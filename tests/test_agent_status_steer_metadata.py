@@ -16,10 +16,12 @@ def test_status_json_preserves_canonical_steer_queue_output() -> None:
     assert empty["next_steer"] is None
     assert empty["steer_metadata_error"] is None
 
-    queued = _status({
-        "steer_seq": 2,
-        "steer_queue": [{"seq": 2, "prompt": "first line\nsecond line", "queued_at": 1.5}],
-    })
+    queued = _status(
+        {
+            "steer_seq": 2,
+            "steer_queue": [{"seq": 2, "prompt": "first line\nsecond line", "queued_at": 1.5}],
+        }
+    )
     assert queued["steers_pending"] == 1
     assert queued["next_steer"] == "first line"
     assert queued["steer_metadata_error"] is None

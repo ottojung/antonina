@@ -8,7 +8,7 @@
 
 ## Context
 
-`antonina prompt --steer` is an operator/orchestrator control operation for a
+`antonina agent prompt --steer` is an operator/orchestrator control operation for a
 managed coding-agent session that is already running. There are two plausible
 meanings for such a control:
 
@@ -119,7 +119,7 @@ Destructive lifecycle controls outrank steering:
 
 ### Idle behavior
 
-`antonina prompt --id <ID> --steer 'task'` on an idle, finished, or
+`antonina agent prompt --id <ID> --steer 'task'` on an idle, finished, or
 never-started agent behaves like an ordinary prompt. There is no running
 invocation to preempt.
 

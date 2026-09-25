@@ -30,6 +30,10 @@ Treat work as abandoned for coordination purposes only after its marked comment 
 
 Use Antonina for work requiring judgment, context, iteration, or multiple steps. Use direct shell only for tiny deterministic observations. Record the agent ID before invocation, retain durable logs, and poll or inspect status and logs while work is nonterminal. Never treat a progress message or green test as completion by itself.
 
+## Durable resources
+
+For work that creates or relies on durable host filesystem paths, read and follow [`resources.md`](resources.md). Register paths before relying on them across work and hand off dependencies before closing the last open Borys issue. The garbage collector is opaque: treat an unprotected path as immediately collectible.
+
 ## Completion
 
 Define the completion predicate from the calling itinerary. It must include the requested repository result, required validation, review expectations, and no unresolved blockers. Mark the issue completed only after those conditions are objectively verified.

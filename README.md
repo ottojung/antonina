@@ -20,16 +20,29 @@ This installs the `antonina` executable.
 ## Basic usage
 
 ```sh
-antonina new --id a13f09c2 --cwd /workspace/project
-antonina prompt --id a13f09c2 'Investigate the issue and implement the fix.'
-antonina status --id a13f09c2
-antonina log --id a13f09c2
-antonina wait --id a13f09c2
+antonina agent new --id a13f09c2 --cwd /workspace/project
+antonina agent prompt --id a13f09c2 'Investigate the issue and implement the fix.'
+antonina agent status --id a13f09c2
+antonina agent log --id a13f09c2
+antonina agent wait --id a13f09c2
 ```
 
-Lifecycle controls are available through `stop`, `kill`, `delete`, and `clean`. Use `antonina --help` or `antonina <command> --help` for the complete CLI.
+Lifecycle controls are available through `antonina agent stop`, `antonina agent kill`, `antonina agent delete`, and `antonina agent clean`. Antonina also owns the Borys board CLI under `antonina board`; see `antonina board --help`. Use `antonina --help` or `antonina agent --help` for agent command details.
 
 State is stored under `$XDG_STATE_HOME/antonina`, defaulting to `$HOME/.local/state/antonina`.
+
+## Borys board
+
+Antonina provides the board client and CLI directly. Configure it only with `ANTONINA_BOARD_URL`, `ANTONINA_BOARD_CAPABILITY`, and `ANTONINA_BOARD_AUTHOR`:
+
+```sh
+antonina board list --state open
+antonina board create 'Implement board support' --body 'Use the v2 schema.'
+antonina board resource add 1 lubko://host /workspace/project
+antonina board --json
+```
+
+The board protocol remains at `borys/board-v1`; accepted and written documents use schema v2.
 
 ## Development
 

@@ -331,7 +331,7 @@ def update_meta(aid: str, fn: Callable[[Meta], None]) -> None:
 def idle_meta(aid: str, cwd: str, title: str | None) -> Meta:
     """Build the metadata mapping of a freshly created, never-prompted agent.
 
-    ``antonina new`` only creates the managed session record: it launches no
+    ``antonina agent new`` only creates the managed session record: it launches no
     underlying AI invocation. The agent is idle until the first ``prompt``
     creates and starts the native session.
 
@@ -3203,7 +3203,7 @@ def cmd_new(args: argparse.Namespace) -> int:
 
     ``new`` only creates the managed Antonina agent record. It never launches the
     underlying AI agent and never accepts an initial prompt; the first
-    invocation happens later through ``antonina prompt --id <ID> PROMPT``.
+    invocation happens later through ``antonina agent prompt --id <ID> PROMPT``.
 
     Args:
         args: Parsed command arguments.
@@ -5937,13 +5937,13 @@ SUBCOMMANDS: Final = (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the ``antonina`` command line parser.
+    """Build the ``antonina agent`` command line parser.
 
     Returns:
         The configured parser.
     """
     parser = argparse.ArgumentParser(
-        prog=PROG,
+        prog=f"{PROG} agent",
         description=(
             "Manage long-running Antonina agent sessions.  The orchestrator uses "
             "Antonina agent IDs only; the underlying agent implementation is hidden."

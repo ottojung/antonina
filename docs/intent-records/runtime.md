@@ -1,23 +1,23 @@
 $id-4729183650148372
-title: Antonina is an independent optional agent runtime
+title: Antonina owns the managed-agent runtime
 date: 2026/09/25
-source: issue-1
+source: issue-3
 kind: requirement
 
-Antonina owns the standalone agent runtime. It is optional and must not be required to run Lubko.
+Antonina provides the standalone managed-agent runtime, including durable local session state, process lifecycle control, logs, and the `antonina` command-line interface.
 
 $id-5837462019564831
 title: Antonina runtime uses only the Python standard library
 date: 2026/09/25
-source: issue-1
+source: issue-3
 kind: constraint
 
-The Antonina runtime has no third-party runtime dependencies and no dependency on the Lubko Python package.
+Antonina has no third-party Python runtime dependencies. External agent backends are invoked as processes rather than imported as Python libraries.
 
 $id-6194057283167408
-title: Antonina is independent of Lubko packaging
+title: Antonina has one canonical command
 date: 2026/09/25
-source: issue-1
+source: issue-3
 kind: requirement
 
-Antonina may be installed and operated independently of Lubko. Lubko must not import Antonina or expose Antonina as a Lubko command.
+The public command is `antonina`. Alternate historical command names or compatibility launchers are not part of the product contract.

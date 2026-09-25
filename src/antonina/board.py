@@ -232,6 +232,13 @@ def _timestamp_seconds(value: object) -> float | None:
     return parsed.timestamp()
 
 
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("issue number must be positive")
+    return number
+
+
 def _is_positive_int(value: object) -> bool:
     """Return whether a JSON value is a positive JavaScript-safe integer."""
     return isinstance(value, int) and not isinstance(value, bool) and 0 < value <= MAX_SAFE_INTEGER
@@ -715,6 +722,12 @@ class BoardClient:
         Returns:
             Resource views with dependent states and protection status.
         """
+        if host is not None and not _valid_host(host):
+            msg = "Resource host is not canonical"
+            raise BoardError(msg)
+        if issue is not None and issue < 1:
+            msg = "Issue number must be positive"
+            raise BoardError(msg)
         board = self.load_board()
         issues = {item["number"]: item for item in board["issues"]}
         views = []
@@ -929,13 +942,13 @@ def _parser() -> argparse.ArgumentParser:
     resource_commands = resource_parser.add_subparsers(dest="resource_command", required=True)
     resource_list = resource_commands.add_parser("list")
     resource_list.add_argument("--host")
-    resource_list.add_argument("--issue", type=int)
+    resource_list.add_argument("--issue", type=_positive_int)
     resource_add = resource_commands.add_parser("add")
-    resource_add.add_argument("issue", type=int)
+    resource_add.add_argument("issue", type=_positive_int)
     resource_add.add_argument("host")
     resource_add.add_argument("path")
     resource_remove = resource_commands.add_parser("remove")
-    resource_remove.add_argument("issue", type=int)
+    resource_remove.add_argument("issue", type=_positive_int)
     resource_remove.add_argument("host")
     resource_remove.add_argument("path")
 
@@ -1000,6 +1013,10 @@ def _human_issue(issue: BoardIssue) -> str:
     for message in issue["messages"]:
         lines.extend((f"{message['author']} @ {message['createdAt']}", message["body"]))
     return "\n".join(lines)
+
+
+def _human_resource(resource: BoardResource) -> str:
+    return f"{resource['host']} {resource['path']} #{','.join(str(number) for number in resource['issueNumbers'])}"
 
 
 def _write_stdout(text: str) -> None:
@@ -1129,11 +1146,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 status = "protected" if item["protected"] else "collectible"
                 _write_stdout(f"{item['host']} {item['path']} {states} {status}")
+            elif "issueNumbers" in item:
+                _write_stdout(_human_resource(cast("BoardResource", item)))
             else:
                 _write_stdout(f"#{item['number']} [{item['state']}] {item['title']}")
         return 0
 
-    _write_stdout(_human_issue(cast("BoardIssue", result)))
+    if "issueNumbers" in cast("dict[str, object]", result):
+        _write_stdout(_human_resource(cast("BoardResource", result)))
+    else:
+        _write_stdout(_human_issue(cast("BoardIssue", result)))
     return 0
 
 

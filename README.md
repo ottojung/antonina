@@ -39,7 +39,7 @@ Antonina provides the board client and CLI directly. Configure it only with `ANT
 antonina board list --state open
 antonina board create 'Implement board support' --body 'Use the v2 schema.'
 antonina board resource add 1 lubko://host /workspace/project
-antonina board --json
+antonina board list --json
 ```
 
 The board protocol remains at `borys/board-v1`; accepted and written documents use schema v2.

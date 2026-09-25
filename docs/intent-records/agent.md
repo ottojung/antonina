@@ -12,4 +12,4 @@ date: 2026/09/15
 source: issue-777
 kind: requirement
 
-Agent IDs entering `antonina` at every input boundary are canonicalized to lowercase via `normalize_agent_id()`. All subcommands that accept an agent ID use the `--id <ID>` option; no command accepts the ID positionally. The canonical form is stored, compared, and dispatched in lowercase. Mixed-case spellings such as `ABCD1234` and `abcd1234` identify the same agent.
+Agent IDs entering `antonina agent` at every input boundary are canonicalized to lowercase via `normalize_agent_id()`. The public agent subcommands are `new`, `list`, `status`, `prompt`, `log`, `wait`, `stop`, `kill`, `delete`, and `clean`; they are reachable only through `antonina agent ...`, never directly at the root. All subcommands that accept an agent ID use the `--id <ID>` option; no command accepts the ID positionally. The canonical form is stored, compared, and dispatched in lowercase. Mixed-case spellings such as `ABCD1234` and `abcd1234` identify the same agent.

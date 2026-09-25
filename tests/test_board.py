@@ -614,3 +614,98 @@ def test_cli_json_output_is_stable(
     captured = capsys.readouterr()
     assert json.loads(captured.out) == [issue(1)]
     assert not captured.err
+
+
+def test_resource_mutation_human_output_is_safe(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    resource = BoardResource(
+        host="lubko://server",
+        path="/workspace/project",
+        issueNumbers=[1],
+        createdAt="2026-09-24T10:00:00.000Z",
+        updatedAt="2026-09-24T10:00:00.000Z",
+    )
+    current = board(resources=[resource])
+    client = BoardClient(http=FakeHttp([response(200, current, etag='"v1"')]))
+    monkeypatch.setattr(board_module, "_client_from_environment", lambda: client)
+
+    assert board_module.main(["resource", "list", "--host", "lubko://server"]) == 0
+    assert capsys.readouterr().out == "lubko://server /workspace/project #1 [open] protected\n"
+
+
+def test_resource_add_human_output(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    resource = BoardResource(
+        host="lubko://server",
+        path="/workspace/project",
+        issueNumbers=[1],
+        createdAt="2026-09-24T10:05:00.000Z",
+        updatedAt="2026-09-24T10:05:00.000Z",
+    )
+    initial = board()
+    committed = board(resources=[resource])
+    client = BoardClient(
+        capability="5" * 64,
+        http=FakeHttp([
+            response(200, initial, etag='"v1"'),
+            response(200),
+            response(200, committed, etag='"v2"'),
+        ]),
+        now=lambda: datetime(2026, 9, 24, 10, 5, tzinfo=UTC),
+    )
+    monkeypatch.setattr(board_module, "_client_from_environment", lambda: client)
+
+    assert board_module.main(["resource", "add", "1", "lubko://server", "/workspace/project"]) == 0
+    assert capsys.readouterr().out == "lubko://server /workspace/project #1\n"
+
+
+def test_resource_remove_human_output(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    resource = BoardResource(
+        host="lubko://server",
+        path="/workspace/project",
+        issueNumbers=[1],
+        createdAt="2026-09-24T10:00:00.000Z",
+        updatedAt="2026-09-24T10:00:00.000Z",
+    )
+    initial = board(resources=[resource])
+    committed = board()
+    client = BoardClient(
+        capability="6" * 64,
+        http=FakeHttp([
+            response(200, initial, etag='"v1"'),
+            response(200),
+            response(200, committed, etag='"v2"'),
+        ]),
+    )
+    monkeypatch.setattr(board_module, "_client_from_environment", lambda: client)
+
+    assert (
+        board_module.main(["resource", "remove", "1", "lubko://server", "/workspace/project"]) == 0
+    )
+    assert capsys.readouterr().out == ""
+
+
+def test_resource_list_rejects_malformed_host_before_network() -> None:
+    fake = FakeHttp([])
+    client = BoardClient(http=fake)
+
+    with pytest.raises(BoardError, match="canonical"):
+        client.list_resources(host="server")
+    assert fake.requests == []
+
+
+def test_multiline_issue_body_preserves_internal_newlines() -> None:
+    fake = FakeHttp([
+        response(200, board(), etag='"v1"'),
+        response(200),
+        response(200, board(next_issue=3, issues=[issue(1), issue(2)]), etag='"v2"'),
+    ])
+    client = BoardClient(capability="4" * 64, http=fake)
+
+    client.create_issue("title", "line one\nline two")
+
+    assert decode_request_body(fake.requests[1])["issues"][1]["body"] == "line one\nline two"

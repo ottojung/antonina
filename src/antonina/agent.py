@@ -5959,31 +5959,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the ``antonina`` command line interface.
-
-    Args:
-        argv: Command line arguments, or ``None`` to use ``sys.argv``.
-
-    Returns:
-        A process exit code.
-    """
+    """Run the public ``antonina agent`` command-line interface."""
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    argv = list(argv) if argv is not None else sys.argv[1:]
-
-    # Hidden internal entry point used by the background runner.
-    if argv and argv[0] == "_runner":
-        if len(argv) != RUNNER_ARGV_LENGTH:
-            return EXIT_USAGE
-        runner(argv[1], argv[2])
-        return EXIT_OK
-
+    arguments = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     if not getattr(args, "command", None):
         parser.print_help()
         return EXIT_USAGE
     return cast("int", args.func(args))
 
 
+def internal_main(argv: list[str] | None = None) -> int:
+    """Run the implementation-private agent entry point."""
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    arguments = list(argv) if argv is not None else sys.argv[1:]
+    if arguments and arguments[0] == "_runner":
+        if len(arguments) != RUNNER_ARGV_LENGTH:
+            return EXIT_USAGE
+        runner(arguments[1], arguments[2])
+        return EXIT_OK
+    return main(arguments)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(internal_main())

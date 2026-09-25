@@ -17,6 +17,7 @@ def test_dispatches_agent_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(agent, "main", fake_agent_main)
 
     assert cli.main(["agent", "status", "--id", "a13f09c2"]) == 23
+
     assert seen == [["status", "--id", "a13f09c2"]]
 
 
@@ -38,12 +39,24 @@ def test_rejects_direct_agent_command(capsys: pytest.CaptureFixture[str]) -> Non
         cli.main(["status", "--id", "a13f09c2"])
 
     assert raised.value.code == 2
-    assert "invalid choice: 'status'" in capsys.readouterr().err
+    assert "unknown namespace: status" in capsys.readouterr().err
 
 
-def test_rejects_hidden_runner(capsys: pytest.CaptureFixture[str]) -> None:
+def test_public_agent_rejects_hidden_runner(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as raised:
-        cli.main(["_runner", "payload", "metadata", "extra"])
+        cli.main(["agent", "_runner", "payload", "metadata"])
 
     assert raised.value.code == 2
     assert "invalid choice: '_runner'" in capsys.readouterr().err
+
+
+def test_internal_entry_still_runs_background_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def fake_runner(aid: str, mode: str) -> None:
+        seen.append((aid, mode))
+
+    monkeypatch.setattr(agent, "runner", fake_runner)
+
+    assert agent.internal_main(["_runner", "a13f09c2", "new"]) == 0
+    assert seen == [("a13f09c2", "new")]

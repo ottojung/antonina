@@ -30,6 +30,8 @@ Treat work as abandoned for coordination purposes only after its marked comment 
 
 Use Antonina for work requiring judgment, context, iteration, or multiple steps. Use direct shell only for tiny deterministic observations. Record the agent ID before invocation, retain durable logs, and poll or inspect status and logs while work is nonterminal. Never treat a progress message or green test as completion by itself.
 
+Before relying on a durable host path, follow [resources.md](resources.md): register it with `antonina board resource add`, verify it, and preserve open dependencies until handoff or completion.
+
 ## Completion
 
 Define the completion predicate from the calling itinerary. It must include the requested repository result, required validation, review expectations, and no unresolved blockers. Mark the issue completed only after those conditions are objectively verified.

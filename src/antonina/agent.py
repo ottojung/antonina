@@ -5988,6 +5988,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+    sub.add_parser("board", help="manage the shared Antonina issue and resource board")
     for spec in SUBCOMMANDS:
         subparser = sub.add_parser(spec.name, help=spec.help)
         for argument in spec.arguments:
@@ -6007,6 +6008,11 @@ def main(argv: list[str] | None = None) -> int:
     """
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     argv = list(argv) if argv is not None else sys.argv[1:]
+
+    if argv and argv[0] == "board":
+        from antonina.board import main as board_main
+
+        return board_main(argv[1:])
 
     # Hidden internal entry point used by the background runner.
     if argv and argv[0] == "_runner":

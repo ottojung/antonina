@@ -44,6 +44,19 @@ antonina board list --json
 
 The board protocol uses the `antonina/board-v1` object key; accepted and written documents use schema v2.
 
+## Web board
+
+The Antonina web board is a Node/Vite app under `web/` and stores canonical schema version 2 in the `antonina` Skrynia namespace with key `board-v1`. Build it with:
+
+```sh
+cd web
+npm ci
+npm test
+npm run build
+```
+
+The web app supports Issues and Resources views, issue bodies separate from comments, writable open-issue bodies, and resource dependency protection. The Python board CLI is stdlib-only and uses ETag compare-and-swap.
+
 ## Development
 
 ```sh

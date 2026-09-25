@@ -297,6 +297,17 @@ def _parse(command: str, argv: list[str]) -> argparse.Namespace:
     return _build().parse_args([command, *argv])
 
 
+def test_detached_prompt_suggests_valid_log_command(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    args = argparse.Namespace(detach=True, json=False)
+    assert agent._finish_prompt_dispatch(args, "abc123") == agent.EXIT_OK
+    assert capsys.readouterr().out == (
+        "Started agent abc123 in the background. Observe it with "
+        "`antonina log --id abc123 --follow`.\n"
+    )
+
+
 @pytest.mark.parametrize(
     "command",
     ["status", "prompt", "log", "wait", "stop", "kill", "delete"],

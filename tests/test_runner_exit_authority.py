@@ -30,7 +30,7 @@ def state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point the agent state root at a throwaway directory.
 
     Returns:
-        The isolated Lubko state root.
+        The isolated Antonina state root.
     """
     state = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
@@ -315,14 +315,16 @@ def test_runner_disappearing_during_identity_proof_gets_fresh_authority(
 ) -> None:
     """PID reuse during runner proof cannot authorize stale prompt reuse."""
     m = agent.idle_meta("aaaaaaaa", str(os.environ["XDG_STATE_HOME"]), None)
-    m.update({
-        "state": "running",
-        "active_runner": True,
-        "runner_gen": 1,
-        "runner_pid": 4242,
-        "runner_start_time": 111,
-        "runner_reservation": _claimed_reservation(),
-    })
+    m.update(
+        {
+            "state": "running",
+            "active_runner": True,
+            "runner_gen": 1,
+            "runner_pid": 4242,
+            "runner_start_time": 111,
+            "runner_reservation": _claimed_reservation(),
+        }
+    )
     probes: list[tuple[int, int]] = []
     closed: list[int] = []
 
@@ -385,19 +387,21 @@ def test_dead_pinned_reservation_owner_recovers_accepted_steer(
 ) -> None:
     """A vanished reservation owner cannot authorize queued work reuse."""
     m = agent.idle_meta("aaaaaaaa", str(os.environ["XDG_STATE_HOME"]), None)
-    m.update({
-        "state": "running",
-        "active_runner": True,
-        "runner_gen": 1,
-        "runner_reservation": {
-            "gen": 1,
-            "owner_pid": 4242,
-            "owner_start_ticks": 111,
-            "state": "reserved",
-            "mode": "new",
-        },
-        "pending_prompt": "original",
-    })
+    m.update(
+        {
+            "state": "running",
+            "active_runner": True,
+            "runner_gen": 1,
+            "runner_reservation": {
+                "gen": 1,
+                "owner_pid": 4242,
+                "owner_start_ticks": 111,
+                "state": "reserved",
+                "mode": "new",
+            },
+            "pending_prompt": "original",
+        }
+    )
     probes: list[tuple[int, int]] = []
     closed: list[int] = []
 
@@ -511,19 +515,21 @@ def test_reserved_runner_marker_requires_pinned_live_candidate(
     assert not agent._runner_marker_alive("bbbbbbbb", 1)
 
     m = agent.idle_meta("aaaaaaaa", str(os.environ["XDG_STATE_HOME"]), None)
-    m.update({
-        "state": "running",
-        "active_runner": True,
-        "runner_gen": 1,
-        "runner_reservation": {
-            "gen": 1,
-            "owner_pid": 4242,
-            "owner_start_ticks": 111,
-            "state": "reserved",
-            "mode": "new",
-        },
-        "pending_prompt": "original",
-    })
+    m.update(
+        {
+            "state": "running",
+            "active_runner": True,
+            "runner_gen": 1,
+            "runner_reservation": {
+                "gen": 1,
+                "owner_pid": 4242,
+                "owner_start_ticks": 111,
+                "state": "reserved",
+                "mode": "new",
+            },
+            "pending_prompt": "original",
+        }
+    )
     monkeypatch.setattr(agent, "is_alive", lambda _meta: False)
     monkeypatch.setattr(agent, "runner_alive", lambda _meta: False)
     monkeypatch.setattr(agent, "_owner_alive", lambda _pid, _ticks: False)

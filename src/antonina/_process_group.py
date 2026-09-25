@@ -1,10 +1,4 @@
-"""Process-group membership queries shared across lifecycle modules.
-
-Kept separate from :mod:`antonina.agent` so lightweight modules such as
-:mod:`antonina.agent` can query process-group membership without pulling in
-the heavy ``psycopg`` dependency that :mod:`antonina.agent` requires at
-import time.
-"""
+"""Process-group membership inspection for Antonina lifecycle control."""
 
 from __future__ import annotations
 

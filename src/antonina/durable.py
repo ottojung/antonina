@@ -1,69 +1,9 @@
-"""Crash-durable writes for Antonina authoritative recovery/control state.
+"""Crash-durable state primitives for Antonina lifecycle metadata.
 
-Antonina keeps several small pieces of state that are the *authority* used to
-recover after a crash or a restart:
-
-* ``worker/meta.json`` — worker lifecycle metadata;
-* ``worker/rollback.json`` — the supervised-deployment rollback mission;
-* ``supervisor/desired.json`` — the explicit supervisor run intent;
-* ``supervisor/state.json`` — the daemon's own applied generation and mode;
-* ``supervisor/supervisor.pid`` — the exact live supervisor identity;
-* ``cli/current`` — the maintained CLI active-pointer symlink;
-* ``toolchain.json`` — the recorded ``uv`` executable.
-
-These must survive a power loss exactly: a crash after a write returns must
-never lose the just-written value and must never expose a torn value to a
-concurrent reader. Observation-only status and health (``supervisor/status.json``,
-``worker/health.json`` and its symlinks) are *not* recovery authority and may
-stay lightweight atomic writes; they are documented as such at their call sites
-and are intentionally not routed through this module.
-
-The durable boundary for regular files is:
-
-1. write the full payload (retrying short ``os.write`` results until complete)
-   into a unique temporary file in the destination directory;
-2. ``fsync`` that temporary file so its bytes are on stable storage;
-3. ``os.replace`` the temporary over the destination, which is atomic with
-   respect to readers;
-4. ``fsync`` the destination directory so the renamed entry is recorded.
-
-A symlink carries no file contents, so the Linux boundary is the same rename
-plus the containing-directory ``fsync``: there is no portable way (and no need)
-to ``fsync`` the symlink inode itself, because the rename and the parent
-directory ``fsync`` record the new directory entry and flush the inode that
-holds the target string.
-
-If any confirmation step cannot be completed the write raises
-:class:`DurabilityError` and the caller must treat the value as *not* written:
-it must not advance any irreversible lifecycle action that depended on the
-durable value being confirmed. The previous destination, if any, is left
-untouched and the temporary artifact is removed so a later reader can never
-mistake an in-progress or partial write for committed state.
-
-A missing destination directory is created top-down and every newly created
-level's entry is recorded in its parent by an immediate parent ``fsync``.  Only
-the direct parent of the boundary level is anchored for an already-visible
-hierarchy (a concurrent first writer may not yet have fsynced it); this keeps
-overhead bounded at one extra directory ``fsync`` per write rather than walking
-every ancestor up to the filesystem root.  Because every writer fsyncs its own
-direct parent, the whole chain is durable by induction: the root is always
-durable, and each level ``d`` is durable once ``d``'s parent has been fsynced.
-
-Temporary names are unique per write (PID + random suffix), so concurrent
-writers can never truncate or rewrite one another's in-progress temporary file
-even when a destination is reachable by more than one process.
-
-All three primitives serialize same-path durable operations: a stable per-
-destination sidecar ``flock`` (plus an in-process reentrant gate) is held from
-before the prior state is snapshotted until confirmation or fail-closed
-cleanup has fully completed.  A failing unconfirmed transition therefore
-always finishes its restore/neutralize before any other writer can proceed,
-so cleanup can never revert a newer independently committed value — including
-byte-identical (ABA) values, because the interleaving cannot occur.
-
-The module exposes fault-injection hooks (:func:`set_fsync_failure_injector`)
-used only by the test suite to deterministically simulate ``fsync``/replace
-failures at the storage-confirmation boundary.
+Writes and removals flush file contents and parent directory entries, use
+atomic replacement, and serialize same-destination operations with process-
+and thread-level locks. Confirmation failures raise :class:`DurabilityError`
+so callers do not advance lifecycle actions on uncommitted state.
 """
 
 from __future__ import annotations
@@ -86,7 +26,7 @@ if TYPE_CHECKING:
 # to simulate a short write deterministically.
 _os_write = os.write
 
-DURABLE_TEMP_PREFIX: Final = ".lubko-durable-"
+DURABLE_TEMP_PREFIX: Final = ".antonina-durable-"
 
 # Injection stages exercised by the regression suite.
 FSYNC_STAGE_FILE: Final = "file"  # the temporary file/symlink itself
@@ -308,7 +248,7 @@ def set_short_write_injector(fraction: float | None) -> None:
     _short_write_fraction[0] = fraction
 
 
-DURABLE_LOCK_PREFIX: Final = ".lubko-durable-lock-"
+DURABLE_LOCK_PREFIX: Final = ".antonina-durable-lock-"
 
 
 class _DestinationLock:
@@ -369,7 +309,7 @@ def _serialized(destination: Path) -> Iterator[None]:
     * a stable per-destination :class:`threading.RLock` ("gate") serializes
       threads within this process — another thread blocks before it can even
       snapshot, so it can never interleave with an in-flight operation;
-    * a stable sidecar lock file (``.lubko-durable-lock-<name>`` next to the
+    * a stable sidecar lock file (``.antonina-durable-lock-<name>`` next to the
       destination) held under an exclusive ``flock`` serializes processes.  The
       ``flock`` is acquired by the outermost acquisition only and released when
       the owning thread fully exits; same-thread nested cleanup calls re-enter
@@ -707,12 +647,8 @@ def remove_durable(path: Path) -> None:
 
     The file is unlinked and then its containing directory is fsynced so the
     removal is recorded durably: a crash after this returns must never bring the
-    removed authority back.  This is the authoritative counterpart of the
-    durable write primitives and must be used for every recovery/control-state
-    removal (for example the supervisor
-    pidfile on shutdown, and rollback-state repair/migration clearing).
-    Observation-only status/readiness cleanup is intentionally *not* routed
-    through here.
+    removed authority back. This is the authoritative counterpart of the durable
+    write primitives and must be used for confirmed lifecycle state removal.
 
     Args:
         path: Authoritative state file to remove.

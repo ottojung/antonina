@@ -1,19 +1,8 @@
-"""Shared exact-process signalling and identity primitives.
+"""Exact Linux process identity and pidfd signalling primitives.
 
-These helpers exist because a holding pidfd does NOT keep a numeric PID
-reserved: the kernel frees the numeric ID from the namespace before the final
-``struct pid`` reference is released. Any check-then-signal sequence that ends
-in a *numeric* syscall (``os.kill``, ``os.killpg``) therefore remains racy no
-matter how strong the preceding proof was. The only non-reusable delivery is
-``pidfd_send_signal``, which addresses the pinned kernel process itself.
-
-The process-identity observation helpers (``proc_start_ticks``,
-``process_state_char``, ``process_is_zombie``, ``process_ppid``,
-``proc_cpu_seconds``) own the canonical ``/proc/<pid>/stat`` parsing used by
-agent, supervisor, health, and lifecycle subsystems.  Subsystem-specific
-authority (agent markers, worker incarnation IDs, supervisor child ownership,
-lifecycle obligations) composes with these shared primitives rather than
-duplicating them.
+Pidfds prevent PID-reuse races during signal delivery, while the ``/proc``
+helpers provide one parser for process start time, state, parent, CPU time, and
+process-group membership.
 """
 
 from __future__ import annotations

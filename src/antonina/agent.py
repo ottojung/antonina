@@ -141,7 +141,7 @@ def _home() -> Path:
 
 
 def state_root() -> Path:
-    """Return the per-user Lubko state root following XDG conventions.
+    """Return the per-user Antonina state root following XDG conventions.
 
     Returns:
         ``$XDG_STATE_HOME/antonina``, falling back to ``~/.local/state/antonina``.
@@ -2246,7 +2246,9 @@ def _spawn_and_run(
             )
         except OSError as exc:
             error = str(exc)
-            log.write(f"LUBKO RUNNER: failed to start agent: {error}\n".encode("utf-8", "replace"))
+            log.write(
+                f"ANTONINA RUNNER: failed to start agent: {error}\n".encode("utf-8", "replace")
+            )
             _fail_invocation_closed(aid, error, exit_code=127)
             return None
 
@@ -3226,12 +3228,14 @@ def cmd_new(args: argparse.Namespace) -> int:
 
     if args.json:
         _out(
-            json.dumps({
-                "id": aid,
-                "state": "idle",
-                "cwd": cwd,
-                "created_at": meta["created_at"],
-            })
+            json.dumps(
+                {
+                    "id": aid,
+                    "state": "idle",
+                    "cwd": cwd,
+                    "created_at": meta["created_at"],
+                }
+            )
         )
     else:
         _out(
@@ -3827,7 +3831,7 @@ def _finish_prompt_dispatch(args: argparse.Namespace, aid: str) -> int:
         else:
             _out(
                 "Started agent " + aid + " in the background. Observe it with "
-                f"`{PROG} log {aid} --follow`."
+                f"`{PROG} log --id {aid} --follow`."
             )
         sys.stdout.flush()
         return EXIT_OK
@@ -3864,7 +3868,7 @@ def _begin_invocation(meta: Meta, prompt: str, now: float, *, prompt_count: int)
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    """List Lubko-managed agents.
+    """List Antonina-managed agents.
 
     Args:
         args: Parsed command arguments.
@@ -4100,18 +4104,20 @@ def _print_agent_table(entries: list[tuple[str, str, Meta]]) -> None:
     for aid, state, meta in entries:
         created_at, prompt_count, cwd, title, errors = _list_summary(meta)
         error_fields = set(errors)
-        rows.append((
-            aid,
-            state,
-            "<invalid>" if "prompt_count" in error_fields else str(prompt_count or 0),
-            "<invalid>" if "created_at" in error_fields else fmt_age(created_at),
-            "<invalid>" if "cwd" in error_fields else _truncate(cwd or "", 24),
+        rows.append(
             (
-                "<invalid>"
-                if "title" in error_fields
-                else _truncate((title or "").replace("\n", " "), 40)
-            ),
-        ))
+                aid,
+                state,
+                "<invalid>" if "prompt_count" in error_fields else str(prompt_count or 0),
+                "<invalid>" if "created_at" in error_fields else fmt_age(created_at),
+                "<invalid>" if "cwd" in error_fields else _truncate(cwd or "", 24),
+                (
+                    "<invalid>"
+                    if "title" in error_fields
+                    else _truncate((title or "").replace("\n", " "), 40)
+                ),
+            )
+        )
     widths = [max(len(row[i]) for row in rows) for i in range(6)]
     labels = ("ID", "STATE", "P", "AGE", "CWD", "TITLE")
     for i, label in enumerate(labels):
@@ -5214,10 +5220,10 @@ def cmd_stop(args: argparse.Namespace) -> int:
     """Gracefully stop a running agent.
 
     Sends ``SIGTERM`` to the exact recorded process group, then — while any
-    member of that exact group remains — ``SIGKILL`` after the grace period,
-    mirroring the worker's cancellation contract so an agent run can never
-    leave abandoned OpenCode children behind. Terminalization is guarded by
-    the exact recorded invocation identity: if the runner records a newer
+    member of that exact group remains — ``SIGKILL`` after the grace period so
+    an agent run can never leave abandoned OpenCode children behind.
+    Terminalization is guarded by the exact recorded invocation identity: if
+    the runner records a newer
     invocation while the old one is being stopped, the newer record is never
     overwritten and the command reports failure instead of false success.
 
@@ -5365,8 +5371,8 @@ def _signal_live_invocation(aid: str, meta: Meta, mode: str) -> int:
             f"{'killed' if mode == 'kill' else 'stopped'} agent {aid}",
         )
     if mode == "stop":
-        # The exact group still has live members; escalate so no child is
-        # abandoned, exactly like the worker's cancel grace period.
+        # The exact group still has live members; apply the same bounded
+        # termination policy so no child is abandoned.
         if group_alive(meta):
             send_signal_group(meta, signal.SIGKILL)
         if wait_group_dead(meta, KILL_WAIT_SECONDS):
@@ -5809,7 +5815,7 @@ SUBCOMMANDS: Final = (
     ),
     _SubcommandSpec(
         name="list",
-        help="list Lubko-managed agents",
+        help="list Antonina-managed agents",
         func=cmd_list,
         arguments=(
             _arg("--running", action="store_true", help="only running agents"),

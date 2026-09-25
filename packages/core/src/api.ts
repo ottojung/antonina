@@ -156,7 +156,7 @@ export class BoardApi {
 
   editIssueBody(number: number, body: string): Promise<BoardIssue> {
     return this.updateIssue(number, (issue) => {
-      if (issue.state === 'closed') throw new AntoninaApiError(`Antonina issue ${number} is closed`);
+      if (issue.state === 'closed') throw new AntoninaApiError(`Closed issue descriptions cannot be edited (Antonina issue ${number} is closed)`);
       return { ...issue, body: body.trim() };
     });
   }
@@ -177,7 +177,7 @@ export class BoardApi {
     let resultKey = '';
     const committed = await this.mutate((board) => {
       const issue = this.requireIssue(board.issues, issueNumber);
-      if (issue.state !== 'open') throw new AntoninaApiError(`Antonina issue ${issueNumber} is closed`);
+      if (issue.state !== 'open') throw new AntoninaApiError(`A resource dependency requires an open issue; Antonina issue ${issueNumber} is closed`);
       const candidate = clone(board);
       const timestamp = this.now().toISOString();
       const current = candidate.resources.find((resource) => resource.host === cleanHost && resource.path === cleanPath);

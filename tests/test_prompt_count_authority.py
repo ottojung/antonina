@@ -26,7 +26,6 @@ def test_malformed_prompt_count_blocks_fresh_acceptance(tmp_path: Path, count: o
         decision,
         prompt="work",
         steer=False,
-        mode="new",
     )
 
     assert decision == {"action": "busy"}
@@ -66,7 +65,6 @@ def test_malformed_prompt_count_blocks_stale_recovery(
         decision,
         prompt="recovered",
         steer=False,
-        mode="new",
     )
 
     assert decision == {"action": "busy"}
@@ -114,7 +112,6 @@ def test_canonical_or_absent_prompt_count_increments(
         decision,
         prompt="work",
         steer=False,
-        mode="new",
     )
 
     assert decision["action"] == "spawn"

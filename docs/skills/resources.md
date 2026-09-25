@@ -4,7 +4,7 @@
 
 Use this skill when scheduled or agentic work creates, uses, or hands off a durable host filesystem location. A resource is a host and an absolute path, such as `lubko://phoebe-dev` plus `/workspace/project-worktree`; the path may be a file or directory.
 
-Resource registration is dependency and liveness metadata, not exclusive ownership or a lock. Multiple open Borys issues may depend on one resource. Use Borys issue numbers, never GitHub issue numbers.
+Resource registration is dependency and liveness metadata, not exclusive ownership or a lock. Multiple open board issues may depend on one resource. Use board issue numbers, never GitHub issue numbers.
 
 ## Commands
 
@@ -14,7 +14,7 @@ Inspect resources before relying on or closing work:
 antonina board resource list [--host HOST] [--issue NUMBER]
 ```
 
-Register a dependency for an open Borys issue:
+Register a dependency for an open board issue:
 
 ```sh
 antonina board resource add ISSUE HOST PATH
@@ -32,7 +32,7 @@ antonina board resource remove 412 lubko://phoebe-dev /workspace/project-worktre
 ## Rules
 
 - Register a path before relying on it across steps, invocations, or leaving it behind for later work.
-- A resource is protected while any dependent Borys issue is open. It is collectible when all dependent issues are closed.
+- A resource is protected while any dependent board issue is open. It is collectible when all dependent issues are closed.
 - Before closing an issue, inspect its resources. If a path must survive for follow-up work, add the open follow-up issue first, verify the registration, then close or remove the old dependency as appropriate. Do not close the last open dependent until the handoff is verified.
 - Remove dependencies when they are genuinely no longer needed. Closing the last open dependent may make the path collectible immediately.
 - Never plan around a grace period or garbage-collection cadence. The collector is deliberately opaque and runs regularly; treat an unprotected path as deletable immediately.
@@ -40,7 +40,7 @@ antonina board resource remove 412 lubko://phoebe-dev /workspace/project-worktre
 
 ## Examples
 
-Inspect the resources for a Borys issue:
+Inspect the resources for a board issue:
 
 ```sh
 antonina board resource list --issue 412

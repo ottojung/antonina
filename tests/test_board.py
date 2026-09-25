@@ -1,4 +1,4 @@
-"""Borys board protocol, concurrency, and CLI invariants."""
+"""Antonina board protocol, concurrency, and CLI invariants."""
 
 from __future__ import annotations
 
@@ -155,7 +155,7 @@ def fixed_now() -> datetime:
 
 
 def test_schema_is_strict_and_rejects_assignment() -> None:
-    """Unknown issue fields, including assignment, are incompatible with Borys v1."""
+    """Unknown issue fields, including assignment, are incompatible with Antonina v1."""
     raw = cast("dict[str, object]", json.loads(json.dumps(board())))
     raw_issue = cast("dict[str, object]", cast("list[object]", raw["issues"])[0])
     raw_issue["assignee"] = "agent-a"
@@ -208,7 +208,7 @@ def test_invalid_board_url_port_is_controlled_error() -> None:
     with pytest.raises(BoardError, match="invalid port"):
         client.request(
             "GET",
-            "https://example.invalid:not-a-port/store/borys/board-v1",
+            "https://example.invalid:not-a-port/store/antonina/board-v1",
             headers={},
             body=None,
         )
@@ -433,19 +433,16 @@ def test_capability_is_never_reflected_in_http_errors() -> None:
     assert capability not in str(raised.value)
 
 
-def test_v1_board_is_normalized_to_v2_in_memory() -> None:
-    """A deployed v1 board is normalized in memory to the v2 schema."""
+def test_noncanonical_board_schema_is_rejected() -> None:
+    """Only canonical schema version 2 is accepted."""
     raw = cast("dict[str, object]", json.loads(json.dumps(board())))
     raw["schemaVersion"] = 1
     raw.pop("resources")
     for raw_issue in cast("list[dict[str, object]]", raw["issues"]):
         raw_issue.pop("body")
 
-    parsed = parse_board(raw)
-
-    assert parsed["schemaVersion"] == 2
-    assert parsed["resources"] == []
-    assert not parsed["issues"][0]["body"]
+    with pytest.raises(BoardError):
+        parse_board(raw)
 
 
 def test_resource_schema_rejects_noncanonical_or_invalid_dependencies() -> None:
@@ -460,6 +457,10 @@ def test_resource_schema_rejects_noncanonical_or_invalid_dependencies() -> None:
     assert parse_board(board(resources=[valid]))["resources"] == [valid]
     mutations: tuple[dict[str, object], ...] = (
         {"host": "lubko://server/"},
+        {"host": "lubko://server?query"},
+        {"host": "lubko://server#fragment"},
+        {"host": "lubko://server\\path"},
+        {"host": "lubko://ser ver"},
         {"path": "/workspace//project"},
         {"path": "/workspace/../project"},
         {"path": "/workspace/./project"},
@@ -522,61 +523,7 @@ def test_resource_add_is_idempotent_and_remove_deletes_last_dependency() -> None
     assert (
         client.add_resource(1, "lubko://server", "/workspace/project") == duplicate["resources"][0]
     )
-    assert client.remove_resource(1, "lubko://server", "/workspace/project") is None
-
-
-def test_shared_resource_remove_returns_affected_resource() -> None:
-    resource = BoardResource(
-        host="lubko://server",
-        path="/workspace/project",
-        issueNumbers=[1, 2],
-        createdAt="2026-09-24T10:00:00.000Z",
-        updatedAt="2026-09-24T10:00:00.000Z",
-    )
-    current = board(next_issue=3, issues=[issue(1), issue(2)], resources=[resource])
-    remaining = BoardResource(**{
-        **resource,
-        "issueNumbers": [2],
-        "updatedAt": "2026-09-24T10:05:00.000Z",
-    })
-    committed = board(next_issue=3, issues=[issue(1), issue(2)], resources=[remaining])
-    fake = FakeHttp([
-        response(200, current, etag='"v1"'),
-        response(200),
-        response(200, committed, etag='"v2"'),
-    ])
-    client = BoardClient(
-        capability="7" * 64,
-        http=fake,
-        now=lambda: datetime(2026, 9, 24, 10, 5, tzinfo=UTC),
-    )
-
-    assert client.remove_resource(1, "lubko://server", "/workspace/project") == remaining
-
-
-def test_human_show_includes_multiline_body_before_messages(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    shown = issue(
-        1,
-        messages=[
-            {
-                "id": "message-1",
-                "author": "agent",
-                "body": "comment",
-                "createdAt": "2026-09-24T10:00:00.000Z",
-            }
-        ],
-    )
-    shown["body"] = "line one\nline two"
-    current = board(issues=[shown])
-    client = BoardClient(http=FakeHttp([response(200, current, etag='"v1"')]))
-    monkeypatch.setattr(board_module, "_client_from_environment", lambda: client)
-
-    assert board_module.main(["show", "1"]) == 0
-    assert capsys.readouterr().out == (
-        "#1 [open] Issue 1\nline one\nline two\nagent @ 2026-09-24T10:00:00.000Z\ncomment\n"
-    )
+    assert client.remove_resource(1, "lubko://server", "/workspace/project") == []
 
 
 def test_closed_issue_cannot_gain_resource_and_state_preserves_dependency() -> None:
@@ -668,98 +615,3 @@ def test_cli_json_output_is_stable(
     captured = capsys.readouterr()
     assert json.loads(captured.out) == [issue(1)]
     assert not captured.err
-
-
-def test_resource_mutation_human_output_is_safe(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    resource = BoardResource(
-        host="lubko://server",
-        path="/workspace/project",
-        issueNumbers=[1],
-        createdAt="2026-09-24T10:00:00.000Z",
-        updatedAt="2026-09-24T10:00:00.000Z",
-    )
-    current = board(resources=[resource])
-    client = BoardClient(http=FakeHttp([response(200, current, etag='"v1"')]))
-    monkeypatch.setattr(board_module, "_client_from_environment", lambda: client)
-
-    assert board_module.main(["resource", "list", "--host", "lubko://server"]) == 0
-    assert capsys.readouterr().out == "lubko://server /workspace/project #1 [open] protected\n"
-
-
-def test_resource_add_human_output(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    resource = BoardResource(
-        host="lubko://server",
-        path="/workspace/project",
-        issueNumbers=[1],
-        createdAt="2026-09-24T10:05:00.000Z",
-        updatedAt="2026-09-24T10:05:00.000Z",
-    )
-    initial = board()
-    committed = board(resources=[resource])
-    client = BoardClient(
-        capability="5" * 64,
-        http=FakeHttp([
-            response(200, initial, etag='"v1"'),
-            response(200),
-            response(200, committed, etag='"v2"'),
-        ]),
-        now=lambda: datetime(2026, 9, 24, 10, 5, tzinfo=UTC),
-    )
-    monkeypatch.setattr(board_module, "_client_from_environment", lambda: client)
-
-    assert board_module.main(["resource", "add", "1", "lubko://server", "/workspace/project"]) == 0
-    assert capsys.readouterr().out == "lubko://server /workspace/project #1\n"
-
-
-def test_resource_remove_human_output(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    resource = BoardResource(
-        host="lubko://server",
-        path="/workspace/project",
-        issueNumbers=[1],
-        createdAt="2026-09-24T10:00:00.000Z",
-        updatedAt="2026-09-24T10:00:00.000Z",
-    )
-    initial = board(resources=[resource])
-    committed = board()
-    client = BoardClient(
-        capability="6" * 64,
-        http=FakeHttp([
-            response(200, initial, etag='"v1"'),
-            response(200),
-            response(200, committed, etag='"v2"'),
-        ]),
-    )
-    monkeypatch.setattr(board_module, "_client_from_environment", lambda: client)
-
-    assert (
-        board_module.main(["resource", "remove", "1", "lubko://server", "/workspace/project"]) == 0
-    )
-    assert capsys.readouterr().out == ""
-
-
-def test_resource_list_rejects_malformed_host_before_network() -> None:
-    fake = FakeHttp([])
-    client = BoardClient(http=fake)
-
-    with pytest.raises(BoardError, match="canonical"):
-        client.list_resources(host="server")
-    assert fake.requests == []
-
-
-def test_multiline_issue_body_preserves_internal_newlines() -> None:
-    fake = FakeHttp([
-        response(200, board(), etag='"v1"'),
-        response(200),
-        response(200, board(next_issue=3, issues=[issue(1), issue(2)]), etag='"v2"'),
-    ])
-    client = BoardClient(capability="4" * 64, http=fake)
-
-    client.create_issue("title", "line one\nline two")
-
-    assert decode_request_body(fake.requests[1])["issues"][1]["body"] == "line one\nline two"

@@ -32,7 +32,7 @@ Use Antonina for work requiring judgment, context, iteration, or multiple steps.
 
 ## Durable resources
 
-For work that creates or relies on durable host filesystem paths, read and follow [`resources.md`](resources.md). Register paths before relying on them across work and hand off dependencies before closing the last open Borys issue. The garbage collector is opaque: treat an unprotected path as immediately collectible.
+For work that creates or relies on durable host filesystem paths, read and follow [`resources.md`](resources.md). Register paths before relying on them across work and hand off dependencies before closing the last open board issue. The garbage collector is opaque: treat an unprotected path as immediately collectible.
 
 ## Completion
 

@@ -17,6 +17,10 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+node_modules/
+*.tsbuildinfo
+web/dist/
+web/build/
 
 .DS_Store
 .idea/

@@ -27,11 +27,11 @@ antonina agent log --id a13f09c2
 antonina agent wait --id a13f09c2
 ```
 
-Lifecycle controls are available through `antonina agent stop`, `antonina agent kill`, `antonina agent delete`, and `antonina agent clean`. Antonina also owns the Borys board CLI under `antonina board`; see `antonina board --help`. Use `antonina --help` or `antonina agent --help` for agent command details.
+Lifecycle controls are available through `antonina agent stop`, `antonina agent kill`, `antonina agent delete`, and `antonina agent clean`. Antonina also owns the board CLI under `antonina board`; see `antonina board --help`. Use `antonina --help` or `antonina agent --help` for agent command details.
 
 State is stored under `$XDG_STATE_HOME/antonina`, defaulting to `$HOME/.local/state/antonina`.
 
-## Borys board
+## Antonina board
 
 Antonina provides the board client and CLI directly. Configure it only with `ANTONINA_BOARD_URL`, `ANTONINA_BOARD_CAPABILITY`, and `ANTONINA_BOARD_AUTHOR`:
 
@@ -42,7 +42,7 @@ antonina board resource add 1 lubko://host /workspace/project
 antonina board list --json
 ```
 
-The board protocol remains at `borys/board-v1`; accepted and written documents use schema v2.
+The board protocol uses the `antonina/board-v1` object key; accepted and written documents use schema v2.
 
 ## Development
 

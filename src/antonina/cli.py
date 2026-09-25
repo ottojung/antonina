@@ -16,11 +16,11 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the root namespace-only command-line parser."""
     parser = argparse.ArgumentParser(
         prog="antonina",
-        description="Manage Antonina agents and the Antonina-owned Borys board.",
+        description="Manage Antonina agents and the Antonina-owned board.",
     )
     commands = parser.add_subparsers(dest="namespace", metavar="NAMESPACE")
     commands.add_parser("agent", help="manage long-running agent sessions")
-    commands.add_parser("board", help="manage the Antonina Borys board")
+    commands.add_parser("board", help="manage the Antonina board")
     return parser
 
 

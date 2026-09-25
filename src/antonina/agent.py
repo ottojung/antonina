@@ -25,7 +25,6 @@ import os
 import re
 import shutil
 import signal
-import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -110,6 +109,8 @@ BACKEND_FIELD_MAX_CHARS: Final = 200
 BACKEND_RETRY_MAX_ATTEMPTS: Final = 2
 BACKEND_RETRY_BASE_SECONDS: Final = 0.5
 MODEL_CATALOG_TIMEOUT_SECONDS: Final = 10.0
+SESSION_LIST_TIMEOUT_SECONDS: Final = 10.0
+SESSION_LIST_MAX_COUNT: Final = 100
 BACKEND_FAILURE_RULES: Final = (
     _BackendFailureRule(
         marker="Unexpected server error",
@@ -239,17 +240,6 @@ def _resolve_agent(
         _err(f"{PROG}: unknown agent: {aid}")
         return EXIT_NOT_FOUND
     return aid, meta
-
-
-def opencode_db_path() -> str:
-    """Return the path of the underlying agent's session database, if present.
-
-    Returns:
-        The absolute database path, or an empty string when no database exists.
-    """
-    base = Path(os.environ.get("XDG_DATA_HOME") or (_home() / ".local" / "share"))
-    db = base / "opencode" / "opencode.db"
-    return str(db) if db.is_file() else ""
 
 
 # ---------------------------------------------------------------------------
@@ -1726,31 +1716,71 @@ def print_box(lines: list[str], max_width: int = 80) -> None:
 
 
 def discover_session_id(aid: str) -> str | None:
-    """Find the underlying session id for a Antonina agent, if discoverable.
+    """Discover the newest exact OpenCode session for one Antonina agent.
+
+    Session discovery uses OpenCode's supported machine-readable CLI rather
+    than its private on-disk database schema. Any command or schema failure is
+    inconclusive and therefore yields no session.
 
     Args:
-        aid: Antonina agent ID.
+        aid: Canonical Antonina agent ID.
 
     Returns:
-        The underlying session ID, or ``None`` when undiscoverable.
+        The newest exact matching OpenCode session ID, or None when the
+        supported discovery boundary cannot prove one.
     """
-    db = opencode_db_path()
-    if not db:
+    executable = shutil.which("opencode")
+    if executable is None:
         return None
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    except sqlite3.Error:
+        result = subprocess.run(
+            [
+                executable,
+                "session",
+                "list",
+                "--format",
+                "json",
+                "--max-count",
+                str(SESSION_LIST_MAX_COUNT),
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=SESSION_LIST_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
         return None
     try:
-        row = conn.execute(
-            "SELECT id FROM session WHERE title=? ORDER BY time_created DESC LIMIT 1",
-            (OPENCODE_TITLE_PREFIX + aid,),
-        ).fetchone()
-    except sqlite3.Error:
+        rows: object = json.loads(result.stdout)
+    except (TypeError, ValueError):
         return None
-    finally:
-        conn.close()
-    return row[0] if row else None
+    if not isinstance(rows, list):
+        return None
+
+    target = OPENCODE_TITLE_PREFIX + aid
+    matches: list[tuple[int | float, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        session_id = row.get("id")
+        title = row.get("title")
+        created = row.get("created")
+        if (
+            not isinstance(session_id, str)
+            or not session_id
+            or not isinstance(title, str)
+            or not isinstance(created, (int, float))
+            or isinstance(created, bool)
+        ):
+            return None
+        if title == target:
+            matches.append((created, session_id))
+    if not matches:
+        return None
+    return max(matches, key=lambda item: (item[0], item[1]))[1]
 
 
 def _persisted_native_session_id(meta: Meta) -> str | None:
@@ -3551,15 +3581,23 @@ def _resolve_session_mode(m: Meta) -> str | None:
         ``"new"``, ``"continue"``, or ``None`` when the session is gone.
     """
     recorded = _persisted_native_session_id(m)
-    # Always rediscover under the lock: external session availability is the
-    # authority, and a stale discovery before the lock must never authorize a
-    # second ``new`` session.
+    if recorded is not None:
+        # The durable exact session ID is continuation authority. Passing it
+        # through `opencode run --session` fails closed if OpenCode no longer
+        # has that session, without an expensive/list-based preflight.
+        return "continue"
+
+    # A pristine never-prompted agent cannot have an Antonina-created native
+    # session to recover. Avoid spawning OpenCode merely to prove absence.
+    if m.get("state") == "idle" and m.get("prompt_count") == 0:
+        return "new"
+
+    # Recovery case: an earlier invocation may have created its OpenCode
+    # session but crashed before persisting the native session ID. Discover
+    # under the Antonina metadata lock so a concurrent prompt cannot start a
+    # second native session from stale state.
     discovered = discover_session_id(m.get("id", "")) or None
-    if recorded is not None and discovered is None:
-        # A recorded underlying session that can no longer be found must fail
-        # closed rather than silently starting a fresh one.
-        return None
-    return "continue" if (recorded or discovered) is not None else "new"
+    return "continue" if discovered is not None else "new"
 
 
 def _decide_invocation(
@@ -3612,11 +3650,7 @@ def _decide_invocation(
         # clears the stop-like intent.
         decision["action"] = "busy"
         return
-    mode = _resolve_session_mode(m)
-    if mode is None:
-        decision["action"] = "error_session_gone"
-        return
-    _apply_locked_transition(m, decision, prompt=prompt, steer=steer, mode=mode)
+    _apply_locked_transition(m, decision, prompt=prompt, steer=steer)
 
 
 def _reserve_fresh_runner(
@@ -3657,20 +3691,18 @@ def _apply_locked_transition(
     *,
     prompt: str,
     steer: bool,
-    mode: str,
 ) -> None:
     """Apply the linearizable prompt/steer transition under the metadata lock.
 
-    Assumes the native-session ``mode`` has already been resolved under the lock
-    (see ``_resolve_session_mode``).  Mutates ``m`` in place and records the
-    caller's next action in ``decision``.
+    Reuse, in-flight, and stale-reservation paths are decided without touching
+    OpenCode. Native-session discovery is deferred until this transition
+    actually needs to reserve a fresh runner.
 
     Args:
         m: Agent metadata under the lock.
         decision: Caller-owned mapping filled with the resulting action.
         prompt: Instruction to run or steer.
         steer: Whether this is a steer rather than an ordinary prompt.
-        mode: Resolved native-session mode (``new`` or ``continue``).
     """
     _require_persisted_lifecycle_state(m)
     pending = _pending_prompt(m)
@@ -3732,8 +3764,14 @@ def _apply_locked_transition(
     if _recover_stale_reservation(m, decision, prompt=prompt, steer=steer):
         return
 
-    # Nothing is genuinely in flight and no stale reservation to recover: own
-    # this transition (fresh start) and reserve exactly one runner.
+    # Nothing is genuinely in flight and no stale reservation to recover:
+    # only now resolve whether the fresh runner starts or continues a native
+    # session. This keeps ordinary reuse/control paths independent of OpenCode
+    # session enumeration.
+    mode = _resolve_session_mode(m)
+    if mode is None:
+        decision["action"] = "error_session_gone"
+        return
     _reserve_fresh_runner(
         m,
         decision,
@@ -5959,28 +5997,31 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the public ``antonina agent`` command-line interface."""
+    """Run the ``antonina agent`` command line interface.
+
+    Args:
+        argv: Command line arguments, or ``None`` to use ``sys.argv``.
+
+    Returns:
+        A process exit code.
+    """
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    arguments = list(argv) if argv is not None else sys.argv[1:]
+    argv = list(argv) if argv is not None else sys.argv[1:]
+
+    # Hidden internal entry point used by the background runner.
+    if argv and argv[0] == "_runner":
+        if len(argv) != RUNNER_ARGV_LENGTH:
+            return EXIT_USAGE
+        runner(argv[1], argv[2])
+        return EXIT_OK
+
     parser = build_parser()
-    args = parser.parse_args(arguments)
+    args = parser.parse_args(argv)
     if not getattr(args, "command", None):
         parser.print_help()
         return EXIT_USAGE
     return cast("int", args.func(args))
 
 
-def internal_main(argv: list[str] | None = None) -> int:
-    """Run the implementation-private agent entry point."""
-    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    arguments = list(argv) if argv is not None else sys.argv[1:]
-    if arguments and arguments[0] == "_runner":
-        if len(arguments) != RUNNER_ARGV_LENGTH:
-            return EXIT_USAGE
-        runner(arguments[1], arguments[2])
-        return EXIT_OK
-    return main(arguments)
-
-
 if __name__ == "__main__":
-    sys.exit(internal_main())
+    sys.exit(main())

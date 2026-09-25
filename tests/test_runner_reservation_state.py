@@ -119,7 +119,7 @@ def test_malformed_reservation_cannot_authorize_prompt_reuse(
     monkeypatch.setattr(agent, "is_alive", lambda _m: False)
     monkeypatch.setattr(agent, "runner_alive", lambda _m: False)
 
-    agent._apply_locked_transition(meta, decision, prompt="new caller", steer=True, mode="new")
+    agent._apply_locked_transition(meta, decision, prompt="new caller", steer=True)
 
     assert decision == {"action": "busy"}
     assert meta == before

@@ -93,7 +93,7 @@ def test_locked_transition_rejects_malformed_before_mutation(
     monkeypatch.setattr(agent, "runner_alive", lambda _m: False)
     monkeypatch.setattr(agent, "reservation_in_flight", lambda _m: False)
     with pytest.raises(agent.MalformedPendingPromptMetadataError):
-        agent._apply_locked_transition(meta, {}, prompt="new", steer=False, mode="new")
+        agent._apply_locked_transition(meta, {}, prompt="new", steer=False)
     assert meta == before
 
 

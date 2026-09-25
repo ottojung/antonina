@@ -131,7 +131,6 @@ def test_malformed_runner_generation_blocks_allocation(
         decision,
         prompt="work",
         steer=False,
-        mode="new",
     )
 
     assert decision == {"action": "busy"}
@@ -169,7 +168,6 @@ def test_malformed_runner_generation_blocks_stale_recovery(
         decision,
         prompt="late",
         steer=False,
-        mode="new",
     )
 
     assert decision == {"action": "busy"}
@@ -207,7 +205,6 @@ def test_valid_stale_recovery_allocates_next_generation(
         decision,
         prompt="late",
         steer=False,
-        mode="new",
     )
 
     assert decision["action"] == "spawn"
@@ -279,7 +276,7 @@ def test_malformed_numeric_owner_cannot_authorize_prompt_reuse(
     monkeypatch.setattr(agent, "reservation_in_flight", lambda _meta: True)
     decision: dict[str, object] = {}
 
-    agent._apply_locked_transition(meta, decision, prompt="new work", steer=False, mode="new")
+    agent._apply_locked_transition(meta, decision, prompt="new work", steer=False)
 
     assert decision == {"action": "busy"}
     assert meta.get("pending_prompt") is None

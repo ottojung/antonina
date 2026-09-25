@@ -1,4 +1,4 @@
-"""Antonina-owned Borys shared-board client and command-line interface."""
+"""Antonina shared-board client and command-line interface."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ BOARD_BASE_URL_ENV: Final = "ANTONINA_BOARD_URL"
 BOARD_CAPABILITY_ENV: Final = "ANTONINA_BOARD_CAPABILITY"
 BOARD_AUTHOR_ENV: Final = "ANTONINA_BOARD_AUTHOR"
 DEFAULT_BOARD_BASE_URL: Final = "https://vau.place/_skrynia"
-BORYS_NAMESPACE: Final = "borys"
+BOARD_NAMESPACE: Final = "antonina"
 BOARD_KEY: Final = "board-v1"
 BOARD_SCHEMA_VERSION: Final = 2
 DEFAULT_MAX_ATTEMPTS: Final = 6
@@ -36,7 +36,7 @@ IssueState = Literal["open", "closed"]
 
 
 class BoardMessage(TypedDict):
-    """One chronological Borys issue message."""
+    """One chronological Antonina issue message."""
 
     id: str
     author: str
@@ -45,7 +45,7 @@ class BoardMessage(TypedDict):
 
 
 class BoardIssue(TypedDict):
-    """One Borys issue thread."""
+    """One Antonina issue thread."""
 
     number: int
     title: str
@@ -67,7 +67,7 @@ class BoardResource(TypedDict):
 
 
 class Board(TypedDict):
-    """The complete canonical Borys v2 board document."""
+    """The complete canonical Antonina v2 board document."""
 
     schemaVersion: Literal[2]
     nextIssueNumber: int
@@ -76,7 +76,7 @@ class Board(TypedDict):
 
 
 class BoardError(RuntimeError):
-    """Raised when the Borys board cannot be read or safely mutated."""
+    """Raised when the Antonina board cannot be read or safely mutated."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,7 +215,7 @@ def _is_non_empty_text(value: object) -> bool:
 
 
 def _timestamp_seconds(value: object) -> float | None:
-    """Parse a Borys timestamp to seconds since the epoch.
+    """Parse a Antonina timestamp to seconds since the epoch.
 
     Returns:
         Parsed epoch seconds, or None for an invalid timestamp.
@@ -232,29 +232,22 @@ def _timestamp_seconds(value: object) -> float | None:
     return parsed.timestamp()
 
 
-def _positive_int(value: str) -> int:
-    number = int(value)
-    if number < 1:
-        raise argparse.ArgumentTypeError("issue number must be positive")
-    return number
-
-
 def _is_positive_int(value: object) -> bool:
     """Return whether a JSON value is a positive JavaScript-safe integer."""
     return isinstance(value, int) and not isinstance(value, bool) and 0 < value <= MAX_SAFE_INTEGER
 
 
 def _parse_message(value: object) -> BoardMessage:
-    """Validate and return one Borys message.
+    """Validate and return one Antonina message.
 
     Returns:
         The validated message.
 
     Raises:
-        BoardError: If the value is not a Borys v1 message.
+        BoardError: If the value is not a canonical Antonina message.
     """
     if not isinstance(value, dict):
-        msg = "Borys board contains an incompatible or malformed message"
+        msg = "Antonina board contains an incompatible or malformed message"
         raise BoardError(msg)
     message = cast("dict[str, object]", value)
     if (
@@ -264,13 +257,13 @@ def _parse_message(value: object) -> BoardMessage:
         or not _is_non_empty_text(message["body"])
         or _timestamp_seconds(message["createdAt"]) is None
     ):
-        msg = "Borys board contains an incompatible or malformed message"
+        msg = "Antonina board contains an incompatible or malformed message"
         raise BoardError(msg)
     return cast("BoardMessage", message)
 
 
 def _parse_issue(value: object, *, legacy: bool = False) -> BoardIssue:
-    """Validate one issue, accepting only the deployed v1 shape during migration.
+    """Validate one canonical issue, accepting the deployed v1 shape.
 
     Returns:
         The validated issue.
@@ -278,7 +271,7 @@ def _parse_issue(value: object, *, legacy: bool = False) -> BoardIssue:
     Raises:
         BoardError: If the issue is malformed or incompatible.
     """
-    error = "Borys board contains an incompatible or malformed issue"
+    error = "Antonina board contains an incompatible or malformed issue"
     if not isinstance(value, dict):
         raise BoardError(error)
     raw = cast("dict[str, object]", value)
@@ -307,10 +300,10 @@ def _parse_issue(value: object, *, legacy: bool = False) -> BoardIssue:
     for message in issue["messages"]:
         created = _timestamp_seconds(message["createdAt"])
         if created is None:
-            msg = "Borys board contains an incompatible message timestamp"
+            msg = "Antonina board contains an incompatible message timestamp"
             raise BoardError(msg)
         if previous is not None and created < previous:
-            msg = f"Borys issue {issue['number']} has messages out of chronological order"
+            msg = f"Antonina issue {issue['number']} has messages out of chronological order"
             raise BoardError(msg)
         previous = created
     return issue
@@ -320,7 +313,9 @@ def _valid_host(host: object) -> bool:
     if not isinstance(host, str) or not host.startswith("lubko://"):
         return False
     server = host.removeprefix("lubko://")
-    return bool(server) and not any(character in server for character in "/?#\\")
+    return bool(server) and not any(
+        character.isspace() or character in "/?#\\" for character in server
+    )
 
 
 def _valid_path(path: object) -> bool:
@@ -340,7 +335,7 @@ def _parse_resource(value: object, issue_numbers: set[int]) -> BoardResource:
     Raises:
         BoardError: If the resource is malformed or incompatible.
     """
-    error = "Borys board contains an incompatible or malformed resource"
+    error = "Antonina board contains an incompatible or malformed resource"
     if not isinstance(value, dict):
         raise BoardError(error)
     raw = cast("dict[str, object]", value)
@@ -364,7 +359,7 @@ def _parse_resource(value: object, issue_numbers: set[int]) -> BoardResource:
 
 
 def parse_board(value: object) -> Board:
-    """Parse and normalize the deployed v1 board or canonical v2 board.
+    """Parse deployed v1 or canonical Antonina v2 board data.
 
     Returns:
         The canonical v2 board.
@@ -372,38 +367,40 @@ def parse_board(value: object) -> Board:
     Raises:
         BoardError: If the board is malformed or incompatible.
     """
-    error = "Skrynia object borys/board-v1 contains an incompatible or malformed board"
+    error = "Skrynia object antonina/board-v1 contains an incompatible or malformed board"
     if not isinstance(value, dict):
         raise BoardError(error)
     raw = cast("dict[str, object]", value)
     version = raw.get("schemaVersion")
     legacy = version == 1
     expected = (
-        frozenset({"schemaVersion", "nextIssueNumber", "issues", "resources"})
-        if version == BOARD_SCHEMA_VERSION
-        else frozenset({"schemaVersion", "nextIssueNumber", "issues"})
+        frozenset({"schemaVersion", "nextIssueNumber", "issues"})
+        if legacy
+        else frozenset({"schemaVersion", "nextIssueNumber", "issues", "resources"})
     )
     if (
         not _exact_keys(raw, expected)
-        or version not in {1, 2}
+        or version not in {1, BOARD_SCHEMA_VERSION}
         or not _is_positive_int(raw["nextIssueNumber"])
         or not isinstance(raw["issues"], list)
     ):
         raise BoardError(error)
-    issues = [_parse_issue(issue, legacy=legacy) for issue in cast("list[object]", raw["issues"])]
+    issues = [
+        _parse_issue(issue, legacy=legacy) for issue in cast("list[object]", raw["issues"])
+    ]
     numbers = {item["number"] for item in issues}
     next_issue_number = cast("int", raw["nextIssueNumber"])
     if len(numbers) != len(issues) or next_issue_number <= (max(numbers) if numbers else 0):
-        msg = "Borys board issue number counter is inconsistent with its issues"
+        msg = "Antonina board issue number counter is inconsistent with its issues"
         raise BoardError(msg)
     resources = (
         [_parse_resource(item, numbers) for item in cast("list[object]", raw["resources"])]
-        if version == BOARD_SCHEMA_VERSION
+        if not legacy
         else []
     )
     keys = [(item["host"], item["path"]) for item in resources]
     if len(keys) != len(set(keys)):
-        msg = "Borys board contains duplicate resources"
+        msg = "Antonina board contains duplicate resources"
         raise BoardError(msg)
     return Board(
         schemaVersion=BOARD_SCHEMA_VERSION,
@@ -477,7 +474,7 @@ def _new_message_id() -> str:
 
 
 class BoardClient:
-    """Thin concurrency-safe client for the shared Borys board."""
+    """Thin concurrency-safe client for the shared Antonina board."""
 
     def __init__(
         self,
@@ -492,7 +489,7 @@ class BoardClient:
 
         Args:
             base_url: Skrynia base URL, normally ending in /_skrynia.
-            capability: Optional Borys write capability.
+            capability: Optional Antonina write capability.
             http: Optional injectable HTTP transport.
             now: Optional clock used by mutations.
             max_attempts: Maximum compare-and-swap attempts.
@@ -503,7 +500,7 @@ class BoardClient:
         if max_attempts < 1:
             msg = "max_attempts must be positive"
             raise ValueError(msg)
-        self._url = f"{base_url.rstrip('/')}/store/{BORYS_NAMESPACE}/{BOARD_KEY}"
+        self._url = f"{base_url.rstrip('/')}/store/{BOARD_NAMESPACE}/{BOARD_KEY}"
         self._capability = capability.strip() if capability else None
         self._http = http if http is not None else StandardHttpClient()
         self._now = now if now is not None else lambda: datetime.now(tz=UTC)
@@ -520,7 +517,7 @@ class BoardClient:
         """
         stored = self._read()
         if stored is None:
-            msg = "Borys board does not exist"
+            msg = "Antonina board does not exist"
             raise BoardError(msg)
         return stored.board
 
@@ -574,7 +571,7 @@ class BoardClient:
             nonlocal created_number
             created_number = board["nextIssueNumber"]
             if created_number >= MAX_SAFE_INTEGER:
-                msg = "Borys issue number space is exhausted"
+                msg = "Antonina issue number space is exhausted"
                 raise BoardError(msg)
             timestamp = _iso_timestamp(self._now())
             issue = BoardIssue(
@@ -610,7 +607,7 @@ class BoardClient:
         def mutate(board: Board) -> Board:
             current = self._require_issue(board, number)
             if current["state"] != "open":
-                msg = f"Borys issue {number} is closed"
+                msg = f"Antonina issue {number} is closed"
                 raise BoardError(msg)
             changed = copy.deepcopy(current)
             changed["body"] = clean_body
@@ -628,7 +625,7 @@ class BoardClient:
 
         Args:
             number: Dependent issue number.
-            host: Canonical Lubko host.
+            host: Canonical resource host.
             path: Canonical absolute POSIX path.
 
         Returns:
@@ -644,7 +641,7 @@ class BoardClient:
         def mutate(board: Board) -> Board:
             issue = self._require_issue(board, number)
             if issue["state"] != "open":
-                msg = f"Borys issue {number} is closed"
+                msg = f"Antonina issue {number} is closed"
                 raise BoardError(msg)
             candidate = copy.deepcopy(board)
             timestamp = _iso_timestamp(self._now())
@@ -672,16 +669,16 @@ class BoardClient:
             item for item in committed["resources"] if (item["host"], item["path"]) == (host, path)
         )
 
-    def remove_resource(self, number: int, host: str, path: str) -> BoardResource | None:
+    def remove_resource(self, number: int, host: str, path: str) -> list[BoardResource]:
         """Remove one issue dependency, deleting an empty resource.
 
         Args:
             number: Dependent issue number.
-            host: Canonical Lubko host.
+            host: Canonical resource host.
             path: Canonical absolute POSIX path.
 
         Returns:
-            The affected remaining resource, or ``None`` when the resource is removed.
+            The remaining resources in deterministic order.
 
         Raises:
             BoardError: If validation fails or the dependency does not exist.
@@ -690,15 +687,12 @@ class BoardClient:
             msg = "Resource host or path is not canonical"
             raise BoardError(msg)
 
-        affected: BoardResource | None = None
-
         def mutate(board: Board) -> Board:
-            nonlocal affected
             candidate = copy.deepcopy(board)
             for resource in candidate["resources"]:
                 if (resource["host"], resource["path"]) == (host, path):
                     if number not in resource["issueNumbers"]:
-                        msg = "Borys resource dependency does not exist"
+                        msg = "Antonina resource dependency does not exist"
                         raise BoardError(msg)
                     resource["issueNumbers"].remove(number)
                     if not resource["issueNumbers"]:
@@ -707,13 +701,11 @@ class BoardClient:
                         resource["updatedAt"] = _latest_timestamp(
                             self._now(), resource["updatedAt"]
                         )
-                        affected = copy.deepcopy(resource)
                     return candidate
-            msg = "Borys resource dependency does not exist"
+            msg = "Antonina resource dependency does not exist"
             raise BoardError(msg)
 
-        self._mutate(mutate)
-        return affected
+        return self._mutate(mutate)["resources"]
 
     def list_resources(
         self, host: str | None = None, issue: int | None = None
@@ -727,12 +719,6 @@ class BoardClient:
         Returns:
             Resource views with dependent states and protection status.
         """
-        if host is not None and not _valid_host(host):
-            msg = "Resource host is not canonical"
-            raise BoardError(msg)
-        if issue is not None and issue < 1:
-            msg = "Issue number must be positive"
-            raise BoardError(msg)
         board = self.load_board()
         issues = {item["number"]: item for item in board["issues"]}
         views = []
@@ -829,7 +815,7 @@ class BoardClient:
         for issue in board["issues"]:
             if issue["number"] == number:
                 return issue
-        msg = f"Borys issue {number} does not exist"
+        msg = f"Antonina issue {number} does not exist"
         raise BoardError(msg)
 
     def _update_issue(
@@ -857,10 +843,10 @@ class BoardClient:
 
     def _require_capability(self) -> str:
         if not self._capability:
-            msg = "A Borys write capability is required"
+            msg = "A Antonina write capability is required"
             raise BoardError(msg)
         if CAPABILITY_RE.fullmatch(self._capability) is None:
-            msg = "The Borys write capability must be 64 hexadecimal characters"
+            msg = "The Antonina write capability must be 64 hexadecimal characters"
             raise BoardError(msg)
         return self._capability
 
@@ -885,13 +871,13 @@ class BoardClient:
             if response.status != http.client.OK:
                 self._raise_http_error("PUT", response)
             return self._require_stored().board
-        msg = "Borys board changed too often; the conditional write was not committed"
+        msg = "Antonina board changed too often; the conditional write was not committed"
         raise BoardError(msg)
 
     def _require_stored(self) -> StoredBoard:
         stored = self._read()
         if stored is None:
-            msg = "Borys board does not exist"
+            msg = "Antonina board does not exist"
             raise BoardError(msg)
         return stored
 
@@ -910,12 +896,12 @@ class BoardClient:
         if not etag:
             msg = "Skrynia GET board-v1 returned no ETag; refusing an unsafe board write"
             raise BoardError(msg)
-        value = _decode_json(response.body, "Skrynia GET borys/board-v1")
+        value = _decode_json(response.body, "Skrynia GET antonina/board-v1")
         return StoredBoard(board=parse_board(value), etag=etag)
 
     @staticmethod
     def _raise_http_error(method: str, response: HttpResponse) -> None:
-        msg = f"Skrynia {method} {BORYS_NAMESPACE}/{BOARD_KEY} failed ({response.status})"
+        msg = f"Skrynia {method} {BOARD_NAMESPACE}/{BOARD_KEY} failed ({response.status})"
         raise BoardError(msg)
 
 
@@ -947,13 +933,13 @@ def _parser() -> argparse.ArgumentParser:
     resource_commands = resource_parser.add_subparsers(dest="resource_command", required=True)
     resource_list = resource_commands.add_parser("list")
     resource_list.add_argument("--host")
-    resource_list.add_argument("--issue", type=_positive_int)
+    resource_list.add_argument("--issue", type=int)
     resource_add = resource_commands.add_parser("add")
-    resource_add.add_argument("issue", type=_positive_int)
+    resource_add.add_argument("issue", type=int)
     resource_add.add_argument("host")
     resource_add.add_argument("path")
     resource_remove = resource_commands.add_parser("remove")
-    resource_remove.add_argument("issue", type=_positive_int)
+    resource_remove.add_argument("issue", type=int)
     resource_remove.add_argument("host")
     resource_remove.add_argument("path")
 
@@ -1014,16 +1000,14 @@ def _human_issue(issue: BoardIssue) -> str:
     Returns:
         Human-readable issue text.
     """
-    lines = [f"#{issue['number']} [{issue['state']}] {issue['title']}"]
-    if issue["body"]:
-        lines.append(issue["body"])
+    lines = [
+        f"#{issue['number']} [{issue['state']}] {issue['title']}",
+        "Description:",
+        issue["body"],
+    ]
     for message in issue["messages"]:
         lines.extend((f"{message['author']} @ {message['createdAt']}", message["body"]))
     return "\n".join(lines)
-
-
-def _human_resource(resource: BoardResource) -> str:
-    return f"{resource['host']} {resource['path']} #{','.join(str(number) for number in resource['issueNumbers'])}"
 
 
 def _write_stdout(text: str) -> None:
@@ -1050,7 +1034,7 @@ def _client_from_environment() -> BoardClient:
 
 def _run_resource_command(
     args: argparse.Namespace, client: BoardClient
-) -> BoardResource | list[dict[str, object]] | None:
+) -> BoardResource | list[BoardResource] | list[dict[str, object]]:
     """Execute one parsed resource command.
 
     Args:
@@ -1090,7 +1074,7 @@ def _run_issue_write(args: argparse.Namespace, client: BoardClient) -> BoardIssu
 
 def _run_command(
     args: argparse.Namespace, client: BoardClient
-) -> BoardIssue | list[BoardIssue] | BoardResource | list[dict[str, object]] | None:
+) -> BoardIssue | list[BoardIssue] | BoardResource | list[BoardResource] | list[dict[str, object]]:
     """Execute one parsed CLI command.
 
     Returns:
@@ -1119,12 +1103,12 @@ def _run_command(
     if command in {"close", "reopen"}:
         number = cast("int", args.number)
         return client.close(number) if command == "close" else client.reopen(number)
-    msg = f"unsupported Antonina board command: {command}"
+    msg = f"unsupported antonina board command: {command}"
     raise BoardError(msg)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the Antonina board command-line interface.
+    """Run the antonina board command-line interface.
 
     Args:
         argv: Optional command arguments excluding the executable name.
@@ -1143,7 +1127,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         _write_stdout(json.dumps(result, separators=(",", ":"), ensure_ascii=False, sort_keys=True))
         return 0
 
-    if result is None:
+    if cast("str", args.command) == "resource" and not cast("bool", args.json_output):
+        resource_command = cast("str", args.resource_command)
+        if resource_command == "add":
+            resource = cast("BoardResource", result)
+            _write_stdout(f"Resource added: {resource['host']} {resource['path']} -> #{args.issue}")
+        elif resource_command == "remove":
+            _write_stdout(f"Resource dependency removed: {args.host} {args.path} <- #{args.issue}")
+        else:
+            for raw_item in cast("list[object]", result):
+                item = cast("dict[str, object]", raw_item)
+                states = ", ".join(
+                    f"#{entry['number']} [{entry['state']}]"
+                    for entry in cast("list[dict[str, object]]", item["issues"])
+                )
+                status = "protected" if item["protected"] else "collectible"
+                _write_stdout(f"{item['host']} {item['path']} {states} {status}")
         return 0
 
     if isinstance(result, list):
@@ -1156,16 +1155,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 status = "protected" if item["protected"] else "collectible"
                 _write_stdout(f"{item['host']} {item['path']} {states} {status}")
-            elif "issueNumbers" in item:
-                _write_stdout(_human_resource(cast("BoardResource", item)))
             else:
                 _write_stdout(f"#{item['number']} [{item['state']}] {item['title']}")
         return 0
 
-    if "issueNumbers" in cast("dict[str, object]", result):
-        _write_stdout(_human_resource(cast("BoardResource", result)))
-    else:
-        _write_stdout(_human_issue(cast("BoardIssue", result)))
+    _write_stdout(_human_issue(cast("BoardIssue", result)))
     return 0
 
 

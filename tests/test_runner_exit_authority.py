@@ -416,7 +416,7 @@ def test_dead_pinned_reservation_owner_recovers_accepted_steer(
     monkeypatch.setattr(os, "close", closed.append)
 
     decision: dict[str, object] = {}
-    agent._apply_locked_transition(m, decision, prompt="steer", steer=True, mode="new")
+    agent._apply_locked_transition(m, decision, prompt="steer", steer=True)
 
     assert probes == [(77, 0), (77, 0)]
     assert closed == [77, 77]
@@ -531,7 +531,7 @@ def test_reserved_runner_marker_requires_pinned_live_candidate(
     state.update({"alive": True, "vanish_on_read": True})
 
     decision: dict[str, object] = {}
-    agent._apply_locked_transition(m, decision, prompt="steer", steer=True, mode="new")
+    agent._apply_locked_transition(m, decision, prompt="steer", steer=True)
 
     assert decision["action"] == "spawn"
     assert decision.get("steer_accepted") is True
@@ -657,12 +657,12 @@ def test_canonical_runner_consumption_authority_preserves_transition_semantics(
     monkeypatch.setattr(agent, "reservation_in_flight", lambda _meta: False)
     inactive = agent.idle_meta("a11d", str(tmp_path), None)
     inactive_decision: dict[str, object] = {}
-    agent._apply_locked_transition(inactive, inactive_decision, prompt="P", steer=False, mode="new")
+    agent._apply_locked_transition(inactive, inactive_decision, prompt="P", steer=False)
     assert inactive_decision == {"action": "spawn", "mode": "new", "gen": 1}
     active = agent.idle_meta("a11d", str(tmp_path), None)
     active["active_runner"] = True
     active_decision: dict[str, object] = {}
-    agent._apply_locked_transition(active, active_decision, prompt="P", steer=False, mode="new")
+    agent._apply_locked_transition(active, active_decision, prompt="P", steer=False)
     assert active_decision == {"action": "reuse", "interrupt": False}
 
 

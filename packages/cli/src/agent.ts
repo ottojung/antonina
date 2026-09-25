@@ -17,6 +17,7 @@ import {
   finalizeTerminal,
   invocationAlive,
   queueSteer,
+  reconcileDeadMeta,
   reservationInFlight,
   signalInvocation,
   waitForInvocationGone,
@@ -27,9 +28,12 @@ import {
   idleMeta,
   nextPromptCount,
   pendingPrompt,
+  persistedLifecycleState,
   persistedNativeSessionId,
   persistedTimestamp,
   runnerGeneration,
+  runnerReservationMode,
+  runnerReservationState,
   type AgentMetadata,
 } from '../../agent-runtime/src/metadata.js';
 import { normalizeAgentId } from '../../agent-runtime/src/process.js';
@@ -127,6 +131,11 @@ function requireMeta(agentId: string, context: AgentCommandContext): AgentMetada
   const meta = readMeta(agentId, paths(context));
   if (meta === null) throw new NotFoundError(`unknown agent: ${agentId}`);
   return meta;
+}
+
+async function reconcileAgent(agentId: string, context: AgentCommandContext): Promise<void> {
+  if (readMeta(agentId, paths(context)) === null) return;
+  await updateMeta(agentId, (meta) => { reconcileDeadMeta(meta); }, paths(context));
 }
 
 function agentIds(context: AgentCommandContext): string[] {
@@ -280,6 +289,7 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
   const parsed = parse(args, ['--json']);
   if (parsed.positionals.length !== 0) throw new UsageError('status: unexpected positional arguments');
   const agentId = requireAgentId(parsed.values.get('--id'), 'status');
+  await reconcileAgent(agentId, context);
   const meta = requireMeta(agentId, context);
   const status = statusJson(agentId, meta);
   status.log = logPath(agentId, paths(context));
@@ -311,6 +321,7 @@ async function cmdLog(args: string[], context: AgentCommandContext): Promise<num
   const parsed = parse(args, ['--follow']);
   if (parsed.positionals.length !== 0) throw new UsageError('log: unexpected positional arguments');
   const agentId = requireAgentId(parsed.values.get('--id'), 'log');
+  await reconcileAgent(agentId, context);
   requireMeta(agentId, context);
   const path = logPath(agentId, paths(context));
   const lines = parsed.values.has('--lines') ? nonnegativeInteger(parsed.values.get('--lines'), '--lines') : 50;
@@ -343,6 +354,7 @@ async function cmdWait(args: string[], context: AgentCommandContext): Promise<nu
   const timeoutSeconds = positiveInteger(parsed.values.get('--timeout'), '--timeout');
   const deadline = Date.now() + timeoutSeconds * 1000;
   while (Date.now() < deadline) {
+    await reconcileAgent(agentId, context);
     const meta = requireMeta(agentId, context);
     const state = deriveState(meta);
     if (state !== 'running') return exitCodeFor(meta);
@@ -434,9 +446,18 @@ async function cmdPrompt(args: string[], context: AgentCommandContext): Promise<
     mode?: 'new' | 'continue';
     generation?: number;
     interrupt?: boolean;
+    recoverBusy?: boolean;
   } = {};
   const steer = parsed.flags.has('--steer');
   await updateMeta(agentId, (meta) => {
+    const lifecycle = persistedLifecycleState(meta);
+    const active = activeRunnerFlag(meta);
+    const reservationState = runnerReservationState(meta.runner_reservation);
+    if (lifecycle === null || active === null || reservationState === 'malformed') {
+      decision.action = 'busy';
+      return;
+    }
+
     const live = invocationAlive(meta);
     if (live) {
       if (!steer) {
@@ -453,7 +474,7 @@ async function cmdPrompt(args: string[], context: AgentCommandContext): Promise<
       return;
     }
 
-    if (activeRunnerFlag(meta) === true && reservationInFlight(meta)) {
+    if (active === true && reservationInFlight(meta)) {
       if (steer) {
         if (!queueSteer(meta, prompt, Date.now() / 1000)) {
           decision.action = 'busy';
@@ -471,6 +492,43 @@ async function cmdPrompt(args: string[], context: AgentCommandContext): Promise<
       meta.last_activity_at = Date.now() / 1000;
       decision.action = 'reuse';
       return;
+    }
+
+    if (active === true && (reservationState === 'reserved' || reservationState === 'claimed')) {
+      const reservation = meta.runner_reservation as Record<string, unknown>;
+      const mode = runnerReservationMode(reservation);
+      const currentGeneration = runnerGeneration(meta.runner_gen ?? 0, 0);
+      const accepted = pendingPrompt(meta);
+      if (mode === null || currentGeneration === null) {
+        decision.action = 'busy';
+        return;
+      }
+      if (accepted !== null) {
+        if (steer) {
+          if (!queueSteer(meta, prompt, Date.now() / 1000)) {
+            decision.action = 'busy';
+            return;
+          }
+        } else {
+          decision.recoverBusy = true;
+        }
+        const generation = currentGeneration + 1;
+        meta.active_runner = true;
+        meta.runner_gen = generation;
+        meta.runner_reservation = {
+          state: 'reserved',
+          gen: generation,
+          owner_pid: process.pid,
+          owner_start_ticks: currentProcessStartTicks(),
+          reserved_at: Date.now() / 1000,
+          mode,
+        };
+        decision.action = 'spawn';
+        decision.mode = mode;
+        decision.generation = generation;
+        return;
+      }
+      setActiveRunner(meta, false);
     }
 
     const currentGeneration = runnerGeneration(meta.runner_gen ?? 0, 0);
@@ -503,6 +561,9 @@ async function cmdPrompt(args: string[], context: AgentCommandContext): Promise<
   }
   if (decision.action === 'spawn') {
     spawnRunner(agentId, decision.mode!, decision.generation!, context);
+    if (decision.recoverBusy) {
+      throw new Error(`agent ${agentId} is recovering an already accepted prompt; this prompt was rejected`);
+    }
   } else if (decision.interrupt) {
     const current = readMeta(agentId, paths(context));
     if (current !== null) signalInvocation(current, 'SIGTERM');

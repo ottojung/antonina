@@ -8,7 +8,7 @@ Prefer inheriting abandoned Antonina issues over selecting new work. If no aband
 
 ## Integration
 
-Scheduled work accumulates on the active `release/*` branch. A human promotes that branch into `main`. Start issue work from the active release branch in an isolated worktree, open the issue pull request against that branch, and merge only after implementation, validation, and review. Scheduled orchestrators must not merge into `main`.
+Scheduled work accumulates on one current active `release/*` branch. A human promotes that branch into `main`. The active release branch is the latest `release/*` branch that has never been promoted into `main`; once promoted, it is retired. If no active release branch exists, create one from current `main` and continue the scheduled invocation. Reuse the same active release branch across scheduled issues. Start issue work from the active release branch in an isolated worktree, open the issue pull request against that branch, and merge only after implementation, validation, and review. Scheduled orchestrators must not merge into `main`.
 
 ## Completion
 

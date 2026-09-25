@@ -1,0 +1,22 @@
+[project]
+name = "antonina"
+version = "0.1.0"
+description = "Standalone optional agent runtime."
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+antonina = "antonina.agent:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "-q"]
+testpaths = ["tests"]

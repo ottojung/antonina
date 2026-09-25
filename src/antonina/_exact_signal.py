@@ -1,0 +1,337 @@
+"""Shared exact-process signalling and identity primitives.
+
+These helpers exist because a holding pidfd does NOT keep a numeric PID
+reserved: the kernel frees the numeric ID from the namespace before the final
+``struct pid`` reference is released. Any check-then-signal sequence that ends
+in a *numeric* syscall (``os.kill``, ``os.killpg``) therefore remains racy no
+matter how strong the preceding proof was. The only non-reusable delivery is
+``pidfd_send_signal``, which addresses the pinned kernel process itself.
+
+The process-identity observation helpers (``proc_start_ticks``,
+``process_state_char``, ``process_is_zombie``, ``process_ppid``,
+``proc_cpu_seconds``) own the canonical ``/proc/<pid>/stat`` parsing used by
+agent, supervisor, health, and lifecycle subsystems.  Subsystem-specific
+authority (agent markers, worker incarnation IDs, supervisor child ownership,
+lifecycle obligations) composes with these shared primitives rather than
+duplicating them.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import os
+import platform
+import signal
+from pathlib import Path
+from typing import Final
+
+STAT_MIN_FIELDS: Final = 20
+STAT_STATE_FIELD_INDEX: Final = 0
+STAT_PPID_FIELD_INDEX: Final = 1
+STAT_PGRP_FIELD_INDEX: Final = 2
+STAT_UTIME_FIELD_INDEX: Final = 11
+STAT_STIME_FIELD_INDEX: Final = 12
+STAT_STARTTIME_FIELD_INDEX: Final = 19
+
+# Unified generic syscall table — same number on every architecture with
+# shared syscall numbering (x86_64, aarch64, riscv64, arm32, ppc64, s390x,
+# loongarch).  Architectures with private numbering (alpha, mips, parisc,
+# sparc) are absent: there pinning is unsupported and signalling fails closed.
+_PIDFD_OPEN_SYSCALL_NR: Final[dict[str, int]] = {
+    "x86_64": 434,
+    "aarch64": 434,
+    "armv7l": 434,
+    "armv8l": 434,
+    "riscv64": 434,
+    "ppc64": 434,
+    "ppc64le": 434,
+    "s390x": 434,
+    "loongarch64": 434,
+}
+_PIDFD_SEND_SIGNAL_SYSCALL_NR: Final[dict[str, int]] = {
+    "x86_64": 424,
+    "aarch64": 424,
+    "armv7l": 424,
+    "armv8l": 424,
+    "riscv64": 424,
+    "ppc64": 424,
+    "ppc64le": 424,
+    "s390x": 424,
+    "loongarch64": 424,
+}
+_LIBC_CACHE: Final[dict[str, ctypes.CDLL]] = {}
+
+
+def _load_libc() -> ctypes.CDLL | None:
+    """Return a cached handle to the C library, or ``None``.
+
+    Uses ``ctypes.CDLL(None)`` which resolves the default C library for
+    the current process — works on both glibc (Linux) and Bionic (Android).
+
+    Returns:
+        The ``ctypes`` C library handle, or ``None`` when unavailable.
+    """
+    if "libc" not in _LIBC_CACHE:
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            libc.syscall.restype = ctypes.c_long
+        except OSError:
+            return None
+        _LIBC_CACHE["libc"] = libc
+    return _LIBC_CACHE["libc"]
+
+
+def open_pidfd(pid: int) -> int:
+    """Open a pidfd pinning ``pid`` against kernel struct-pid release.
+
+    Prefers ``os.pidfd_open`` when available; otherwise issues the raw
+    ``SYS_pidfd_open`` syscall via ``libc.syscall()`` on architectures with
+    the unified generic syscall number.  Works on both glibc and Bionic
+    because ``syscall()`` is exported by both C libraries.
+
+    Args:
+        pid: Process id to pin.
+
+    Returns:
+        The new pid file descriptor.
+
+    Raises:
+        OSError: If the process is gone or the pin fails.
+    """
+    pidfd_open_fn = getattr(os, "pidfd_open", None)
+    if pidfd_open_fn is not None:
+        return int(pidfd_open_fn(pid))
+    nr = _PIDFD_OPEN_SYSCALL_NR.get(platform.machine())
+    libc = _load_libc()
+    if nr is None or libc is None:
+        raise OSError(0, "pidfd_open unsupported on this platform")
+    fd = libc.syscall(ctypes.c_long(nr), ctypes.c_int(pid), ctypes.c_uint(0))
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), "pidfd_open failed")
+    return int(fd)
+
+
+def pidfd_send_signal(pidfd: int, sig: int) -> None:
+    """Deliver ``sig`` to exactly the process pinned by ``pidfd``.
+
+    Prefers ``signal.pidfd_send_signal`` when available; otherwise issues
+    the raw ``SYS_pidfd_send_signal`` syscall via ``libc.syscall()``.
+    Works on both glibc and Bionic.
+
+    Args:
+        pidfd: Pinned process file descriptor.
+        sig: Signal number to deliver.
+
+    Raises:
+        OSError: If delivery fails (for example the process already exited).
+    """
+    send_signal_fn = getattr(signal, "pidfd_send_signal", None)
+    if send_signal_fn is not None:
+        send_signal_fn(pidfd, sig)
+        return
+    nr = _PIDFD_SEND_SIGNAL_SYSCALL_NR.get(platform.machine())
+    libc = _load_libc()
+    if nr is None or libc is None:
+        raise OSError(0, "pidfd_send_signal unsupported on this platform")
+    result = libc.syscall(
+        ctypes.c_long(nr),
+        ctypes.c_int(pidfd),
+        ctypes.c_int(sig),
+        ctypes.c_void_p(None),
+        ctypes.c_uint(0),
+    )
+    if result != 0:
+        raise OSError(ctypes.get_errno(), "pidfd_send_signal failed")
+
+
+def _read_proc_stat(pid: int) -> bytes | None:
+    """Read the raw ``/proc/<pid>/stat`` bytes, or ``None`` on any error.
+
+    Args:
+        pid: Process ID to inspect.
+
+    Returns:
+        The raw stat bytes, or ``None`` when the process is gone or
+        unreadable.
+    """
+    try:
+        return (Path("/proc") / str(pid) / "stat").read_bytes()
+    except OSError:
+        return None
+
+
+def _split_stat_fields(stat: bytes) -> list[bytes] | None:
+    """Split ``/proc/<pid>/stat`` bytes after the closing paren.
+
+    The comm field (between the first ``(`` and last ``)``) may contain
+    spaces and parentheses, so field splitting must begin after the last
+    ``)``.
+
+    Args:
+        stat: Raw stat bytes.
+
+    Returns:
+        The space-split fields after the comm, or ``None`` when the line
+        is unparseable.
+    """
+    close_paren = stat.rfind(b")")
+    if close_paren == -1:
+        return None
+    fields = stat[close_paren + 2 :].split()
+    if len(fields) < STAT_MIN_FIELDS:
+        return None
+    return fields
+
+
+def proc_start_ticks(pid: int) -> int | None:
+    """Return a process start time in clock ticks, or ``None`` if unknown.
+
+    The start time is unique per process on a boot and survives PID reuse,
+    so it anchors identity checks.
+
+    Args:
+        pid: Process ID to inspect.
+
+    Returns:
+        The start time in clock ticks, or ``None`` when unreadable.
+    """
+    stat = _read_proc_stat(pid)
+    if stat is None:
+        return None
+    fields = _split_stat_fields(stat)
+    if fields is None:
+        return None
+    try:
+        return int(fields[STAT_STARTTIME_FIELD_INDEX])
+    except ValueError:
+        return None
+
+
+def process_state_char(pid: int) -> str | None:
+    """Return the single-character process state, or ``None`` if unreadable.
+
+    This is the neutral primitive: it reports observed evidence without
+    interpreting it.  Callers adapt the unknown case to their own fail-closed
+    or fail-open policy.
+
+    Args:
+        pid: Process ID to inspect.
+
+    Returns:
+        The state character (e.g. ``"R"``, ``"S"``, ``"Z"``) or ``None``
+        when the process is gone or the stat entry is unreadable.
+    """
+    stat = _read_proc_stat(pid)
+    if stat is None:
+        return None
+    fields = _split_stat_fields(stat)
+    if fields is None:
+        return None
+    try:
+        return fields[STAT_STATE_FIELD_INDEX].decode("ascii", "replace")
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def process_is_zombie(pid: int) -> bool:
+    """Return whether a process is a zombie or dead.
+
+    Fail-closed: an unreadable or unparseable ``/proc`` entry is treated as
+    zombie so callers never trust an ambiguous process state.
+
+    Args:
+        pid: Process ID to inspect.
+
+    Returns:
+        ``True`` when the process is zombie, dead, or unreadable.
+    """
+    state = process_state_char(pid)
+    if state is None:
+        return True
+    return state in {"Z", "X"}
+
+
+def process_ppid(pid: int) -> int | None:
+    """Return the exact parent process ID, or ``None`` if unknown.
+
+    Args:
+        pid: Process whose parent to inspect.
+
+    Returns:
+        The parent PID, or ``None`` when the process is gone or unreadable.
+    """
+    stat = _read_proc_stat(pid)
+    if stat is None:
+        return None
+    fields = _split_stat_fields(stat)
+    if fields is None:
+        return None
+    try:
+        return int(fields[STAT_PPID_FIELD_INDEX])
+    except ValueError:
+        return None
+
+
+def proc_cpu_seconds(pid: int) -> float | None:
+    """Return the total CPU time in seconds used by a process, or ``None``.
+
+    Reads the user and system CPU time from ``/proc/<pid>/stat`` and converts
+    clock ticks to seconds.
+
+    Args:
+        pid: Process ID to inspect.
+
+    Returns:
+        The total CPU time in seconds, or ``None`` when unavailable.
+    """
+    stat = _read_proc_stat(pid)
+    if stat is None:
+        return None
+    fields = _split_stat_fields(stat)
+    if fields is None:
+        return None
+    try:
+        ticks = int(fields[STAT_UTIME_FIELD_INDEX]) + int(
+            fields[STAT_STIME_FIELD_INDEX],
+        )
+    except (ValueError, IndexError):
+        return None
+    try:
+        ticks_per_second = os.sysconf("SC_CLK_TCK")
+    except (ValueError, OSError):
+        return None
+    if not ticks_per_second:
+        return None
+    return ticks / ticks_per_second
+
+
+def process_pgrp(pid: int) -> int | None:
+    """Return the exact process group of a running process.
+
+    Zombie and dead processes report no group. Unreadable or unparseable
+    process table entries are ignored.  State and pgrp are derived from a
+    single ``/proc/<pid>/stat`` snapshot so PID exit/reuse between
+    observations cannot mix processes.
+
+    Args:
+        pid: Process ID to inspect.
+
+    Returns:
+        The process group ID, or ``None`` if the process is dead or unknown.
+    """
+    stat = _read_proc_stat(pid)
+    if stat is None:
+        return None
+    fields = _split_stat_fields(stat)
+    if fields is None:
+        return None
+    try:
+        state = fields[STAT_STATE_FIELD_INDEX].decode("ascii", "replace")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if state in {"Z", "X"}:
+        return None
+    try:
+        return int(fields[STAT_PGRP_FIELD_INDEX])
+    except ValueError:
+        return None

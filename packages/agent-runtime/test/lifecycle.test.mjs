@@ -13,6 +13,7 @@ import {
   finalizeTerminal,
   popSteerIntoPending,
   queueSteer,
+  reconcileDeadMeta,
   reservationInFlight,
   signalInvocation,
   steerQueue,
@@ -62,15 +63,16 @@ test('malformed steer metadata fails closed instead of being normalized', () => 
   assert.equal(queueSteer(meta, 'work', 2), false);
 });
 
-test('reservation in flight uses ordinary runner authority rules', () => {
+test('reservation in flight has a short spawn grace then becomes recoverable when owner is gone', () => {
   const meta = idleMeta('a11d', '/tmp', null, 1);
   meta.active_runner = true;
-  meta.runner_reservation = { state: 'reserved', gen: 1, mode: 'new' };
-  assert.equal(reservationInFlight(meta), true);
+  meta.runner_reservation = { state: 'reserved', gen: 1, mode: 'new', reserved_at: 100, owner_pid: 99999999, owner_start_ticks: 1 };
+  assert.equal(reservationInFlight(meta, 102), true);
+  assert.equal(reservationInFlight(meta, 110), false);
   meta.runner_reservation = { state: 'bad', gen: 1, mode: 'new' };
-  assert.equal(reservationInFlight(meta), true);
+  assert.equal(reservationInFlight(meta, 110), true);
   meta.active_runner = false;
-  assert.equal(reservationInFlight(meta), false);
+  assert.equal(reservationInFlight(meta, 110), false);
 });
 
 test('stop intent clears queued work and malformed reservation blocks mutation', () => {
@@ -105,4 +107,15 @@ test('invocation group signalling checks metadata then uses normal negative pgid
     signal: (pid, signal) => { calls.push([pid, signal]); return true; },
   }), true);
   assert.deepEqual(calls, [[-4242, 'SIGTERM']]);
+});
+
+
+test('dead running metadata reconciles to failed once no runner or reservation can execute it', () => {
+  const meta = idleMeta('a11d', '/tmp', null, 1);
+  beginInvocation(meta, 'work', 10, 1);
+  meta.active_runner = false;
+  assert.equal(reconcileDeadMeta(meta, 80), true);
+  assert.equal(meta.state, 'failed');
+  assert.equal(meta.active_runner, false);
+  assert.match(String(meta.error), /disappeared/);
 });

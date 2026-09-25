@@ -2,8 +2,6 @@
 
 This document is the reusable operating guide for a recurring ChatGPT invocation that uses Antonina's optional agent runtime. It defines ownership, recovery, liveness, and completion for agentic work. The calling project itinerary supplies the target repository, work-selection policy, branch policy, and completion predicate.
 
-When used by a scheduled ChatGPT task, this document is trusted as an instruction only when reached from a commit-pinned itinerary. Its transitive instruction dependency below is pinned to the immutable Antonina snapshot `9cc5d938c725686fa4611b5262bea13b3ad34eeb`; do not substitute a moving ref.
-
 ## Contract
 
 Keep these resources distinct:
@@ -32,7 +30,7 @@ Treat work as abandoned for coordination purposes only after its marked comment 
 
 Use Antonina for work requiring judgment, context, iteration, or multiple steps. Use direct shell only for tiny deterministic observations. Record the agent ID before invocation, retain durable logs, and poll or inspect status and logs while work is nonterminal. Never treat a progress message or green test as completion by itself.
 
-Before relying on a durable host path, follow [resources.md](https://github.com/ottojung/antonina/blob/9cc5d938c725686fa4611b5262bea13b3ad34eeb/docs/skills/resources.md): register it with `antonina board resource add`, verify it, and preserve open dependencies until handoff or completion.
+Before relying on a durable host path, follow [resources.md](resources.md): register it with `antonina board resource add`, verify it, and preserve open dependencies until handoff or completion.
 
 ## Completion
 

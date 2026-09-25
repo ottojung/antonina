@@ -22,18 +22,6 @@ export interface ProcStat {
   startTicks: number;
 }
 
-export interface PidfdOps {
-  open(pid: number): number | null;
-  send(pidfd: number, signal: number): boolean;
-  close(pidfd: number): void;
-}
-
-export const unavailablePidfdOps: PidfdOps = {
-  open: () => null,
-  send: () => false,
-  close: () => undefined,
-};
-
 export interface ProcessIdentity {
   pid: number;
   startTicks: number;
@@ -41,9 +29,11 @@ export interface ProcessIdentity {
   invocationId?: string;
 }
 
+export type SignalSender = (pid: number, signal: NodeJS.Signals | number) => boolean;
+
 export interface ProcessProbeOptions {
   procRoot?: string;
-  pidfd?: PidfdOps;
+  signal?: SignalSender;
 }
 
 function parseStrictInteger(raw: string): number | null {
@@ -161,31 +151,41 @@ function identityMatches(identity: ProcessIdentity, procRoot: string): boolean {
   return identity.invocationId === undefined || envHasInvocationMarker(identity.pid, identity.invocationId, procRoot);
 }
 
+function trySignal(sender: SignalSender, pid: number, signal: NodeJS.Signals | number): boolean {
+  try {
+    return sender(pid, signal);
+  } catch {
+    return false;
+  }
+}
+
 export function isIdentityAlive(identity: ProcessIdentity, options: ProcessProbeOptions = {}): boolean {
   const procRoot = options.procRoot ?? '/proc';
-  const pidfd = options.pidfd ?? unavailablePidfdOps;
-  const fd = pidfd.open(identity.pid);
-  if (fd === null) return false;
-  try {
-    return identityMatches(identity, procRoot) && pidfd.send(fd, 0);
-  } finally {
-    pidfd.close(fd);
-  }
+  const sender = options.signal ?? process.kill;
+  if (!identityMatches(identity, procRoot)) return false;
+  return trySignal(sender, identity.pid, 0);
 }
 
 export function signalIdentityChecked(
   identity: ProcessIdentity,
-  signal: number,
+  signal: NodeJS.Signals | number,
   options: ProcessProbeOptions = {},
 ): boolean {
   const procRoot = options.procRoot ?? '/proc';
-  const pidfd = options.pidfd ?? unavailablePidfdOps;
-  const fd = pidfd.open(identity.pid);
-  if (fd === null) return false;
-  try {
-    if (!identityMatches(identity, procRoot)) return false;
-    return pidfd.send(fd, signal);
-  } finally {
-    pidfd.close(fd);
-  }
+  const sender = options.signal ?? process.kill;
+  if (!identityMatches(identity, procRoot)) return false;
+  return trySignal(sender, identity.pid, signal);
+}
+
+export function signalGroupChecked(
+  identity: ProcessIdentity,
+  pgid: number,
+  signal: NodeJS.Signals | number,
+  options: ProcessProbeOptions = {},
+): boolean {
+  if (!Number.isSafeInteger(pgid) || pgid <= 0) return false;
+  const procRoot = options.procRoot ?? '/proc';
+  const sender = options.signal ?? process.kill;
+  if (!identityMatches(identity, procRoot)) return false;
+  return trySignal(sender, -pgid, signal);
 }

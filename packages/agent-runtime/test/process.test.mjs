@@ -13,6 +13,7 @@ import {
   persistedProcessInteger,
   processIsZombie,
   processPgrp,
+  signalGroupChecked,
   signalIdentityChecked,
 } from '../dist/process.js';
 
@@ -34,14 +35,13 @@ function withProc(t, entries) {
   return root;
 }
 
-function fakePidfd({ open = 91, deliver = true } = {}) {
+function recordingSignal(result = true) {
   const calls = [];
   return {
     calls,
-    ops: {
-      open(pid) { calls.push(['open', pid]); return open; },
-      send(fd, signal) { calls.push(['send', fd, signal]); return deliver; },
-      close(fd) { calls.push(['close', fd]); },
+    send(pid, signal) {
+      calls.push([pid, signal]);
+      return result;
     },
   };
 }
@@ -82,42 +82,59 @@ test('persisted authority validators do not normalize durable values', () => {
   for (const value of [0, -1, 1.5, '123', true]) assert.equal(persistedProcessInteger(value, 1), null);
 });
 
-test('liveness pins before identity checks and probes through the same pin', (t) => {
+test('liveness verifies persisted identity before ordinary Node signal probe', (t) => {
   const root = withProc(t, {
     4242: { stat: statLine({ start: 1234 }), environ: 'ANTONINA_AGENT_ID=ab12\0' },
   });
-  const fake = fakePidfd();
-  assert.equal(isIdentityAlive({ pid: 4242, startTicks: 1234, agentId: 'ab12' }, { procRoot: root, pidfd: fake.ops }), true);
-  assert.deepEqual(fake.calls, [['open', 4242], ['send', 91, 0], ['close', 91]]);
+  const signal = recordingSignal();
+  assert.equal(isIdentityAlive({ pid: 4242, startTicks: 1234, agentId: 'ab12' }, { procRoot: root, signal: signal.send }), true);
+  assert.deepEqual(signal.calls, [[4242, 0]]);
 });
 
-test('identity mismatch withholds signal and still releases the pin', (t) => {
+test('identity mismatch withholds ordinary signal', (t) => {
   const root = withProc(t, {
     4242: { stat: statLine({ start: 9999 }), environ: 'ANTONINA_AGENT_ID=ab12\0' },
   });
-  const fake = fakePidfd();
-  assert.equal(signalIdentityChecked({ pid: 4242, startTicks: 1234, agentId: 'ab12' }, 15, { procRoot: root, pidfd: fake.ops }), false);
-  assert.deepEqual(fake.calls, [['open', 4242], ['close', 91]]);
+  const signal = recordingSignal();
+  assert.equal(signalIdentityChecked({ pid: 4242, startTicks: 1234, agentId: 'ab12' }, 15, { procRoot: root, signal: signal.send }), false);
+  assert.deepEqual(signal.calls, []);
 });
 
-test('missing pidfd support fails closed without numeric signal fallback', (t) => {
+test('signal errors are treated as failure rather than runtime crashes', (t) => {
   const root = withProc(t, {
     4242: { stat: statLine({ start: 1234 }), environ: 'ANTONINA_AGENT_ID=ab12\0' },
   });
-  let opened = 0;
-  const ops = { open() { opened += 1; return null; }, send() { throw new Error('must not send'); }, close() {} };
-  assert.equal(signalIdentityChecked({ pid: 4242, startTicks: 1234, agentId: 'ab12' }, 15, { procRoot: root, pidfd: ops }), false);
-  assert.equal(opened, 1);
+  assert.equal(signalIdentityChecked(
+    { pid: 4242, startTicks: 1234, agentId: 'ab12' },
+    15,
+    { procRoot: root, signal: () => { throw new Error('ESRCH'); } },
+  ), false);
 });
 
-test('invocation marker is part of exact identity when present', (t) => {
+test('invocation marker is part of identity when present', (t) => {
   const iid = 'b'.repeat(32);
   const root = withProc(t, {
     4242: { stat: statLine({ start: 1234 }), environ: `ANTONINA_AGENT_ID=ab12\0ANTONINA_INVOCATION_ID=${iid}\0` },
   });
-  const ok = fakePidfd();
-  assert.equal(signalIdentityChecked({ pid: 4242, startTicks: 1234, agentId: 'ab12', invocationId: iid }, 15, { procRoot: root, pidfd: ok.ops }), true);
-  const wrong = fakePidfd();
-  assert.equal(signalIdentityChecked({ pid: 4242, startTicks: 1234, agentId: 'ab12', invocationId: 'c'.repeat(32) }, 15, { procRoot: root, pidfd: wrong.ops }), false);
-  assert.deepEqual(wrong.calls, [['open', 4242], ['close', 91]]);
+  const ok = recordingSignal();
+  assert.equal(signalIdentityChecked({ pid: 4242, startTicks: 1234, agentId: 'ab12', invocationId: iid }, 15, { procRoot: root, signal: ok.send }), true);
+  assert.deepEqual(ok.calls, [[4242, 15]]);
+  const wrong = recordingSignal();
+  assert.equal(signalIdentityChecked({ pid: 4242, startTicks: 1234, agentId: 'ab12', invocationId: 'c'.repeat(32) }, 15, { procRoot: root, signal: wrong.send }), false);
+  assert.deepEqual(wrong.calls, []);
+});
+
+test('process-group signal verifies leader then uses negative pgid', (t) => {
+  const iid = 'd'.repeat(32);
+  const root = withProc(t, {
+    4242: { stat: statLine({ start: 1234, pgrp: 4242 }), environ: `ANTONINA_AGENT_ID=ab12\0ANTONINA_INVOCATION_ID=${iid}\0` },
+  });
+  const signal = recordingSignal();
+  assert.equal(signalGroupChecked(
+    { pid: 4242, startTicks: 1234, agentId: 'ab12', invocationId: iid },
+    4242,
+    'SIGTERM',
+    { procRoot: root, signal: signal.send },
+  ), true);
+  assert.deepEqual(signal.calls, [[-4242, 'SIGTERM']]);
 });

@@ -1,11 +1,10 @@
-# ruff: file-ignore[undocumented-public-module, undocumented-public-function]
 import copy
 
 import pytest
 
 # Explicit submodule import required: strict mypy rejects `from antonina import agent`
 # because the package __init__ does not re-export the submodule.
-import antonina.agent as agent  # ruff: ignore[manual-from-import]
+import antonina.agent as agent
 
 
 def test_queue_steer_preserves_fifo_and_sequence() -> None:

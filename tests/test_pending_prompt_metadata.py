@@ -7,7 +7,7 @@ import pytest
 
 # Explicit submodule import required: strict mypy rejects `from antonina import agent`
 # because the package __init__ does not re-export the submodule.
-import antonina.agent as agent  # ruff: ignore[manual-from-import]
+import antonina.agent as agent
 
 
 def test_pending_prompt_rejects_malformed_present_values() -> None:

@@ -27,7 +27,7 @@ def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point the agent state root at a throwaway directory.
 
     Returns:
-        The isolated Lubko state root.
+        The isolated Antonina state root.
     """
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.delenv("ANTONINA_AGENT_RETENTION_DAYS", raising=False)

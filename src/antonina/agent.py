@@ -141,7 +141,7 @@ def _home() -> Path:
 
 
 def state_root() -> Path:
-    """Return the per-user Lubko state root following XDG conventions.
+    """Return the per-user Antonina state root following XDG conventions.
 
     Returns:
         ``$XDG_STATE_HOME/antonina``, falling back to ``~/.local/state/antonina``.
@@ -884,7 +884,7 @@ def _leader_marker_state(meta: Meta, pid: int) -> str | None:
     return "live" if exact else "gone"
 
 
-def group_alive(meta: Meta) -> bool:  # ruff: ignore[too-many-return-statements]
+def group_alive(meta: Meta) -> bool:
     """Return whether any live process remains in the agent's exact invocation group.
 
     When a durable invocation ID was recorded, group membership is decided by
@@ -2246,7 +2246,9 @@ def _spawn_and_run(
             )
         except OSError as exc:
             error = str(exc)
-            log.write(f"LUBKO RUNNER: failed to start agent: {error}\n".encode("utf-8", "replace"))
+            log.write(
+                f"ANTONINA RUNNER: failed to start agent: {error}\n".encode("utf-8", "replace")
+            )
             _fail_invocation_closed(aid, error, exit_code=127)
             return None
 
@@ -3864,7 +3866,7 @@ def _begin_invocation(meta: Meta, prompt: str, now: float, *, prompt_count: int)
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    """List Lubko-managed agents.
+    """List Antonina-managed agents.
 
     Args:
         args: Parsed command arguments.
@@ -4135,7 +4137,7 @@ def _print_backend_status(meta: Meta) -> None:
     _out(f"recovery:   automatic retry {retry}; fresh session {fresh_text}")
 
 
-def cmd_status(args: argparse.Namespace) -> int:  # ruff: ignore[too-many-locals]
+def cmd_status(args: argparse.Namespace) -> int:
     """Show detailed status of one agent.
 
     Args:
@@ -5809,7 +5811,7 @@ SUBCOMMANDS: Final = (
     ),
     _SubcommandSpec(
         name="list",
-        help="list Lubko-managed agents",
+        help="list Antonina-managed agents",
         func=cmd_list,
         arguments=(
             _arg("--running", action="store_true", help="only running agents"),

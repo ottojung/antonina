@@ -9,7 +9,6 @@ and keep dry-run strictly observational.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import time
 from typing import TYPE_CHECKING
@@ -36,15 +35,10 @@ def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def write_meta(aid: str, **fields: object) -> None:
     """Persist an agent metadata document."""
-    directory = agent.agent_dir(aid)
-    directory.mkdir(parents=True, exist_ok=True)
-    payload: dict[str, object] = {
-        "id": aid,
-        "state": "succeeded",
-        "finished_at": time.time() - 86400 * 30,
-    }
-    payload.update(fields)
-    (directory / "meta.json").write_text(json.dumps(payload), encoding="utf-8")
+    meta = agent.idle_meta(aid, str(agent.agents_dir()), None)
+    meta.update({"state": "succeeded", "finished_at": time.time() - 86400 * 30})
+    meta.update(fields)
+    agent.write_meta(aid, meta)
 
 
 def clean_args(*, dry_run: bool) -> argparse.Namespace:
@@ -126,6 +120,7 @@ def test_reserved_runner_blocks_removal_at_prestart_boundary(
             "owner_pid": os.getpid(),
             "mode": "new",
             "owner_start_ticks": agent.proc_start_ticks(os.getpid()),
+            "reserved_at": time.time(),
         },
     )
     reserved = agent.read_meta(aid)

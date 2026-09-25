@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -28,7 +29,7 @@ def test_build_agent_command_preserves_valid_persisted_cwd() -> None:
     """Pass the exact durable working directory to opencode."""
     cwd = "/workspace/exact-agent-tree"
     command = agent.build_agent_command(
-        {"id": "aaaaaaaa", "cwd": cwd},
+        agent.idle_meta("aaaaaaaa", cwd, None),
         "do work",
         is_continue=False,
     )
@@ -41,7 +42,7 @@ def test_build_agent_command_rejects_malformed_persisted_cwd() -> None:
     """Reject malformed durable cwd values instead of normalizing them."""
     bad_cwds: tuple[object, ...] = ("", 0, False, None, [], "relative", "./relative", "../relative")
     for cwd in bad_cwds:
-        meta: agent.Meta = {"id": "aaaaaaaa", "cwd": cwd}
+        meta = agent.idle_meta("aaaaaaaa", str(cwd), None)
 
         with pytest.raises(ValueError, match="managed-agent cwd is malformed"):
             agent.build_agent_command(meta, "do work", is_continue=False)
@@ -52,11 +53,14 @@ def test_runner_malformed_cwd_fails_before_spawn_and_aborts_cleanly(
 ) -> None:
     """Abort a claimed runner before spawn when durable cwd is malformed."""
     aid = "aaaaaaaa"
-    meta: agent.Meta = {
-        "id": aid,
-        "cwd": "",
-        "state": "idle",
-        "runner_reservation": {"state": "reserved", "gen": 1, "mode": "new"},
+    meta = agent.idle_meta(aid, "", None)
+    meta["runner_reservation"] = {
+        "state": "reserved",
+        "gen": 1,
+        "owner_pid": os.getpid(),
+        "owner_start_ticks": agent.proc_start_ticks(os.getpid()),
+        "reserved_at": 1.0,
+        "mode": "new",
     }
     agent.write_meta(aid, meta)
     monkeypatch.setenv("ANTONINA_RUNNER_GEN", "1")
@@ -68,10 +72,6 @@ def test_runner_malformed_cwd_fails_before_spawn_and_aborts_cleanly(
     monkeypatch.setattr(agent, "send_signal_group", lambda _m, _sig: None)
     monkeypatch.setattr(agent, "wait_group_dead", lambda _m, _timeout: True)
 
-    with pytest.raises(ValueError, match="managed-agent cwd is malformed"):
+    with pytest.raises(agent.MetadataError, match="missing, malformed, or unsupported"):
         agent.runner(aid, "new")
-
-    final = agent.read_meta(aid)
-    assert final is not None
-    assert final["state"] == "failed"
-    assert final["active_runner"] is False
+    assert agent.read_meta(aid) is None

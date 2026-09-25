@@ -32,12 +32,9 @@ def _idle_meta(aid: str = _CANONICAL) -> agent.Meta:
 
 
 def _running_meta(aid: str = _CANONICAL) -> agent.Meta:
-    return {
-        "id": aid,
-        "state": "running",
-        "pending_prompt": None,
-        "runner_reservation": None,
-    }
+    meta = agent.idle_meta(aid, "/test", None)
+    meta["state"] = "running"
+    return meta
 
 
 def test_normalize_lowercase_passthrough() -> None:

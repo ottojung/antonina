@@ -26,6 +26,11 @@ SLEEP_BIN: Final = shutil.which("sleep") or "/bin/sleep"
 
 
 @pytest.fixture(autouse=True)
+def _no_external_session_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent, "discover_session_id", lambda _aid: None)
+
+
+@pytest.fixture(autouse=True)
 def state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point the agent state root at a throwaway directory.
 
@@ -78,6 +83,7 @@ def _claimed_reservation() -> dict[str, object]:
         "gen": 1,
         "owner_pid": os.getpid(),
         "owner_start_ticks": agent.proc_start_ticks(os.getpid()),
+        "reserved_at": 1.0,
         "state": "claimed",
         "mode": "new",
     }
@@ -675,7 +681,5 @@ def test_delete_keeps_malformed_runner_consumption_authority_blocking(
     meta["active_runner"] = "false"
     agent.agent_dir("a11d").mkdir(parents=True)
     agent.write_meta("a11d", meta)
-    snapshot = agent._begin_delete("a11d", force=False)
-    assert snapshot is not None
-    assert snapshot["active_runner"] == "false"
-    assert not agent._delete_converged(snapshot)
+    with pytest.raises(agent.MetadataError):
+        agent._begin_delete("a11d", force=False)

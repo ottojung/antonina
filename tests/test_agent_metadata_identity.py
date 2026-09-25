@@ -16,14 +16,9 @@ from antonina import agent
 def _write_meta(base: Path, aid: str, persisted_id: object = "aaaa") -> None:
     directory = base / aid
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "meta.json").write_text(
-        json.dumps({
-            "id": persisted_id,
-            "cwd": "/workspace/exact-agent-tree",
-            "variant": "low",
-            "native_session_id": None,
-        })
-    )
+    meta = agent.idle_meta(aid, "/workspace/exact-agent-tree", None)
+    meta["id"] = persisted_id
+    (directory / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
 
 def test_matching_persisted_identity_remains_session_authority(

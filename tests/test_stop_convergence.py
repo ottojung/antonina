@@ -170,6 +170,7 @@ def test_stop_kill_converges_live_runner_queued_prompt(
         "owner_pid": os.getpid(),
         "owner_start_ticks": agent.proc_start_ticks(os.getpid()),
         "state": "claimed",
+        "reserved_at": time.time(),
         "mode": "new",
     }
     agent.write_meta(aid, meta)

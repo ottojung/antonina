@@ -128,15 +128,16 @@ def state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _running_meta(aid: str, pid: int, start: object, iid: str) -> agent.Meta:
     """Return running-agent metadata recording one exact invocation identity."""
-    return {
-        "id": aid,
+    meta = agent.idle_meta(aid, "/tmp/antonina-test", None)
+    meta.update({
         "state": "running",
         "pid": pid,
         "pgid": pid,
         "start_time": start,
         "invocation_id": iid,
         "active_runner": True,
-    }
+    })
+    return meta
 
 
 def test_abort_runner_signals_via_exact_identity_helper(
@@ -851,7 +852,8 @@ def test_unresolved_child_proven_recycled_clears_block() -> None:
         "start_time": 111,
         "invocation_id": "95894480b0564c57826c9fce0714244e",
     }
-    meta: agent.Meta = {"id": "aaaaaaaa", "state": "stopped", "stop_reason": "stop"}
+    meta = agent.idle_meta("aaaaaaaa", "/tmp/antonina-test", None)
+    meta.update({"state": "stopped", "stop_reason": "stop"})
     meta["unresolved_invocation"] = marker
     patcher = pytest.MonkeyPatch()
     patcher.setattr(os, "kill", lambda _pid, _sig: None)

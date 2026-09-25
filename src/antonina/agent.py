@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import codecs
 import contextlib
+import contextvars
 import copy
 import fcntl
 import json
@@ -25,7 +26,7 @@ import os
 import re
 import shutil
 import signal
-import sqlite3
+import stat
 import subprocess
 import sys
 import textwrap
@@ -41,8 +42,7 @@ from antonina._exact_signal import pidfd_send_signal
 from antonina._exact_signal import proc_cpu_seconds as _shared_proc_cpu_seconds
 from antonina._exact_signal import proc_start_ticks as _shared_proc_start_ticks
 from antonina._exact_signal import process_state_char as _shared_process_state_char
-from antonina._process_group import group_has_members
-from antonina.durable import write_text_durable
+from antonina.durable import DurabilityError, write_text_durable
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -123,6 +123,47 @@ FOLD_WIDTH: Final = 80
 DEFAULT_RETENTION_DAYS: Final = 14
 RUNNER_ARGV_LENGTH: Final = 3
 AGENT_META_VERSION: Final = 3
+CANONICAL_META_FIELDS: Final = frozenset({
+    "id",
+    "agent_version",
+    "created_at",
+    "last_activity_at",
+    "state",
+    "cwd",
+    "title",
+    "variant",
+    "native_session_id",
+    "pid",
+    "pgid",
+    "start_time",
+    "invocation_id",
+    "runner_pid",
+    "runner_start_time",
+    "started_at",
+    "finished_at",
+    "exit_code",
+    "exit_signal",
+    "backend_error",
+    "intent",
+    "stop_reason",
+    "delete_pending",
+    "active_runner",
+    "runner_gen",
+    "runner_reservation",
+    "unresolved_invocation",
+    "steer_queue",
+    "steer_seq",
+    "prompt_count",
+    "pending_prompt",
+    "last_prompt",
+    "error",
+})
+SESSION_DISCOVER_COMMAND_TIMEOUT_SECONDS: Final = 10.0
+SESSION_DISCOVER_MAX_COUNT: Final = 100
+_META_CREATE_PARENT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "antonina_meta_create_parent",
+    default=True,
+)
 
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-9:;<=>?]*[ -/]*[@-~]")
 _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)")
@@ -236,20 +277,177 @@ def _resolve_agent(
         return EXIT_USAGE
     meta = read_meta(aid)
     if meta is None:
-        _err(f"{PROG}: unknown agent: {aid}")
-        return EXIT_NOT_FOUND
+        try:
+            agent_dir(aid).stat()
+        except FileNotFoundError:
+            _err(f"{PROG}: unknown agent: {aid}")
+            return EXIT_NOT_FOUND
+        except OSError as exc:
+            _err(f"{PROG}: cannot inspect metadata for agent {aid}: {exc}")
+            return EXIT_ERROR
+        _err(f"{PROG}: agent {aid} has missing, malformed, or unsupported metadata")
+        return EXIT_ERROR
     return aid, meta
 
 
-def opencode_db_path() -> str:
-    """Return the path of the underlying agent's session database, if present.
+class MetadataError(OSError):
+    """A metadata authority operation could not be completed safely."""
 
-    Returns:
-        The absolute database path, or an empty string when no database exists.
-    """
-    base = Path(os.environ.get("XDG_DATA_HOME") or (_home() / ".local" / "share"))
-    db = base / "opencode" / "opencode.db"
-    return str(db) if db.is_file() else ""
+
+def _strict_int(value: object, *, minimum: int | None = None) -> bool:
+    if type(value) is not int:
+        return False
+    return minimum is None or value >= minimum
+
+
+def _finite_nonnegative(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value) and value >= 0
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def _optional_finite_nonnegative(value: object) -> bool:
+    return value is None or _finite_nonnegative(value)
+
+
+def _valid_runner_reservation(value: object) -> bool:
+    if value is None:
+        return True
+    if type(value) is not dict:
+        return False
+    return (
+        type(value.get("state")) is str
+        and value.get("state") in {"reserved", "claimed"}
+        and _strict_int(value.get("gen"), minimum=1)
+        and _strict_int(value.get("owner_pid"), minimum=1)
+        and _strict_int(value.get("owner_start_ticks"), minimum=0)
+        and _finite_nonnegative(value.get("reserved_at"))
+        and type(value.get("mode")) is str
+        and value.get("mode") in {"new", "continue"}
+    )
+
+
+def _valid_unresolved_invocation(value: object) -> bool:
+    if value is None:
+        return True
+    if type(value) is not dict:
+        return False
+    return (
+        _strict_int(value.get("pid"), minimum=1)
+        and _strict_int(value.get("pgid"), minimum=1)
+        and _strict_int(value.get("start_time"), minimum=0)
+        and _persisted_invocation_id(value.get("invocation_id")) is not None
+    )
+
+
+def _valid_steer_queue(value: object, sequence: int) -> bool:
+    if type(value) is not list:
+        return False
+    previous = 0
+    for item in value:
+        if type(item) is not dict:
+            return False
+        item_sequence = item.get("seq")
+        if (
+            type(item_sequence) is not int
+            or item_sequence <= previous
+            or item_sequence > sequence
+            or type(item.get("prompt")) is not str
+            or not item.get("prompt")
+            or not _finite_nonnegative(item.get("queued_at"))
+        ):
+            return False
+        previous = item_sequence
+    return True
+
+
+def _metadata_schema_error(value: object, aid: str) -> str | None:
+    if type(value) is not dict:
+        return "metadata is not an object"
+    missing = CANONICAL_META_FIELDS.difference(value)
+    if missing:
+        return f"metadata is missing required field {sorted(missing)[0]!r}"
+    if _persisted_agent_id(value.get("id")) != aid:
+        return "managed-agent id is malformed or unbound"
+    if (
+        type(value.get("agent_version")) is not int
+        or value.get("agent_version") != AGENT_META_VERSION
+    ):
+        return f"unsupported metadata schema version {value.get('agent_version')!r}"
+    if not _finite_nonnegative(value.get("created_at")):
+        return "created_at is malformed"
+    if not _finite_nonnegative(value.get("last_activity_at")):
+        return "last_activity_at is malformed"
+    state = value.get("state")
+    if type(state) is not str or state not in PERSISTED_AGENT_STATES:
+        return "state is malformed"
+    cwd = value.get("cwd")
+    if type(cwd) is not str or not cwd or not Path(cwd).is_absolute():
+        return "cwd is malformed"
+    if value.get("title") is not None and type(value.get("title")) is not str:
+        return "title is malformed"
+    variant = value.get("variant")
+    if type(variant) is not str or not variant:
+        return "variant is malformed"
+    native_session_id = value.get("native_session_id")
+    if native_session_id is not None and (
+        type(native_session_id) is not str or not native_session_id
+    ):
+        return "native_session_id is malformed"
+    for field in ("pid", "pgid", "runner_pid"):
+        item = value.get(field)
+        if item is not None and not _strict_int(item, minimum=1):
+            return f"{field} is malformed"
+    for field in ("start_time", "runner_start_time"):
+        item = value.get(field)
+        if item is not None and not _strict_int(item, minimum=0):
+            return f"{field} is malformed"
+    invocation_id = value.get("invocation_id")
+    if invocation_id is not None and _persisted_invocation_id(invocation_id) is None:
+        return "invocation_id is malformed"
+    for field in ("started_at", "finished_at"):
+        if not _optional_finite_nonnegative(value.get(field)):
+            return f"{field} is malformed"
+    exit_code = value.get("exit_code")
+    if exit_code is not None and not _strict_int(exit_code):
+        return "exit_code is malformed"
+    exit_signal = value.get("exit_signal")
+    if exit_signal is not None and not _strict_int(exit_signal, minimum=1):
+        return "exit_signal is malformed"
+    if value.get("backend_error") is not None and type(value.get("backend_error")) is not dict:
+        return "backend_error is malformed"
+    for field in ("intent", "stop_reason"):
+        item = value.get(field)
+        if item is not None and (type(item) is not str or item not in CONTROL_REASONS):
+            return f"{field} is malformed"
+    if type(value.get("delete_pending")) is not bool:
+        return "delete_pending is malformed"
+    if type(value.get("active_runner")) is not bool:
+        return "active_runner is malformed"
+    if not _strict_int(value.get("runner_gen"), minimum=0):
+        return "runner_gen is malformed"
+    if not _valid_runner_reservation(value.get("runner_reservation")):
+        return "runner_reservation is malformed"
+    if not _valid_unresolved_invocation(value.get("unresolved_invocation")):
+        return "unresolved_invocation is malformed"
+    sequence = value.get("steer_seq")
+    if not _strict_int(sequence, minimum=0):
+        return "steer_seq is malformed"
+    if not _valid_steer_queue(value.get("steer_queue"), cast("int", sequence)):
+        return "steer_queue is malformed"
+    if not _strict_int(value.get("prompt_count"), minimum=0):
+        return "prompt_count is malformed"
+    pending_prompt = value.get("pending_prompt")
+    if pending_prompt is not None and (type(pending_prompt) is not str or not pending_prompt):
+        return "pending_prompt is malformed"
+    if value.get("last_prompt") is not None and type(value.get("last_prompt")) is not str:
+        return "last_prompt is malformed"
+    if value.get("error") is not None and type(value.get("error")) is not str:
+        return "error is malformed"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -258,18 +456,18 @@ def opencode_db_path() -> str:
 
 
 def read_meta(aid: str) -> Meta | None:
-    """Load metadata only when its persisted identity is bound to ``aid``.
+    """Load only complete, current-schema metadata bound to ``aid``.
 
     The directory/caller ID is the authority that selects an agent record. A
-    record whose durable ``id`` is absent, malformed, non-canonical, or names a
-    different canonical agent is corrupt and must not be reinterpreted as that
-    other agent.
+    record with an old or unknown schema, malformed required fields, or a
+    different canonical identity is not readable as managed state.
 
     Args:
         aid: Canonical Antonina agent ID whose directory is being addressed.
 
     Returns:
-        The bound metadata mapping, or ``None`` when unavailable or corrupt.
+        The bound current-schema metadata mapping, or ``None`` when unavailable,
+        unsupported, or corrupt.
     """
     if _persisted_agent_id(aid) != aid:
         return None
@@ -279,12 +477,27 @@ def read_meta(aid: str) -> Meta | None:
             data: object = json.load(fh)
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict):
-        return None
-    persisted_id = _persisted_agent_id(data.get("id"))
-    if persisted_id != aid:
+    if _metadata_schema_error(data, aid) is not None:
         return None
     return cast("Meta", data)
+
+
+def _read_existing_meta(aid: str) -> Meta | None:
+    meta = read_meta(aid)
+    if meta is not None:
+        return meta
+    try:
+        agent_dir(aid).stat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise MetadataError(f"cannot inspect metadata for {aid}: {exc}") from exc
+    raise MetadataError(f"metadata is missing, malformed, or unsupported: {aid}")
+
+
+def _write_meta_payload(directory: Path, meta: Meta, *, create_parent: bool) -> None:
+    payload = json.dumps(meta, indent=2, sort_keys=True) + "\n"
+    write_text_durable(directory / "meta.json", payload, _create_parent=create_parent)
 
 
 def write_meta(aid: str, meta: Meta) -> None:
@@ -295,37 +508,80 @@ def write_meta(aid: str, meta: Meta) -> None:
         meta: Metadata mapping to persist.
     """
     directory = agent_dir(aid)
-    directory.mkdir(parents=True, exist_ok=True)
-    # Crash-durable replace: fsync of file contents and the directory entry so
-    # reconciled metadata can never be lost or half-written on power failure.
-    payload = json.dumps(meta, indent=2, sort_keys=True) + "\n"
-    write_text_durable(directory / "meta.json", payload)
+    create_parent = _META_CREATE_PARENT.get()
+    if create_parent:
+        directory.mkdir(parents=True, exist_ok=True)
+    _write_meta_payload(directory, meta, create_parent=create_parent)
+
+
+def _write_meta_existing(aid: str, meta: Meta) -> None:
+    directory = agent_dir(aid)
+    try:
+        directory_status = directory.stat()
+    except FileNotFoundError as exc:
+        raise MetadataError(
+            f"metadata directory disappeared before persistence: {directory}: {exc}"
+        ) from exc
+    if not stat.S_ISDIR(directory_status.st_mode):
+        raise MetadataError(f"metadata path is not a directory: {directory}")
+    token = _META_CREATE_PARENT.set(False)
+    try:
+        write_meta(aid, meta)
+    finally:
+        _META_CREATE_PARENT.reset(token)
 
 
 def update_meta(aid: str, fn: Callable[[Meta], None]) -> None:
-    """Apply ``fn(meta)`` to an agent's metadata under an exclusive lock.
+    """Apply ``fn(meta)`` under the exclusive metadata lock.
 
-    If the agent has been deleted, this is a no-op: a late background runner
-    must never resurrect a deleted agent's directory.
+    A missing agent directory is the sole intentional no-op. Every failure
+    after the directory is observed, including lock acquisition, schema
+    validation, callback execution, and durable persistence, is surfaced to the
+    caller so dependent lifecycle work cannot proceed as if it committed.
 
     Args:
         aid: Antonina agent ID.
         fn: Mutation to apply to the metadata under the lock.
     """
     directory = agent_dir(aid)
-    if not directory.is_dir():
+    try:
+        directory_status = directory.stat()
+    except FileNotFoundError:
         return
+    except OSError as exc:
+        raise MetadataError(f"cannot inspect metadata directory {directory}: {exc}") from exc
+    if not stat.S_ISDIR(directory_status.st_mode):
+        raise MetadataError(f"metadata path is not a directory: {directory}")
+
     lock_path = directory / ".lock"
-    with contextlib.suppress(OSError), lock_path.open("w", encoding="utf-8") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        lock = lock_path.open("w", encoding="utf-8")
+    except OSError as exc:
+        raise MetadataError(f"cannot open metadata lock {lock_path}: {exc}") from exc
+    locked = False
+    try:
         try:
-            meta = read_meta(aid)
-            if meta is None:
-                return
-            fn(meta)
-            write_meta(aid, meta)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            locked = True
+        except OSError as exc:
+            raise MetadataError(f"cannot acquire metadata lock {lock_path}: {exc}") from exc
+        meta = read_meta(aid)
+        if meta is None:
+            raise MetadataError(f"metadata is missing, malformed, or unsupported: {aid}")
+        fn(meta)
+        try:
+            _write_meta_existing(aid, meta)
+        except OSError as exc:
+            raise MetadataError(f"cannot persist metadata for {aid}: {exc}") from exc
+    finally:
+        try:
+            if locked:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                except OSError as exc:
+                    raise MetadataError(f"cannot release metadata lock {lock_path}: {exc}") from exc
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            lock.close()
 
 
 def idle_meta(aid: str, cwd: str, title: str | None) -> Meta:
@@ -374,6 +630,9 @@ def idle_meta(aid: str, cwd: str, title: str | None) -> Meta:
         "steer_queue": [],
         "steer_seq": 0,
         "prompt_count": 0,
+        "pending_prompt": None,
+        "last_prompt": None,
+        "error": None,
         "agent_version": AGENT_META_VERSION,
     }
 
@@ -397,21 +656,18 @@ def proc_start_ticks(pid: int) -> int | None:
     return _shared_proc_start_ticks(pid)
 
 
-def proc_cpu_seconds(pid: int | None) -> float | None:
+def proc_cpu_seconds(pid: int) -> float | None:
     """Return the total CPU time in seconds used by a process, or ``None``.
 
-    Delegates to the shared ``_exact_signal.proc_cpu_seconds`` primitive.
-    Accepts ``None`` for backward-compatible callers.
-
     Args:
-        pid: Process ID to inspect, or ``None``.
+        pid: Positive process ID to inspect.
 
     Returns:
         The total CPU time in seconds, or ``None`` when unavailable.
     """
-    if not pid:
-        return None
-    return _shared_proc_cpu_seconds(int(pid))
+    if type(pid) is not int or pid < 1:
+        raise ValueError("process ID must be a positive integer")
+    return _shared_proc_cpu_seconds(pid)
 
 
 def env_has_marker(pid: int, aid: str) -> bool:
@@ -865,8 +1121,6 @@ def _leader_marker_state(meta: Meta, pid: int) -> str | None:
     if aid is None:
         return None
     iid_raw = meta.get("invocation_id")
-    if iid_raw is None:
-        return "live" if env_has_marker(pid, aid) else "gone"
     iid = _persisted_invocation_id(iid_raw)
     if iid is None:
         return None
@@ -893,8 +1147,8 @@ def group_alive(meta: Meta) -> bool:
     an *incomplete* scan (procfs enumeration failure, unpinnable or
     uninspectable candidate) conservatively counts as alive so convergence
     can never fail open, and an ambiguous recorded-leader identity likewise
-    counts as alive. Without a recorded invocation ID the plain
-    process-group membership is used (legacy metadata).
+    counts as alive. Without a recorded invocation ID the group is treated as
+    ambiguous and remains alive until a current-schema identity is available.
 
     Args:
         meta: Agent metadata.
@@ -910,13 +1164,13 @@ def group_alive(meta: Meta) -> bool:
     if pgid is None:
         return True
     iid_raw = meta.get("invocation_id")
-    if iid_raw is None:
-        return bool(group_has_members(pgid))
-    aid = _persisted_agent_id(meta.get("id"))
     iid = _persisted_invocation_id(iid_raw)
+    if iid is None:
+        return True
+    aid = _persisted_agent_id(meta.get("id"))
     leader = _process_identity_int(meta.get("pid"), minimum=1)
     start_time = _process_identity_int(meta.get("start_time"), minimum=0)
-    if aid is None or iid is None or leader is None or start_time is None:
+    if aid is None or leader is None or start_time is None:
         return True
     if is_alive(meta):
         # The verified live leader implies its whole session group.
@@ -1167,30 +1421,15 @@ def _runner_reservation_mode(reservation: object) -> str | None:
 
 
 def _next_prompt_count(meta: Meta) -> int | None:
-    """Return the next canonical durable prompt count, or fail closed.
-
-    Genuine absence is the legacy zero-count state. A present value must be an
-    actual non-negative JSON integer; booleans and coercible strings/floats are
-    malformed durable state and must never be normalized by an acceptance path.
-    """
-    if "prompt_count" not in meta:
-        return 1
-    value = meta["prompt_count"]
+    """Return the next canonical durable prompt count, or fail closed."""
+    value = meta.get("prompt_count")
     if type(value) is not int or value < 0:
         return None
     return value + 1
 
 
 def _active_runner_flag(meta: Meta) -> bool | None:
-    """Return canonical durable runner-consumption authority.
-
-    ``active_runner`` is persisted JSON authority, so only literal booleans are
-    usable. Historical records that genuinely omit the field predate runner
-    reservations and safely mean inactive; present malformed values remain
-    distinguishable as ``None`` and must block authority-changing operations.
-    """
-    if "active_runner" not in meta:
-        return False
+    """Return canonical durable runner-consumption authority."""
     value = meta.get("active_runner")
     if type(value) is not bool:
         return None
@@ -1198,15 +1437,7 @@ def _active_runner_flag(meta: Meta) -> bool | None:
 
 
 def _delete_pending_flag(meta: Meta) -> bool | None:
-    """Return canonical durable deletion-tombstone authority.
-
-    Genuine field absence remains the legacy non-tombstone state. A present
-    value is lifecycle authority only when it is a literal JSON boolean;
-    malformed values remain distinguishable as ``None`` so callers can block
-    execution or deletion rather than normalizing through truthiness.
-    """
-    if "delete_pending" not in meta:
-        return False
+    """Return canonical durable deletion-tombstone authority."""
     value = meta.get("delete_pending")
     if type(value) is not bool:
         return None
@@ -1390,10 +1621,8 @@ class MalformedLifecycleStateError(ValueError):
 
 
 def _persisted_lifecycle_state(meta: Meta) -> str | None:
-    """Return canonical durable lifecycle state, preserving legacy absence as idle."""
-    if "state" not in meta:
-        return "idle"
-    value = meta["state"]
+    """Return canonical durable lifecycle state, rejecting missing authority."""
+    value = meta.get("state")
     if type(value) is not str or value not in PERSISTED_AGENT_STATES:
         return None
     return value
@@ -1467,11 +1696,8 @@ def _persisted_timestamp(value: object) -> float | None:
 
 
 def _launch_timestamp(meta: Meta) -> float | None:
-    """Return a canonical persisted launch timestamp."""
-    value = meta.get("started_at")
-    if value is None:
-        value = meta.get("created_at")
-    return _persisted_timestamp(value)
+    """Return the canonical persisted launch timestamp."""
+    return _persisted_timestamp(meta.get("started_at"))
 
 
 def derive_state(meta: Meta | None) -> str:
@@ -1726,31 +1952,71 @@ def print_box(lines: list[str], max_width: int = 80) -> None:
 
 
 def discover_session_id(aid: str) -> str | None:
-    """Find the underlying session id for a Antonina agent, if discoverable.
+    """Find the newest exactly titled OpenCode session for an Antonina agent.
 
     Args:
         aid: Antonina agent ID.
 
     Returns:
-        The underlying session ID, or ``None`` when undiscoverable.
+        The underlying session ID, or ``None`` when discovery is unavailable or
+        no canonical match exists.
     """
-    db = opencode_db_path()
-    if not db:
+    try:
+        executable = shutil.which("opencode")
+    except OSError:
+        return None
+    if executable is None:
         return None
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    except sqlite3.Error:
+        result = subprocess.run(
+            [
+                executable,
+                "session",
+                "list",
+                "--format",
+                "json",
+                "--max-count",
+                str(SESSION_DISCOVER_MAX_COUNT),
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=SESSION_DISCOVER_COMMAND_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or type(result.stdout) is not str:
         return None
     try:
-        row = conn.execute(
-            "SELECT id FROM session WHERE title=? ORDER BY time_created DESC LIMIT 1",
-            (OPENCODE_TITLE_PREFIX + aid,),
-        ).fetchone()
-    except sqlite3.Error:
+        payload: object = json.loads(result.stdout)
+    except (TypeError, ValueError):
         return None
-    finally:
-        conn.close()
-    return row[0] if row else None
+    if type(payload) is not list:
+        return None
+
+    expected_title = OPENCODE_TITLE_PREFIX + aid
+    matches: list[tuple[int, int, str]] = []
+    for item in payload:
+        if type(item) is not dict:
+            return None
+        session_id = item.get("id")
+        title = item.get("title")
+        created = item.get("created")
+        updated = item.get("updated")
+        if (
+            type(session_id) is not str
+            or not session_id
+            or type(title) is not str
+            or not _strict_int(created, minimum=0)
+            or not _strict_int(updated, minimum=0)
+        ):
+            return None
+        if title == expected_title:
+            matches.append((cast("int", created), cast("int", updated), session_id))
+    if not matches:
+        return None
+    return max(matches)[2]
 
 
 def _persisted_native_session_id(meta: Meta) -> str | None:
@@ -1794,9 +2060,7 @@ def _persisted_variant(meta: Meta) -> str:
     Raises:
         ValueError: The durable variant value is malformed.
     """
-    if "variant" not in meta:
-        return DEFAULT_VARIANT
-    variant = meta["variant"]
+    variant = meta.get("variant")
     if not isinstance(variant, str) or not variant:
         message = "managed-agent variant is malformed"
         raise ValueError(message)
@@ -1851,11 +2115,11 @@ def build_agent_command(meta: Meta, prompt: str, *, is_continue: bool) -> list[s
         The command argv, or ``None`` when continuation is impossible.
     """
     model = AGENT_MODEL
+    aid = _required_persisted_agent_id(meta)
+    recorded = _persisted_native_session_id(meta) if is_continue else None
     variant = _persisted_variant(meta)
     cwd = _persisted_agent_cwd(meta)
     if is_continue:
-        aid = _required_persisted_agent_id(meta)
-        recorded = _persisted_native_session_id(meta)
         session_id = recorded or discover_session_id(aid)
         if not session_id:
             return None
@@ -1879,7 +2143,7 @@ def build_agent_command(meta: Meta, prompt: str, *, is_continue: bool) -> list[s
         "run",
         "--auto",
         "--title",
-        OPENCODE_TITLE_PREFIX + _required_persisted_agent_id(meta),
+        OPENCODE_TITLE_PREFIX + aid,
         "--model",
         model,
         "--variant",
@@ -1968,7 +2232,7 @@ def runner(aid: str, mode: str) -> None:
         aid: Antonina agent ID.
         mode: Invocation mode (``new`` or ``continue``).
     """
-    meta = read_meta(aid)
+    meta = _read_existing_meta(aid)
     if meta is None:
         return
     gen = int(os.environ.get("ANTONINA_RUNNER_GEN") or "0")
@@ -2045,7 +2309,7 @@ def _runner_loop(ctx: _RunnerContext, *, is_continue: bool) -> None:
         is_continue: Whether the first invocation continues an existing session.
     """
     while True:
-        meta = read_meta(ctx.aid)
+        meta = _read_existing_meta(ctx.aid)
         if meta is None:
             return
         if _delete_pending_flag(meta) is not False:
@@ -2117,7 +2381,7 @@ def _abort_runner(aid: str) -> None:
     Args:
         aid: Antonina agent ID.
     """
-    meta = read_meta(aid)
+    meta = _read_existing_meta(aid)
     if meta is None or meta.get("state") != "running":
         return
     identity = _invocation_identity(meta)
@@ -2255,7 +2519,11 @@ def _spawn_and_run(
         start = proc_start_ticks(proc.pid)
         # The record is conditional (issue #185): see ``_spawn_and_run``.
         blocked: dict[str, bool] = {}
-        update_meta(aid, _record_running(proc, start, iid, blocked))
+        try:
+            update_meta(aid, _record_running(proc, start, iid, blocked))
+        except BaseException:
+            _kill_unrecorded_invocation(aid, proc, start, iid)
+            raise
         if blocked.get("stopped"):
             # The freshly spawned invocation lost the race against stop/kill;
             # converge it instead of leaving it running untracked.
@@ -2336,7 +2604,7 @@ def _run_invocation(ctx: _RunnerContext, prompt: str, *, is_continue: bool) -> s
         The next queued prompt, or ``None`` when the runner should stop.
     """
     aid = ctx.aid
-    meta = read_meta(aid)
+    meta = _read_existing_meta(aid)
     if meta is None:
         return None
     ctx.env["ANTONINA_PROMPT"] = prompt
@@ -3178,15 +3446,18 @@ def spawn_runner(aid: str, mode: str, *, gen: int | None = None) -> None:
             raise ValueError(msg)
         env["ANTONINA_RUNNER_GEN"] = str(spawn_gen)
     else:
-        meta = read_meta(aid)
-        if meta:
-            res = meta.get("runner_reservation")
-            if isinstance(res, dict):
-                spawn_gen = _runner_generation(res.get("gen"), minimum=1)
-                if spawn_gen is None:
-                    msg = "managed-agent runner generation is malformed"
-                    raise ValueError(msg)
-                env["ANTONINA_RUNNER_GEN"] = str(spawn_gen)
+        meta = _read_existing_meta(aid)
+        if meta is None:
+            raise MetadataError(f"cannot spawn runner for missing agent: {aid}")
+        res = meta.get("runner_reservation")
+        if not isinstance(res, dict):
+            msg = "managed-agent runner generation is malformed"
+            raise ValueError(msg)
+        spawn_gen = _runner_generation(res.get("gen"), minimum=1)
+        if spawn_gen is None:
+            msg = "managed-agent runner generation is malformed"
+            raise ValueError(msg)
+        env["ANTONINA_RUNNER_GEN"] = str(spawn_gen)
     subprocess.Popen(
         [sys.executable, str(script), "_runner", aid, mode],
         stdin=subprocess.DEVNULL,
@@ -3272,10 +3543,10 @@ def cmd_prompt(args: argparse.Namespace) -> int:
     if not prompt:
         _err(f"{PROG}: prompt: a prompt is required")
         return EXIT_USAGE
-    meta = read_meta(aid)
-    if meta is None:
-        _err(f"{PROG}: unknown agent: {aid}")
-        return EXIT_NOT_FOUND
+    result = _resolve_agent(args.id, "prompt")
+    if isinstance(result, int):
+        return result
+    aid, meta = result
     # An ordinary prompt on a genuinely busy agent is rejected; a steer is
     # serialized.  A reserved agent whose runner never claimed (stale
     # reservation) is not genuinely busy and is recovered below instead of
@@ -3323,7 +3594,7 @@ def _interrupt_steer_if_needed(aid: str) -> bool:
         ``True`` when no steer is currently targeting a live invocation, or when
         the targeted exact invocation group has been positively converged.
     """
-    current = read_meta(aid)
+    current = _read_existing_meta(aid)
     if current is None:
         return True
     intent, intent_malformed = _persisted_intent(current)
@@ -3358,7 +3629,7 @@ def _wait_for_steer_group_convergence(aid: str, observed: Meta) -> bool:
         unavailable or malformed and the runner must stop.
     """
     while True:
-        current = read_meta(aid)
+        current = _read_existing_meta(aid)
         if current is None:
             return False
         intent, intent_malformed = _persisted_intent(current)
@@ -4146,17 +4417,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     Returns:
         A process exit code.
     """
-    aid = _require_agent_id(args.id, "status")
-    if aid is None:
-        return EXIT_USAGE
-    # Reconcile before reporting: a status observation must converge durable
-    # metadata instead of leaving a dead invocation recorded as running. This
-    # is idempotent and PID-reuse safe (exact-identity checks inside).
-    reconcile_meta(aid)
-    meta = read_meta(aid)
-    if meta is None:
-        _err(f"{PROG}: unknown agent: {aid}")
-        return EXIT_NOT_FOUND
+    result = _resolve_agent(args.id, "status")
+    if isinstance(result, int):
+        return result
+    aid, meta = result
+    if reconcile_meta(aid):
+        current_meta = read_meta(aid)
+        if current_meta is None:
+            _err(f"{PROG}: agent {aid} has missing, malformed, or unsupported metadata")
+            return EXIT_ERROR
+        meta = current_meta
     state = derive_state(meta)
     alive = is_alive(meta)
     if args.json:
@@ -4223,7 +4493,10 @@ def _status_cpu_seconds(meta: Meta, *, alive: bool) -> float | None:
     """
     if not alive:
         return None
-    return proc_cpu_seconds(meta.get("pid"))
+    pid = _process_identity_int(meta.get("pid"), minimum=1)
+    if pid is None:
+        return None
+    return proc_cpu_seconds(pid)
 
 
 def _status_steer_queue(meta: Meta) -> tuple[list[Meta] | None, str | None]:
@@ -5553,7 +5826,7 @@ def _converge_for_delete(aid: str, *, force: bool, deadline: float) -> bool:
         ``True`` only when no runner or invocation can still execute.
     """
     while True:
-        cur = read_meta(aid)
+        cur = _read_existing_meta(aid)
         if cur is not None:
             if _delete_pending_flag(cur) is not True:
                 return False
@@ -5974,7 +6247,11 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "_runner":
         if len(argv) != RUNNER_ARGV_LENGTH:
             return EXIT_USAGE
-        runner(argv[1], argv[2])
+        try:
+            runner(argv[1], argv[2])
+        except (MetadataError, DurabilityError, OSError) as exc:
+            _err(f"{PROG}: runner metadata authority operation failed: {exc}")
+            return EXIT_ERROR
         return EXIT_OK
 
     parser = build_parser()
@@ -5982,7 +6259,11 @@ def main(argv: list[str] | None = None) -> int:
     if not getattr(args, "command", None):
         parser.print_help()
         return EXIT_USAGE
-    return cast("int", args.func(args))
+    try:
+        return cast("int", args.func(args))
+    except (MetadataError, DurabilityError, OSError) as exc:
+        _err(f"{PROG}: metadata authority operation failed: {exc}")
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":

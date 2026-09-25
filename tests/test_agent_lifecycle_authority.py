@@ -101,9 +101,9 @@ def test_locked_transition_does_not_repair_malformed_state_into_runner_authority
     assert meta["runner_reservation"] is None
 
 
-def test_missing_lifecycle_state_retains_legacy_idle_semantics() -> None:
-    """Genuine field absence remains distinct from malformed presence."""
-    assert derive_state({"id": "a1"}) == "idle"
+def test_missing_lifecycle_state_fails_closed() -> None:
+    """A missing current-schema state is not inferred as idle."""
+    assert derive_state({"id": "a1"}) == "unknown"
 
 
 def test_delete_tombstone_rejects_malformed_present_values() -> None:
@@ -112,11 +112,11 @@ def test_delete_tombstone_rejects_malformed_present_values() -> None:
         assert agent._delete_pending_flag({"delete_pending": malformed}) is None
 
 
-def test_delete_tombstone_preserves_boolean_and_legacy_absence_semantics() -> None:
-    """Canonical booleans remain exact and genuine absence stays non-tombstoned."""
+def test_delete_tombstone_preserves_booleans_and_rejects_absence() -> None:
+    """Canonical booleans remain exact and missing authority fails closed."""
     assert agent._delete_pending_flag({"delete_pending": False}) is False
     assert agent._delete_pending_flag({"delete_pending": True}) is True
-    assert agent._delete_pending_flag({}) is False
+    assert agent._delete_pending_flag({}) is None
 
 
 @pytest.mark.parametrize("malformed", [0, 0.0, "", [], {}, 1, "yes", [1], None])
@@ -413,10 +413,10 @@ def test_derive_state_launch_grace_requires_non_future_timestamp(
     assert derive_state(meta) == expected
 
 
-def test_derive_state_created_at_fallback_rejects_future_timestamp(
+def test_derive_state_without_launch_timestamp_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The created_at fallback rejects future timestamps as liveness evidence."""
+    """A missing launch timestamp cannot fall back to creation time."""
     monkeypatch.setattr(time, "time", lambda: 120.0)
     meta = _running_meta(pid=None)
     meta["started_at"] = None

@@ -134,7 +134,7 @@ def test_group_alive_fails_closed_on_malformed_present_pgid(
 
 
 def test_group_alive_preserves_absent_group_semantics() -> None:
-    """Actual absence of a recorded PGID remains a proven-empty legacy case."""
+    """A canonical idle record without a process group is proven empty."""
     meta = dict(BASE_META)
     meta["pgid"] = None
 

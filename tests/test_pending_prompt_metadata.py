@@ -87,7 +87,8 @@ def test_locked_transition_rejects_malformed_before_mutation(
     monkeypatch: pytest.MonkeyPatch, bad: object
 ) -> None:
     """Transitions reject malformed prompt state before mutation."""
-    meta: agent.Meta = {"pending_prompt": bad}
+    meta = agent.idle_meta("test", "/test", None)
+    meta["pending_prompt"] = bad
     before = copy.deepcopy(meta)
     monkeypatch.setattr(agent, "is_alive", lambda _m: False)
     monkeypatch.setattr(agent, "runner_alive", lambda _m: False)
@@ -112,12 +113,8 @@ def test_drain_next_rejects_malformed_pending_prompt(
     monkeypatch: pytest.MonkeyPatch, bad: object
 ) -> None:
     """Drain cannot forward malformed durable prompt values."""
-    meta: agent.Meta = {
-        "active_runner": True,
-        "pending_prompt": bad,
-        "steer_queue": [],
-        "steer_seq": 0,
-    }
+    meta = agent.idle_meta("test", "/test", None)
+    meta.update({"active_runner": True, "pending_prompt": bad})
     before = copy.deepcopy(meta)
 
     def fake_update_meta(_aid: str, mutate: object) -> agent.Meta:
@@ -135,7 +132,9 @@ def test_runner_loop_never_forwards_malformed_pending_prompt(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad: object
 ) -> None:
     """Runner consumption validates durable prompt shape before invocation."""
-    monkeypatch.setattr(agent, "read_meta", lambda _aid: {"pending_prompt": bad})
+    meta = agent.idle_meta("audit", str(tmp_path), None)
+    meta["pending_prompt"] = bad
+    monkeypatch.setattr(agent, "_read_existing_meta", lambda _aid: meta)
     called: list[object] = []
     monkeypatch.setattr(agent, "_run_invocation", lambda *a, **k: called.append((a, k)))
     ctx = agent._RunnerContext(

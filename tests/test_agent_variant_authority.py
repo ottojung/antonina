@@ -11,11 +11,10 @@ def _meta(**extra: object) -> agent.Meta:
     return {"id": "aaaaaaaa", "cwd": "/workspace/exact-agent-tree", **extra}
 
 
-def test_absent_variant_uses_canonical_default() -> None:
-    """Absent durable configuration uses the canonical default."""
-    command = agent.build_agent_command(_meta(), "do work", is_continue=False)
-    assert command is not None
-    assert command[command.index("--variant") + 1] == agent.DEFAULT_VARIANT
+def test_absent_variant_fails_closed() -> None:
+    """Missing current-schema configuration is not defaulted."""
+    with pytest.raises(ValueError, match="managed-agent variant is malformed"):
+        agent.build_agent_command(_meta(), "do work", is_continue=False)
 
 
 def test_valid_variant_preserved_new() -> None:

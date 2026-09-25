@@ -28,6 +28,7 @@ def test_build_agent_command_rejects_malformed_persisted_identity(
     meta: agent.Meta = {
         "id": "aaaaaaaa",
         "cwd": "/workspace/exact-agent-tree",
+        "variant": "low",
         "native_session_id": value,
     }
 
@@ -43,6 +44,7 @@ def test_none_and_discovered_only_continuation_remain_valid(
     meta: agent.Meta = {
         "id": "aaaaaaaa",
         "cwd": "/workspace/exact-agent-tree",
+        "variant": "low",
         "native_session_id": None,
     }
 
@@ -70,6 +72,7 @@ def test_valid_recorded_identity_is_preserved_in_continue_command(
     meta: agent.Meta = {
         "id": "aaaaaaaa",
         "cwd": "/workspace/exact-agent-tree",
+        "variant": "low",
         "native_session_id": "recorded",
     }
 

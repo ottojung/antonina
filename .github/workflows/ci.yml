@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  python:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -29,3 +29,27 @@ jobs:
         run: uv run mypy .
       - name: Tests
         run: uv run pytest
+
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web toolchain
+        run: npm ci --prefix web
+      - name: Typecheck shared core
+        run: ./web/node_modules/.bin/tsc -p packages/core/tsconfig.json
+      - name: Typecheck CLI
+        run: ./web/node_modules/.bin/tsc -p packages/cli/tsconfig.json
+      - name: Core tests
+        run: node --test packages/core/test/*.test.mjs
+      - name: CLI tests
+        run: node --test packages/cli/test/*.test.mjs
+      - name: Web tests
+        run: npm test --prefix web
+      - name: Web build
+        run: npm run build --prefix web

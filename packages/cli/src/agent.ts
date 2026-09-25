@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import {
   existsSync,
   readdirSync,
@@ -6,19 +7,29 @@ import {
 } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { configuredModelAvailable } from '../../agent-runtime/src/backend.js';
 import {
+  beginInvocation,
   beginStopLike,
+  currentProcessStartTicks,
   deriveState,
   exitCodeFor,
   finalizeTerminal,
   invocationAlive,
+  queueSteer,
+  reservationInFlight,
   signalInvocation,
   waitForInvocationGone,
 } from '../../agent-runtime/src/lifecycle.js';
 import {
   TERMINAL_STATES,
+  activeRunnerFlag,
   idleMeta,
+  nextPromptCount,
+  pendingPrompt,
+  persistedNativeSessionId,
   persistedTimestamp,
+  runnerGeneration,
   type AgentMetadata,
 } from '../../agent-runtime/src/metadata.js';
 import { normalizeAgentId } from '../../agent-runtime/src/process.js';
@@ -44,6 +55,7 @@ const DEFAULT_RETENTION_DAYS = 14;
 export interface AgentCommandIo {
   stdout(text: string): void;
   stderr(text: string): void;
+  stdoutRaw?(text: string): void;
 }
 
 export interface AgentCommandContext {
@@ -51,6 +63,7 @@ export interface AgentCommandContext {
   cwd: string;
   io: AgentCommandIo;
   home?: string;
+  entryScript?: string;
 }
 
 interface Parsed {
@@ -339,6 +352,173 @@ async function cmdWait(args: string[], context: AgentCommandContext): Promise<nu
   return EXIT_TIMEOUT;
 }
 
+
+function writeRaw(context: AgentCommandContext, text: string): void {
+  if (!text) return;
+  if (context.io.stdoutRaw) context.io.stdoutRaw(text);
+  else context.io.stdout(text.replace(/\n$/, ''));
+}
+
+function spawnRunner(
+  agentId: string,
+  mode: 'new' | 'continue',
+  generation: number,
+  context: AgentCommandContext,
+): void {
+  const entryScript = context.entryScript ?? process.argv[1];
+  if (!entryScript) throw new Error('cannot locate Antonina JavaScript entry point');
+  const child = spawn(
+    process.execPath,
+    [entryScript, '_runner', agentId, mode, String(generation)],
+    {
+      detached: true,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        ...context.env,
+        ANTONINA_AGENT_ID: agentId,
+        ANTONINA_RUNNER_GEN: String(generation),
+      },
+    },
+  );
+  child.unref();
+}
+
+async function followAttached(agentId: string, context: AgentCommandContext): Promise<number> {
+  const path = logPath(agentId, paths(context));
+  let offset = 0;
+  let terminalSince: number | null = null;
+  while (true) {
+    if (existsSync(path)) {
+      const data = readFileSync(path);
+      if (data.length > offset) {
+        const text = data.subarray(offset).toString('utf8').replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
+        writeRaw(context, text);
+        offset = data.length;
+      }
+    }
+    const meta = readMeta(agentId, paths(context));
+    if (meta === null) return EXIT_NOT_FOUND;
+    const state = deriveState(meta);
+    const terminal = (TERMINAL_STATES as readonly string[]).includes(state) && activeRunnerFlag(meta) === false;
+    if (terminal) {
+      if (terminalSince === null) terminalSince = Date.now();
+      if (Date.now() - terminalSince >= 500) return exitCodeFor(meta);
+    } else {
+      terminalSince = null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}
+
+async function cmdPrompt(args: string[], context: AgentCommandContext): Promise<number> {
+  const parsed = parse(args, ['--steer', '--detach', '--json']);
+  if (parsed.positionals.length > 1) throw new UsageError('prompt: expected one prompt');
+  const agentId = requireAgentId(parsed.values.get('--id'), 'prompt');
+  const prompt = parsed.values.get('--prompt') ?? parsed.positionals[0];
+  if (!prompt) throw new UsageError('prompt: a prompt is required');
+  const observed = requireMeta(agentId, context);
+  if (
+    deriveState(observed) === 'running'
+    && !parsed.flags.has('--steer')
+    && (invocationAlive(observed) || reservationInFlight(observed))
+  ) {
+    throw new Error(`agent ${agentId} is still running; use --steer to redirect it`);
+  }
+  if (configuredModelAvailable(context.env) === false) {
+    throw new Error('configured OpenCode model opencode/space-bunny-free is unavailable');
+  }
+
+  const decision: {
+    action?: 'busy' | 'spawn' | 'reuse';
+    mode?: 'new' | 'continue';
+    generation?: number;
+    interrupt?: boolean;
+  } = {};
+  const steer = parsed.flags.has('--steer');
+  await updateMeta(agentId, (meta) => {
+    const live = invocationAlive(meta);
+    if (live) {
+      if (!steer) {
+        decision.action = 'busy';
+        return;
+      }
+      if (!queueSteer(meta, prompt, Date.now() / 1000)) {
+        decision.action = 'busy';
+        return;
+      }
+      meta.intent = 'steer';
+      decision.action = 'reuse';
+      decision.interrupt = true;
+      return;
+    }
+
+    if (activeRunnerFlag(meta) === true && reservationInFlight(meta)) {
+      if (steer) {
+        if (!queueSteer(meta, prompt, Date.now() / 1000)) {
+          decision.action = 'busy';
+          return;
+        }
+        decision.action = 'reuse';
+        return;
+      }
+      if (pendingPrompt(meta) !== null) {
+        decision.action = 'busy';
+        return;
+      }
+      meta.pending_prompt = prompt;
+      meta.state = 'running';
+      meta.last_activity_at = Date.now() / 1000;
+      decision.action = 'reuse';
+      return;
+    }
+
+    const currentGeneration = runnerGeneration(meta.runner_gen ?? 0, 0);
+    const promptCount = nextPromptCount(meta);
+    if (currentGeneration === null || promptCount === null) {
+      decision.action = 'busy';
+      return;
+    }
+    const mode = persistedNativeSessionId(meta) === null ? 'new' : 'continue';
+    const generation = currentGeneration + 1;
+    const now = Date.now() / 1000;
+    beginInvocation(meta, prompt, now, promptCount);
+    meta.active_runner = true;
+    meta.runner_gen = generation;
+    meta.runner_reservation = {
+      state: 'reserved',
+      gen: generation,
+      owner_pid: process.pid,
+      owner_start_ticks: currentProcessStartTicks(),
+      reserved_at: now,
+      mode,
+    };
+    decision.action = 'spawn';
+    decision.mode = mode;
+    decision.generation = generation;
+  }, paths(context));
+
+  if (decision.action === 'busy' || decision.action === undefined) {
+    throw new Error(`agent ${agentId} is still running; use --steer to redirect it`);
+  }
+  if (decision.action === 'spawn') {
+    spawnRunner(agentId, decision.mode!, decision.generation!, context);
+  } else if (decision.interrupt) {
+    const current = readMeta(agentId, paths(context));
+    if (current !== null) signalInvocation(current, 'SIGTERM');
+  }
+
+  if (parsed.flags.has('--detach')) {
+    if (parsed.flags.has('--json')) {
+      context.io.stdout(JSON.stringify({ id: agentId, state: 'running', detached: true }));
+    } else {
+      context.io.stdout(`Started agent ${agentId} in the background. Observe it with \`antonina agent log --id ${agentId} --follow\`.`);
+    }
+    return EXIT_OK;
+  }
+  return followAttached(agentId, context);
+}
+
 async function stopLike(
   command: 'stop' | 'kill',
   args: string[],
@@ -433,8 +613,7 @@ export async function runAgentCommand(argv: string[], context: AgentCommandConte
       case 'kill': return await stopLike('kill', args, context);
       case 'delete': return await cmdDelete(args, context);
       case 'clean': return await cmdClean(args, context);
-      case 'prompt':
-        throw new Error('prompt runtime is not yet ported on this migration branch');
+      case 'prompt': return await cmdPrompt(args, context);
       default:
         throw new UsageError(command ? `unsupported antonina agent command: ${command}` : 'an agent command is required');
     }

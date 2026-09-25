@@ -244,7 +244,7 @@ def _parse_message(value: object) -> BoardMessage:
         The validated message.
 
     Raises:
-        BoardError: If the value is not a Antonina v1 message.
+        BoardError: If the value is not a canonical Antonina message.
     """
     if not isinstance(value, dict):
         msg = "Antonina board contains an incompatible or malformed message"
@@ -311,7 +311,9 @@ def _valid_host(host: object) -> bool:
     if not isinstance(host, str) or not host.startswith("lubko://"):
         return False
     server = host.removeprefix("lubko://")
-    return bool(server) and not any(character in server for character in "/?#\\")
+    return bool(server) and not any(
+        character.isspace() or character in "/?#\\" for character in server
+    )
 
 
 def _valid_path(path: object) -> bool:
@@ -355,7 +357,7 @@ def _parse_resource(value: object, issue_numbers: set[int]) -> BoardResource:
 
 
 def parse_board(value: object) -> Board:
-    """Parse and normalize the deployed v1 board or canonical v2 board.
+    """Parse and validate the canonical Antonina v2 board.
 
     Returns:
         The canonical v2 board.
@@ -985,7 +987,11 @@ def _human_issue(issue: BoardIssue) -> str:
     Returns:
         Human-readable issue text.
     """
-    lines = [f"#{issue['number']} [{issue['state']}] {issue['title']}"]
+    lines = [
+        f"#{issue['number']} [{issue['state']}] {issue['title']}",
+        "Description:",
+        issue["body"],
+    ]
     for message in issue["messages"]:
         lines.extend((f"{message['author']} @ {message['createdAt']}", message["body"]))
     return "\n".join(lines)
@@ -1106,6 +1112,24 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if cast("bool", args.json_output):
         _write_stdout(json.dumps(result, separators=(",", ":"), ensure_ascii=False, sort_keys=True))
+        return 0
+
+    if cast("str", args.command) == "resource" and not cast("bool", args.json_output):
+        resource_command = cast("str", args.resource_command)
+        if resource_command == "add":
+            resource = cast("BoardResource", result)
+            _write_stdout(f"Resource added: {resource['host']} {resource['path']} -> #{args.issue}")
+        elif resource_command == "remove":
+            _write_stdout(f"Resource dependency removed: {args.host} {args.path} <- #{args.issue}")
+        else:
+            for raw_item in cast("list[object]", result):
+                item = cast("dict[str, object]", raw_item)
+                states = ", ".join(
+                    f"#{entry['number']} [{entry['state']}]"
+                    for entry in cast("list[dict[str, object]]", item["issues"])
+                )
+                status = "protected" if item["protected"] else "collectible"
+                _write_stdout(f"{item['host']} {item['path']} {states} {status}")
         return 0
 
     if isinstance(result, list):

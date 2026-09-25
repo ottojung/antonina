@@ -130,7 +130,7 @@ export class BoardApi {
       created = {
         number: board.nextIssueNumber,
         title: cleanTitle,
-        body,
+        body: body.trim(),
         state: 'open',
         createdAt: timestamp,
         updatedAt: timestamp,
@@ -147,7 +147,7 @@ export class BoardApi {
   editIssueBody(number: number, body: string): Promise<BoardIssue> {
     return this.updateIssue(number, (issue) => {
       if (issue.state === 'closed') throw new AntoninaApiError('Closed issue descriptions cannot be edited');
-      return { ...issue, body };
+      return { ...issue, body: body.trim() };
     });
   }
 

@@ -70,7 +70,7 @@ function isIssue(value: unknown, allowEmptyBody: boolean): value is BoardIssue {
 }
 
 function isValidHost(host: string): boolean {
-  return /^lubko:\/\/[^/\s]+$/.test(host);
+  return /^lubko:\/\/[^/\s?#\\]+$/.test(host);
 }
 
 function isValidPath(path: string): boolean {

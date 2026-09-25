@@ -5988,6 +5988,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+    sub.add_parser("board", help="manage the shared Antonina issue and resource board")
     for spec in SUBCOMMANDS:
         subparser = sub.add_parser(spec.name, help=spec.help)
         for argument in spec.arguments:

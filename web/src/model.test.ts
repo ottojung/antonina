@@ -26,7 +26,8 @@ describe('board schema', () => {
     expect(canonicalHost(' lubko://server ')).toBe('lubko://server');
     expect(canonicalPath(' /a/b ')).toBe('/a/b');
     expect(canonicalPath('/')).toBe('/');
-    for (const host of ['', 'https://server', 'lubko://', 'lubko://server/']) expect(() => canonicalHost(host)).toThrow();
+    for (const host of ['', 'https://server', 'lubko://', 'lubko://server/', 'lubko://server?x', 'lubko://server#x', 'lubko://server\\x', 'lubko://ser ver']) expect(() => canonicalHost(host)).toThrow();
+    expect(canonicalHost('lubko://server-name')).toBe('lubko://server-name');
     for (const path of ['', 'a/b', '/a/../b', '/a//b', '/a/.', '/a/b/']) expect(() => canonicalPath(path)).toThrow();
   });
 

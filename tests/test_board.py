@@ -457,6 +457,10 @@ def test_resource_schema_rejects_noncanonical_or_invalid_dependencies() -> None:
     assert parse_board(board(resources=[valid]))["resources"] == [valid]
     mutations: tuple[dict[str, object], ...] = (
         {"host": "lubko://server/"},
+        {"host": "lubko://server?query"},
+        {"host": "lubko://server#fragment"},
+        {"host": "lubko://server\\path"},
+        {"host": "lubko://ser ver"},
         {"path": "/workspace//project"},
         {"path": "/workspace/../project"},
         {"path": "/workspace/./project"},

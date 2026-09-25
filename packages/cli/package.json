@@ -1,5 +1,15 @@
 {
   "name": "@antonina/cli",
-  "private": true,
-  "type": "module"
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Antonina CLI and managed-agent runtime",
+  "bin": {
+    "antonina": "dist/packages/cli/src/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  }
 }

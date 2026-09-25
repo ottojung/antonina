@@ -53,6 +53,18 @@ jobs:
         run: node --test packages/agent-runtime/test/*.test.mjs
       - name: CLI tests
         run: node --test packages/cli/test/*.test.mjs
+      - name: Pack precompiled CLI
+        run: npm pack ./packages/cli --pack-destination /tmp
+      - name: Install and run packed CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="$(find /tmp -maxdepth 1 -name 'antonina-cli-*.tgz' -print -quit)"
+          test -n "$package"
+          mkdir -p /tmp/antonina-install
+          npm install --prefix /tmp/antonina-install "$package"
+          output="$(XDG_STATE_HOME=/tmp/antonina-state /tmp/antonina-install/node_modules/.bin/antonina agent list --json)"
+          test "$output" = '{"agents":[]}'
       - name: Web tests
         run: npm test --prefix web
       - name: Web build

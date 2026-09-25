@@ -522,7 +522,61 @@ def test_resource_add_is_idempotent_and_remove_deletes_last_dependency() -> None
     assert (
         client.add_resource(1, "lubko://server", "/workspace/project") == duplicate["resources"][0]
     )
-    assert client.remove_resource(1, "lubko://server", "/workspace/project") == []
+    assert client.remove_resource(1, "lubko://server", "/workspace/project") is None
+
+
+def test_shared_resource_remove_returns_affected_resource() -> None:
+    resource = BoardResource(
+        host="lubko://server",
+        path="/workspace/project",
+        issueNumbers=[1, 2],
+        createdAt="2026-09-24T10:00:00.000Z",
+        updatedAt="2026-09-24T10:00:00.000Z",
+    )
+    current = board(next_issue=3, issues=[issue(1), issue(2)], resources=[resource])
+    remaining = BoardResource(**{
+        **resource,
+        "issueNumbers": [2],
+        "updatedAt": "2026-09-24T10:05:00.000Z",
+    })
+    committed = board(next_issue=3, issues=[issue(1), issue(2)], resources=[remaining])
+    fake = FakeHttp([
+        response(200, current, etag='"v1"'),
+        response(200),
+        response(200, committed, etag='"v2"'),
+    ])
+    client = BoardClient(
+        capability="7" * 64,
+        http=fake,
+        now=lambda: datetime(2026, 9, 24, 10, 5, tzinfo=UTC),
+    )
+
+    assert client.remove_resource(1, "lubko://server", "/workspace/project") == remaining
+
+
+def test_human_show_includes_multiline_body_before_messages(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    shown = issue(
+        1,
+        messages=[
+            {
+                "id": "message-1",
+                "author": "agent",
+                "body": "comment",
+                "createdAt": "2026-09-24T10:00:00.000Z",
+            }
+        ],
+    )
+    shown["body"] = "line one\nline two"
+    current = board(issues=[shown])
+    client = BoardClient(http=FakeHttp([response(200, current, etag='"v1"')]))
+    monkeypatch.setattr(board_module, "_client_from_environment", lambda: client)
+
+    assert board_module.main(["show", "1"]) == 0
+    assert capsys.readouterr().out == (
+        "#1 [open] Issue 1\nline one\nline two\nagent @ 2026-09-24T10:00:00.000Z\ncomment\n"
+    )
 
 
 def test_closed_issue_cannot_gain_resource_and_state_preserves_dependency() -> None:

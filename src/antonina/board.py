@@ -672,7 +672,7 @@ class BoardClient:
             item for item in committed["resources"] if (item["host"], item["path"]) == (host, path)
         )
 
-    def remove_resource(self, number: int, host: str, path: str) -> list[BoardResource]:
+    def remove_resource(self, number: int, host: str, path: str) -> BoardResource | None:
         """Remove one issue dependency, deleting an empty resource.
 
         Args:
@@ -681,7 +681,7 @@ class BoardClient:
             path: Canonical absolute POSIX path.
 
         Returns:
-            The remaining resources in deterministic order.
+            The affected remaining resource, or ``None`` when the resource is removed.
 
         Raises:
             BoardError: If validation fails or the dependency does not exist.
@@ -690,7 +690,10 @@ class BoardClient:
             msg = "Resource host or path is not canonical"
             raise BoardError(msg)
 
+        affected: BoardResource | None = None
+
         def mutate(board: Board) -> Board:
+            nonlocal affected
             candidate = copy.deepcopy(board)
             for resource in candidate["resources"]:
                 if (resource["host"], resource["path"]) == (host, path):
@@ -704,11 +707,13 @@ class BoardClient:
                         resource["updatedAt"] = _latest_timestamp(
                             self._now(), resource["updatedAt"]
                         )
+                        affected = copy.deepcopy(resource)
                     return candidate
             msg = "Borys resource dependency does not exist"
             raise BoardError(msg)
 
-        return self._mutate(mutate)["resources"]
+        self._mutate(mutate)
+        return affected
 
     def list_resources(
         self, host: str | None = None, issue: int | None = None
@@ -1010,6 +1015,8 @@ def _human_issue(issue: BoardIssue) -> str:
         Human-readable issue text.
     """
     lines = [f"#{issue['number']} [{issue['state']}] {issue['title']}"]
+    if issue["body"]:
+        lines.append(issue["body"])
     for message in issue["messages"]:
         lines.extend((f"{message['author']} @ {message['createdAt']}", message["body"]))
     return "\n".join(lines)
@@ -1043,7 +1050,7 @@ def _client_from_environment() -> BoardClient:
 
 def _run_resource_command(
     args: argparse.Namespace, client: BoardClient
-) -> BoardResource | list[BoardResource] | list[dict[str, object]]:
+) -> BoardResource | list[dict[str, object]] | None:
     """Execute one parsed resource command.
 
     Args:
@@ -1083,7 +1090,7 @@ def _run_issue_write(args: argparse.Namespace, client: BoardClient) -> BoardIssu
 
 def _run_command(
     args: argparse.Namespace, client: BoardClient
-) -> BoardIssue | list[BoardIssue] | BoardResource | list[BoardResource] | list[dict[str, object]]:
+) -> BoardIssue | list[BoardIssue] | BoardResource | list[dict[str, object]] | None:
     """Execute one parsed CLI command.
 
     Returns:
@@ -1134,6 +1141,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if cast("bool", args.json_output):
         _write_stdout(json.dumps(result, separators=(",", ":"), ensure_ascii=False, sort_keys=True))
+        return 0
+
+    if result is None:
         return 0
 
     if isinstance(result, list):

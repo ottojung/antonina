@@ -169,6 +169,7 @@ def test_stop_kill_converges_live_runner_queued_prompt(
         "gen": 1,
         "owner_pid": os.getpid(),
         "owner_start_ticks": agent.proc_start_ticks(os.getpid()),
+        "reserved_at": time.time(),
         "state": "claimed",
         "mode": "new",
     }

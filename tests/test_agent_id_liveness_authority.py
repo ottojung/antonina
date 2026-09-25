@@ -36,9 +36,17 @@ def test_invocation_liveness_accepts_canonical_persisted_agent_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Canonical IDs still permit exact invocation marker matching."""
+    invocation_id = "0123456789abcdef0123456789abcdef"
     meta = agent.idle_meta("aaaaaaaa", str(os.environ["XDG_STATE_HOME"]), None)
-    meta.update({"state": "running", "pid": 4242, "start_time": 111})
+    meta.update({
+        "state": "running",
+        "pid": 4242,
+        "pgid": 4242,
+        "start_time": 111,
+        "invocation_id": invocation_id,
+    })
     marker_checks: list[tuple[int, str]] = []
+    invocation_checks: list[tuple[int, str]] = []
 
     monkeypatch.setattr(agent, "open_pidfd", lambda _pid: 77)
     monkeypatch.setattr(agent, "proc_start_ticks", lambda _pid: 111)
@@ -47,12 +55,18 @@ def test_invocation_liveness_accepts_canonical_persisted_agent_id(
         marker_checks.append((pid, aid))
         return True
 
+    def record_invocation(pid: int, iid: str) -> bool:
+        invocation_checks.append((pid, iid))
+        return True
+
     monkeypatch.setattr(agent, "env_has_marker", record_marker)
+    monkeypatch.setattr(agent, "env_has_invocation", record_invocation)
     monkeypatch.setattr(agent, "pidfd_send_signal", lambda _fd, _sig: None)
     monkeypatch.setattr(os, "close", lambda _fd: None)
 
     assert agent.is_alive(meta)
     assert marker_checks == [(4242, "aaaaaaaa")]
+    assert invocation_checks == [(4242, invocation_id)]
 
 
 @pytest.mark.parametrize("bad_aid", [123, True, "", "AAAAAAAA", "not-hex"])

@@ -133,12 +133,12 @@ def test_group_alive_fails_closed_on_malformed_present_pgid(
     assert calls == []
 
 
-def test_group_alive_preserves_absent_group_semantics() -> None:
-    """Actual absence of a recorded PGID remains a proven-empty legacy case."""
+def test_group_alive_rejects_missing_pgid_for_partial_invocation() -> None:
+    """A partial recorded invocation cannot prove its group is empty."""
     meta = dict(BASE_META)
     meta["pgid"] = None
 
-    assert agent.group_alive(meta) is False
+    assert agent.group_alive(meta) is True
 
 
 @pytest.mark.parametrize("value", [1234.0, "1234", True, -1])
@@ -201,6 +201,25 @@ def test_leader_marker_state_rejects_malformed_present_markers(
 
     assert agent._leader_marker_state(meta, 4242) is None
     assert probes == []
+
+
+def test_group_alive_rejects_missing_invocation_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recorded group without its invocation identity remains ambiguous."""
+    meta = dict(BASE_META)
+    meta["invocation_id"] = None
+    scans: list[object] = []
+    monkeypatch.setattr(agent, "_proven_invocation_members", lambda *_a: scans.append(True))
+
+    assert agent.group_alive(meta) is True
+    assert scans == []
+
+
+def test_group_alive_accepts_explicit_absence_of_any_invocation() -> None:
+    """The canonical pre-invocation state has no group to probe."""
+    meta = dict(BASE_META)
+    meta.update({"pid": None, "pgid": None, "start_time": None, "invocation_id": None})
+
+    assert agent.group_alive(meta) is False
 
 
 def test_valid_group_authority_still_reaches_exact_member_scan(

@@ -38,11 +38,8 @@ def write_meta(aid: str, **fields: object) -> None:
     """Persist an agent metadata document."""
     directory = agent.agent_dir(aid)
     directory.mkdir(parents=True, exist_ok=True)
-    payload: dict[str, object] = {
-        "id": aid,
-        "state": "succeeded",
-        "finished_at": time.time() - 86400 * 30,
-    }
+    payload = agent.idle_meta(aid, os.getcwd(), None)
+    payload.update({"state": "succeeded", "finished_at": time.time() - 86400 * 30})
     payload.update(fields)
     (directory / "meta.json").write_text(json.dumps(payload), encoding="utf-8")
 
@@ -124,8 +121,9 @@ def test_reserved_runner_blocks_removal_at_prestart_boundary(
             "state": "reserved",
             "gen": 1,
             "owner_pid": os.getpid(),
-            "mode": "new",
             "owner_start_ticks": agent.proc_start_ticks(os.getpid()),
+            "reserved_at": time.time(),
+            "mode": "new",
         },
     )
     reserved = agent.read_meta(aid)

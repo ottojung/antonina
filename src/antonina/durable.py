@@ -21,6 +21,7 @@ import fcntl
 import json
 import os
 import secrets
+import stat
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -443,7 +444,13 @@ def _write_temporary_file(temporary: Path, data: bytes) -> None:
             os.close(fd)
 
 
-def write_bytes_durable(path: Path, data: bytes, *, _restore: bool = True) -> None:
+def write_bytes_durable(
+    path: Path,
+    data: bytes,
+    *,
+    create_parent: bool = True,
+    _restore: bool = True,
+) -> None:
     """Crash-durably write ``data`` to ``path`` as a regular file.
 
     The payload is written to a unique temporary file, fully flushed (short
@@ -464,6 +471,8 @@ def write_bytes_durable(path: Path, data: bytes, *, _restore: bool = True) -> No
     Args:
         path: Destination regular-file path.
         data: Bytes to store.
+        create_parent: Create and durably anchor the parent directory when it is
+            absent. If false, the parent must already be an accessible directory.
         _restore: Internal; disable the best-effort restore on nested calls to
             avoid unbounded recursion.
 
@@ -471,7 +480,17 @@ def write_bytes_durable(path: Path, data: bytes, *, _restore: bool = True) -> No
         DurabilityError: If the write cannot be confirmed durable.
     """
     destination = Path(path)
-    make_directory_durable(destination.parent)
+    if create_parent:
+        make_directory_durable(destination.parent)
+    else:
+        try:
+            parent_mode = destination.parent.lstat().st_mode
+        except OSError as exc:
+            msg = f"cannot inspect destination directory {destination.parent}: {exc}"
+            raise DurabilityError(msg) from exc
+        if not stat.S_ISDIR(parent_mode):
+            msg = f"destination parent is not a directory: {destination.parent}"
+            raise DurabilityError(msg)
     # Serialize the whole snapshot → rename → confirm/cleanup sequence against
     # every other durable operation on this path (across processes and
     # threads).  Because no other writer can even snapshot — let alone commit —
@@ -513,7 +532,12 @@ def write_bytes_durable(path: Path, data: bytes, *, _restore: bool = True) -> No
             # reentrantly.
             if previous is not None:
                 with contextlib.suppress(DurabilityError):
-                    write_bytes_durable(destination, previous, _restore=False)
+                    write_bytes_durable(
+                        destination,
+                        previous,
+                        create_parent=create_parent,
+                        _restore=False,
+                    )
             else:
                 with contextlib.suppress(DurabilityError):
                     remove_durable(destination)
@@ -620,19 +644,20 @@ def write_symlink_durable(path: Path, target: str, *, _restore: bool = True) -> 
             raise
 
 
-def write_text_durable(path: Path, text: str) -> None:
+def write_text_durable(path: Path, text: str, *, create_parent: bool = True) -> None:
     """Crash-durably write ``text`` to ``path`` as UTF-8.
 
     Args:
         path: Destination regular-file path.
         text: Text to store.
+        create_parent: Create and durably anchor the parent directory when absent.
 
     Note:
         Fails closed: the underlying :func:`write_bytes_durable` raises
         :class:`DurabilityError` when the write cannot be confirmed durable, so
         callers must not advance a dependent action.
     """
-    write_bytes_durable(path, text.encode("utf-8"))
+    write_bytes_durable(path, text.encode("utf-8"), create_parent=create_parent)
 
 
 def write_json_durable(path: Path, mapping: dict[str, object]) -> None:

@@ -101,9 +101,9 @@ def test_locked_transition_does_not_repair_malformed_state_into_runner_authority
     assert meta["runner_reservation"] is None
 
 
-def test_missing_lifecycle_state_retains_legacy_idle_semantics() -> None:
-    """Genuine field absence remains distinct from malformed presence."""
-    assert derive_state({"id": "a1"}) == "idle"
+def test_missing_lifecycle_state_fails_closed() -> None:
+    """A missing lifecycle state is not inferred as idle."""
+    assert derive_state({"id": "a1"}) == "unknown"
 
 
 def test_delete_tombstone_rejects_malformed_present_values() -> None:
@@ -112,11 +112,11 @@ def test_delete_tombstone_rejects_malformed_present_values() -> None:
         assert agent._delete_pending_flag({"delete_pending": malformed}) is None
 
 
-def test_delete_tombstone_preserves_boolean_and_legacy_absence_semantics() -> None:
-    """Canonical booleans remain exact and genuine absence stays non-tombstoned."""
+def test_delete_tombstone_requires_canonical_boolean_field() -> None:
+    """Only a present literal boolean carries deletion authority."""
     assert agent._delete_pending_flag({"delete_pending": False}) is False
     assert agent._delete_pending_flag({"delete_pending": True}) is True
-    assert agent._delete_pending_flag({}) is False
+    assert agent._delete_pending_flag({}) is None
 
 
 @pytest.mark.parametrize("malformed", [0, 0.0, "", [], {}, 1, "yes", [1], None])

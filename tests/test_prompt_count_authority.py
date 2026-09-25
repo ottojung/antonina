@@ -94,19 +94,11 @@ def test_malformed_prompt_count_blocks_queued_promotion(
     assert meta["steer_queue"] == [item]
 
 
-@pytest.mark.parametrize("initial", [None, 0, 7])
-def test_canonical_or_absent_prompt_count_increments(
-    tmp_path: Path,
-    initial: int | None,
-) -> None:
-    """Absence means zero; canonical non-negative integers increment exactly."""
+@pytest.mark.parametrize("initial", [0, 7])
+def test_canonical_prompt_count_increments(tmp_path: Path, initial: int) -> None:
+    """Canonical non-negative integers increment exactly."""
     meta = agent.idle_meta("audit", str(tmp_path), None)
-    if initial is None:
-        del meta["prompt_count"]
-        expected = 1
-    else:
-        meta["prompt_count"] = initial
-        expected = initial + 1
+    meta["prompt_count"] = initial
     decision: dict[str, object] = {}
 
     agent._apply_locked_transition(
@@ -118,5 +110,24 @@ def test_canonical_or_absent_prompt_count_increments(
     )
 
     assert decision["action"] == "spawn"
-    assert meta["prompt_count"] == expected
+    assert meta["prompt_count"] == initial + 1
     assert meta["pending_prompt"] == "work"
+
+
+def test_missing_prompt_count_fails_closed(tmp_path: Path) -> None:
+    """A missing prompt count is not interpreted as zero."""
+    meta = agent.idle_meta("audit", str(tmp_path), None)
+    del meta["prompt_count"]
+    before = dict(meta)
+    decision: dict[str, object] = {}
+
+    agent._apply_locked_transition(
+        meta,
+        decision,
+        prompt="work",
+        steer=False,
+        mode="new",
+    )
+
+    assert decision == {"action": "busy"}
+    assert meta == before

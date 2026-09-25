@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -47,17 +48,13 @@ def test_build_agent_command_rejects_malformed_persisted_cwd() -> None:
             agent.build_agent_command(meta, "do work", is_continue=False)
 
 
-def test_runner_malformed_cwd_fails_before_spawn_and_aborts_cleanly(
+def test_runner_malformed_schema_fails_before_spawn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Abort a claimed runner before spawn when durable cwd is malformed."""
+    """Malformed current-schema metadata never reaches runner execution."""
     aid = "aaaaaaaa"
-    meta: agent.Meta = {
-        "id": aid,
-        "cwd": "",
-        "state": "idle",
-        "runner_reservation": {"state": "reserved", "gen": 1, "mode": "new"},
-    }
+    meta = agent.idle_meta(aid, os.getcwd(), None)
+    meta["cwd"] = ""
     agent.write_meta(aid, meta)
     monkeypatch.setenv("ANTONINA_RUNNER_GEN", "1")
     monkeypatch.setattr(
@@ -65,13 +62,7 @@ def test_runner_malformed_cwd_fails_before_spawn_and_aborts_cleanly(
         "_runner_loop",
         lambda *_a, **_kw: pytest.fail("underlying runner started with malformed cwd"),
     )
-    monkeypatch.setattr(agent, "send_signal_group", lambda _m, _sig: None)
-    monkeypatch.setattr(agent, "wait_group_dead", lambda _m, _timeout: True)
 
-    with pytest.raises(ValueError, match="managed-agent cwd is malformed"):
-        agent.runner(aid, "new")
+    agent.runner(aid, "new")
 
-    final = agent.read_meta(aid)
-    assert final is not None
-    assert final["state"] == "failed"
-    assert final["active_runner"] is False
+    assert agent.read_meta(aid) is None

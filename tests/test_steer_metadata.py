@@ -102,7 +102,8 @@ def test_pop_rejects_nonlist_queue_without_consuming() -> None:
 def test_reclaim_prompt_rejects_malformed_transition_metadata(
     monkeypatch: pytest.MonkeyPatch, field: str, bad: object
 ) -> None:
-    meta: agent.Meta = {"active_runner": True, "steer_queue": [], "steer_seq": 0}
+    meta = agent.idle_meta("ab", "/tmp", None)
+    meta.update({"active_runner": True, "steer_queue": [], "steer_seq": 0})
     meta[field] = bad
     before = copy.deepcopy(meta)
 
@@ -130,7 +131,8 @@ def test_reclaim_prompt_rejects_malformed_transition_metadata(
 def test_drain_next_rejects_malformed_transition_metadata(
     monkeypatch: pytest.MonkeyPatch, field: str, bad: object
 ) -> None:
-    meta: agent.Meta = {"active_runner": True, "steer_queue": [], "steer_seq": 0}
+    meta = agent.idle_meta("ab", "/tmp", None)
+    meta.update({"active_runner": True, "steer_queue": [], "steer_seq": 0})
     meta[field] = bad
     before = copy.deepcopy(meta)
 
@@ -147,12 +149,13 @@ def test_drain_next_rejects_malformed_transition_metadata(
 def test_drain_next_validates_steer_metadata_before_pending_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    meta: agent.Meta = {
+    meta = agent.idle_meta("ab", "/tmp", None)
+    meta.update({
         "active_runner": True,
         "pending_prompt": "already accepted",
         "steer_queue": False,
         "steer_seq": 0,
-    }
+    })
     before = copy.deepcopy(meta)
 
     def fake_update_meta(_aid: str, mutate: object) -> agent.Meta:

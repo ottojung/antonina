@@ -25,7 +25,7 @@ import os
 import re
 import shutil
 import signal
-import sqlite3
+import stat
 import subprocess
 import sys
 import textwrap
@@ -41,7 +41,6 @@ from antonina._exact_signal import pidfd_send_signal
 from antonina._exact_signal import proc_cpu_seconds as _shared_proc_cpu_seconds
 from antonina._exact_signal import proc_start_ticks as _shared_proc_start_ticks
 from antonina._exact_signal import process_state_char as _shared_process_state_char
-from antonina._process_group import group_has_members
 from antonina.durable import write_text_durable
 
 if TYPE_CHECKING:
@@ -96,6 +95,9 @@ SECONDS_PER_DAY: Final = 86400
 PID_START_WINDOW_SECONDS: Final = 60
 SESSION_DISCOVER_TIMEOUT_SECONDS: Final = 60
 SESSION_DISCOVER_POLL_SECONDS: Final = 1
+SESSION_LIST_TIMEOUT_SECONDS: Final = 5.0
+SESSION_LIST_MAX_COUNT: Final = 1000
+SESSION_LIST_MAX_OUTPUT_BYTES: Final = 4 * 1024 * 1024
 STEER_POLL_SECONDS: Final = 0.2
 STOP_WAIT_SECONDS: Final = 10.0
 KILL_WAIT_SECONDS: Final = 5.0
@@ -123,6 +125,40 @@ FOLD_WIDTH: Final = 80
 DEFAULT_RETENTION_DAYS: Final = 14
 RUNNER_ARGV_LENGTH: Final = 3
 AGENT_META_VERSION: Final = 3
+REQUIRED_AGENT_META_FIELDS: Final = frozenset({
+    "active_runner",
+    "agent_version",
+    "backend_error",
+    "created_at",
+    "cwd",
+    "delete_pending",
+    "exit_code",
+    "exit_signal",
+    "finished_at",
+    "id",
+    "intent",
+    "invocation_id",
+    "last_activity_at",
+    "native_session_id",
+    "pgid",
+    "pid",
+    "prompt_count",
+    "runner_gen",
+    "runner_pid",
+    "runner_reservation",
+    "runner_start_time",
+    "start_time",
+    "started_at",
+    "state",
+    "steer_queue",
+    "steer_seq",
+    "stop_reason",
+    "title",
+    "unresolved_invocation",
+    "variant",
+})
+OPTIONAL_AGENT_META_FIELDS: Final = frozenset({"error", "last_prompt", "pending_prompt"})
+AGENT_META_FIELDS: Final = REQUIRED_AGENT_META_FIELDS | OPTIONAL_AGENT_META_FIELDS
 
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-9:;<=>?]*[ -/]*[@-~]")
 _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)")
@@ -241,48 +277,229 @@ def _resolve_agent(
     return aid, meta
 
 
-def opencode_db_path() -> str:
-    """Return the path of the underlying agent's session database, if present.
-
-    Returns:
-        The absolute database path, or an empty string when no database exists.
-    """
-    base = Path(os.environ.get("XDG_DATA_HOME") or (_home() / ".local" / "share"))
-    db = base / "opencode" / "opencode.db"
-    return str(db) if db.is_file() else ""
-
-
 # ---------------------------------------------------------------------------
 # Metadata
 # ---------------------------------------------------------------------------
 
 
+def _is_canonical_timestamp(value: object) -> bool:
+    """Return whether a value is a finite non-negative JSON number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and value >= 0
+
+
+def _is_optional_timestamp(value: object) -> bool:
+    """Return whether a value is a canonical timestamp or explicit absence."""
+    return value is None or _is_canonical_timestamp(value)
+
+
+def _is_optional_process_id(value: object, *, minimum: int) -> bool:
+    """Return whether a value is a canonical process identity or absence."""
+    return value is None or (
+        type(value) is int and not isinstance(value, bool) and value >= minimum
+    )
+
+
+def _is_canonical_runner_reservation(value: object) -> bool:
+    """Return whether a runner reservation has the current canonical shape."""
+    if value is None:
+        return True
+    if type(value) is not dict:
+        return False
+    expected = {"gen", "mode", "owner_pid", "owner_start_ticks", "reserved_at", "state"}
+    if set(value) != expected:
+        return False
+    return (
+        type(value["gen"]) is int
+        and value["gen"] >= 1
+        and type(value["mode"]) is str
+        and value["mode"] in {"new", "continue"}
+        and type(value["owner_pid"]) is int
+        and value["owner_pid"] >= 1
+        and _is_optional_process_id(value["owner_start_ticks"], minimum=0)
+        and _is_canonical_timestamp(value["reserved_at"])
+        and type(value["state"]) is str
+        and value["state"] in {"reserved", "claimed"}
+    )
+
+
+def _is_canonical_unresolved_invocation(value: object) -> bool:
+    """Return whether an unresolved invocation has the current canonical shape."""
+    if value is None:
+        return True
+    if type(value) is not dict:
+        return False
+    if set(value) != {"invocation_id", "pgid", "pid", "start_time"}:
+        return False
+    return (
+        _is_optional_process_id(value["pid"], minimum=1)
+        and _is_optional_process_id(value["pgid"], minimum=1)
+        and _is_optional_process_id(value["start_time"], minimum=0)
+        and (
+            value["invocation_id"] is None
+            or _persisted_invocation_id(value["invocation_id"]) is not None
+        )
+    )
+
+
+def _is_canonical_steer_queue(value: object, *, sequence: int) -> bool:
+    """Return whether a steer queue has the current canonical shape."""
+    if type(value) is not list:
+        return False
+    previous = 0
+    for item in value:
+        if type(item) is not dict or set(item) != {"prompt", "queued_at", "seq"}:
+            return False
+        item_sequence = item["seq"]
+        if (
+            type(item_sequence) is not int
+            or not previous < item_sequence <= sequence
+            or type(item["prompt"]) is not str
+            or not _is_canonical_timestamp(item["queued_at"])
+        ):
+            return False
+        previous = item_sequence
+    return True
+
+
+def _is_canonical_backend_error(value: object) -> bool:
+    """Return whether backend diagnostics have the current canonical shape."""
+    if value is None:
+        return True
+    expected = {
+        "automatic_retry_safe",
+        "backend_scope",
+        "classification",
+        "diagnostic_bytes",
+        "fresh_session_useful",
+        "model",
+        "provider",
+        "reference",
+        "request_boundary",
+        "transient",
+    }
+    if type(value) is not dict or set(value) != expected:
+        return False
+    return (
+        type(value["classification"]) is str
+        and bool(value["classification"])
+        and len(value["classification"]) <= BACKEND_CLASSIFICATION_MAX_CHARS
+        and type(value["provider"]) is str
+        and type(value["model"]) is str
+        and type(value["request_boundary"]) is str
+        and value["request_boundary"] in {"continuation", "fresh_session"}
+        and (value["reference"] is None or type(value["reference"]) is str)
+        and type(value["transient"]) is bool
+        and type(value["automatic_retry_safe"]) is bool
+        and (value["fresh_session_useful"] is None or type(value["fresh_session_useful"]) is bool)
+        and type(value["backend_scope"]) is str
+        and type(value["diagnostic_bytes"]) is int
+        and 0 <= value["diagnostic_bytes"] <= BACKEND_DIAGNOSTIC_MAX_BYTES
+    )
+
+
+def _is_canonical_meta(data: object, aid: str) -> bool:
+    """Return whether a metadata document conforms to the current schema."""
+    if type(data) is not dict:
+        return False
+    fields = cast("Meta", data)
+    if not fields.keys() >= REQUIRED_AGENT_META_FIELDS:
+        return False
+    if not fields.keys() <= AGENT_META_FIELDS:
+        return False
+    if type(fields["agent_version"]) is not int or fields["agent_version"] != AGENT_META_VERSION:
+        return False
+    if _persisted_agent_id(fields["id"]) != aid:
+        return False
+    if not _is_canonical_timestamp(fields["created_at"]):
+        return False
+    if not _is_canonical_timestamp(fields["last_activity_at"]):
+        return False
+    if type(fields["state"]) is not str or fields["state"] not in PERSISTED_AGENT_STATES:
+        return False
+    if type(fields["cwd"]) is not str or not fields["cwd"] or not Path(fields["cwd"]).is_absolute():
+        return False
+    if fields["title"] is not None and type(fields["title"]) is not str:
+        return False
+    if type(fields["variant"]) is not str or not fields["variant"]:
+        return False
+    if fields["native_session_id"] is not None and (
+        type(fields["native_session_id"]) is not str or not fields["native_session_id"]
+    ):
+        return False
+    if not _is_optional_process_id(fields["pid"], minimum=1):
+        return False
+    if not _is_optional_process_id(fields["pgid"], minimum=1):
+        return False
+    if not _is_optional_process_id(fields["start_time"], minimum=0):
+        return False
+    if (
+        fields["invocation_id"] is not None
+        and _persisted_invocation_id(fields["invocation_id"]) is None
+    ):
+        return False
+    if not _is_optional_process_id(fields["runner_pid"], minimum=1):
+        return False
+    if not _is_optional_process_id(fields["runner_start_time"], minimum=0):
+        return False
+    if not _is_optional_timestamp(fields["started_at"]):
+        return False
+    if not _is_optional_timestamp(fields["finished_at"]):
+        return False
+    if fields["exit_code"] is not None and type(fields["exit_code"]) is not int:
+        return False
+    if not _is_optional_process_id(fields["exit_signal"], minimum=1):
+        return False
+    if not _is_canonical_backend_error(fields["backend_error"]):
+        return False
+    if fields["intent"] is not None and fields["intent"] not in {"steer", "stop", "kill"}:
+        return False
+    if type(fields["delete_pending"]) is not bool:
+        return False
+    if fields["stop_reason"] is not None and fields["stop_reason"] not in {
+        "steer",
+        "stop",
+        "kill",
+    }:
+        return False
+    if type(fields["active_runner"]) is not bool:
+        return False
+    if type(fields["runner_gen"]) is not int or fields["runner_gen"] < 0:
+        return False
+    if not _is_canonical_runner_reservation(fields["runner_reservation"]):
+        return False
+    if not _is_canonical_unresolved_invocation(fields["unresolved_invocation"]):
+        return False
+    steer_sequence = fields["steer_seq"]
+    if type(steer_sequence) is not int or steer_sequence < 0:
+        return False
+    if not _is_canonical_steer_queue(fields["steer_queue"], sequence=steer_sequence):
+        return False
+    prompt_count = fields["prompt_count"]
+    if type(prompt_count) is not int or prompt_count < 0:
+        return False
+    pending_prompt = fields.get("pending_prompt")
+    if pending_prompt is not None and (type(pending_prompt) is not str or not pending_prompt):
+        return False
+    last_prompt = fields.get("last_prompt")
+    if last_prompt is not None and (type(last_prompt) is not str or not last_prompt):
+        return False
+    error = fields.get("error")
+    return error is None or (type(error) is str and bool(error))
+
+
 def read_meta(aid: str) -> Meta | None:
-    """Load metadata only when its persisted identity is bound to ``aid``.
-
-    The directory/caller ID is the authority that selects an agent record. A
-    record whose durable ``id`` is absent, malformed, non-canonical, or names a
-    different canonical agent is corrupt and must not be reinterpreted as that
-    other agent.
-
-    Args:
-        aid: Canonical Antonina agent ID whose directory is being addressed.
-
-    Returns:
-        The bound metadata mapping, or ``None`` when unavailable or corrupt.
-    """
+    """Load one current-schema metadata record bound to ``aid``."""
     if _persisted_agent_id(aid) != aid:
         return None
     path = agent_dir(aid) / "meta.json"
     try:
         with path.open(encoding="utf-8") as fh:
             data: object = json.load(fh)
-    except (OSError, ValueError):
+    except (OSError, RecursionError, ValueError):
         return None
-    if not isinstance(data, dict):
-        return None
-    persisted_id = _persisted_agent_id(data.get("id"))
-    if persisted_id != aid:
+    if not _is_canonical_meta(data, aid):
         return None
     return cast("Meta", data)
 
@@ -296,36 +513,77 @@ def write_meta(aid: str, meta: Meta) -> None:
     """
     directory = agent_dir(aid)
     directory.mkdir(parents=True, exist_ok=True)
-    # Crash-durable replace: fsync of file contents and the directory entry so
-    # reconciled metadata can never be lost or half-written on power failure.
     payload = json.dumps(meta, indent=2, sort_keys=True) + "\n"
     write_text_durable(directory / "meta.json", payload)
 
 
-def update_meta(aid: str, fn: Callable[[Meta], None]) -> None:
-    """Apply ``fn(meta)`` to an agent's metadata under an exclusive lock.
+class MetadataUpdateError(OSError):
+    """An authoritative metadata prerequisite could not be committed."""
 
-    If the agent has been deleted, this is a no-op: a late background runner
-    must never resurrect a deleted agent's directory.
+
+def update_meta(aid: str, fn: Callable[[Meta], None]) -> bool:
+    """Apply ``fn(meta)`` under an exclusive lock and report durable commit.
 
     Args:
         aid: Antonina agent ID.
         fn: Mutation to apply to the metadata under the lock.
+
+    Returns:
+        ``True`` after the mutation is durably committed, or ``False`` only when
+        the agent directory was already absent before the update began.
+
+    Raises:
+        MetadataUpdateError: If the directory, lock, metadata read, or unlock
+            fails.
+        DurabilityError: If the metadata replacement cannot be confirmed.
     """
     directory = agent_dir(aid)
-    if not directory.is_dir():
-        return
+    try:
+        directory_mode = directory.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        message = f"cannot inspect agent directory for metadata update: {exc}"
+        raise MetadataUpdateError(message) from exc
+    if not stat.S_ISDIR(directory_mode):
+        message = f"agent metadata path is not a directory: {directory}"
+        raise MetadataUpdateError(message)
+
     lock_path = directory / ".lock"
-    with contextlib.suppress(OSError), lock_path.open("w", encoding="utf-8") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        lock = lock_path.open("a", encoding="utf-8")
+    except OSError as exc:
+        message = f"cannot open agent metadata lock {lock_path}: {exc}"
+        raise MetadataUpdateError(message) from exc
+    locked = False
+    try:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            locked = True
+        except OSError as exc:
+            message = f"cannot lock agent metadata {lock_path}: {exc}"
+            raise MetadataUpdateError(message) from exc
         try:
             meta = read_meta(aid)
             if meta is None:
-                return
+                message = f"agent metadata is unavailable or malformed: {aid}"
+                raise MetadataUpdateError(message)
             fn(meta)
-            write_meta(aid, meta)
+            if not _is_canonical_meta(meta, aid):
+                message = f"agent metadata mutation produced malformed schema: {aid}"
+                raise MetadataUpdateError(message)
+            payload = json.dumps(meta, indent=2, sort_keys=True) + "\n"
+            write_text_durable(directory / "meta.json", payload, create_parent=False)
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            if locked:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                except OSError as exc:
+                    message = f"cannot unlock agent metadata {lock_path}: {exc}"
+                    raise MetadataUpdateError(message) from exc
+    finally:
+        lock.close()
+    return True
 
 
 def idle_meta(aid: str, cwd: str, title: str | None) -> Meta:
@@ -397,21 +655,11 @@ def proc_start_ticks(pid: int) -> int | None:
     return _shared_proc_start_ticks(pid)
 
 
-def proc_cpu_seconds(pid: int | None) -> float | None:
-    """Return the total CPU time in seconds used by a process, or ``None``.
-
-    Delegates to the shared ``_exact_signal.proc_cpu_seconds`` primitive.
-    Accepts ``None`` for backward-compatible callers.
-
-    Args:
-        pid: Process ID to inspect, or ``None``.
-
-    Returns:
-        The total CPU time in seconds, or ``None`` when unavailable.
-    """
-    if not pid:
-        return None
-    return _shared_proc_cpu_seconds(int(pid))
+def proc_cpu_seconds(pid: int) -> float | None:
+    """Return the total CPU time in seconds used by a process, or ``None``."""
+    if type(pid) is not int:
+        raise TypeError("pid must be an integer")
+    return _shared_proc_cpu_seconds(pid)
 
 
 def env_has_marker(pid: int, aid: str) -> bool:
@@ -651,8 +899,7 @@ def send_signal_group(meta: Meta, sig: int) -> None:
     start_time = _process_identity_int(meta.get("start_time"), minimum=0)
     aid = _persisted_agent_id(meta.get("id"))
     iid = _persisted_invocation_id(meta.get("invocation_id"))
-    raw_pgid = meta.get("pgid")
-    pgid = leader if raw_pgid is None else _process_identity_int(raw_pgid, minimum=1)
+    pgid = _process_identity_int(meta.get("pgid"), minimum=1)
     if leader is None or start_time is None or pgid is None or aid is None or iid is None:
         return
     fd = open_pidfd(leader)
@@ -794,7 +1041,8 @@ def is_alive(meta: Meta) -> bool:
     pid = _process_identity_int(meta.get("pid"), minimum=1)
     start_time = _process_identity_int(meta.get("start_time"), minimum=0)
     aid = _persisted_agent_id(meta.get("id"))
-    if pid is None or start_time is None or aid is None:
+    invocation_id = _persisted_invocation_id(meta.get("invocation_id"))
+    if pid is None or start_time is None or aid is None or invocation_id is None:
         return False
     invocation_pid = pid
     fd = open_pidfd(invocation_pid)
@@ -803,7 +1051,9 @@ def is_alive(meta: Meta) -> bool:
     try:
         if proc_start_ticks(invocation_pid) != start_time:
             return False
-        if not env_has_marker(invocation_pid, aid):
+        if not env_has_marker(invocation_pid, aid) or not env_has_invocation(
+            invocation_pid, invocation_id
+        ):
             return False
         try:
             pidfd_send_signal(fd, 0)
@@ -866,7 +1116,7 @@ def _leader_marker_state(meta: Meta, pid: int) -> str | None:
         return None
     iid_raw = meta.get("invocation_id")
     if iid_raw is None:
-        return "live" if env_has_marker(pid, aid) else "gone"
+        return None
     iid = _persisted_invocation_id(iid_raw)
     if iid is None:
         return None
@@ -885,38 +1135,21 @@ def _leader_marker_state(meta: Meta, pid: int) -> str | None:
 
 
 def group_alive(meta: Meta) -> bool:
-    """Return whether any live process remains in the agent's exact invocation group.
-
-    When a durable invocation ID was recorded, group membership is decided by
-    the invocation-exact pinned scan: a recycled PGID hosting a newer
-    invocation of the same agent never counts as this invocation's survivors,
-    an *incomplete* scan (procfs enumeration failure, unpinnable or
-    uninspectable candidate) conservatively counts as alive so convergence
-    can never fail open, and an ambiguous recorded-leader identity likewise
-    counts as alive. Without a recorded invocation ID the plain
-    process-group membership is used (legacy metadata).
-
-    Args:
-        meta: Agent metadata.
-
-    Returns:
-        ``True`` when the recorded invocation still has live group members,
-        or when their absence could not be positively proven.
-    """
-    raw_pgid = meta.get("pgid")
-    if raw_pgid is None:
+    """Return whether the exact recorded invocation group may still be alive."""
+    identity_fields = (
+        meta.get("pid"),
+        meta.get("pgid"),
+        meta.get("start_time"),
+        meta.get("invocation_id"),
+    )
+    if all(value is None for value in identity_fields):
         return False
-    pgid = _process_identity_int(raw_pgid, minimum=1)
-    if pgid is None:
-        return True
-    iid_raw = meta.get("invocation_id")
-    if iid_raw is None:
-        return bool(group_has_members(pgid))
+    pgid = _process_identity_int(meta.get("pgid"), minimum=1)
+    iid = _persisted_invocation_id(meta.get("invocation_id"))
     aid = _persisted_agent_id(meta.get("id"))
-    iid = _persisted_invocation_id(iid_raw)
     leader = _process_identity_int(meta.get("pid"), minimum=1)
     start_time = _process_identity_int(meta.get("start_time"), minimum=0)
-    if aid is None or iid is None or leader is None or start_time is None:
+    if pgid is None or iid is None or aid is None or leader is None or start_time is None:
         return True
     if is_alive(meta):
         # The verified live leader implies its whole session group.
@@ -1167,14 +1400,9 @@ def _runner_reservation_mode(reservation: object) -> str | None:
 
 
 def _next_prompt_count(meta: Meta) -> int | None:
-    """Return the next canonical durable prompt count, or fail closed.
-
-    Genuine absence is the legacy zero-count state. A present value must be an
-    actual non-negative JSON integer; booleans and coercible strings/floats are
-    malformed durable state and must never be normalized by an acceptance path.
-    """
+    """Return the next canonical durable prompt count, or fail closed."""
     if "prompt_count" not in meta:
-        return 1
+        return None
     value = meta["prompt_count"]
     if type(value) is not int or value < 0:
         return None
@@ -1182,32 +1410,20 @@ def _next_prompt_count(meta: Meta) -> int | None:
 
 
 def _active_runner_flag(meta: Meta) -> bool | None:
-    """Return canonical durable runner-consumption authority.
-
-    ``active_runner`` is persisted JSON authority, so only literal booleans are
-    usable. Historical records that genuinely omit the field predate runner
-    reservations and safely mean inactive; present malformed values remain
-    distinguishable as ``None`` and must block authority-changing operations.
-    """
+    """Return canonical durable runner-consumption authority."""
     if "active_runner" not in meta:
-        return False
-    value = meta.get("active_runner")
+        return None
+    value = meta["active_runner"]
     if type(value) is not bool:
         return None
     return value
 
 
 def _delete_pending_flag(meta: Meta) -> bool | None:
-    """Return canonical durable deletion-tombstone authority.
-
-    Genuine field absence remains the legacy non-tombstone state. A present
-    value is lifecycle authority only when it is a literal JSON boolean;
-    malformed values remain distinguishable as ``None`` so callers can block
-    execution or deletion rather than normalizing through truthiness.
-    """
+    """Return canonical durable deletion-tombstone authority."""
     if "delete_pending" not in meta:
-        return False
-    value = meta.get("delete_pending")
+        return None
+    value = meta["delete_pending"]
     if type(value) is not bool:
         return None
     return value
@@ -1390,9 +1606,9 @@ class MalformedLifecycleStateError(ValueError):
 
 
 def _persisted_lifecycle_state(meta: Meta) -> str | None:
-    """Return canonical durable lifecycle state, preserving legacy absence as idle."""
+    """Return canonical durable lifecycle state."""
     if "state" not in meta:
-        return "idle"
+        return None
     value = meta["state"]
     if type(value) is not str or value not in PERSISTED_AGENT_STATES:
         return None
@@ -1571,8 +1787,7 @@ def reconcile_meta(aid: str) -> bool:
     _reconcile_dead_invocation(candidate)
     if candidate == current:
         return False
-    update_meta(aid, _reconcile_dead_invocation)
-    return True
+    return update_meta(aid, _reconcile_dead_invocation)
 
 
 # ---------------------------------------------------------------------------
@@ -1725,32 +1940,100 @@ def print_box(lines: list[str], max_width: int = 80) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _terminate_session_list_process(proc: subprocess.Popen[bytes]) -> None:
+    """Converge and reap one session-list process group owned by discovery."""
+    if proc.returncode is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            proc.kill()
+    try:
+        proc.wait(timeout=ABORT_REAP_SECONDS)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=ABORT_REAP_SECONDS)
+    except OSError:
+        return
+
+
+def _run_session_list() -> tuple[int, bytes] | None:
+    """Run the bounded supported session-list command at the subprocess boundary."""
+    try:
+        proc = subprocess.Popen(
+            [
+                "opencode",
+                "session",
+                "list",
+                "--format",
+                "json",
+                "--max-count",
+                str(SESSION_LIST_MAX_COUNT),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+    try:
+        raw, _ = proc.communicate(timeout=SESSION_LIST_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        _terminate_session_list_process(proc)
+        return None
+    except OSError:
+        _terminate_session_list_process(proc)
+        return None
+    return proc.returncode, raw
+
+
 def discover_session_id(aid: str) -> str | None:
-    """Find the underlying session id for a Antonina agent, if discoverable.
-
-    Args:
-        aid: Antonina agent ID.
-
-    Returns:
-        The underlying session ID, or ``None`` when undiscoverable.
-    """
-    db = opencode_db_path()
-    if not db:
+    """Discover one exact-title session through the supported OpenCode CLI."""
+    if _persisted_agent_id(aid) is None:
+        return None
+    result = _run_session_list()
+    if result is None:
+        return None
+    returncode, raw = result
+    if returncode != 0:
+        return None
+    if type(raw) is not bytes or len(raw) > SESSION_LIST_MAX_OUTPUT_BYTES:
         return None
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    except sqlite3.Error:
+        payload: object = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         return None
-    try:
-        row = conn.execute(
-            "SELECT id FROM session WHERE title=? ORDER BY time_created DESC LIMIT 1",
-            (OPENCODE_TITLE_PREFIX + aid,),
-        ).fetchone()
-    except sqlite3.Error:
+    if type(payload) is not list:
         return None
-    finally:
-        conn.close()
-    return row[0] if row else None
+
+    expected_title = OPENCODE_TITLE_PREFIX + aid
+    matches: list[tuple[str, float | int]] = []
+    for item in payload:
+        if type(item) is not dict:
+            return None
+        session_id = item.get("id")
+        title = item.get("title")
+        session_time = item.get("time")
+        if (
+            type(session_id) is not str
+            or not session_id
+            or type(title) is not str
+            or type(session_time) is not dict
+        ):
+            return None
+        created = session_time.get("created")
+        if not _is_canonical_timestamp(created):
+            return None
+        created_value = cast("float | int", created)
+        if title == expected_title:
+            matches.append((session_id, created_value))
+
+    if not matches:
+        return None
+    return max(matches, key=lambda match: (match[1], match[0]))[0]
 
 
 def _persisted_native_session_id(meta: Meta) -> str | None:
@@ -2013,7 +2296,8 @@ def runner(aid: str, mode: str) -> None:
         claimed["ok"] = True
 
     _test_sync("runner_preclaim")
-    update_meta(aid, claim)
+    if not update_meta(aid, claim):
+        return
     if not claimed.get("ok"):
         return
     # Deterministic test boundary after the exact claim committed but before
@@ -2189,7 +2473,8 @@ def _claim_pending_prompt(aid: str, prompt: str) -> bool:
         _clear_pending(m, prompt)
         claimed["ok"] = True
 
-    update_meta(aid, claim)
+    if not update_meta(aid, claim):
+        return False
     if not claimed.get("ok"):
         update_meta(aid, lambda m: _set_active_runner(m, value=False))
         return False
@@ -2255,7 +2540,14 @@ def _spawn_and_run(
         start = proc_start_ticks(proc.pid)
         # The record is conditional (issue #185): see ``_spawn_and_run``.
         blocked: dict[str, bool] = {}
-        update_meta(aid, _record_running(proc, start, iid, blocked))
+        try:
+            recorded = update_meta(aid, _record_running(proc, start, iid, blocked))
+        except BaseException:
+            _kill_unrecorded_invocation(aid, proc, start, iid)
+            raise
+        if not recorded:
+            _kill_unrecorded_invocation(aid, proc, start, iid)
+            return None
         if blocked.get("stopped"):
             # The freshly spawned invocation lost the race against stop/kill;
             # converge it instead of leaving it running untracked.
@@ -2319,7 +2611,8 @@ def _spawn_and_run(
         backend_error = _classify_backend_failure(
             ctx.log_path, invocation_log_start, rc, is_continue=is_continue
         )
-        update_meta(aid, _finalize_after(rc, backend_error))
+        if not update_meta(aid, _finalize_after(rc, backend_error)):
+            return None
 
     return rc
 
@@ -2527,6 +2820,8 @@ def _kill_unrecorded_invocation(
         # Positively converged: clear exactly this child's obligation, never
         # a newer one that may have been recorded meanwhile.
         _clear_unresolved(aid, proc.pid, start, iid)
+    else:
+        _hold_unrecorded(aid, proc.pid, start, iid)
 
 
 def _clear_unresolved(aid: str, pid: int, start: object, iid: str) -> None:
@@ -2932,7 +3227,7 @@ def _steer_sequence(meta: Meta) -> int | None:
 
 def _valid_steer_item(item: object, *, previous: int, sequence: int) -> bool:
     """Return whether one persisted steer item has canonical JSON shape."""
-    if type(item) is not dict:
+    if type(item) is not dict or set(item) != {"prompt", "queued_at", "seq"}:
         return False
     item_seq = item.get("seq")
     prompt = item.get("prompt")
@@ -2941,9 +3236,7 @@ def _valid_steer_item(item: object, *, previous: int, sequence: int) -> bool:
         type(item_seq) is int
         and previous < item_seq <= sequence
         and type(prompt) is str
-        and isinstance(queued_at, (int, float))
-        and not isinstance(queued_at, bool)
-        and math.isfinite(queued_at)
+        and _is_canonical_timestamp(queued_at)
     )
 
 
@@ -3179,14 +3472,18 @@ def spawn_runner(aid: str, mode: str, *, gen: int | None = None) -> None:
         env["ANTONINA_RUNNER_GEN"] = str(spawn_gen)
     else:
         meta = read_meta(aid)
-        if meta:
-            res = meta.get("runner_reservation")
-            if isinstance(res, dict):
-                spawn_gen = _runner_generation(res.get("gen"), minimum=1)
-                if spawn_gen is None:
-                    msg = "managed-agent runner generation is malformed"
-                    raise ValueError(msg)
-                env["ANTONINA_RUNNER_GEN"] = str(spawn_gen)
+        if meta is None:
+            message = f"agent metadata is unavailable or malformed: {aid}"
+            raise MetadataUpdateError(message)
+        res = meta.get("runner_reservation")
+        if not isinstance(res, dict):
+            message = "managed-agent runner generation is malformed"
+            raise ValueError(message)
+        spawn_gen = _runner_generation(res.get("gen"), minimum=1)
+        if spawn_gen is None:
+            message = "managed-agent runner generation is malformed"
+            raise ValueError(message)
+        env["ANTONINA_RUNNER_GEN"] = str(spawn_gen)
     subprocess.Popen(
         [sys.executable, str(script), "_runner", aid, mode],
         stdin=subprocess.DEVNULL,
@@ -3554,7 +3851,7 @@ def _resolve_session_mode(m: Meta) -> str | None:
     # Always rediscover under the lock: external session availability is the
     # authority, and a stale discovery before the lock must never authorize a
     # second ``new`` session.
-    discovered = discover_session_id(m.get("id", "")) or None
+    discovered = discover_session_id(_required_persisted_agent_id(m)) or None
     if recorded is not None and discovered is None:
         # A recorded underlying session that can no longer be found must fail
         # closed rather than silently starting a fresh one.
@@ -3784,13 +4081,18 @@ def _dispatch_invocation(args: argparse.Namespace, prompt: str) -> int:
     _test_sync("sc_observe")
 
     decision: dict[str, object] = {}
-    update_meta(
+    if not update_meta(
         aid,
         lambda m: _decide_invocation(m, decision, prompt=prompt, steer=steer),
-    )
+    ):
+        _err(f"{PROG}: unknown agent: {aid}")
+        return EXIT_NOT_FOUND
     _test_sync("sc_decide")
 
     action = decision.get("action")
+    if action not in {"busy", "error_session_gone", "reuse", "spawn"}:
+        _err(f"{PROG}: agent {aid} has no durable invocation decision")
+        return EXIT_ERROR
     if action == "error_session_gone":
         _err(f"{PROG}: cannot continue agent {aid}: its underlying session is not available")
         return EXIT_ERROR
@@ -4223,7 +4525,8 @@ def _status_cpu_seconds(meta: Meta, *, alive: bool) -> float | None:
     """
     if not alive:
         return None
-    return proc_cpu_seconds(meta.get("pid"))
+    pid = _process_identity_int(meta.get("pid"), minimum=1)
+    return proc_cpu_seconds(pid) if pid is not None else None
 
 
 def _status_steer_queue(meta: Meta) -> tuple[list[Meta] | None, str | None]:

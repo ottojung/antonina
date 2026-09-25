@@ -15,6 +15,7 @@ import os
 import shutil
 import signal
 import subprocess
+import time
 from pathlib import Path
 from typing import Final
 
@@ -78,6 +79,7 @@ def _claimed_reservation() -> dict[str, object]:
         "gen": 1,
         "owner_pid": os.getpid(),
         "owner_start_ticks": agent.proc_start_ticks(os.getpid()),
+        "reserved_at": time.time(),
         "state": "claimed",
         "mode": "new",
     }
@@ -85,7 +87,9 @@ def _claimed_reservation() -> dict[str, object]:
 
 def _decide(m: agent.Meta, *, prompt: str, steer: bool) -> dict[str, object]:
     decision: dict[str, object] = {}
-    agent._decide_invocation(m, decision, prompt=prompt, steer=steer)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(agent, "discover_session_id", lambda _aid: None)
+        agent._decide_invocation(m, decision, prompt=prompt, steer=steer)
     return decision
 
 
@@ -260,13 +264,20 @@ def test_invocation_liveness_stays_bound_to_pinned_identity(
 ) -> None:
     """Invocation liveness is accepted only through the pinned process."""
     meta = agent.idle_meta("aaaaaaaa", str(os.environ["XDG_STATE_HOME"]), None)
-    meta.update({"state": "running", "pid": 4242, "start_time": 111})
+    meta.update({
+        "state": "running",
+        "pid": 4242,
+        "pgid": 4242,
+        "start_time": 111,
+        "invocation_id": "0123456789abcdef0123456789abcdef",
+    })
     probes: list[tuple[int, int]] = []
     closed: list[int] = []
 
     monkeypatch.setattr(agent, "open_pidfd", lambda _pid: 77)
     monkeypatch.setattr(agent, "proc_start_ticks", lambda _pid: 111)
     monkeypatch.setattr(agent, "env_has_marker", lambda _pid, _aid: True)
+    monkeypatch.setattr(agent, "env_has_invocation", lambda _pid, _iid: True)
     monkeypatch.setattr(agent, "pidfd_send_signal", lambda fd, sig: probes.append((fd, sig)))
     monkeypatch.setattr(os, "close", closed.append)
 
@@ -285,6 +296,8 @@ def test_dead_pinned_invocation_cannot_authorize_prompt_reuse(
     monkeypatch.setattr(agent, "open_pidfd", lambda _pid: 77)
     monkeypatch.setattr(agent, "proc_start_ticks", lambda _pid: 111)
     monkeypatch.setattr(agent, "env_has_marker", lambda _pid, _aid: True)
+    monkeypatch.setattr(agent, "env_has_invocation", lambda _pid, _iid: True)
+    monkeypatch.setattr(agent, "discover_session_id", lambda _aid: None)
 
     def dead_pinned_invocation(fd: int, sig: int) -> None:
         probes.append((fd, sig))
@@ -295,7 +308,13 @@ def test_dead_pinned_invocation_cannot_authorize_prompt_reuse(
 
     for steer in (False, True):
         meta = agent.idle_meta("aaaaaaaa", str(os.environ["XDG_STATE_HOME"]), None)
-        meta.update({"state": "running", "pid": 4242, "start_time": 111})
+        meta.update({
+            "state": "running",
+            "pid": 4242,
+            "pgid": 4242,
+            "start_time": 111,
+            "invocation_id": "0123456789abcdef0123456789abcdef",
+        })
 
         decision = _decide(meta, prompt="work", steer=steer)
 
@@ -666,7 +685,7 @@ def test_canonical_runner_consumption_authority_preserves_transition_semantics(
     assert active_decision == {"action": "reuse", "interrupt": False}
 
 
-def test_delete_keeps_malformed_runner_consumption_authority_blocking(
+def test_delete_rejects_malformed_runner_consumption_authority(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Deletion never normalizes malformed durable runner authority."""
@@ -675,7 +694,6 @@ def test_delete_keeps_malformed_runner_consumption_authority_blocking(
     meta["active_runner"] = "false"
     agent.agent_dir("a11d").mkdir(parents=True)
     agent.write_meta("a11d", meta)
-    snapshot = agent._begin_delete("a11d", force=False)
-    assert snapshot is not None
-    assert snapshot["active_runner"] == "false"
-    assert not agent._delete_converged(snapshot)
+    with pytest.raises(agent.MetadataUpdateError, match="unavailable or malformed"):
+        agent._begin_delete("a11d", force=False)
+    assert agent.read_meta("a11d") is None

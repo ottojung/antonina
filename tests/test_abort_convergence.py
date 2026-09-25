@@ -128,15 +128,16 @@ def state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _running_meta(aid: str, pid: int, start: object, iid: str) -> agent.Meta:
     """Return running-agent metadata recording one exact invocation identity."""
-    return {
-        "id": aid,
+    meta = agent.idle_meta(aid, os.getcwd(), None)
+    meta.update({
         "state": "running",
         "pid": pid,
         "pgid": pid,
         "start_time": start,
         "invocation_id": iid,
         "active_runner": True,
-    }
+    })
+    return meta
 
 
 def test_abort_runner_signals_via_exact_identity_helper(
@@ -762,9 +763,11 @@ def _decide_with_marker(meta: agent.Meta) -> tuple[agent.Meta, dict[str, object]
     Returns:
         The mutated metadata and the recorded decision.
     """
+    current = agent.idle_meta(str(meta["id"]), os.getcwd(), None)
+    current.update(meta)
     decision: dict[str, object] = {}
-    agent._decide_invocation(meta, decision, prompt="replacement", steer=False)
-    return meta, decision
+    agent._decide_invocation(current, decision, prompt="replacement", steer=False)
+    return current, decision
 
 
 def test_unresolved_child_ambiguous_inspection_blocks_prompt(

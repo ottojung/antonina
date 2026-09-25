@@ -10,6 +10,7 @@ Proves that:
 from __future__ import annotations
 
 import argparse
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -28,16 +29,13 @@ _VARIANTS = ("a11ce", "A11CE", "a11Ce", "A11cE", "a11CE")
 
 
 def _idle_meta(aid: str = _CANONICAL) -> agent.Meta:
-    return {"id": aid, "state": "idle", "cwd": "/test", "created_at": 0.0}
+    return agent.idle_meta(aid, os.getcwd(), None)
 
 
 def _running_meta(aid: str = _CANONICAL) -> agent.Meta:
-    return {
-        "id": aid,
-        "state": "running",
-        "pending_prompt": None,
-        "runner_reservation": None,
-    }
+    meta = agent.idle_meta(aid, os.getcwd(), None)
+    meta["state"] = "running"
+    return meta
 
 
 def test_normalize_lowercase_passthrough() -> None:

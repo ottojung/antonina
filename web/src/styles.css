@@ -71,6 +71,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .create-form > div { display: flex; gap: 8px; }
 .create-form input { flex: 1; min-width: 0; }
 .create-form textarea { min-height: 76px; resize: vertical; }
+.create-form small { margin-bottom: 4px; color: var(--muted); font-size: .75rem; line-height: 1.45; }
 .resources-view { border-top: 1px solid var(--line); padding-bottom: 32px; }
 .workspace.resources-view { display: block; background: var(--paper); }
 .workspace.resources-view .issue-pane { border-right: 0; }
@@ -96,6 +97,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .description-heading h2, .messages > h2 { margin: 0; font-size: .82rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
 .description-heading button { color: #fff !important; }
 .issue-description textarea { min-height: 150px; resize: vertical; white-space: pre-wrap; }
+.section-guidance { margin: -2px 0 12px !important; color: var(--muted); font-size: .78rem !important; }
 .issue-description form > div { display: flex; gap: 8px; margin-top: 8px; }
 .issue-description form button:last-child { background: #e6e9e3; color: var(--ink); }
 .issue-description > p { margin: 0; white-space: pre-wrap; line-height: 1.65; }
@@ -131,6 +133,12 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .empty-state h2 { margin: 0; color: var(--ink); font-size: 1.05rem; }
 .empty-state p { max-width: 330px; margin: 8px auto 16px; font-size: .86rem; line-height: 1.55; }
 .empty-action-hint { display: block; color: var(--green-dark); font-size: .82rem; font-weight: 700; }
+
+.first-run-view { grid-template-columns: minmax(350px, 39%) minmax(0, 1fr); }
+.first-run-pane { padding-top: 1px; }
+.first-run-onboarding { align-self: center; justify-self: center; width: min(100% - 48px, 620px); }
+.first-run-onboarding h2 { margin: 3px 0 12px; color: var(--ink); font-size: clamp(1.8rem, 4vw, 2.6rem); letter-spacing: -.04em; line-height: 1.2; }
+.first-run-onboarding p:not(.eyebrow) { margin: 0 0 22px; color: var(--muted); font-size: 1rem; line-height: 1.65; }
 
 .thread { min-width: 0; display: flex; flex-direction: column; background: #f6f7f3; }
 .thread.welcome { justify-content: center; align-items: center; padding: 40px; text-align: center; color: var(--muted); }
@@ -214,7 +222,9 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
   .top-actions { gap: 3px; }
   .top-actions .quiet { padding: 8px; font-size: .78rem; }
   .notice { margin: 10px 12px 0; }
-  .workspace { display: block; min-height: 0; }
+  .workspace, .first-run-view { display: block; min-height: 0; }
+  .first-run-pane { border-right: 0; }
+  .first-run-onboarding { padding: 20px 0 48px; }
   .workspace.resources-view .resources-view { padding: 0 20px; }
   .issue-pane { border-right: 0; }
   .has-selection .issue-pane { display: none; }

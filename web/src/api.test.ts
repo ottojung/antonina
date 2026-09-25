@@ -102,28 +102,41 @@ describe('BoardApi', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it('creates a capability-write board and persists its capability', async () => {
+  it('returns a controlled missing-board signal after only a GET', async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(response({ error: 'not_found' }, 404));
+
+    await expect(new BoardApi({ fetch: fetcher }).loadBoard()).resolves.toBeNull();
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls[0][1]).toEqual({ cache: 'no-store' });
+  });
+
+  it('explicitly initializes a capability-write board, persists its key, and confirms it', async () => {
     const persisted = storage();
     const created = emptyBoard();
     const fetcher = vi.fn()
-      .mockResolvedValueOnce(response({ error: 'not_found' }, 404))
       .mockResolvedValueOnce(response({ ok: true, mode: 'capability-write', capability: CAPABILITY }, 201))
       .mockResolvedValueOnce(response(created, 200, '"created"'));
+    const client = new BoardApi({ fetch: fetcher, capability: null, capabilityStorage: persisted });
 
-    await expect(new BoardApi({ fetch: fetcher, capability: null, capabilityStorage: persisted }).ensureBoard()).resolves.toEqual(created);
-    expect(fetcher.mock.calls[1][1].headers['X-Skrynia-Mode']).toBe('capability-write');
+    await expect(client.initializeBoard()).resolves.toEqual({ board: created, initializedElsewhere: false });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[0][1]).toMatchObject({ method: 'POST', headers: { 'X-Skrynia-Mode': 'capability-write' } });
     expect(persisted.get('antonina:skrynia:capability:board-v1')).toBe(CAPABILITY);
+    expect(client.hasWriteAccess()).toBe(true);
+    expect(fetcher.mock.calls[1][1]).toEqual({ cache: 'no-store' });
   });
 
-  it('loads the winner and remains read-only when creation races without a capability', async () => {
+  it('loads the winner and remains read-only when initialization races', async () => {
     const winner = board([issue()]);
+    const persisted = storage();
     const fetcher = vi.fn()
-      .mockResolvedValueOnce(response({ error: 'not_found' }, 404))
       .mockResolvedValueOnce(response({ error: 'already_exists' }, 409))
       .mockResolvedValueOnce(response(winner, 200, '"winner"'));
-    const client = new BoardApi({ fetch: fetcher });
+    const client = new BoardApi({ fetch: fetcher, capabilityStorage: persisted });
 
-    await expect(client.ensureBoard()).resolves.toEqual(winner);
+    await expect(client.initializeBoard()).resolves.toEqual({ board: winner, initializedElsewhere: true });
+    expect(client.hasWriteAccess()).toBe(false);
+    expect(persisted.get('antonina:skrynia:capability:board-v1')).toBeNull();
     await expect(client.createIssue('Blocked')).rejects.toThrow('write capability is required');
   });
 

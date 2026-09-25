@@ -26,6 +26,11 @@ interface StoredBoard {
   etag: string;
 }
 
+export type BoardInitialization = {
+  board: Board;
+  initializedElsewhere: boolean;
+};
+
 export class AntoninaApiError extends Error {}
 
 type Mutation = (board: Board) => Board;
@@ -86,19 +91,11 @@ export class BoardApi {
     this.capabilityStorage?.remove(CAPABILITY_STORAGE_KEY);
   }
 
-  async loadBoard(): Promise<Board> {
-    const stored = await this.read();
-    if (!stored) throw new AntoninaApiError('Antonina board does not exist');
-    return stored.board;
+  async loadBoard(): Promise<Board | null> {
+    return (await this.read())?.board ?? null;
   }
 
-  async ensureBoard(): Promise<Board> {
-    return (await this.ensureStored()).board;
-  }
-
-  private async ensureStored(): Promise<StoredBoard> {
-    const existing = await this.read();
-    if (existing) return existing;
+  async initializeBoard(): Promise<BoardInitialization> {
     const response = await this.fetcher(this.url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Skrynia-Mode': 'capability-write' },
@@ -106,19 +103,18 @@ export class BoardApi {
     });
     if (response.status === 409) {
       const winner = await this.read();
-      if (!winner) throw new AntoninaApiError('Antonina board creation raced, but the board could not be read');
-      return winner;
+      if (!winner) throw new AntoninaApiError('Antonina board initialization raced, but the board could not be read');
+      return { board: winner.board, initializedElsewhere: true };
     }
     if (response.status !== 201) throw await this.httpError('POST', response);
     const created = (await response.json()) as { mode?: string; capability?: string };
     if (created.mode !== 'capability-write' || !created.capability) {
-      throw new AntoninaApiError('Skrynia did not return the capability for the Antonina board');
+      throw new AntoninaApiError('Skrynia did not return the editing key for the Antonina board');
     }
-    this.capability = created.capability;
-    this.capabilityStorage?.set(CAPABILITY_STORAGE_KEY, created.capability);
-    const stored = await this.read();
-    if (!stored) throw new AntoninaApiError('Antonina board could not be read after creation');
-    return stored;
+    this.setCapability(created.capability);
+    const confirmed = await this.read();
+    if (!confirmed) throw new AntoninaApiError('Antonina board could not be read after initialization');
+    return { board: confirmed.board, initializedElsewhere: false };
   }
 
   createIssue(title: string, body = ''): Promise<BoardIssue> {
@@ -152,7 +148,7 @@ export class BoardApi {
   }
 
   listResources(): Promise<BoardResource[]> {
-    return this.loadBoard().then((board) => board.resources);
+    return this.requireBoard().then((board) => board.resources);
   }
 
   addResourceDependency(host: string, path: string, issueNumber: number): Promise<BoardResource> {
@@ -210,7 +206,7 @@ export class BoardApi {
   }
 
   listIssues(): Promise<BoardIssue[]> {
-    return this.loadBoard().then((board) => board.issues);
+    return this.requireBoard().then((board) => board.issues);
   }
 
   getIssue(number: number): Promise<BoardIssue> {
@@ -270,9 +266,11 @@ export class BoardApi {
 
   private async mutate(mutate: Mutation): Promise<Board> {
     if (!this.capability) {
-      throw new AntoninaApiError('A Antonina write capability is required');
+      throw new AntoninaApiError('An Antonina write capability is required');
     }
-    let stored = await this.ensureStored();
+    const initial = await this.read();
+    if (!initial) throw new AntoninaApiError('Antonina board does not exist; initialize it before editing');
+    let stored = initial;
     for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
       const response = await this.fetcher(this.url, {
         method: 'PUT',
@@ -293,6 +291,12 @@ export class BoardApi {
       return (await this.read())?.board ?? this.requireReadAfterWrite();
     }
     throw new AntoninaApiError('Antonina board changed too often; the conditional write was not committed');
+  }
+
+  private async requireBoard(): Promise<Board> {
+    const board = await this.loadBoard();
+    if (!board) throw new AntoninaApiError('Antonina board does not exist; initialize it before use');
+    return board;
   }
 
   private async read(): Promise<StoredBoard | null> {

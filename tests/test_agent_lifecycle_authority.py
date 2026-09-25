@@ -94,7 +94,7 @@ def test_locked_transition_does_not_repair_malformed_state_into_runner_authority
     monkeypatch.setattr(agent, "reservation_in_flight", lambda _m: False)
 
     with pytest.raises(agent.MalformedLifecycleStateError):
-        agent._apply_locked_transition(meta, decision, prompt="P", steer=False, mode="new")
+        agent._apply_locked_transition(meta, decision, prompt="P", steer=False)
 
     assert decision == {}
     assert meta == before

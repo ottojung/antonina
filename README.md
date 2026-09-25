@@ -2,6 +2,8 @@
 
 Antonina is the standalone optional agent runtime. It manages long-running local agent sessions behind the `antonina` command, with durable metadata, logs, process-group lifecycle control, and model backend integration.
 
+The runtime is derived from Lubko and is licensed under the GNU Affero General Public License version 3 only (`AGPL-3.0-only`); see [`LICENSE`](LICENSE).
+
 ## Independence
 
 The runtime uses only the Python standard library and does not depend on the Lubko Python package. Antonina can be installed and operated independently of the Lubko connector and execution transport.

@@ -312,21 +312,15 @@ So just save time and not consider them at all.
 - Clean design is the default. Legacy support must justify its existence explicitly.
 - A clean review with no findings is better than speculative feedback.
 
-## Lifecycle/supervisor state safety
+## Agent/session state safety
 
-Antonina's committed test suite redirects every XDG-backed state root to pytest-owned
-temporary directories before any test runs, and asserts the whole session never
-touches ambient (production-like) state or processes. Reviews must preserve and
-rely on that isolation, and must treat any lifecycle/supervisor test or helper
-that could write ambient user state as an Error.
+Antonina's committed test suite redirects its XDG-backed state root to pytest-owned
+temporary directories before any test runs. Reviews must preserve that isolation and
+must treat any agent or session test or helper that could write ambient user state
+as an Error.
 
-The same rule applies to manual orchestration and review experiments: never
-mutate the ambient Antonina lifecycle/supervisor state tree. Durable
-state-mutating experiments against `antonina-deploy`, the `antonina-supervisor`
-daemon, `worker/meta.json`, `worker/rollback.json`, or `supervisor/*.json` must
-run with explicit temporary XDG roots (for example `XDG_STATE_HOME=$(mktemp -d)`
-or a dedicated scratch container), never against the live environment's state.
-Ordinary worker restarts and probes run from the sealed per-commit runtime and
-must remain functional even when the source checkout is modified or deleted;
-there is no supported in-environment stopped state, and the only supported way
-to fully stop Antonina is to stop its container/environment.
+The same rule applies to manual experiments: never mutate the ambient Antonina
+agent state tree. Durable state-mutating experiments must run with an explicit
+temporary XDG root such as `XDG_STATE_HOME=$(mktemp -d)`, or in a dedicated
+scratch environment. Review only Antonina's actual agent/session state and
+process behavior; do not invent additional runtime components or commands.

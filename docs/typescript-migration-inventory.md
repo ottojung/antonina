@@ -44,15 +44,14 @@ The TypeScript runtime must port behavior, not merely command names.
 
 Primary sources: `src/antonina/durable.py`, `tests/test_pending_prompt_metadata.py`, `tests/test_prompt_count_authority.py`, `tests/test_runner_claim_generation_strict.py`, `tests/test_runner_generation_authority.py`, `tests/test_runner_reservation_mode.py`, `tests/test_runner_reservation_state.py`, and the preserved #7/#8 work at `af7bb216e9e38d84643fc190aa26c0cf6f8c13cb`.
 
-### Exact process ownership and signalling
+### Process ownership and signalling
 
 - Never infer ownership from process names.
-- A managed invocation is identified by exact process evidence: PID/process-group identity, process start time, and a 32-hex `ANTONINA_INVOCATION_ID` inherited through the invocation tree.
-- A runner likewise has exact persisted PID/start-time/agent-marker identity.
-- Unreadable or malformed process evidence is ambiguous, not evidence of death and never signalling authority.
-- PID/PGID reuse must not let a stale Antonina record signal a newer unrelated process.
+- Persist PID, process start time, agent ID, and invocation ID, and check that evidence before signalling when it is available.
+- The TypeScript migration does **not** preserve the old pidfd-level guarantee against the narrow race where a PID is recycled between the final identity check and Node's numeric signal syscall. This is an intentional simplification accepted for #28.
+- Ordinary Node process signalling is sufficient. Keep checks conservative around malformed metadata, but do not add native addons solely to reproduce Python's pidfd guarantees.
 
-Primary sources: `src/antonina/_exact_signal.py`, `src/antonina/_process_group.py`, `tests/test_agent_invocation_group_authority.py`, `tests/test_agent_signal_capability.py`, `tests/test_agent_id_liveness_authority.py`, and `tests/test_abort_convergence.py`.
+Primary sources for behavior worth retaining: `tests/test_agent_id_liveness_authority.py`, `tests/test_agent_invocation_group_authority.py`, and lifecycle/convergence tests. The pidfd-specific delivery tests are not migration blockers.
 
 ### Runner reservation, prompting, and steering
 
@@ -66,8 +65,8 @@ Primary sources: `tests/test_runner_exit_authority.py`, `tests/test_agent_backen
 
 ### Stop, kill, delete, and clean convergence
 
-- `stop` and `kill` target the exact currently owned invocation. If a newer invocation wins a race, it is left untouched and the stale operation fails rather than terminalizing the newer work.
-- Stop first uses graceful termination and then exact forced convergence; successful return means the targeted process group/runner authority is positively gone.
+- `stop` and `kill` target the currently recorded invocation after validating its persisted identity as far as Node can reasonably observe it.
+- Stop first uses graceful termination and may escalate to forced termination. Numeric PID/PGID signalling races are accepted; native pidfd machinery is out of scope.
 - Stop/kill also cancel reserved-but-not-yet-started runner work; they may not report quiescence while accepted work could still execute.
 - `delete` first records a durable deletion tombstone under the metadata lock, then converges every exact runner/invocation identity before removing state. Failure to prove convergence preserves retryable state.
 - `clean` uses the same safe deletion machinery; dry-run is observation-only and races that make a candidate live cause it to be skipped, never killed by retention cleanup.
@@ -80,6 +79,6 @@ Primary sources: `tests/test_stop_convergence.py`, `tests/test_agent_stop_author
 2. TypeScript board CLI reaches behavioral parity while Python board tests remain green; only then may the public board path cut over.
 3. Agent metadata/durable I/O and process-identity primitives are ported with direct invariant tests.
 4. Runner/prompt/steer lifecycle is ported and exercised against a controllable fake backend plus real process-race tests.
-5. Stop/kill/delete/clean convergence tests pass in Node, including PID reuse/ambiguous `/proc` cases.
+5. Stop/kill/delete/clean convergence tests pass in Node for ordinary lifecycle behavior and malformed-state handling; pidfd-specific PID-reuse guarantees are not required.
 6. The canonical `antonina` executable switches to built JavaScript. Python production code and packaging are removed in the same completion sequence rather than retained as an alternate runtime.
 7. CI tests the built artifact itself, and ordinary execution hosts need Node.js plus intentionally external tools such as OpenCode, not Python or a TypeScript compiler.

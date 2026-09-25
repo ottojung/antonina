@@ -1,45 +1,69 @@
 # Durable host resources
 
-Use this skill when scheduled or agentic work creates, uses, or hands off a durable host filesystem location. A resource is a host and canonical absolute POSIX path, such as `lubko://phoebe-dev` plus `/workspace/project-worktree`; the path may be a file or directory.
+## Purpose
 
-Resource registration is dependency and liveness metadata, not exclusive ownership or a lock. Multiple open Antonina issues may depend on one resource. Every number in these commands is an **Antonina BOARD issue number**, never a GitHub issue number.
+Use this skill when scheduled or agentic work creates, uses, or hands off a durable host filesystem location. A resource is a host and an absolute path, such as `lubko://phoebe-dev` plus `/workspace/project-worktree`; the path may be a file or directory.
 
-## Garbage collection semantics
-
-A deterministic garbage collector runs regularly on hosts, but it is deliberately opaque to agents. Agents do not know when a collection pass will happen and must never plan around cadence or timing.
-
-Any path not protected by at least one open Antonina board issue may disappear at any time. A resource is protected while any dependent issue is open and collectible when all dependents are closed. Closing the last open dependent issue can make the resource collectible immediately; do not rely on a grace period.
+Resource registration is dependency and liveness metadata, not exclusive ownership or a lock. Multiple open board issues may depend on one resource. Use board issue numbers, never GitHub issue numbers.
 
 ## Commands
 
+Inspect resources before relying on or closing work:
+
 ```sh
 antonina board resource list [--host HOST] [--issue NUMBER]
-antonina board resource add ISSUE HOST PATH
-antonina board resource remove ISSUE HOST PATH
 ```
 
-`--host` and `--issue` narrow inspection; verify registrations rather than assuming a command succeeded.
+Register a dependency for an open board issue:
 
-## Safe handoff
+```sh
+antonina board resource add ISSUE HOST PATH
+antonina board resource add 412 lubko://phoebe-dev /workspace/project-worktree
+```
 
-1. Inspect the old issue's resources.
-2. Add the follow-up open issue dependency first.
-3. Verify the resource list output includes the follow-up dependency and shows it protected.
-4. Only then close the old issue or remove the old dependency.
+Remove a dependency once it is genuinely no longer needed:
 
-For example, hand off `/workspace/project-worktree` from Antonina board issue `412` to open follow-up issue `419`:
+```sh
+antonina board resource remove 412 lubko://phoebe-dev /workspace/project-worktree
+```
+
+`--host` and `--issue` narrow inspection; use the output to verify registrations rather than assuming a command succeeded.
+
+## Rules
+
+- Register a path before relying on it across steps, invocations, or leaving it behind for later work.
+- A resource is protected while any dependent board issue is open. It is collectible when all dependent issues are closed.
+- Before closing an issue, inspect its resources. If a path must survive for follow-up work, add the open follow-up issue first, verify the registration, then close or remove the old dependency as appropriate. Do not close the last open dependent until the handoff is verified.
+- Remove dependencies when they are genuinely no longer needed. Closing the last open dependent may make the path collectible immediately.
+- Never plan around a grace period or garbage-collection cadence. The collector is deliberately opaque and runs regularly; treat an unprotected path as deletable immediately.
+- The garbage collector implementation is out of scope; agents need only follow this registration and handoff protocol.
+
+## Examples
+
+Inspect the resources for a board issue:
 
 ```sh
 antonina board resource list --issue 412
+```
+
+Register a shared worktree for the current issue and a follow-up issue:
+
+```sh
+antonina board resource add 412 lubko://phoebe-dev /workspace/project-worktree
+antonina board resource add 419 lubko://phoebe-dev /workspace/project-worktree
+antonina board resource list --host lubko://phoebe-dev
+```
+
+Hand off a path, remove the old dependency only after the new one is verified, and then close the old issue:
+
+```sh
 antonina board resource add 419 lubko://phoebe-dev /workspace/project-worktree
 antonina board resource list --issue 419
 antonina board resource remove 412 lubko://phoebe-dev /workspace/project-worktree
 ```
 
-Unregister a path when no issue needs it:
+Unregister a path when the issue no longer needs it:
 
 ```sh
 antonina board resource remove 419 lubko://phoebe-dev /workspace/project-worktree
 ```
-
-Host values are `lubko://<server>` with no trailing slash; paths are canonical absolute POSIX paths.

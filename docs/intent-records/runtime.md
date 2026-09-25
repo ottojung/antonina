@@ -20,4 +20,4 @@ date: 2026/09/25
 source: issue-3
 kind: requirement
 
-The public command is `antonina`. Alternate historical command names or compatibility launchers are not part of the product contract.
+The public command is `antonina`. Its public namespaces are exactly `antonina agent ...` for managed-agent operations and `antonina board ...` for board operations. Direct agent commands and alternate compatibility launchers are not part of the product contract.

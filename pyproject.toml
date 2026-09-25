@@ -16,7 +16,7 @@ dev = [
 ]
 
 [project.scripts]
-antonina = "antonina.agent:main"
+antonina = "antonina.cli:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -262,8 +262,8 @@ def _parse_message(value: object) -> BoardMessage:
     return cast("BoardMessage", message)
 
 
-def _parse_issue(value: object) -> BoardIssue:
-    """Validate one canonical issue.
+def _parse_issue(value: object, *, legacy: bool = False) -> BoardIssue:
+    """Validate one canonical issue, accepting the deployed v1 shape.
 
     Returns:
         The validated issue.
@@ -275,13 +275,15 @@ def _parse_issue(value: object) -> BoardIssue:
     if not isinstance(value, dict):
         raise BoardError(error)
     raw = cast("dict[str, object]", value)
-    expected = frozenset({"number", "title", "body", "state", "createdAt", "updatedAt", "messages"})
+    expected = frozenset({"number", "title", "state", "createdAt", "updatedAt", "messages"})
+    if not legacy:
+        expected |= {"body"}
     if not _exact_keys(raw, expected):
         raise BoardError(error)
     valid = (
         _is_positive_int(raw["number"])
         and _is_non_empty_text(raw["title"])
-        and isinstance(raw["body"], str)
+        and (legacy or isinstance(raw["body"], str))
         and isinstance(raw["state"], str)
         and raw["state"] in {"open", "closed"}
         and _timestamp_seconds(raw["createdAt"]) is not None
@@ -290,7 +292,7 @@ def _parse_issue(value: object) -> BoardIssue:
     )
     if not valid:
         raise BoardError(error)
-    issue = cast("BoardIssue", raw)
+    issue = cast("BoardIssue", {**raw, "body": "" if legacy else raw["body"]})
     issue["messages"] = [
         _parse_message(message) for message in cast("list[object]", raw["messages"])
     ]
@@ -357,7 +359,7 @@ def _parse_resource(value: object, issue_numbers: set[int]) -> BoardResource:
 
 
 def parse_board(value: object) -> Board:
-    """Parse and validate the canonical Antonina v2 board.
+    """Parse deployed v1 or canonical Antonina v2 board data.
 
     Returns:
         The canonical v2 board.
@@ -370,21 +372,30 @@ def parse_board(value: object) -> Board:
         raise BoardError(error)
     raw = cast("dict[str, object]", value)
     version = raw.get("schemaVersion")
-    expected = frozenset({"schemaVersion", "nextIssueNumber", "issues", "resources"})
+    legacy = version == 1
+    expected = (
+        frozenset({"schemaVersion", "nextIssueNumber", "issues"})
+        if legacy
+        else frozenset({"schemaVersion", "nextIssueNumber", "issues", "resources"})
+    )
     if (
         not _exact_keys(raw, expected)
-        or version != BOARD_SCHEMA_VERSION
+        or version not in {1, BOARD_SCHEMA_VERSION}
         or not _is_positive_int(raw["nextIssueNumber"])
         or not isinstance(raw["issues"], list)
     ):
         raise BoardError(error)
-    issues = [_parse_issue(issue) for issue in cast("list[object]", raw["issues"])]
+    issues = [_parse_issue(issue, legacy=legacy) for issue in cast("list[object]", raw["issues"])]
     numbers = {item["number"] for item in issues}
     next_issue_number = cast("int", raw["nextIssueNumber"])
     if len(numbers) != len(issues) or next_issue_number <= (max(numbers) if numbers else 0):
         msg = "Antonina board issue number counter is inconsistent with its issues"
         raise BoardError(msg)
-    resources = [_parse_resource(item, numbers) for item in cast("list[object]", raw["resources"])]
+    resources = (
+        [_parse_resource(item, numbers) for item in cast("list[object]", raw["resources"])]
+        if not legacy
+        else []
+    )
     keys = [(item["host"], item["path"]) for item in resources]
     if len(keys) != len(set(keys)):
         msg = "Antonina board contains duplicate resources"
@@ -612,7 +623,7 @@ class BoardClient:
 
         Args:
             number: Dependent issue number.
-            host: Canonical Lubko host.
+            host: Canonical resource host.
             path: Canonical absolute POSIX path.
 
         Returns:
@@ -661,7 +672,7 @@ class BoardClient:
 
         Args:
             number: Dependent issue number.
-            host: Canonical Lubko host.
+            host: Canonical resource host.
             path: Canonical absolute POSIX path.
 
         Returns:

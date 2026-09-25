@@ -9,8 +9,10 @@
     "exactOptionalPropertyTypes": true,
     "useUnknownInCatchVariables": true,
     "skipLibCheck": true,
+    "types": ["node"],
+    "typeRoots": ["../../web/node_modules/@types"],
     "outDir": "dist",
     "rootDir": "../.."
   },
-  "include": ["src/**/*.ts", "../core/src/**/*.ts"]
+  "include": ["src/**/*.ts", "../core/src/**/*.ts", "../agent-runtime/src/**/*.ts"]
 }

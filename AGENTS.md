@@ -5,6 +5,8 @@ Antonina is a Python 3.12+ command-line runtime for long-lived local coding-agen
 ## Architecture
 
 - `src/antonina/agent.py` owns the CLI and managed-session lifecycle.
+- `src/antonina/board.py` owns the stdlib board/resource client and `antonina board` commands.
+- `web/` is the Antonina-owned Node/Vite board app; its Skrynia namespace is `antonina` and key is `board-v1`.
 - `src/antonina/_exact_signal.py` and `_process_group.py` provide exact process identity/signalling primitives.
 - `src/antonina/durable.py` provides crash-durable local state writes.
 - Durable user state lives under `$XDG_STATE_HOME/antonina` (default `$HOME/.local/state/antonina`).

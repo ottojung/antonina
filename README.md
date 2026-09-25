@@ -1,6 +1,6 @@
 # Antonina
 
-Antonina manages long-running local AI coding-agent sessions through a small command-line interface. It keeps durable session metadata and logs, preserves working-directory and native-session identity, and provides explicit controls for prompting, steering, waiting, stopping, killing, deleting, and cleaning sessions.
+Antonina manages long-running local AI coding-agent sessions through a small command-line interface. It also provides the Antonina board, a shared issue and durable-resource registry backed by Skrynia.
 
 Antonina currently uses OpenCode as its coding-agent backend. OpenCode is an external executable; Antonina itself has no third-party Python runtime dependencies.
 
@@ -27,9 +27,22 @@ antonina log --id a13f09c2
 antonina wait --id a13f09c2
 ```
 
-Lifecycle controls are available through `stop`, `kill`, `delete`, and `clean`. Use `antonina --help` or `antonina <command> --help` for the complete CLI.
+Lifecycle controls are available through `stop`, `kill`, `delete`, and `clean`. The board is available as `antonina board`; set `ANTONINA_BOARD_CAPABILITY` for writes. Use `antonina --help` or `antonina <command> --help` for the complete CLI.
 
 State is stored under `$XDG_STATE_HOME/antonina`, defaulting to `$HOME/.local/state/antonina`.
+
+## Web board
+
+The Antonina web board is a Node/Vite app under `web/` and stores canonical schema version 2 in the `antonina` Skrynia namespace with key `board-v1`. Build it with:
+
+```sh
+cd web
+npm ci
+npm test
+npm run build
+```
+
+The deployed web app supports Issues and Resources views, issue bodies separate from comments, writable open-issue bodies, and resource dependency protection. The Python board CLI is stdlib-only and uses ETag compare-and-swap.
 
 ## Development
 

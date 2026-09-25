@@ -6008,6 +6008,11 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     argv = list(argv) if argv is not None else sys.argv[1:]
 
+    if argv and argv[0] == "board":
+        from antonina.board import main as board_main
+
+        return board_main(argv[1:])
+
     # Hidden internal entry point used by the background runner.
     if argv and argv[0] == "_runner":
         if len(argv) != RUNNER_ARGV_LENGTH:

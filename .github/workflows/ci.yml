@@ -43,10 +43,14 @@ jobs:
         run: npm ci --prefix web
       - name: Typecheck shared core
         run: ./web/node_modules/.bin/tsc -p packages/core/tsconfig.json
+      - name: Typecheck agent runtime
+        run: ./web/node_modules/.bin/tsc -p packages/agent-runtime/tsconfig.json
       - name: Typecheck CLI
         run: ./web/node_modules/.bin/tsc -p packages/cli/tsconfig.json
       - name: Core tests
         run: node --test packages/core/test/*.test.mjs
+      - name: Agent runtime tests
+        run: node --test packages/agent-runtime/test/*.test.mjs
       - name: CLI tests
         run: node --test packages/cli/test/*.test.mjs
       - name: Web tests

@@ -26,6 +26,7 @@ import {
 } from './process.js';
 
 export const PID_START_WINDOW_SECONDS = 60;
+export const RUNNER_RESERVATION_GRACE_SECONDS = 5;
 
 export interface InvocationIdentity extends ProcessIdentity {
   pgid: number;
@@ -224,7 +225,19 @@ export function beginStopLike(meta: AgentMetadata, intent: 'stop' | 'kill', now:
   return true;
 }
 
-export function reservationInFlight(meta: AgentMetadata): boolean {
+function reservationOwnerAlive(reservation: Record<string, unknown>): boolean {
+  const ownerPid = persistedProcessInteger(reservation.owner_pid, 1);
+  const ownerStart = persistedProcessInteger(reservation.owner_start_ticks, 0);
+  if (ownerPid === null || ownerStart === null) return false;
+  try {
+    process.kill(ownerPid, 0);
+  } catch {
+    return false;
+  }
+  return procStartTicks(ownerPid) === ownerStart;
+}
+
+export function reservationInFlight(meta: AgentMetadata, now = Date.now() / 1000): boolean {
   const active = activeRunnerFlag(meta);
   if (active === null) return true;
   if (!active) return false;
@@ -233,7 +246,29 @@ export function reservationInFlight(meta: AgentMetadata): boolean {
   if (state === 'malformed') return true;
   if (state !== 'reserved') return false;
   const reservation = meta.runner_reservation as Record<string, unknown>;
-  return runnerGeneration(reservation.gen, 1) !== null && runnerReservationMode(reservation) !== null;
+  if (runnerGeneration(reservation.gen, 1) === null || runnerReservationMode(reservation) === null) return true;
+  const reservedAt = persistedTimestamp(reservation.reserved_at);
+  if (reservedAt !== null && now >= reservedAt && now - reservedAt < RUNNER_RESERVATION_GRACE_SECONDS) return true;
+  return reservationOwnerAlive(reservation);
+}
+
+export function reconcileDeadMeta(meta: AgentMetadata, now = Date.now() / 1000): boolean {
+  if (persistedLifecycleState(meta) !== 'running') return false;
+  if (invocationAlive(meta) || runnerAlive(meta) || reservationInFlight(meta, now)) return false;
+  if (meta.pid === null || meta.pid === undefined) {
+    const launched = persistedTimestamp(meta.started_at) ?? persistedTimestamp(meta.created_at);
+    if (launched !== null && now >= launched && now - launched < PID_START_WINDOW_SECONDS) return false;
+  }
+  finalizeTerminal(
+    meta,
+    'failed',
+    now,
+    null,
+    null,
+    'runner/model process disappeared without a captured exit status',
+  );
+  setActiveRunner(meta, false);
+  return true;
 }
 
 export function signalInvocation(

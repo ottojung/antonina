@@ -433,16 +433,19 @@ def test_capability_is_never_reflected_in_http_errors() -> None:
     assert capability not in str(raised.value)
 
 
-def test_noncanonical_board_schema_is_rejected() -> None:
-    """Only canonical schema version 2 is accepted."""
+def test_v1_board_is_normalized_to_v2_in_memory() -> None:
+    """A deployed v1 board is normalized in memory to canonical v2."""
     raw = cast("dict[str, object]", json.loads(json.dumps(board())))
     raw["schemaVersion"] = 1
     raw.pop("resources")
     for raw_issue in cast("list[dict[str, object]]", raw["issues"]):
         raw_issue.pop("body")
 
-    with pytest.raises(BoardError):
-        parse_board(raw)
+    parsed = parse_board(raw)
+
+    assert parsed["schemaVersion"] == 2
+    assert parsed["resources"] == []
+    assert not parsed["issues"][0]["body"]
 
 
 def test_resource_schema_rejects_noncanonical_or_invalid_dependencies() -> None:

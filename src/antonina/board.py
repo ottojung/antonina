@@ -385,9 +385,7 @@ def parse_board(value: object) -> Board:
         or not isinstance(raw["issues"], list)
     ):
         raise BoardError(error)
-    issues = [
-        _parse_issue(issue, legacy=legacy) for issue in cast("list[object]", raw["issues"])
-    ]
+    issues = [_parse_issue(issue, legacy=legacy) for issue in cast("list[object]", raw["issues"])]
     numbers = {item["number"] for item in issues}
     next_issue_number = cast("int", raw["nextIssueNumber"])
     if len(numbers) != len(issues) or next_issue_number <= (max(numbers) if numbers else 0):

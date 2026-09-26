@@ -24,11 +24,17 @@ function fakeSkrynia() {
   const capability = 'a'.repeat(64);
   let signed = null;
   let revision = 0;
+  let beforePut = null;
   const etag = () => `"v${revision}"`;
 
   return {
     capability,
     get signed() { return signed; },
+    set beforePut(value) { beforePut = value; },
+    bump(value) {
+      signed = structuredClone(value);
+      revision += 1;
+    },
     async fetch(url, init = {}) {
       const method = init.method ?? 'GET';
       if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
@@ -45,6 +51,11 @@ function fakeSkrynia() {
         const headers = new Headers(init.headers);
         if (headers.get('X-Skrynia-Capability') !== capability) {
           return jsonResponse({ error: 'invalid capability' }, 403);
+        }
+        if (beforePut) {
+          const hook = beforePut;
+          beforePut = null;
+          await hook();
         }
         if (headers.get('If-Match') !== etag()) return new Response(null, { status: 412 });
         signed = JSON.parse(String(init.body));
@@ -462,4 +473,109 @@ test('read commands report an unverifiable board and a missing board as differen
     await assert.rejects(read, BoardMissingError);
   }
   assert.equal(await absent.readBoard(), null);
+});
+
+test('reorderQueue commits the requested order and getQueue reads it back', async () => {
+  const server = fakeSkrynia();
+  const client = api(server);
+  await client.initialize();
+  await client.createIssue('One');
+  await client.createIssue('Two');
+  await client.createIssue('Three');
+
+  const committed = await client.reorderQueue([3, 1, 2]);
+
+  assert.deepEqual(committed, [3, 1, 2]);
+  assert.deepEqual(await client.getQueue(), [3, 1, 2]);
+  assert.equal(server.signed.operations.at(-1).kind, 'queue.reorder');
+  assert.deepEqual(server.signed.operations.at(-1).payload, { numbers: [3, 1, 2] });
+});
+
+test('a reordered queue is durable for a fresh client that only loads the stored log', async () => {
+  const server = fakeSkrynia();
+  const writer = api(server);
+  const initialized = await writer.initialize();
+  await writer.createIssue('One');
+  await writer.createIssue('Two');
+  await writer.reorderQueue([2, 1]);
+
+  const fresh = api(server, { trustAnchor: initialized.trustAnchor });
+  assert.deepEqual(await fresh.getQueue(), [2, 1]);
+  assert.equal(fresh.hasWriteAccess(), false, 'a reader sees the order without being able to change it');
+});
+
+test('a rejected queue permutation leaves the stored log and the queue unchanged', async () => {
+  const server = fakeSkrynia();
+  const methods = [];
+  const client = api(server, {
+    fetch: async (url, init = {}) => { methods.push(init.method ?? 'GET'); return server.fetch(url, init); },
+  });
+  await client.initialize();
+  await client.createIssue('One');
+  await client.createIssue('Two');
+  await client.reorderQueue([2, 1]);
+  const stored = server.signed;
+
+  // A partial list and an unknown number fail the open-issue invariant; a
+  // duplicated one is refused earlier, by the payload parser.
+  for (const [invalid, refusal] of [
+    [[1], /every open issue exactly once/],
+    [[2, 1, 1], /Queue-reorder payload is malformed/],
+    [[1, 99], /every open issue exactly once/],
+  ]) {
+    await assert.rejects(() => client.reorderQueue(invalid), refusal);
+    assert.equal(server.signed, stored, 'a rejected permutation must not write');
+    assert.deepEqual(await client.getQueue(), [2, 1]);
+  }
+  assert.equal(methods.includes('PUT'), true, 'the accepted reorder did write once');
+  assert.equal(server.signed.operations.length, 4);
+});
+
+test('reorderQueue without the queue.reorder capability writes nothing', async () => {
+  const server = fakeSkrynia();
+  const root = api(server);
+  const initialized = await root.initialize();
+  await root.createIssue('One');
+  await root.createIssue('Two');
+  const child = await root.delegateCredential(['issue.create']);
+  const stored = server.signed;
+
+  const delegated = api(server, {
+    credential: child,
+    trustAnchor: initialized.trustAnchor,
+    rememberedHead: root.getRememberedHead(),
+  });
+  await assert.rejects(() => delegated.reorderQueue([2, 1]), /lacks required capability queue\.reorder/);
+
+  assert.equal(server.signed, stored, 'a credential without the capability must not write');
+  assert.deepEqual(await root.getQueue(), [1, 2]);
+});
+
+test('a queue reorder survives the ETag conflict of a concurrent valid writer', async () => {
+  const server = fakeSkrynia();
+  const root = api(server);
+  const initialized = await root.initialize();
+  await root.createIssue('One');
+  await root.createIssue('Two');
+  await root.createIssue('Three');
+  const operationsBefore = server.signed.operations.length;
+
+  const rival = api(server, {
+    credential: initialized.credential,
+    trustAnchor: initialized.trustAnchor,
+    rememberedHead: root.getRememberedHead(),
+  });
+  // The rival commits a comment between this client's read and its write, so the
+  // first PUT is refused with 412 and the reorder has to converge on retry.
+  server.beforePut = async () => { await rival.comment(1, 'rival', 'racing'); };
+
+  const committed = await root.reorderQueue([3, 1, 2]);
+
+  assert.deepEqual(committed, [3, 1, 2]);
+  assert.deepEqual(await root.getQueue(), [3, 1, 2]);
+  assert.equal(server.signed.operations.length, operationsBefore + 2, 'the rival and the retry both committed');
+  assert.deepEqual(
+    server.signed.operations.slice(operationsBefore).map((operation) => operation.kind),
+    ['issue.comment', 'queue.reorder'],
+  );
 });

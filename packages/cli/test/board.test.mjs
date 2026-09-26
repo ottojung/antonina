@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BoardApi } from '../../core/dist/api.js';
-import { serializeBoardCredential, serializeBoardTrustAnchor } from '../../core/dist/credential.js';
+// The CLI compiles its own copy of packages/core, so the test drives the exact
+// module graph the shipped executable runs, including its error identities.
+import { BoardApi } from '../dist/packages/core/src/api.js';
+import { serializeBoardCredential, serializeBoardTrustAnchor } from '../dist/packages/core/src/credential.js';
 import { runBoardCommand, BOARD_CREDENTIAL_ENV, BOARD_TRUST_ENV } from '../dist/packages/cli/src/board.js';
 
 const STAMP = '2026-09-25T12:00:00.000Z';
@@ -102,11 +104,49 @@ test('no board CLI command creates a missing board', async () => {
   for (const command of [['list'], ['access'], ['queue', 'list'], ['create', 'Mine']]) {
     const { code, err } = await run(command, { createClient: () => reader });
     assert.equal(code, 1, command.join(' '));
-    assert.match(err[0], /does not exist|credential is required|already exists|required/);
+    assert.match(err[0], /^antonina board: /, command.join(' '));
   }
 
   assert.equal(methods.includes('POST'), false);
   assert.equal(server.signed, null);
+});
+
+test('every read command names initialization while the board is missing', async () => {
+  const server = fakeSkrynia();
+  const missing = 'antonina board: Antonina signed board does not exist; run: antonina board initialize to create it';
+
+  for (const command of [['list'], ['list', '--json'], ['show', '1'], ['queue', 'list'], ['resource', 'list']]) {
+    const { code, err } = await run(command, { createClient: () => client(server) });
+    assert.equal(code, 1, command.join(' '));
+    assert.equal(err[0], missing, command.join(' '));
+  }
+
+  assert.equal(server.signed, null);
+});
+
+test('read commands refuse a client with no credential instead of asking about the board', async () => {
+  const server = fakeSkrynia();
+
+  for (const command of [['access'], ['create', 'Mine']]) {
+    const { code, err } = await run(command, { createClient: () => client(server) });
+    assert.equal(code, 1, command.join(' '));
+    assert.equal(err[0], 'antonina board: Antonina board credential is required', command.join(' '));
+  }
+
+  assert.equal(server.signed, null);
+});
+
+test('every read command names the trust anchor when it cannot verify the board', async () => {
+  const server = fakeSkrynia();
+  await client(server).initialize();
+  const untrusted = 'antonina board: Antonina signed board exists; this client has no trust anchor for it; '
+    + 'set ANTONINA_BOARD_TRUST to the board trust anchor to read it';
+
+  for (const command of [['list'], ['show', '1'], ['queue', 'list'], ['resource', 'list']]) {
+    const { code, err } = await run(command, { createClient: () => client(server) });
+    assert.equal(code, 1, command.join(' '));
+    assert.equal(err[0], untrusted, command.join(' '));
+  }
 });
 
 test('a missing board fails closed for a client that holds a valid credential', async () => {
@@ -118,7 +158,7 @@ test('a missing board fails closed for a client that holds a valid credential', 
   const { code, err } = await run(['create', 'Mine'], { createClient: () => writer });
 
   assert.equal(code, 1);
-  assert.match(err[0], /does not exist/);
+  assert.equal(err[0], 'antonina board: Antonina signed board does not exist; run: antonina board initialize to create it');
   assert.equal(server.signed, null);
 });
 

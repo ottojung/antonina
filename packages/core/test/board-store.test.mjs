@@ -129,19 +129,21 @@ test('concurrent valid writers converge through ETag retry without losing the wi
   assert.equal(committed.log.operations[2].timestamp, '2026-09-25T12:03:00.000Z');
 });
 
-test('storage capability validation is separate from cryptographic authority', async () => {
+test('a stale storage capability is refused by the first real append', async () => {
   const server = fakeSkrynia();
   const store = new SignedBoardStore({ fetch: server.fetch.bind(server) });
   const initialized = await store.initialize();
   const stale = { ...initialized.credential, storageCapability: 'b'.repeat(64) };
 
   await assert.rejects(
-    () => store.verifyStorageCapability(stale, initialized.state.head),
+    () => store.append(stale, {
+      kind: 'issue.create',
+      payload: { number: 1, title: 'Refused', body: '' },
+    }, initialized.state.head),
     /failed \(403\)/,
   );
 
-  const valid = await store.verifyStorageCapability(initialized.credential, initialized.state.head);
-  assert.equal(valid.state.head, initialized.state.head);
+  assert.equal(server.signed.operations.length, 1);
 });
 
 test('tampered persisted history is rejected instead of becoming derived state', async () => {

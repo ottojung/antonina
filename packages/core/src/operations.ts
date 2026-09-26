@@ -20,6 +20,14 @@ export const BOARD_CAPABILITIES = [
 
 export type BoardCapability = (typeof BOARD_CAPABILITIES)[number];
 
+/** The one place a capability name is accepted or rejected. */
+export function parseBoardCapability(value: string): BoardCapability {
+  if (!(BOARD_CAPABILITIES as readonly string[]).includes(value)) {
+    throw new Error('Unknown Antonina board capability: ' + value);
+  }
+  return value as BoardCapability;
+}
+
 export const BOARD_OPERATION_KINDS = [
   'board.initialize',
   'authority.delegate',
@@ -354,12 +362,8 @@ export async function createTrustAnchor(boardId: string, root: SigningKeyPair): 
   return { boardId, rootKeyId: root.keyId, rootPublicKey: root.publicKey };
 }
 
-export function unsignedOperationValue(operation: UnsignedBoardOperation): CanonicalValue {
-  return operation as unknown as CanonicalValue;
-}
-
 export async function operationId(operation: UnsignedBoardOperation): Promise<string> {
-  return sha256Id('sha256', canonicalBytes(unsignedOperationValue(operation)));
+  return sha256Id('sha256', canonicalBytes(operation as unknown as CanonicalValue));
 }
 
 export async function signBoardOperation(input: SignOperationInput, signer: SigningKeyPair): Promise<SignedBoardOperation> {
@@ -375,7 +379,7 @@ export async function signBoardOperation(input: SignOperationInput, signer: Sign
     kind: input.kind,
     payload: input.payload,
   });
-  const bytes = canonicalBytes(unsignedOperationValue(unsigned));
+  const bytes = canonicalBytes(unsigned as unknown as CanonicalValue);
   return {
     ...unsigned,
     opId: await sha256Id('sha256', bytes),
@@ -655,7 +659,7 @@ export async function verifyAndReplayOperationLog(
     }
 
     const unsigned = unsignedFromSigned(operation);
-    const bytes = canonicalBytes(unsignedOperationValue(unsigned));
+    const bytes = canonicalBytes(unsigned as unknown as CanonicalValue);
     const expectedId = await sha256Id('sha256', bytes);
     if (operation.opId !== expectedId) throw new OperationLogVerificationError('Operation identity hash is invalid');
     if (seen.has(operation.opId)) throw new OperationLogVerificationError('Operation history contains a duplicate operation');

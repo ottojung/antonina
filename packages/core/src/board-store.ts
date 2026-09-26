@@ -28,6 +28,13 @@ const DEFAULT_MAX_ATTEMPTS = 6;
 
 export class SignedBoardStoreError extends Error {}
 
+/** The signed board does not exist at its Skrynia key. */
+export class BoardMissingError extends SignedBoardStoreError {
+  constructor() {
+    super('Antonina signed board does not exist');
+  }
+}
+
 export interface SignedBoardStoreOptions {
   fetch?: typeof fetch;
   baseUrl?: string;
@@ -99,7 +106,7 @@ function boardTimestampFloor(board: Board): string | undefined {
 
 export class SignedBoardStore {
   private readonly fetcher: typeof fetch;
-  private readonly signedUrl: string;
+  private readonly url: string;
   private readonly maxAttempts: number;
   private readonly now: () => Date;
   private readonly newId: () => string;
@@ -110,14 +117,14 @@ export class SignedBoardStore {
     }
     const baseUrl = (options.baseUrl ?? '/_skrynia').replace(/\/$/, '');
     this.fetcher = options.fetch ?? fetch.bind(globalThis);
-    this.signedUrl = `${baseUrl}/store/${encodeURIComponent(ANTONINA_NAMESPACE)}/${encodeURIComponent(SIGNED_BOARD_KEY)}`;
+    this.url = `${baseUrl}/store/${encodeURIComponent(ANTONINA_NAMESPACE)}/${encodeURIComponent(SIGNED_BOARD_KEY)}`;
     this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     this.now = options.now ?? (() => new Date());
     this.newId = options.newId ?? defaultId;
   }
 
   async read(anchor: BoardTrustAnchor, previouslyAcceptedHead?: string | null): Promise<StoredSignedBoard | null> {
-    const response = await this.fetcher(this.signedUrl, { cache: 'no-store' });
+    const response = await this.fetcher(this.url, { cache: 'no-store' });
     if (response.status === 404) return null;
     if (response.status !== 200) throw this.httpError('GET', SIGNED_BOARD_KEY, response);
     const etag = response.headers.get('ETag');
@@ -133,12 +140,12 @@ export class SignedBoardStore {
 
   async require(anchor: BoardTrustAnchor, previouslyAcceptedHead?: string | null): Promise<StoredSignedBoard> {
     const stored = await this.read(anchor, previouslyAcceptedHead);
-    if (!stored) throw new SignedBoardStoreError('Antonina signed board does not exist');
+    if (!stored) throw new BoardMissingError();
     return stored;
   }
 
   async signedBoardExists(): Promise<boolean> {
-    const response = await this.fetcher(this.signedUrl, { cache: 'no-store' });
+    const response = await this.fetcher(this.url, { cache: 'no-store' });
     if (response.status === 404) return false;
     if (response.status === 200) return true;
     throw this.httpError('GET', SIGNED_BOARD_KEY, response);
@@ -161,7 +168,7 @@ export class SignedBoardStore {
     const initialized = appendToLog(log, operation);
     await verifyAndReplayOperationLog(initialized, anchor);
 
-    const response = await this.fetcher(this.signedUrl, {
+    const response = await this.fetcher(this.url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -219,7 +226,7 @@ export class SignedBoardStore {
         previouslyAcceptedHead: stored.state.head,
       });
 
-      const response = await this.fetcher(this.signedUrl, {
+      const response = await this.fetcher(this.url, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -239,35 +246,6 @@ export class SignedBoardStore {
     }
 
     throw new SignedBoardStoreError('Antonina board changed too often; signed operation was not committed');
-  }
-
-  async verifyStorageCapability(
-    credentialValue: BoardCredential,
-    previouslyAcceptedHead?: string | null,
-  ): Promise<StoredSignedBoard> {
-    const credential = await verifyBoardCredential(credentialValue);
-    const anchor = credentialTrustAnchor(credential);
-    let stored = await this.require(anchor, previouslyAcceptedHead);
-
-    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const response = await this.fetcher(this.signedUrl, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Skrynia-Capability': credential.storageCapability,
-          'If-Match': stored.etag,
-        },
-        body: JSON.stringify(stored.log),
-      });
-      if (response.status === 412) {
-        stored = await this.require(anchor, stored.state.head);
-        continue;
-      }
-      if (response.status !== 200) throw this.httpError('PUT', SIGNED_BOARD_KEY, response);
-      return this.require(anchor, stored.state.head);
-    }
-
-    throw new SignedBoardStoreError('Antonina board changed too often to verify its storage capability');
   }
 
   private async parseJson(response: Response, context: string): Promise<unknown> {

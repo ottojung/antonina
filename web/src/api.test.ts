@@ -109,7 +109,7 @@ describe('browser board session', () => {
     expect(reader.api.hasWriteAccess()).toBe(true);
   });
 
-  it('holds a stored credential without claiming edit access before verifying it', async () => {
+  it('holds a stored credential without claiming edit access before reading the board', async () => {
     const { server, storage } = await initializedBoard();
     const reopened = session(server, storage);
 
@@ -185,7 +185,32 @@ describe('browser board session', () => {
     await expect(other.api.createIssue('Blocked')).rejects.toThrow('credential is required');
   });
 
-  it('never grants editing access to a credential whose storage capability is stale', async () => {
+  it('never writes to the board while reading, polling, or claiming edit access', async () => {
+    const { server, storage, initialized } = await initializedBoard();
+    await session(server, storage).api.createIssue('Existing');
+    const methods: Array<string | undefined> = [];
+    const reopened = new BrowserBoardSession(storage, {
+      fetch: async (input, init) => {
+        methods.push(init?.method);
+        return server.fetch(String(input), init);
+      },
+      now: () => new Date(STAMP),
+    });
+
+    await reopened.read();
+    await reopened.read();
+    expect(reopened.hasCredential()).toBe(true);
+    expect(reopened.api.hasWriteAccess()).toBe(true);
+    expect(reopened.api.accessState().storageRejected).toBe(false);
+
+    expect(methods).not.toContain('POST');
+    expect(methods).not.toContain('PUT');
+    expect(methods.every((method) => method === undefined)).toBe(true);
+    expect((server.signed as { operations: unknown[] }).operations.length).toBe(2);
+    expect(initialized.credential.keyId).toBe(reopened.api.getCredential()?.keyId);
+  });
+
+  it('surfaces a stale storage capability on the first mutation and then drops edit access', async () => {
     const server = fakeSkrynia();
     const owner = session(server);
     const initialized = await owner.initialize();
@@ -193,9 +218,13 @@ describe('browser board session', () => {
     await other.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
 
     const stale = { ...initialized.credential, storageCapability: 'b'.repeat(64) };
-    await expect(other.enableEditing(serializeBoardCredential(stale))).rejects.toThrow('failed (403)');
+    const access = await other.enableEditing(serializeBoardCredential(stale));
+
+    expect(access.canEdit).toBe(true);
+    await expect(other.api.createIssue('Refused')).rejects.toThrow('failed (403)');
     expect(other.api.hasWriteAccess()).toBe(false);
-    expect(other.hasCredential()).toBe(false);
+    expect(other.api.accessState().storageRejected).toBe(true);
+    expect((server.signed as { operations: unknown[] }).operations.length).toBe(1);
   });
 
   it('refuses a credential whose key ID does not match its public key', async () => {

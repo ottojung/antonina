@@ -1,6 +1,8 @@
 import {
   AntoninaApiError,
   BoardApi,
+  BoardMissingError,
+  BoardTrustRequiredError,
   DEFAULT_BOARD_BASE_URL,
   type BoardAccessState,
   type BoardInitialization,
@@ -12,9 +14,10 @@ import {
   serializeBoardTrustAnchor,
   type BoardCredential,
 } from '../../core/src/credential.js';
+import { canonicalJson, type CanonicalValue } from '../../core/src/canonical.js';
 import type { BoardIssue, BoardResource, IssueState, ResourceView } from '../../core/src/model.js';
 import {
-  BOARD_CAPABILITIES,
+  parseBoardCapability,
   type BoardCapability,
   type VerifiedAuthority,
 } from '../../core/src/operations.js';
@@ -99,19 +102,6 @@ function option(args: string[], name: string): { value?: string; rest: string[] 
   return { value, rest: [...args.slice(0, index), ...args.slice(index + 2)] };
 }
 
-function stableJson(value: unknown): string {
-  const canonical = (entry: unknown): unknown => {
-    if (Array.isArray(entry)) return entry.map(canonical);
-    if (entry !== null && typeof entry === 'object') {
-      return Object.fromEntries(Object.entries(entry as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, item]) => [key, canonical(item)]));
-    }
-    return entry;
-  };
-  return JSON.stringify(canonical(value));
-}
-
 function parseJsonEnv(raw: string, name: string): unknown {
   try {
     return JSON.parse(raw);
@@ -140,14 +130,18 @@ function defaultClient(env: Record<string, string | undefined>): BoardApi {
 
 function parseCapabilities(args: string[]): BoardCapability[] {
   if (args.length === 0) throw new AntoninaApiError('credential delegate requires at least one capability');
-  const capabilities: BoardCapability[] = [];
-  for (const raw of args) {
-    if (!(BOARD_CAPABILITIES as readonly string[]).includes(raw)) {
-      throw new AntoninaApiError('unknown board capability: ' + raw);
-    }
-    capabilities.push(raw as BoardCapability);
-  }
-  return [...new Set(capabilities)].sort();
+  return args.map(parseBoardCapability);
+}
+
+/**
+ * The CLI's advice for the three board states the shared API reports, so an
+ * operator is never told to configure a trust anchor for a board that does not
+ * exist, or left guessing what to do about one it cannot verify.
+ */
+function boardStateAdvice(error: unknown): string | null {
+  if (error instanceof BoardMissingError) return 'run: antonina board initialize to create it';
+  if (error instanceof BoardTrustRequiredError) return 'set ' + BOARD_TRUST_ENV + ' to the board trust anchor to read it';
+  return null;
 }
 
 async function execute(
@@ -327,7 +321,7 @@ function humanLines(result: CommandResult, parsed: ParsedCommand): string[] {
     const access = result.value as BoardAccessState;
     return [
       'key: ' + (access.keyId ?? 'none'),
-      'storage: ' + (access.storageVerified ? 'verified' : 'unverified'),
+      'storage: ' + (access.storageRejected ? 'rejected' : 'not rejected'),
       'edit: ' + (access.canEdit ? 'yes' : 'no'),
       'capabilities: ' + access.capabilities.join(', '),
     ];
@@ -376,14 +370,15 @@ export async function runBoardCommand(argv: string[], context: BoardCommandConte
     const client = context.createClient?.() ?? defaultClient(context.env);
     const result = await execute(parsed, client, context.env);
     if (parsed.json) {
-      context.io.stdout(stableJson(result.value));
+      context.io.stdout(canonicalJson(result.value as unknown as CanonicalValue));
       return 0;
     }
     for (const line of humanLines(result, parsed)) context.io.stdout(line);
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    context.io.stderr('antonina board: ' + message);
+    const advice = boardStateAdvice(error);
+    context.io.stderr('antonina board: ' + message + (advice === null ? '' : '; ' + advice));
     return 1;
   }
 }

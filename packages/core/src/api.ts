@@ -1,6 +1,7 @@
 import { generateSigningKey } from './canonical.js';
 import {
   ANTONINA_NAMESPACE,
+  BoardMissingError,
   DEFAULT_BOARD_BASE_URL,
   SIGNED_BOARD_KEY,
   SignedBoardStore,
@@ -31,6 +32,7 @@ import {
 } from './model.js';
 import {
   BOARD_CAPABILITIES,
+  parseBoardCapability,
   type BoardCapability,
   type BoardOperationKind,
   type BoardOperationPayload,
@@ -41,10 +43,10 @@ import {
 
 export {
   ANTONINA_NAMESPACE,
+  BoardMissingError,
   DEFAULT_BOARD_BASE_URL,
   SIGNED_BOARD_KEY,
 };
-export const BOARD_KEY = SIGNED_BOARD_KEY;
 
 const MUTATING_CAPABILITIES = new Set<BoardCapability>([
   'issue.create',
@@ -75,7 +77,7 @@ export interface BoardAccessState {
   keyId: string | null;
   rootKeyId: string;
   capabilities: BoardCapability[];
-  storageVerified: boolean;
+  storageRejected: boolean;
   canEdit: boolean;
 }
 
@@ -97,13 +99,7 @@ function sameAnchor(left: BoardTrustAnchor, right: BoardTrustAnchor): boolean {
 }
 
 function normalizeCapabilities(values: readonly BoardCapability[]): BoardCapability[] {
-  const unique = [...new Set(values)];
-  for (const capability of unique) {
-    if (!(BOARD_CAPABILITIES as readonly string[]).includes(capability)) {
-      throw new AntoninaApiError('Unknown Antonina board capability: ' + String(capability));
-    }
-  }
-  return unique.sort();
+  return [...new Set(values.map((value) => parseBoardCapability(value)))].sort();
 }
 
 function hasMutationCapability(capabilities: readonly BoardCapability[]): boolean {
@@ -115,8 +111,9 @@ export class BoardApi {
   private credential: BoardCredential | null;
   private anchor: BoardTrustAnchor | null;
   private rememberedHead: string | null;
-  private storageVerified = false;
-  private effectiveCapabilities: BoardCapability[] = [];
+  private storageRejected = false;
+  /** `null` until a verified log has said what this credential may do. */
+  private effectiveCapabilities: BoardCapability[] | null = null;
 
   constructor(options: BoardApiOptions = {}) {
     this.store = new SignedBoardStore(options);
@@ -147,17 +144,22 @@ export class BoardApi {
   }
 
   getEffectiveCapabilities(): BoardCapability[] {
-    return [...this.effectiveCapabilities];
+    return this.effectiveCapabilities === null ? [] : [...this.effectiveCapabilities];
   }
 
+  /**
+   * Edit access is what the verified log grants this credential, minus any
+   * storage capability Skrynia has already refused. It is never established by
+   * a probe: reading the board writes nothing.
+   */
   hasWriteAccess(): boolean {
-    return this.storageVerified && hasMutationCapability(this.effectiveCapabilities);
+    return !this.storageRejected && hasMutationCapability(this.getEffectiveCapabilities());
   }
 
   clearCredential(): void {
     this.credential = null;
-    this.storageVerified = false;
-    this.effectiveCapabilities = [];
+    this.storageRejected = false;
+    this.effectiveCapabilities = null;
   }
 
   async signedBoardExists(): Promise<boolean> {
@@ -165,20 +167,17 @@ export class BoardApi {
   }
 
   /**
-   * Reads the signed board without ever creating it; a missing board is `null`
-   * and an existing board is only readable through a configured trust anchor.
+   * The tri-state read both front ends share: a missing board is `null`, a
+   * board this client cannot verify is `BoardTrustRequiredError`, and an
+   * existing board is only readable through a configured trust anchor.
    */
   async readBoard(): Promise<Board | null> {
-    if (this.anchor === null) {
-      if (await this.store.signedBoardExists()) {
-        throw new BoardTrustRequiredError('Antonina signed board exists; this client has no trust anchor for it');
-      }
-      return null;
+    try {
+      return clone((await this.readStored()).state.board);
+    } catch (error) {
+      if (error instanceof BoardMissingError) return null;
+      throw error;
     }
-    const stored = await this.store.read(this.anchor, this.rememberedHead);
-    if (stored === null) return null;
-    this.acceptStored(stored);
-    return clone(stored.state.board);
   }
 
   /**
@@ -194,8 +193,7 @@ export class BoardApi {
     this.anchor = credentialTrustAnchor(initialized.credential);
     this.credential = initialized.credential;
     this.acceptStored(initialized);
-    this.storageVerified = true;
-    this.refreshEffectiveCapabilities(initialized.state);
+    this.storageRejected = false;
     return {
       board: clone(initialized.state.board),
       credential: clone(initialized.credential),
@@ -209,14 +207,17 @@ export class BoardApi {
     if (this.anchor !== null && !sameAnchor(this.anchor, anchor)) {
       throw new AntoninaApiError('Refusing to replace the trusted Antonina board root implicitly');
     }
-    const stored = await this.store.require(anchor, this.rememberedHead);
+    const stored = await this.readStored(anchor);
     this.anchor = anchor;
-    this.acceptStored(stored);
-    this.storageVerified = false;
-    this.refreshEffectiveCapabilities(stored.state);
     return clone(stored.state.board);
   }
 
+  /**
+   * Verifies a credential against the board's own history: it must be a real
+   * signature over a live authority that holds the delegated capabilities. It
+   * never writes, so it cannot discover a stale storage capability; the first
+   * real mutation reports that.
+   */
   async verifyCredential(credentialValue: BoardCredential | null = this.credential): Promise<BoardAccessState> {
     if (credentialValue === null) throw new AntoninaApiError('Antonina board credential is required');
     const credential = await verifyBoardCredential(credentialValue);
@@ -225,20 +226,11 @@ export class BoardApi {
       throw new AntoninaApiError('Antonina credential does not match the trusted board root');
     }
 
-    let stored: StoredSignedBoard;
-    try {
-      stored = await this.store.verifyStorageCapability(credential, this.rememberedHead);
-    } catch (error) {
-      this.storageVerified = false;
-      this.effectiveCapabilities = [];
-      throw error;
-    }
-
+    const stored = await this.readStored(anchor);
     const authority = this.requireActiveAuthority(stored.state, credential.keyId);
     this.anchor = anchor;
     this.credential = credential;
-    this.acceptStored(stored);
-    this.storageVerified = true;
+    this.storageRejected = false;
     this.effectiveCapabilities = [...authority.capabilities];
     return this.accessState();
   }
@@ -249,8 +241,8 @@ export class BoardApi {
       boardId: anchor.boardId,
       keyId: this.credential?.keyId ?? null,
       rootKeyId: anchor.rootKeyId,
-      capabilities: [...this.effectiveCapabilities],
-      storageVerified: this.storageVerified,
+      capabilities: this.getEffectiveCapabilities(),
+      storageRejected: this.storageRejected,
       canEdit: this.hasWriteAccess(),
     };
   }
@@ -386,8 +378,9 @@ export class BoardApi {
   async delegateCredential(capabilities: readonly BoardCapability[]): Promise<BoardCredential> {
     const current = await this.requireUsableCredential('authority.delegate');
     const normalized = normalizeCapabilities(capabilities);
+    const held = this.getEffectiveCapabilities();
     for (const capability of normalized) {
-      if (!this.effectiveCapabilities.includes(capability)) {
+      if (!held.includes(capability)) {
         throw new AntoninaApiError('Delegation cannot add capability ' + capability);
       }
     }
@@ -440,16 +433,11 @@ export class BoardApi {
 
   private refreshEffectiveCapabilities(state: VerifiedBoardState): void {
     if (this.credential === null) {
-      this.effectiveCapabilities = [];
+      this.effectiveCapabilities = null;
       return;
     }
     const authority = state.authorities.find((candidate) => candidate.keyId === this.credential?.keyId);
-    if (!authority || authority.revoked) {
-      this.storageVerified = false;
-      this.effectiveCapabilities = [];
-      return;
-    }
-    this.effectiveCapabilities = [...authority.capabilities];
+    this.effectiveCapabilities = !authority || authority.revoked ? [] : [...authority.capabilities];
   }
 
   private acceptStored(stored: StoredSignedBoard): void {
@@ -458,16 +446,30 @@ export class BoardApi {
     this.refreshEffectiveCapabilities(stored.state);
   }
 
-  private async readStored(): Promise<StoredSignedBoard> {
-    const stored = await this.store.require(this.requireAnchor(), this.rememberedHead);
+  /**
+   * The one read path every read command and read command result goes through.
+   * It reports a missing board and an unverifiable board as two distinct
+   * failures, and it never creates or writes the board.
+   */
+  private async readStored(anchor: BoardTrustAnchor | null = this.anchor): Promise<StoredSignedBoard> {
+    if (anchor === null) {
+      if (await this.store.signedBoardExists()) {
+        throw new BoardTrustRequiredError('Antonina signed board exists; this client has no trust anchor for it');
+      }
+      throw new BoardMissingError();
+    }
+    const stored = await this.store.read(anchor, this.rememberedHead);
+    if (stored === null) throw new BoardMissingError();
     this.acceptStored(stored);
     return stored;
   }
 
   private async requireUsableCredential(capability: BoardCapability): Promise<BoardCredential> {
     if (this.credential === null) throw new AntoninaApiError('Antonina board credential is required');
-    if (!this.storageVerified) await this.verifyCredential(this.credential);
-    if (!this.effectiveCapabilities.includes(capability)) {
+    if (this.effectiveCapabilities === null) {
+      await this.verifyCredential(this.credential);
+    }
+    if (!this.effectiveCapabilities?.includes(capability)) {
       throw new AntoninaApiError('Antonina credential lacks required capability ' + capability);
     }
     return this.credential;
@@ -486,11 +488,11 @@ export class BoardApi {
         this.rememberedHead,
       );
       this.acceptStored(stored);
-      this.storageVerified = true;
+      this.storageRejected = false;
       return stored;
     } catch (error) {
       if (error instanceof SignedBoardStoreError && /failed \(403\)/.test(error.message)) {
-        this.storageVerified = false;
+        this.storageRejected = true;
       }
       throw error;
     }

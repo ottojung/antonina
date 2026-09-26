@@ -1,5 +1,4 @@
 import {
-  base64UrlDecode,
   canonicalBytes,
   canonicalJson,
   keyIdFromPublicKey,
@@ -185,9 +184,4 @@ export async function parseBoardTrustAnchorText(text: string): Promise<BoardTrus
     throw new Error('Antonina board trust anchor is not valid JSON', { cause: error });
   }
   return verifyBoardTrustAnchor(value);
-}
-
-export function assertPublicKeyEncoding(publicKey: string): void {
-  const bytes = base64UrlDecode(publicKey);
-  if (bytes.byteLength !== 32) throw new Error('Antonina Ed25519 public key must be 32 bytes');
 }

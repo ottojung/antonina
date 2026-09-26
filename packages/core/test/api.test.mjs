@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BoardApi, BOARD_CAPABILITIES, BoardTrustRequiredError } from '../dist/api.js';
+import { BoardApi, BoardMissingError, BOARD_CAPABILITIES, BoardTrustRequiredError } from '../dist/api.js';
 
 const STAMP = '2026-09-25T12:00:00.000Z';
 
@@ -128,19 +128,29 @@ test('full-capability admin children can be minted without storing the root cred
   assert.notEqual(adminCredential.keyId, initialized.trustAnchor.rootKeyId);
 });
 
-test('stale storage capability never becomes verified edit access', async () => {
+test('a stale storage capability is refused by the first mutation, not before it', async () => {
   const server = fakeSkrynia();
   const root = api(server);
   const initialized = await root.initialize();
   const stale = { ...initialized.credential, storageCapability: 'b'.repeat(64) };
 
-  const client = api(server, {
+  const methods = [];
+  const watched = api(server, {
     credential: stale,
     trustAnchor: initialized.trustAnchor,
     rememberedHead: initialized.head,
+    fetch: async (url, init = {}) => { methods.push(init.method); return server.fetch(url, init); },
   });
-  await assert.rejects(() => client.verifyCredential(), /failed \(403\)/);
-  assert.equal(client.hasWriteAccess(), false);
+
+  const access = await watched.verifyCredential();
+  assert.equal(access.canEdit, true);
+  assert.equal(access.storageRejected, false);
+  assert.equal(methods.includes('PUT'), false, 'verifying a credential must not write');
+
+  await assert.rejects(() => watched.createIssue('Refused'), /failed \(403\)/);
+  assert.equal(watched.hasWriteAccess(), false);
+  assert.equal(watched.accessState().storageRejected, true);
+  assert.equal(server.signed.operations.length, 1);
 });
 
 test('revocation invalidates a delegated credential on its next verification', async () => {
@@ -215,16 +225,32 @@ test('mutations fail closed on a missing board instead of creating one', async (
   assert.equal(methods.includes('POST'), false);
 });
 
-test('the unsigned board-v1 format has no reader, migrator, or converter', async () => {
+test('a missing board stays a read-only miss even for a client holding an anchor', async () => {
   const server = fakeSkrynia();
-  const urls = [];
+  const elsewhere = await api(fakeSkrynia()).initialize();
+  const methods = [];
   const client = api(server, {
-    fetch: async (url, init = {}) => { urls.push(String(url)); return server.fetch(url, init); },
+    trustAnchor: elsewhere.trustAnchor,
+    fetch: async (url, init = {}) => { methods.push(init.method); return server.fetch(url, init); },
   });
 
-  assert.equal(await client.signedBoardExists(), false);
   assert.equal(await client.readBoard(), null);
-
+  assert.equal(methods.includes('POST'), false);
+  assert.equal(methods.includes('PUT'), false);
   assert.equal(server.signed, null);
-  assert.deepEqual([...new Set(urls)], ['/_skrynia/store/antonina/board-v2']);
+});
+
+test('read commands report an unverifiable board and a missing board as different failures', async () => {
+  const server = fakeSkrynia();
+  await api(server).initialize();
+  const stranger = api(server);
+  const absent = api(fakeSkrynia());
+
+  for (const read of [() => stranger.listIssues(), () => stranger.getQueue(), () => stranger.listResources()]) {
+    await assert.rejects(read, BoardTrustRequiredError);
+  }
+  for (const read of [() => absent.listIssues(), () => absent.getQueue(), () => absent.listResources()]) {
+    await assert.rejects(read, BoardMissingError);
+  }
+  assert.equal(await absent.readBoard(), null);
 });

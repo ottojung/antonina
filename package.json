@@ -1,0 +1,20 @@
+{
+  "name": "antonina-workspace",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "bootstrap": "npm ci --prefix web",
+    "typecheck": "./web/node_modules/.bin/tsc -p packages/core/tsconfig.json && ./web/node_modules/.bin/tsc -p packages/agent-runtime/tsconfig.json && ./web/node_modules/.bin/tsc -p packages/cli/tsconfig.json",
+    "test:core": "node --test packages/core/test/*.test.mjs",
+    "test:runtime": "node --test packages/agent-runtime/test/*.test.mjs",
+    "test:cli": "node --test packages/cli/test/*.test.mjs",
+    "test:web": "npm test --prefix web",
+    "test": "npm run test:core && npm run test:runtime && npm run test:cli && npm run test:web",
+    "build:web": "npm run build --prefix web",
+    "build": "npm run typecheck && npm run build:web",
+    "pack:cli": "npm pack ./packages/cli"
+  }
+}

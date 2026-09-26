@@ -23,10 +23,10 @@ can produce clean transcript history, but it also makes intervention latency
 backend-dependent and can force Antonina to let an expensive, stuck, or known-wrong
 tool continue merely to reach a polite agent-loop boundary.
 
-Antonina already treats exact process ownership and convergence as first-class
-lifecycle machinery. Steering should therefore have a backend-independent
-product meaning at the process boundary rather than inherit whichever semantics
-a particular coding-agent harness happens to expose.
+Antonina treats managed-process ownership as lifecycle metadata rather than
+inferring it from process names. Steering should therefore have a
+backend-independent product meaning at the process boundary rather than inherit
+whichever semantics a particular coding-agent harness happens to expose.
 
 ## Decision
 
@@ -59,19 +59,18 @@ lifecycle authority has already won. At that point:
 - the steer becomes durable pending work for the logical session;
 - the old invocation becomes superseded and must converge toward termination;
 - ordinary continuation of the old work is no longer an acceptable steady state;
-- a replacement/continuation invocation may start only after Antonina has enough
-  positive authority to know that the superseded exact invocation can no longer
-  continue concurrently as ordinary agent work.
+- a replacement/continuation invocation starts after Antonina has terminated the
+  recorded process group using its persisted PID/start-time/agent/invocation
+  metadata as a best-effort ownership check.
 
-If exact ownership or termination cannot be proven, Antonina must fail closed. The
-steer remains durably accepted, but replacement execution must not be authorized
-by an ambiguous process observation.
+The TypeScript runtime intentionally does not provide a kernel-level guarantee
+against the narrow race where a PID/PGID is recycled between the final metadata
+check and a normal Node signal syscall. That risk is accepted in exchange for a
+small portable runtime without a native pidfd addon.
 
-The termination policy may be SIGTERM-first with bounded escalation to SIGKILL,
-provided every signal is scoped to the exact invocation/process ownership already
-proven by Antonina's process-identity machinery. More aggressive steering semantics
-are not permission to weaken PID/start-identity checks, invocation markers,
-pidfd signalling, process-group/member convergence, or fail-closed behavior.
+The termination policy is SIGTERM-first with bounded escalation to SIGKILL.
+Antonina should validate recorded process identity before signalling when
+practical, but ordinary Node/POSIX signalling is the product requirement.
 
 ## Required invariants
 
@@ -82,11 +81,12 @@ accepted until it is delivered to the continuing logical agent session or is
 explicitly blocked by stronger lifecycle authority. Killing the superseded
 invocation must never also discard the steer that motivated the kill.
 
-### Exact target
+### Recorded target
 
-Only the exact invocation owned by the managed agent may be interrupted.
-Process identity and convergence must remain exact. Ambiguous identity is not
-sufficient authority to signal, retire, or replace a process.
+Antonina interrupts the invocation recorded in durable managed-agent metadata.
+It must not use process-name matching or broad host-wide process discovery.
+PID/start-time and agent/invocation markers should be checked when available;
+the remaining numeric-signal race described above is accepted.
 
 ### Supersession
 
@@ -157,10 +157,9 @@ Antonina terminates the exact running invocation/process tree and continues the
 logical session under the new instruction.
 
 This gives immediate operator control, remains meaningful across coding-agent
-backends, stops known-wrong or wasteful work promptly, and fits Antonina's existing
-exact process-control model. The costs are accepted partial side effects,
-interrupted-turn recovery complexity, and the need to keep steer semantics
-strictly separate from terminal stop/kill semantics.
+backends, and stops known-wrong or wasteful work promptly. The costs are accepted
+partial side effects, interrupted-turn recovery complexity, and the need to keep
+steer semantics strictly separate from terminal stop/kill semantics.
 
 This is the chosen architecture.
 
@@ -178,8 +177,8 @@ would make the public contract unpredictable and is rejected.
   polite queued suggestion.
 - Steering may leave partial filesystem, process, network, or external-service
   side effects; continuation code and agents must inspect reality and reconcile.
-- Exact process identity and fail-closed retirement remain mandatory before a
-  replacement invocation is authorized.
+- Managed-process metadata checks remain important, but kernel-level pidfd
+  retirement guarantees are not required.
 - Status and logs should make a "steer accepted, old invocation converging"
   state observable rather than falsely reporting an already-idle session.
 - Implementations must preserve durable FIFO steering and deterministic
@@ -195,14 +194,13 @@ would make the public contract unpredictable and is rejected.
 Implementation changes should be split into focused issues after this decision.
 In particular, follow-up work should verify that the current steer acceptance,
 process interruption, continuation, status/log reporting, interrupted-turn
-recovery, and multiple-steer races all satisfy the invariants above. This ADR
-itself does not change `src/antonina/agent.py` behavior.
+recovery, and multiple-steer races all satisfy the invariants above. The current implementation lives in the TypeScript managed-agent runtime.
 
 ## References
 
 - Issue #597 — architectural request and acceptance criteria.
-- `src/antonina/agent.py` — current managed-agent prompt/steer lifecycle and durable
+- `packages/agent-runtime/` — managed-agent prompt/steer lifecycle and durable
   steer queue.
-- `README.md` — orchestrator guidance for using `antonina --steer`.
-- Existing process-identity, pidfd, process-group, stop/kill convergence, and
-  runner-authority tests under `tests/`.
+- `packages/cli/` — `antonina agent prompt --steer` command surface.
+- TypeScript lifecycle, process, and built-runtime integration tests under
+  `packages/agent-runtime/test/` and `packages/cli/test/`.

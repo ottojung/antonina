@@ -26,6 +26,7 @@ import {
 import {
   TERMINAL_STATES,
   activeRunnerFlag,
+  deletePendingFlag,
   idleMeta,
   nextPromptCount,
   pendingPrompt,
@@ -455,6 +456,10 @@ async function cmdPrompt(args: string[], context: AgentCommandContext): Promise<
   await updateMeta(agentId, (meta) => {
     const lifecycle = persistedLifecycleState(meta);
     const active = activeRunnerFlag(meta);
+    if (deletePendingFlag(meta) !== false) {
+      decision.action = 'busy';
+      return;
+    }
     const reservationState = runnerReservationState(meta.runner_reservation);
     if (lifecycle === null || active === null || reservationState === 'malformed') {
       decision.action = 'busy';
@@ -649,11 +654,34 @@ async function cmdDelete(args: string[], context: AgentCommandContext): Promise<
   const parsed = parse(args, ['--force']);
   if (parsed.positionals.length !== 0) throw new UsageError('delete: unexpected positional arguments');
   const agentId = requireAgentId(parsed.values.get('--id'), 'delete');
-  const meta = requireMeta(agentId, context);
-  if (deriveState(meta) === 'running' && !parsed.flags.has('--force')) {
+  const observed = requireMeta(agentId, context);
+  let pending: string | null;
+  try {
+    pending = pendingPrompt(observed);
+  } catch {
+    throw new Error(`delete: agent ${agentId} has malformed pending prompt authority`);
+  }
+  const ownsWork = deriveState(observed) === 'running'
+    || invocationAlive(observed)
+    || activeRunnerFlag(observed) === true
+    || reservationInFlight(observed)
+    || pending !== null;
+  if (ownsWork && !parsed.flags.has('--force')) {
     throw new Error(`delete: agent ${agentId} is running; use --force`);
   }
-  if (deriveState(meta) === 'running') await stopLike('kill', ['--id', agentId], context);
+
+  const tombstoned = await updateMeta(agentId, (meta) => {
+    if (deletePendingFlag(meta) === null) {
+      throw new Error('delete: durable deletion authority is malformed');
+    }
+    meta.delete_pending = true;
+  }, paths(context));
+  if (tombstoned === null) throw new NotFoundError(`unknown agent: ${agentId}`);
+
+  if (ownsWork) {
+    const result = await stopLike('kill', ['--id', agentId], context);
+    if (result !== EXIT_OK) return result;
+  }
   removeAgentDirectory(agentId, paths(context));
   context.io.stdout(`deleted agent ${agentId}`);
   return EXIT_OK;
@@ -672,11 +700,36 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
     return finished !== null && finished < cutoff;
   });
   for (const agentId of candidates) {
-    if (parsed.flags.has('--dry-run')) context.io.stdout(agentId);
-    else {
-      removeAgentDirectory(agentId, paths(context));
-      context.io.stdout(`deleted agent ${agentId}`);
+    if (parsed.flags.has('--dry-run')) {
+      context.io.stdout(agentId);
+      continue;
     }
+    let removable = false;
+    await updateMeta(agentId, (meta) => {
+      let pending: string | null;
+      try {
+        pending = pendingPrompt(meta);
+      } catch {
+        return;
+      }
+      const state = deriveState(meta);
+      const finished = persistedTimestamp(meta.finished_at);
+      if (
+        !(TERMINAL_STATES as readonly string[]).includes(state)
+        || finished === null
+        || finished >= cutoff
+        || invocationAlive(meta)
+        || activeRunnerFlag(meta) !== false
+        || reservationInFlight(meta)
+        || pending !== null
+        || deletePendingFlag(meta) !== false
+      ) return;
+      meta.delete_pending = true;
+      removable = true;
+    }, paths(context));
+    if (!removable) continue;
+    removeAgentDirectory(agentId, paths(context));
+    context.io.stdout(`deleted agent ${agentId}`);
   }
   return EXIT_OK;
 }

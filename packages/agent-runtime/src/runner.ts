@@ -293,7 +293,10 @@ async function runInvocation(
       continue;
     }
 
-    if (!isContinue && result.code === 0 && result.signal === null) await rememberFreshSession(agentId, options);
+    // A fresh OpenCode invocation may create its session before a steer/stop
+    // interrupts it. Preserve that session whenever it can be discovered so
+    // queued steering continues the same native conversation.
+    if (!isContinue) await rememberFreshSession(agentId, options);
     await finalizeInvocation(agentId, result, backendError, options);
     return true;
   }

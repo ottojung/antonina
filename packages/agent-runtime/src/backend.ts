@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
 
-import { DEFAULT_VARIANT, persistedNativeSessionId, persistedVariant, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
+import { DEFAULT_VARIANT, persistedAgentCwd, persistedNativeSessionId, persistedVariant, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
 
 export const AGENT_MODEL = 'opencode/space-bunny-free';
 export const OPENCODE_TITLE_PREFIX = 'antonina-';
@@ -118,6 +118,7 @@ export function buildAgentCommand(
   env: Record<string, string | undefined> = process.env,
 ): string[] | null {
   const agentId = requiredPersistedAgentId(meta);
+  const cwd = persistedAgentCwd(meta);
   const variant = persistedVariant(meta) || DEFAULT_VARIANT;
   if (isContinue) {
     const recorded = persistedNativeSessionId(meta);
@@ -129,7 +130,7 @@ export function buildAgentCommand(
       '--model', AGENT_MODEL,
       '--variant', variant,
       '--thinking',
-      '--dir', String(meta.cwd),
+      '--dir', cwd,
       prompt,
     ];
   }
@@ -139,7 +140,7 @@ export function buildAgentCommand(
     '--model', AGENT_MODEL,
     '--variant', variant,
     '--thinking',
-    '--dir', String(meta.cwd),
+    '--dir', cwd,
     prompt,
   ];
 }

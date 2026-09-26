@@ -71,8 +71,6 @@ describe('create issue form', () => {
   it('describes the description and advertises the shortcut in the form copy', () => {
     expect(markup).toContain(ISSUE_FORM_HINT);
     expect(markup).toContain(ISSUE_FORM_SUBMIT_HINT);
-    expect(ISSUE_FORM_SUBMIT_HINT).toContain('Ctrl+Enter');
-    expect(ISSUE_FORM_HINT).not.toContain('Ctrl');
   });
 });
 

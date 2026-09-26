@@ -12,8 +12,8 @@ The orchestrator has four jobs:
 
 1. reconcile the board with objective execution state;
 2. continue useful work already in progress when possible;
-3. otherwise select the highest-priority actionable issue from the board queue;
-4. leave an append-only board update that makes the next pass able to continue safely.
+3. build the largest clearly safe and useful parallel frontier from the board queue;
+4. leave append-only board updates that make later passes able to continue safely.
 
 Do useful work and then return. Do not keep an invocation alive merely to wait for a long-running agent or external event. A later invocation should be able to reconstruct the state from the board and the durable artifacts named there.
 
@@ -57,17 +57,23 @@ At the beginning of every pass:
 2. Read the queue.
 3. Inspect enough queued issues, in queue order, to classify ongoing work, ownership, blockers, and actionability.
 4. Reconcile any referenced agent, worktree, branch, pull request, job, or other durable artifact before trusting an old status comment.
-5. Select exactly one primary issue for substantive attention in this pass.
+5. Build a portfolio of useful concurrent work rather than stopping after one issue.
 
-Selection uses these tiers, in order:
+Selection proceeds in phases:
 
-1. **Recoverable ongoing work.** Prefer an issue whose existing work can usefully continue now: a live subordinate agent to inspect or steer, a handoff with a clear next step, a branch or pull request awaiting the next local action, or interrupted work whose durable state is recoverable.
-2. **Highest-priority new work.** If no ongoing work should be continued, choose the first actionable issue in queue order that is not actively owned by another live orchestrator and is not blocked on an unavailable dependency.
-3. **No actionable work.** If every open issue is actively owned elsewhere, blocked, or otherwise non-actionable, record a board update only when doing so adds new durable information, then return.
+1. **Recoverable ongoing work.** Reconcile and continue every issue whose existing work can usefully continue now: a live subordinate agent to inspect or steer, a handoff with a clear next step, a branch or pull request awaiting the next local action, or interrupted work whose durable state is recoverable.
+2. **Breadth scan.** Scan the queue from front to back. For each actionable unclaimed issue, ask whether it is clearly safe and useful to execute concurrently with the work already admitted into this pass. Admit it when the answer is yes; otherwise defer it and keep scanning.
+3. **Prefer obvious independence.** Issues from clearly unrelated projects or repositories should normally be admitted concurrently unless they share an explicit dependency, deployment target, mutable external resource, or other concrete conflict. Do not stop scanning merely because an earlier issue is already being worked on.
+4. **Be conservative within one project.** When two issues appear to belong to the same project, defer additional work unless there is positive evidence that the fronts are independent. The same repository is not proof of conflict: monorepos may contain independent packages, apps, services, or subsystems that can safely progress in separate worktrees.
+5. **Depth scan.** After establishing broad cross-project parallelism, revisit deferred same-project issues in queue order and admit additional work when independence is evident.
+6. **Intra-issue parallelism.** For substantial issues, consider complementary agents with genuinely different roles, such as implementation, independent review, verification/testing, or focused research/design. Do not spawn duplicate agents merely to increase concurrency.
+7. **No further safe work.** Stop expanding the frontier when additional work would be blocked, duplicate existing work, or rely on uncertain independence.
 
-Within the same tier, queue order wins.
+Queue order still expresses shared priority. The orchestrator should preserve that priority while exploiting concurrency; do not reorder the queue merely to encode scheduler state.
 
-A higher-priority issue may be skipped for this pass when it is actively owned by another live worker, blocked on a named unresolved dependency, or less appropriate than genuinely ongoing recoverable work. Skipping it is a scheduling decision, not a queue-priority change.
+Useful evidence of independence includes disjoint repositories, separate monorepo packages/apps, unrelated subsystems, separate worktrees, distinct deployment targets, or clearly non-overlapping implementation areas. Potential conflict domains include the same source files, shared core APIs under active redesign, one database/schema migration path, the same mutable deployment environment, or another shared external resource.
+
+Development can often proceed concurrently even when integration must later serialize. Separate branches or worktrees may be safe to implement in parallel and then merge into a shared release branch one at a time.
 
 Do not manufacture work merely to stay busy.
 
@@ -143,7 +149,7 @@ antonina agent new --id ID --cwd /absolute/worktree
 
 Record a new agent ID and its worktree in the issue comment before relying on them for handoff. Use separate worktrees for materially independent repository work.
 
-Parallel agents are useful only for genuinely independent fronts. Do not spawn duplicates just to fill capacity.
+Parallel agents are useful for genuinely independent fronts and for complementary roles on the same substantial issue. Favor broad, clearly independent work first; then add proven same-project or intra-issue parallelism. Do not spawn duplicates just to fill capacity.
 
 Do not wait idly for long-running agents. Inspect what is available now, steer if useful, record durable state when it materially changes, and let a later orchestrator pass continue.
 

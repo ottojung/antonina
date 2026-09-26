@@ -398,6 +398,129 @@ test('delete without force refuses live work and force converges before removal'
   assert.throws(() => readFileSync(metaPath(root, 'feed'), 'utf8'));
 });
 
+// The --force runner-reaping block in cmdDelete (packages/cli/src/agent.ts).
+// The invariant, in one sentence: when `delete --force` removes an agent that
+// owns work, it must first reap the reserved/live runner process itself --
+// killing the invocation, escalating to SIGKILL on the runner, and failing
+// closed if the runner survives -- so that no orphan runner outlives the
+// directory it is writing into. The test below pins the outcome with real
+// process identity (PID + start ticks), not with a stubbed seam: a mutant that
+// drops the block still prints "deleted agent" and still removes the state
+// directory, so only the surviving process distinguishes them.
+test('delete --force reaps the live runner process before removing the agent', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', 'feed1', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'prompt', '--id', 'feed1', '--detach', 'slow'], env).status, 0);
+  const live = await waitFor(
+    root,
+    'feed1',
+    (meta) => meta.state === 'running'
+      && typeof meta.pid === 'number'
+      && meta.active_runner === true
+      && typeof meta.runner_pid === 'number'
+      && meta.runner_pid > 1,
+  );
+  const runnerPid = live.runner_pid;
+  const runnerTicks = live.runner_start_time;
+  const invocationPid = live.pid;
+  assert.equal(typeof runnerTicks, 'number', 'the live runner must carry recorded identity facts');
+  assert.ok(
+    procStartTicks(runnerPid) === runnerTicks,
+    `runner ${runnerPid} must be alive with the recorded start ticks before delete`,
+  );
+  // The runner is detached from this test, so it is reaped here whether or not
+  // the command under test did it. On the shipped path delete already killed
+  // it, and the group kill below is then a no-op on a dead process group.
+  t.after(() => {
+    for (const pid of [runnerPid, invocationPid]) {
+      try {
+        process.kill(-pid, 'SIGKILL');
+      } catch {}
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {}
+    }
+  });
+
+  const forced = run(['agent', 'delete', '--id', 'feed1', '--force'], env);
+  assert.equal(forced.status, 0, forced.stderr);
+  assert.match(forced.stdout, /deleted agent feed1/);
+  assert.throws(() => readFileSync(metaPath(root, 'feed1'), 'utf8'), 'the agent directory must be removed');
+
+  assert.equal(
+    procStartTicks(runnerPid),
+    null,
+    `the reserved runner ${runnerPid} must be reaped before delete --force returns`,
+  );
+  assert.equal(
+    procStartTicks(invocationPid),
+    null,
+    `the runner's OpenCode invocation ${invocationPid} must be reaped before delete --force returns`,
+  );
+  assertFixtureInvoked(handle, 'slow');
+});
+
+// A reservation that no runner has claimed yet, owned by this (genuinely live)
+// test process. The reaping block must still drive the agent to a terminal
+// record and say so, instead of silently tombstoning and dropping the
+// reservation on the floor: a reserved runner is work that was accepted.
+test('delete --force cancels an in-flight runner reservation and reports it', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', 'feed2', '--cwd', work], env).status, 0);
+  const path = metaPath(root, 'feed2');
+  const meta = JSON.parse(readFileSync(path, 'utf8'));
+  Object.assign(meta, {
+    state: 'running',
+    active_runner: true,
+    runner_pid: null,
+    runner_start_time: null,
+    pending_prompt: 'accepted',
+    prompt_count: 1,
+    runner_gen: 1,
+    started_at: 1,
+    runner_reservation: {
+      state: 'reserved',
+      gen: 1,
+      mode: 'new',
+      // This test process is alive and these are its real identity facts, so
+      // the reservation owner check holds without relying on the grace window.
+      owner_pid: process.pid,
+      owner_start_ticks: procStartTicks(process.pid),
+      reserved_at: 1,
+    },
+  });
+  writeFileSync(path, JSON.stringify(meta));
+
+  const refused = run(['agent', 'delete', '--id', 'feed2'], env);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /use --force/);
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).runner_reservation.state, 'reserved');
+
+  const forced = run(['agent', 'delete', '--id', 'feed2', '--force'], env);
+  assert.equal(forced.status, 0, forced.stderr);
+  assert.match(
+    forced.stdout,
+    /cancelled reserved runner work/,
+    'delete --force must reap the reservation, not just tombstone it',
+  );
+  assert.match(forced.stdout, /deleted agent feed2/);
+  assert.throws(() => readFileSync(path, 'utf8'));
+});
+
+// /proc entries for a freshly spawned process can lag, and a reaped process has
+// no entry at all: null means "gone", which is what these tests assert on.
+function procStartTicks(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const after = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const ticks = Number(after[19]);
+    return Number.isFinite(ticks) ? ticks : null;
+  } catch {
+    return null;
+  }
+}
+
 test('delete tombstone blocks later prompt reservation', (t) => {
   const { root, work, env } = fixture(t);
   assert.equal(run(['agent', 'new', '--id', 'face', '--cwd', work], env).status, 0);

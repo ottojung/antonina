@@ -156,7 +156,9 @@ TMPDIR=/workspace/tmp-verify XDG_STATE_HOME="$(mktemp -d)" \
   sh /workspace/antonina-coordination/verify-antonina.sh /workspace/antonina-issue20-baseline
 ```
 
-Result: **exit 0**, final line `verify: ok`, in about 13 s.
+Result: **exit 0**, final line `verify: ok`. No wall-clock figure is carried here, for the same
+reason the `vite build` row carries none: the claim this section makes is that the run reproduces,
+not how long it took.
 
 | Command | Observed on `45f2236` |
 | --- | --- |
@@ -316,7 +318,7 @@ because `/workspace` is btrfs and exec-able. **A repository checked out on a `no
 neither candidate, and the suites now fail loudly and immediately** instead of quietly using the
 host's real `opencode`.
 
-Verified by measurement, not assumed, and re-established on the release head rather than copied.
+Re-established by argument for the release head, not by re-running it.
 This copy-out was measured at `d896ed8` and was **not** re-run at this re-pin to `45f2236`: the
 guard's candidate list, the throw and both test files are byte-identical across the two heads
 (`git diff --stat d896ed8 45f2236` touches neither), so a re-measurement would exercise the same

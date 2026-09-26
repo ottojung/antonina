@@ -176,8 +176,8 @@ async function execute(
         throw new AntoninaApiError('--json cannot be combined with --credential or --trust-anchor');
       }
       const initialized = await client.initialize();
-      if (credentialFlag.value) return { mode: 'initialize-credential', value: initialized.credential };
-      if (trustFlag.value) return { mode: 'initialize-trust', value: initialized.trustAnchor };
+      if (credentialFlag.value) return { mode: 'credential', value: initialized.credential };
+      if (trustFlag.value) return { mode: 'trust', value: initialized.trustAnchor };
       return { mode: 'initialize', value: initialized };
     }
     case 'access':
@@ -338,10 +338,10 @@ function humanLines(result: CommandResult): string[] {
       serializeBoardCredential(initialized.credential),
     ];
   }
-  if (result.mode === 'credential' || result.mode === 'initialize-credential') {
+  if (result.mode === 'credential') {
     return [serializeBoardCredential(result.value as BoardCredential)];
   }
-  if (result.mode === 'trust' || result.mode === 'initialize-trust') {
+  if (result.mode === 'trust') {
     return [serializeBoardTrustAnchor(result.value as BoardTrustAnchor)];
   }
   if (result.mode === 'access') {

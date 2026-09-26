@@ -1,13 +1,47 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // The CLI compiles its own copy of packages/core, so the test drives the exact
 // module graph the shipped executable runs, including its error identities.
 import { BoardApi } from '../dist/packages/core/src/api.js';
 import { serializeBoardCredential, serializeBoardTrustAnchor } from '../dist/packages/core/src/credential.js';
-import { runBoardCommand, BOARD_CREDENTIAL_ENV, BOARD_TRUST_ENV } from '../dist/packages/cli/src/board.js';
+import {
+  runBoardCommand,
+  configuredIdentity,
+  BOARD_BASE_URL_ENV,
+} from '../dist/packages/cli/src/board.js';
+import { boardConfigDir } from '../dist/packages/cli/src/board-config.js';
 
 const STAMP = '2026-09-25T12:00:00.000Z';
+
+// A home directory that cannot exist, so a board command that fell through to
+// the ambient `$HOME` would find no configuration rather than the operator's.
+const TEST_HOME = '/nonexistent-antonina-test-home';
+
+// A filesystem that is never read, for the path-resolution assertions that are
+// about naming and not about contents.
+const noFs = { readFileSync: () => assert.fail('no configuration file should be read') };
+
+/**
+ * A real, throwaway `$XDG_CONFIG_HOME/antonina` holding exactly `files`.
+ *
+ * The CLI resolves its configuration directory from the environment, so this is
+ * the whole isolation story for the config tests: a real temporary directory, a
+ * real `XDG_CONFIG_HOME` pointing at it, and a home that cannot exist. No test
+ * in this file can read or mutate the operator's `~/.config/antonina`.
+ */
+function configDirectory(files) {
+  const root = mkdtempSync(join(tmpdir(), 'antonina-board-config-'));
+  const dir = join(root, 'antonina');
+  mkdirSync(dir, { recursive: true });
+  for (const [name, contents] of Object.entries(files)) {
+    writeFileSync(join(dir, name), contents, { mode: 0o600 });
+  }
+  return { root, dir, env: { XDG_CONFIG_HOME: root }, home: TEST_HOME };
+}
 
 function jsonResponse(value, status = 200, etag) {
   const headers = { 'Content-Type': 'application/json' };
@@ -67,7 +101,10 @@ function memoryIo() {
 
 function run(argv, context) {
   const capture = memoryIo();
-  return runBoardCommand(argv, { env: {}, io: capture.io, ...context }).then((code) => ({ code, ...capture }));
+  // `home` is a deliberately unreachable directory: these tests must resolve the
+  // configuration root from the environment they are given and never from the
+  // ambient `$HOME/.config/antonina` they happen to run under.
+  return runBoardCommand(argv, { env: {}, home: TEST_HOME, io: capture.io, ...context }).then((code) => ({ code, ...capture }));
 }
 
 test('board CLI emits deterministic JSON list output for a read-only client', async () => {
@@ -78,7 +115,7 @@ test('board CLI emits deterministic JSON list output for a read-only client', as
 
   const reader = client(server, { trustAnchor: initialized.trustAnchor });
   const capture = memoryIo();
-  const code = await runBoardCommand(['list', '--json'], { env: {}, io: capture.io, createClient: () => reader });
+  const code = await runBoardCommand(['list', '--json'], { env: {}, home: TEST_HOME, io: capture.io, createClient: () => reader });
 
   assert.equal(code, 0);
   assert.equal(JSON.parse(capture.out[0])[0].title, 'First');
@@ -89,6 +126,7 @@ test('board CLI requires author from flag or environment', async () => {
   const capture = memoryIo();
   const code = await runBoardCommand(['comment', '1', 'hello'], {
     env: {},
+    home: TEST_HOME,
     io: capture.io,
     createClient: () => client(fakeSkrynia()),
   });
@@ -172,7 +210,7 @@ test('every read command names the trust anchor when it cannot verify the board'
   const server = fakeSkrynia();
   await client(server).initialize();
   const untrusted = 'antonina board: Antonina signed board exists; this client has no trust anchor for it; '
-    + 'set ANTONINA_BOARD_TRUST to the board trust anchor to read it';
+    + 'save the board trust anchor as $XDG_CONFIG_HOME/antonina/trust.json to read it';
 
   for (const command of [
     ['list'],
@@ -317,21 +355,93 @@ test('a pipe-friendly initialization leaves stdout empty when the board already 
   }
 });
 
-test('board CLI refuses environment credentials it cannot parse or reconcile', async () => {
-  const malformed = await run(['access'], { env: { [BOARD_CREDENTIAL_ENV]: 'not json' } });
-  assert.equal(malformed.code, 1);
-  assert.match(malformed.err[0], /must contain valid JSON/);
+test('a board command takes its trust anchor and credential from the config files', async () => {
+  const initialized = await client(fakeSkrynia()).initialize();
+  const config = configDirectory({
+    'trust.json': serializeBoardTrustAnchor(initialized.trustAnchor),
+    'credential.json': serializeBoardCredential(initialized.credential),
+  });
 
+  // Nothing here exports a variable: the identity a board command runs as is
+  // read entirely out of the configuration directory.
+  const identity = configuredIdentity({ env: config.env, io: { stdout() {}, stderr() {} } });
+  assert.deepEqual(identity.trustAnchor, initialized.trustAnchor);
+  assert.deepEqual(identity.credential, initialized.credential);
+
+  // And the loader is what `runBoardCommand` itself consults: a malformed file
+  // in that same directory stops the command, which an unread directory would not.
+  const broken = configDirectory({ 'credential.json': 'not json' });
+  const { code, err } = await run(['list'], { env: broken.env, home: broken.home });
+  assert.equal(code, 1);
+  assert.match(err[0], /credential\.json must contain valid JSON/);
+});
+
+test('the config directory follows XDG_CONFIG_HOME and the home fallback', () => {
+  assert.equal(
+    boardConfigDir({ env: { XDG_CONFIG_HOME: '/xdg' }, home: '/home/op', fs: noFs }),
+    '/xdg/antonina',
+  );
+  // An unset *and* an empty `XDG_CONFIG_HOME` both fall back: an empty value is
+  // an unset value here, never the current directory.
+  for (const env of [{ XDG_CONFIG_HOME: '' }, {}]) {
+    assert.equal(boardConfigDir({ env, home: '/home/op', fs: noFs }), '/home/op/.config/antonina');
+  }
+  assert.notEqual(boardConfigDir({ env: { XDG_CONFIG_HOME: '' }, home: '/home/op', fs: noFs }), 'antonina');
+});
+
+test('a board command refuses a config file it cannot parse and names its path', async () => {
+  const notJson = configDirectory({ 'trust.json': 'not json' });
+  const badJson = await run(['list'], { env: notJson.env, home: notJson.home });
+  assert.equal(badJson.code, 1);
+  assert.match(badJson.err[0], /trust\.json must contain valid JSON/);
+
+  const wrongShape = configDirectory({ 'credential.json': '{"schemaVersion":1}' });
+  const badShape = await run(['list'], { env: wrongShape.env, home: wrongShape.home });
+  assert.equal(badShape.code, 1);
+  assert.match(badShape.err[0], /credential\.json: Antonina board credential is malformed/);
+
+  // The rejected value's secret never reaches the operator's terminal.
+  assert.equal(/storageCapability|privateKey/.test(badShape.err.join('\n')), false);
+});
+
+test('a board command has no identity when the config files are absent', async () => {
+  const io = { stdout() {}, stderr() {} };
+  // A directory that does not exist at all, and a real one holding something
+  // else, are both "nothing is configured" rather than failures.
+  for (const config of [{ env: { XDG_CONFIG_HOME: TEST_HOME }, home: TEST_HOME }, configDirectory({ 'notes.txt': 'hello' })]) {
+    const identity = configuredIdentity({ env: config.env, io });
+    assert.equal(identity.trustAnchor, null, config.env.XDG_CONFIG_HOME);
+    assert.equal(identity.credential, null, config.env.XDG_CONFIG_HOME);
+  }
+
+  // An unconfigured board is not an error at load time; it fails closed as soon
+  // as a command actually needs the board, naming initialization.
+  const { code, err } = await run(['list'], { env: { XDG_CONFIG_HOME: TEST_HOME }, home: TEST_HOME, createClient: () => client(fakeSkrynia()) });
+  assert.equal(code, 1);
+  assert.match(err[0], /does not exist; run: antonina board initialize/);
+});
+
+test('a trust anchor and credential from different boards are still refused', async () => {
   const first = await client(fakeSkrynia()).initialize();
   const second = await client(fakeSkrynia()).initialize();
-  const mismatched = await run(['access'], {
-    env: {
-      [BOARD_CREDENTIAL_ENV]: serializeBoardCredential(first.credential),
-      [BOARD_TRUST_ENV]: serializeBoardTrustAnchor(second.trustAnchor),
-    },
+  const mismatched = configDirectory({
+    'credential.json': serializeBoardCredential(first.credential),
+    'trust.json': serializeBoardTrustAnchor(second.trustAnchor),
   });
-  assert.equal(mismatched.code, 1);
-  assert.match(mismatched.err[0], /does not match the configured board trust anchor/);
+
+  const capture = memoryIo();
+  const code = await runBoardCommand(['access'], {
+    env: mismatched.env,
+    home: mismatched.home,
+    io: capture.io,
+    createClient: () => new BoardApi({
+      baseUrl: mismatched.env[BOARD_BASE_URL_ENV],
+      ...configuredIdentity({ env: mismatched.env, io: capture.io }),
+    }),
+  });
+
+  assert.equal(code, 1);
+  assert.match(capture.err[0], /does not match the configured board trust anchor/);
 });
 
 async function queuedBoard() {

@@ -31,7 +31,7 @@ antonina board collect list --host lubko://phoebe-dev
 antonina board collect delete --host lubko://phoebe-dev --path /workspace/project-worktree [--confirm]
 ```
 
-`collect list` is a dry run. It prints every path on that host that one verified board revision calls collectible, each line naming the board and the revision the answer came from. It needs no managed roots and no board credential — it only reads — but it does need a trust anchor for the board, from `ANTONINA_BOARD_TRUST` or from a configured credential; with neither, the board cannot be verified at all and the command exits non-zero. A board it cannot read or cannot verify is a failure on stderr with a non-zero exit, never an empty list.
+`collect list` is a dry run. It prints every path on that host that one verified board revision calls collectible, each line naming the board and the revision the answer came from. It needs no managed roots and no board credential — it only reads — but it does need a trust anchor for the board, from `$XDG_CONFIG_HOME/antonina/trust.json` or from the board credential in `credential.json`; with neither, the board cannot be verified at all and the command exits non-zero. A board it cannot read or cannot verify is a failure on stderr with a non-zero exit, never an empty list.
 
 `collect delete` removes a path, and needs `--confirm`. Without it the command performs the whole re-check and then reports what it would do, naming the revision it read:
 

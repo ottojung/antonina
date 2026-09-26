@@ -9,6 +9,7 @@ Antonina is a TypeScript/Node.js command-line runtime for long-lived local codin
 - `packages/core/` owns shared board/domain/Skrynia behavior used by CLI and web.
 - `web/` is the Antonina-owned React/Vite board app.
 - Durable user state lives under `$XDG_STATE_HOME/antonina` (default `$HOME/.local/state/antonina`).
+- Board trust and credential configuration lives under `$XDG_CONFIG_HOME/antonina` (default `$HOME/.config/antonina`) as `trust.json` and `credential.json`. These files are the only source; there is no environment override.
 - `docs/intent-records/` records durable product constraints and `docs/skills/` contains agentic operating guidance.
 
 ## Non-negotiable constraints
@@ -22,7 +23,7 @@ Antonina is a TypeScript/Node.js command-line runtime for long-lived local codin
 
 ## Test safety
 
-Tests must never read or mutate ambient Antonina state. Set `XDG_STATE_HOME` to a test-owned temporary directory. Any test that spawns a process must converge/reap it before returning.
+Tests must never read or mutate ambient Antonina state. Set `XDG_STATE_HOME` to a test-owned temporary directory, and do the same for `XDG_CONFIG_HOME` so no test can read or write the operator's `trust.json` or `credential.json`. Any test that spawns a process must converge/reap it before returning.
 
 Do not run manual lifecycle experiments against a real `$XDG_STATE_HOME/antonina`.
 

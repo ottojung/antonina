@@ -33,6 +33,9 @@ import { existsSync, readFileSync } from 'node:fs';
 const STAMP = '2026-09-25T12:00:00.000Z';
 const HOST = 'lubko://server';
 const OTHER_HOST = 'lubko://other';
+// A home directory that cannot exist, so a board command that fell through to
+// the ambient `$HOME` would find no configuration rather than the operator's.
+const TEST_HOME = '/nonexistent-antonina-test-home';
 
 // A minimal Skrynia stand-in, as in `board.test.mjs`: the collector's only
 // contact with the board is this store, and nothing here needs a real backend.
@@ -94,7 +97,10 @@ function memoryIo() {
 
 function run(argv, context) {
   const capture = memoryIo();
-  return runBoardCommand(argv, { env: {}, io: capture.io, ...context }).then((code) => ({ code, ...capture }));
+  // `home` is a deliberately unreachable directory: these tests must resolve the
+  // configuration root from the environment they are given and never from the
+  // ambient `$HOME/.config/antonina` they happen to run under.
+  return runBoardCommand(argv, { env: {}, home: TEST_HOME, io: capture.io, ...context }).then((code) => ({ code, ...capture }));
 }
 
 /**
@@ -272,7 +278,7 @@ test('collect list surfaces an unverifiable board and names the trust anchor', a
     assert.equal(
       err[0],
       'antonina board: Antonina signed board exists; this client has no trust anchor for it; '
-        + 'set ANTONINA_BOARD_TRUST to the board trust anchor to read it',
+        + 'save the board trust anchor as $XDG_CONFIG_HOME/antonina/trust.json to read it',
     );
   });
 });

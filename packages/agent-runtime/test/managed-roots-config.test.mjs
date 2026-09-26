@@ -8,7 +8,6 @@ import test from 'node:test';
 import { evaluateManagedCandidate, validateManagedRoots } from '../dist/packages/core/src/managed-roots.js';
 import {
   MANAGED_ROOTS_ENV,
-  configuredRootSpellings,
   loadManagedRoots,
 } from '../dist/packages/agent-runtime/src/managed-roots-config.js';
 
@@ -61,13 +60,32 @@ test('the loader reads exactly one env var name', () => {
   assert.equal(MANAGED_ROOTS_ENV, 'ANTONINA_COLLECT_ROOTS');
 });
 
-test('configured spellings are the trimmed, non-empty `:`-separated entries', () => {
-  assert.deepEqual(configuredRootSpellings({}), []);
-  assert.deepEqual(configuredRootSpellings(env('')), []);
-  assert.deepEqual(configuredRootSpellings(env('  :  : ')), []);
-  assert.deepEqual(configuredRootSpellings(env(' /a : /b ')), ['/a', '/b']);
-  // A second variable of the same shape is not read by this loader.
-  assert.deepEqual(configuredRootSpellings({ ANTONINA_MANAGED_ROOTS: '/a' }), []);
+test('the loader asks about the trimmed, non-empty `:`-separated entries and nothing else', async () => {
+  // The parsing is observed through the loader, which is its only public entry
+  // point: the `realpath` seam is asked about exactly the spellings the variable
+  // names, so this asserts the parse rather than a second exported parser.
+  await withTree(async () => {
+    const { fs, calls } = recordingFs(async (spelling) => `${spelling}/resolved`);
+    const result = await loadManagedRoots(
+      {
+        ANTONINA_COLLECT_ROOTS: '  /a : : /b :',
+        // A differently named variable of the same shape is not read by this
+        // loader.
+        ANTONINA_MANAGED_ROOTS: '/c',
+      },
+      MANAGED_ROOTS_ENV,
+      fs,
+    );
+
+    assert.equal(result.ok, true, JSON.stringify(result));
+    // Both entries are trimmed, the empty one is dropped rather than resolved,
+    // and the other variable contributed nothing.
+    assert.deepEqual(calls, ['/a', '/b']);
+    assert.deepEqual(result.roots.roots, [
+      { spelled: '/a', resolved: '/a/resolved' },
+      { spelled: '/b', resolved: '/b/resolved' },
+    ]);
+  });
 });
 
 test('an unset or empty variable is refused by name, never as "no roots"', async () => {
@@ -272,6 +290,37 @@ test('(d) a root that resolves to `/` is refused with its own kind', async () =>
   });
 });
 
+test('(a) a `resolved` coordinate is never read from configuration', async () => {
+  await withTree(async (root) => {
+    const real = join(root, 'real');
+    const other = join(root, 'other');
+    const link = join(root, 'link');
+    mkdirSync(real);
+    mkdirSync(other);
+    symlinkSync(real, link);
+
+    // The drift guard, and the load-bearing half of (a). Two readers of one
+    // operator-facing variable that disagree about `resolved` is a collector
+    // whose refusals cannot be trusted, and two consumers of two spellings of the
+    // same concept is how that starts -- so the second variable an earlier
+    // loader may have read must contribute nothing here, and the only `resolved`
+    // value that can appear is the one the seam returns.
+    const { fs, calls } = recordingFs(async (spelling) => (spelling === link ? real : spelling));
+    const result = await loadManagedRoots(
+      { [MANAGED_ROOTS_ENV]: `${link}:${other}`, ANTONINA_COLLECT_ROOTS_RESOLVED: '/etc' },
+      MANAGED_ROOTS_ENV,
+      fs,
+    );
+
+    assert.deepEqual(calls, [link, other]);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(result.roots.roots, [
+      { spelled: link, resolved: real },
+      { spelled: other, resolved: other },
+    ]);
+  });
+});
+
 test('(e) a nested set hands core\'s defect back, not a re-derived string', async () => {
   await withTree(async (root) => {
     const outer = join(root, 'outer');
@@ -290,6 +339,34 @@ test('(e) a nested set hands core\'s defect back, not a re-derived string', asyn
     const direct = validateManagedRoots([{ spelled: outer, resolved: outer }, { spelled: inner, resolved: inner }]);
     assert.equal(direct.ok, false);
     assert.deepEqual(result.defect, direct.defect);
+  });
+});
+
+test('(e) a pair that nests only in resolved coordinates is still refused', async () => {
+  await withTree(async (root) => {
+    // Two spellings side by side, neither inside the other...
+    const left = join(root, 'left');
+    const right = join(root, 'right');
+    mkdirSync(left);
+    mkdirSync(right);
+    // ...but the second is a symlink whose target is inside the first, so the
+    // pair nests once resolved even though the spellings do not. Containment is
+    // judged in the resolved coordinate, so the spelled pair looking disjoint is
+    // not a defence.
+    const nested = join(left, 'nested');
+    mkdirSync(nested);
+    const link = join(right, 'into-left');
+    symlinkSync(nested, link);
+
+    // A seam that delegates to the real filesystem and only records, so this
+    // asserts a real symlinked root and not a simulated one.
+    const { fs, calls } = recordingFs((spelling) => realpathCall(spelling));
+    const result = await loadManagedRoots(env(`${left}:${link}`), MANAGED_ROOTS_ENV, fs);
+
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.deepEqual(result.defect, { kind: 'nested', path: link, within: left });
+    assert.equal(result.spelling, link);
+    assert.deepEqual(calls, [left, link]);
   });
 });
 

@@ -40,12 +40,12 @@ export const BOARD_CREDENTIAL_ENV = 'ANTONINA_BOARD_CREDENTIAL';
 export const BOARD_TRUST_ENV = 'ANTONINA_BOARD_TRUST';
 export const BOARD_HEAD_ENV = 'ANTONINA_BOARD_HEAD';
 export const BOARD_AUTHOR_ENV = 'ANTONINA_BOARD_AUTHOR';
-// The managed collection roots the `collect` commands are configured from. The
-// name is owned by the loader that reads it, in
-// `packages/agent-runtime/src/managed-roots-config.ts`, and is re-exported from
-// there unmodified so the environment block is still where an operator looks
-// for it while the variable has exactly one owner.
-export { MANAGED_ROOTS_ENV } from '../../agent-runtime/src/managed-roots-config.js';
+// `ANTONINA_COLLECT_ROOTS`, the managed collection roots the `collect` commands
+// are configured from. It is named here, in the one block where an operator
+// looks for every environment name, but it is not declared or re-exported here:
+// the loader in `packages/agent-runtime/src/managed-roots-config.ts` owns the
+// name, and `collect delete` imports it from there. One constant, one owner, one
+// import path.
 
 export interface BoardCommandIo {
   stdout(text: string): void;

@@ -85,12 +85,17 @@ export type LoadManagedRootsResult =
 /**
  * The spellings the environment names, in configuration order.
  *
+ * Private, so `loadManagedRoots` is the module's one public entry point: a second
+ * exported parser is a second way to be wrong about what is configured. The
+ * parsing is observed through the loader, which asks the injected `realpath`
+ * about exactly the spellings this returns.
+ *
  * The separator is `:` (a POSIX path list) and empty entries are dropped after
  * trimming, so a variable holding only separators configures nothing. That
  * nothing is not "no roots, proceed": it is refused by name before any of this
  * is used for anything.
  */
-export function configuredRootSpellings(
+function configuredRootSpellings(
   env: Record<string, string | undefined>,
   name: string = MANAGED_ROOTS_ENV,
 ): string[] {

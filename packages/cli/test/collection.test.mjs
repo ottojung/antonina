@@ -9,7 +9,8 @@ import test from 'node:test';
 // runs, including the four-argument `recheckCollectionClaim` and the real
 // node-side `gatherCandidatePathFacts`.
 import { BoardApi } from '../dist/packages/core/src/api.js';
-import { runBoardCommand, MANAGED_ROOTS_ENV } from '../dist/packages/cli/src/board.js';
+import { runBoardCommand } from '../dist/packages/cli/src/board.js';
+import { MANAGED_ROOTS_ENV } from '../dist/packages/agent-runtime/src/managed-roots-config.js';
 import { unlinkCollectedPath } from '../dist/packages/cli/src/collection.js';
 import {
   openCollectionClaim,

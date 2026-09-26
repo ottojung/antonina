@@ -122,10 +122,6 @@ export function describeRootsDefect(result: {
     return `roots-not-configured: no managed collection roots are configured in ${defect.variable}; `
       + `set it to a ":"-separated list of absolute directories the collector may remove from`;
   }
-  if (defect.kind === 'empty') {
-    return `empty: no managed collection roots are configured in ${MANAGED_ROOTS_ENV}; `
-      + 'set it to a ":"-separated list of absolute directories the collector may remove from';
-  }
   if (defect.kind === 'malformed-root') {
     return `malformed-root: a configured managed root is not a spelled/resolved pair${spelling === null ? '' : ` (${spelling})`}`;
   }
@@ -146,7 +142,19 @@ export function describeRootsDefect(result: {
     return `root-resolves-to-filesystem-root: configured managed root ${defect.path} resolves to the `
       + `filesystem root ${defect.resolved}; it would make every absolute path collectible`;
   }
-  return `unresolvable-root: ${defect.message}`;
+  if (defect.kind === 'unresolvable-root') {
+    return `unresolvable-root: ${defect.message}`;
+  }
+  // Totality over the type, not a live case. `ManagedRootsConfigDefect` carries
+  // core's whole `ManagedRootDefect` because core's defect is handed back by
+  // identity rather than re-derived, so this function is total over a union that
+  // still names `empty`. The loader can never produce it: an absent or
+  // separator-only variable is refused above, as `roots-not-configured`, before
+  // `validateManagedRoots` is reached, so core is never asked to judge an empty
+  // set. It is rendered from the kind it was handed rather than as a second
+  // copy of the `roots-not-configured` sentence -- one situation, one wording.
+  return `${defect.kind}: the configured managed root set was refused by validation`
+    + (spelling === null ? '' : ` (${spelling})`);
 }
 /**
  * The verified snapshot both subcommands answer from, or the board's own

@@ -246,6 +246,57 @@ test('a credential whose key ID claims a live authority but whose key is not tha
   assert.equal(server.signed.operations.length, 2, 'a refused credential must not sign an operation');
 });
 
+test('a credential holding the live public key with a foreign private key is read-only', async () => {
+  const server = fakeSkrynia();
+  const root = api(server);
+  const initialized = await root.initialize();
+  await root.createIssue('Visible');
+
+  const other = await generateSigningKey();
+  const impostor = {
+    ...initialized.credential,
+    privateKey: other.privateKey,
+  };
+
+  const client = api(server, {
+    credential: impostor,
+    trustAnchor: initialized.trustAnchor,
+    rememberedHead: initialized.head,
+  });
+  assert.equal((await client.readBoard()).issues[0].title, 'Visible');
+  assert.equal(client.hasWriteAccess(), false);
+  assert.deepEqual(client.getEffectiveCapabilities(), []);
+  assert.equal(client.accessState().credentialRejection, 'unverified');
+  await assert.rejects(() => client.verifyCredential(), /private key does not match its public key/);
+  await assert.rejects(() => client.createIssue('Impostor'), /private key does not match its public key/);
+  assert.equal(server.signed.operations.length, 2, 'a refused credential must not sign an operation');
+});
+
+test('a credential whose key ID is not derived from the live public key is read-only', async () => {
+  const server = fakeSkrynia();
+  const root = api(server);
+  const initialized = await root.initialize();
+  await root.createIssue('Visible');
+
+  const impostor = {
+    ...initialized.credential,
+    keyId: `ed25519:${'A'.repeat(43)}`,
+  };
+
+  const client = api(server, {
+    credential: impostor,
+    trustAnchor: initialized.trustAnchor,
+    rememberedHead: initialized.head,
+  });
+  assert.equal((await client.readBoard()).issues[0].title, 'Visible');
+  assert.equal(client.hasWriteAccess(), false);
+  assert.deepEqual(client.getEffectiveCapabilities(), []);
+  assert.equal(client.accessState().credentialRejection, 'unverified');
+  await assert.rejects(() => client.verifyCredential(), /key ID does not match its public key/);
+  await assert.rejects(() => client.createIssue('Impostor'), /key ID does not match its public key/);
+  assert.equal(server.signed.operations.length, 2, 'a refused credential must not sign an operation');
+});
+
 test('a deleted board is reported as its own state, not as a read failure', async () => {
   const server = fakeSkrynia();
   const owner = api(server);
@@ -293,6 +344,9 @@ test('revocation invalidates a delegated credential on its next verification', a
     trustAnchor: initialized.trustAnchor,
     rememberedHead: root.getRememberedHead(),
   });
+  assert.equal((await delegated.loadBoard()).issues.length, 0);
+  assert.equal(delegated.accessState().credentialRejection, 'revoked');
+  assert.equal(delegated.hasWriteAccess(), false);
   await assert.rejects(() => delegated.verifyCredential(), /unknown or revoked/);
   assert.equal(delegated.hasWriteAccess(), false);
 });

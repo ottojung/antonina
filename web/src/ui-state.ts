@@ -36,7 +36,20 @@ export const ISSUE_FORM_HINT = 'The description holds the task context; the conv
 export const READ_ONLY_CALLOUT = {
   title: 'Read-only board',
   body: 'You can read every issue and resource. Enable editing in this browser to make changes.',
+  action: 'Enable editing',
 } as const;
+
+export const REJECTED_CREDENTIAL_COPY = {
+  title: 'This board rejected the credential in this browser',
+  body: 'The board credential stored in this browser was rejected, so the board is read-only. Paste a fresh credential that this board still accepts.',
+  action: 'Paste a fresh credential',
+} as const;
+
+/** A stored credential the board refused is reported as itself, not as a browser holding none. */
+export function accessCallout(hasWriteAccess: boolean, credentialRejected: boolean) {
+  if (hasWriteAccess) return null;
+  return credentialRejected ? REJECTED_CREDENTIAL_COPY : READ_ONLY_CALLOUT;
+}
 
 const FILTER_LABELS: Record<IssueFilter, string> = { open: 'Open', closed: 'Closed', all: 'All' };
 

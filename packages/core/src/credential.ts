@@ -7,7 +7,7 @@ import {
   type CanonicalValue,
   type SigningKeyPair,
 } from './canonical.js';
-import type { BoardTrustAnchor } from './operations.js';
+import type { BoardTrustAnchor, VerifiedAuthority, VerifiedBoardState } from './operations.js';
 
 export const BOARD_CREDENTIAL_SCHEMA_VERSION = 1 as const;
 export const BOARD_CREDENTIAL_STORAGE_KEY = 'antonina:board-v2:credential';
@@ -139,6 +139,35 @@ export async function verifyBoardCredential(value: unknown): Promise<BoardCreden
     throw new Error('Antonina credential private key does not match its public key');
   }
   return credential;
+}
+
+/** Why a credential is not an authority of a verified board. */
+export type CredentialRejection = 'unverified' | 'unknown' | 'revoked';
+
+export type CredentialAuthority =
+  | { active: true; authority: VerifiedAuthority }
+  | { active: false; rejection: 'unverified'; cause: unknown }
+  | { active: false; rejection: 'unknown' | 'revoked' };
+
+/**
+ * The one place a credential value is turned into board authority: it must
+ * first verify as one key, and only then is its verified key id looked up in
+ * the verified log. A field the credential declares about itself is never
+ * evidence of identity.
+ */
+export async function resolveCredentialAuthority(
+  value: unknown,
+  state: VerifiedBoardState,
+): Promise<CredentialAuthority> {
+  let credential: BoardCredential;
+  try {
+    credential = await verifyBoardCredential(value);
+  } catch (cause) {
+    return { active: false, rejection: 'unverified', cause };
+  }
+  const authority = state.authorities.find((candidate) => candidate.keyId === credential.keyId);
+  if (authority === undefined) return { active: false, rejection: 'unknown' };
+  return authority.revoked ? { active: false, rejection: 'revoked' } : { active: true, authority };
 }
 
 export async function createBoardCredential(

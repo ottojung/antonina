@@ -16,7 +16,6 @@ import {
   type BoardCredential,
 } from '../../packages/core/src/credential';
 import type { BoardTrustAnchor, VerifiedBoardState } from '../../packages/core/src/operations';
-import type { Board } from '../../packages/core/src/model';
 
 export {
   parseBoardCredentialText,
@@ -81,23 +80,22 @@ export class BrowserBoardSession {
 
   /**
    * Adopts a board trust anchor so this browser can read it, and returns the
-   * board that call verified.
-   *
-   * The verified `VerifiedBoardState` — the one shape `readState` hands back,
-   * with the queue beside the board — is not reachable from here: `trustBoard`
-   * returns the board alone, and every queue lives behind another verified read
-   * of the whole log. Surfacing it means changing `packages/core`, which this
-   * branch does not touch, so the caller still makes the one read it needs.
+   * whole state that call verified — the same shape `readState` hands back,
+   * queue beside board. Trusting reads and verifies the log once, so the
+   * session is ready to render and no second read is needed.
    */
-  async trust(anchorText: string): Promise<Board> {
+  async trust(anchorText: string): Promise<VerifiedBoardState> {
     const anchor = await parseBoardTrustAnchorText(anchorText);
-    const board = await this.api.trustBoard(anchor);
+    const state = await this.api.trustBoard(anchor);
     this.storage.set(BOARD_TRUST_STORAGE_KEY, serializeBoardTrustAnchor(anchor));
     this.rememberHead();
-    return board;
+    return state;
   }
 
-  /** Creates the board and keeps its root credential in this browser. */
+  /**
+   * Creates the board, keeps its root credential in this browser, and returns
+   * the state the create verified, so the first load needs no second read.
+   */
   async initialize(): Promise<BoardInitialization> {
     const initialized = await this.api.initialize();
     this.persistCredential(initialized.credential);

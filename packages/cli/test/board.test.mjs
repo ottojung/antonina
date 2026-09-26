@@ -204,7 +204,7 @@ test('board CLI reports the trust anchor and root credential after initializatio
   assert.equal(code, 0);
   const printed = JSON.parse(out[0]);
   assert.equal(printed.credential.keyId, printed.trustAnchor.rootKeyId);
-  assert.equal(printed.board.nextIssueNumber, 1);
+  assert.equal(printed.state.board.nextIssueNumber, 1);
   assert.equal(server.signed.operations[0].kind, 'board.initialize');
 });
 

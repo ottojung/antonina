@@ -6,6 +6,7 @@ import {
   canonicalPath,
   emptyBoard,
   parseBoard,
+  pathFormDefect,
   resourceViews,
 } from '../dist/model.js';
 
@@ -85,6 +86,36 @@ test('host and path canonicalization match the persisted resource contract', () 
   for (const value of ['', 'a/b', '/a/../b', '/a//b', '/a/.', '/a/b/']) {
     assert.throws(() => canonicalPath(value));
   }
+});
+
+test('path form defects name the rule each spelling breaks', () => {
+  assert.equal(pathFormDefect('/'), null);
+  assert.equal(pathFormDefect('/workspace/project'), null);
+  assert.equal(pathFormDefect('/workspace/..hidden'), null);
+  assert.equal(pathFormDefect(''), 'empty');
+  assert.equal(pathFormDefect('a/b'), 'relative');
+  assert.equal(pathFormDefect('workspace'), 'relative');
+  assert.equal(pathFormDefect('/a/../b'), 'parent-traversal');
+  assert.equal(pathFormDefect('/..'), 'parent-traversal');
+  assert.equal(pathFormDefect('/a//b'), 'non-canonical');
+  assert.equal(pathFormDefect('/a/./b'), 'non-canonical');
+  assert.equal(pathFormDefect('/.'), 'non-canonical');
+  assert.equal(pathFormDefect('/a/b/'), 'non-canonical');
+  // The valid form is exactly the one canonicalization accepts, and it has not
+  // // moved: `pathFormDefect(p) === null` iff `canonicalPath(p)` does not throw.
+  for (const value of ['', '/', '/a', 'a', '..', '/..', '/a//b', '/a/./b', '/a/../b', '/a/']) {
+    const valid = pathFormDefect(value) === null;
+    let accepted = true;
+    try {
+      canonicalPath(value);
+    } catch {
+      accepted = false;
+    }
+    assert.equal(valid, accepted, JSON.stringify(value));
+  }
+  assert.throws(() => canonicalPath('/a/../b'), /Path must be/);
+  assert.throws(() => canonicalPath('a'), /Path must be/);
+  assert.throws(() => canonicalPath(''), /Path must be/);
 });
 
 test('empty board is canonical', () => {

@@ -83,11 +83,10 @@ async function initializedBoard(storage: BoardKeyStorage = memoryStorage()) {
 
 describe('browser board session', () => {
   it('verifies the stored log once per trust and once per initialize', async () => {
-    // The first-run paths are the reason this count matters: each of these two
-    // calls already reads and verifies the whole operation log, and neither
-    // returns the queue that `readState` pairs with the board, so the app makes
-    // one more read for the queue. What must never happen is a second
-    // verification inside either of these calls.
+    // Both of these calls read and verify the whole operation log, and both hand
+    // back the state that read verified, so nothing has to read the log again
+    // for the queue. What must never happen is a second verification inside
+    // either of them, so the count after each call is that call's whole budget.
     const server = fakeSkrynia();
     const storage = memoryStorage();
     let gets = 0;
@@ -103,20 +102,16 @@ describe('browser board session', () => {
     // The existence probe and the create's own compare-and-set read; both belong
     // to the one create, and neither is repeated inside our call.
     expect(gets).toBe(2);
-    expect(initialized.board.issues).toEqual([]);
+    expect(initialized.state.board.issues).toEqual([]);
+    expect(initialized.state.queue).toEqual([]);
 
     const reader = counting();
-    const board = await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
-    // One read: trusting a known anchor is a single verified pass over the log.
+    const state = await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
+    // One read: trusting a known anchor is a single verified pass over the log,
+    // and it returns that pass's state, so no read follows it.
     expect(gets).toBe(3);
-    expect(board.issues).toEqual([]);
-
-    // One more read, and only one, is what it costs to learn the queue those two
-    // calls did not return.
-    await reader.readState();
-    expect(gets).toBe(4);
-    await reader.readState();
-    expect(gets).toBe(5);
+    expect(state.board.issues).toEqual([]);
+    expect(state.queue).toEqual([]);
   });
 
   it('reports a missing board on a plain page load without creating it', async () => {
@@ -141,7 +136,7 @@ describe('browser board session', () => {
 
     expect(reader.credentialText()).toBe(serializeBoardCredential(before.initialized.credential));
     expect(reader.trustAnchorText()).toBe(serializeBoardTrustAnchor(before.initialized.trustAnchor));
-    expect(storage.get('antonina:board-v2:accepted-head')).toBe(before.initialized.head);
+    expect(storage.get('antonina:board-v2:accepted-head')).toBe(before.initialized.state.head);
     expect((await reader.api.verifyCredential()).canEdit).toBe(true);
     expect(reader.api.hasWriteAccess()).toBe(true);
   });
@@ -169,8 +164,8 @@ describe('browser board session', () => {
     const reader = session(server);
 
     await expect(reader.readState()).rejects.toBeInstanceOf(BoardTrustRequiredError);
-    const board = await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
-    expect(board.issues).toEqual([]);
+    const state = await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
+    expect(state.board.issues).toEqual([]);
   });
 
   it('reads a board through a trust anchor alone, and stays read-only', async () => {
@@ -180,9 +175,9 @@ describe('browser board session', () => {
     await owner.api.createIssue('Visible', 'signed board');
 
     const reader = session(server);
-    const board = await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
+    const state = await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
 
-    expect(board.issues[0]).toMatchObject({ number: 1, title: 'Visible', createdAt: STAMP });
+    expect(state.board.issues[0]).toMatchObject({ number: 1, title: 'Visible', createdAt: STAMP });
     expect(reader.hasCredential()).toBe(false);
     expect(reader.api.hasWriteAccess()).toBe(false);
     await expect(reader.api.createIssue('Blocked')).rejects.toThrow('credential is required');

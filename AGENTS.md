@@ -28,7 +28,7 @@ Do not run manual lifecycle experiments against a real `$XDG_STATE_HOME/antonina
 
 ## Development
 
-Use the locked web toolchain for TypeScript during this migration:
+Use the repository's locked TypeScript toolchain:
 
 ```sh
 npm ci --prefix web
@@ -42,4 +42,4 @@ npm test --prefix web
 npm run build --prefix web
 ```
 
-The Python tree is temporary parity material for issue #28 and must not receive new product behavior.
+There is no alternate Python runtime. Product behavior belongs in the TypeScript packages above.

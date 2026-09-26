@@ -21,6 +21,8 @@ import {
   reservationInFlight,
   setActiveRunner,
   signalInvocation,
+  steerQueue,
+  steerSequence,
   waitForInvocationGone,
 } from '../../agent-runtime/src/lifecycle.js';
 import {
@@ -31,6 +33,7 @@ import {
   nextPromptCount,
   pendingPrompt,
   persistedAgentCwd,
+  persistedControlField,
   persistedLifecycleState,
   persistedNativeSessionId,
   persistedTimestamp,
@@ -326,6 +329,12 @@ function statusJson(agentId: string, meta: AgentMetadata): Record<string, unknow
   };
   const startedAt = summaryTimestamp(meta, 'started_at', errors);
   const exitSignal = positiveInteger('exit_signal');
+  const sequence = steerSequence(meta);
+  const steers = steerQueue(meta, sequence);
+  const steerMetadataError = sequence === null || steers === null
+    ? 'malformed persisted steer metadata'
+    : null;
+  const intent = persistedControlField(meta, 'intent');
   const status: Record<string, unknown> = {
     id: agentId,
     state: deriveState(meta),
@@ -343,6 +352,10 @@ function statusJson(agentId: string, meta: AgentMetadata): Record<string, unknow
     exit_code: integer('exit_code'),
     exit_signal: exitSignal,
     prompts: item.prompts,
+    steers_pending: steers === null ? null : steers.length,
+    next_steer: steers && steers.length > 0 ? steers[0]!.prompt.split('\n', 1)[0] : null,
+    steer_preempting: intent.malformed ? null : intent.value === 'steer',
+    steer_metadata_error: steerMetadataError,
     model: 'opencode/space-bunny-free',
     variant: optionalString('variant'),
     backend_error: sanitizeBackendError(meta.backend_error),
@@ -374,6 +387,12 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
     context.io.stdout(`finished:   ${shown('finished_at', status.finished_at)}`);
     context.io.stdout(`exit code:  ${shown('exit_code', status.exit_code)}`);
     context.io.stdout(`prompts:    ${shown('prompt_count', status.prompts, '0')}`);
+    if (status.steer_metadata_error) {
+      context.io.stdout(`steers:     ${String(status.steer_metadata_error)}`);
+    } else if (typeof status.steers_pending === 'number' && status.steers_pending > 0) {
+      context.io.stdout(`steers:     ${status.steers_pending} queued: ${String(status.next_steer ?? '')}`);
+    }
+    if (status.steer_preempting === true) context.io.stdout('steer:      hard-preempting current invocation');
     context.io.stdout(`title:      ${shown('title', status.title)}`);
     if (errors.size > 0) {
       context.io.stdout(`metadata:   malformed persisted summary metadata: ${[...errors].join(', ')}`);

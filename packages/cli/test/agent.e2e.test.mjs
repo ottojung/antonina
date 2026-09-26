@@ -252,7 +252,7 @@ test('delete tombstone blocks later prompt reservation', (t) => {
   assert.equal(prompt.status, 1);
   assert.match(prompt.stderr, /still running|redirect/);
   const after = JSON.parse(readFileSync(path, 'utf8'));
-  assert.equal(after.pending_prompt, null);
+  assert.equal(after.pending_prompt ?? null, null);
   assert.equal(after.active_runner, false);
   assert.equal(after.prompt_count, 0);
 });

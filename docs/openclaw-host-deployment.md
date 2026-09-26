@@ -385,3 +385,73 @@ The experiment still needs to settle:
 The next milestone is deliberately small: install the Gateway as a persistent daemon,
 remove the broad temporary HTTP smoke-test tool exposure, and verify that the same
 ACP child path still works without broadening the design prematurely.
+
+
+## Later findings from the same experiment
+
+The first ACP child smoke test eventually completed successfully. OpenClaw accepted
+the spawn, created an ACP child session, initialized the OpenCode ACP backend, and
+the Gateway log contained exactly:
+
+```text
+LIVE-ACP-SPAWN-OK
+```
+
+This proves the execution path:
+
+```text
+Gateway -> sessions_spawn -> ACPX -> OpenCode ACP -> task completion
+```
+
+The ad-hoc HTTP requester did not receive the child completion as a normal wake-up;
+OpenClaw logged a requester handoff warning after the child itself had completed.
+That is a requester/session integration issue, not an ACP execution failure.
+
+The broad temporary Gateway tool allowlist used to drive the HTTP smoke test was
+subsequently removed.
+
+### Native service installation is unavailable in this container
+
+`marceline-dev` currently has `docker-init` as PID 1. OpenClaw reports:
+
+```text
+Service: no supported service manager detected
+```
+
+There is no usable systemd user service manager (and no Shepherd service manager)
+inside this container, so `openclaw gateway install` cannot provide its normal Linux
+daemon installation here.
+
+A long-running Lubko command can keep a Gateway process alive for continued
+experimentation, but that is a stopgap. The desired deterministic deployment should
+make Gateway startup part of the Antonina host/container lifecycle rather than add a
+new process supervisor to Antonina.
+
+### Embedded OpenClaw model routing is not solved yet
+
+The successful ACP worker path is separate from OpenClaw's own embedded/system-agent
+model route.
+
+On the current installation:
+
+```text
+openclaw models list --provider opencode
+```
+
+returns no models, and an explicit embedded run using
+`opencode/space-bunny-free` fails as an unknown model.
+
+This explains why the foreground Gateway's default heartbeat attempted the built-in
+OpenAI default even though the ACP agents were restricted to Space Bunny.
+
+Until the direct provider route is resolved or intentionally replaced, recurring
+heartbeats are disabled with `agents.defaults.heartbeat.every = "0m"`. OpenClaw's
+documentation defines `0m` as disabling recurring heartbeat cadence while still
+allowing targeted event-driven wakes.
+
+The desired final deployment therefore has two model-related checks:
+
+1. ACP workers must continue to launch OpenCode with the dedicated Space Bunny-only
+   OpenCode configuration.
+2. Any OpenClaw embedded/system-agent route that is enabled must also be constrained
+   to the intended model rather than silently falling back to another provider.

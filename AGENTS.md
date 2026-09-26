@@ -1,41 +1,45 @@
 # Antonina contributor guidance
 
-Antonina is a Python 3.12+ command-line runtime for long-lived local coding-agent sessions. The public executable is `antonina`; OpenCode is the current external backend.
+Antonina is a TypeScript/Node.js command-line runtime for long-lived local coding-agent sessions. The public executable is `antonina`; OpenCode is the current external backend.
 
 ## Architecture
 
-- `src/antonina/agent.py` owns the CLI and managed-session lifecycle.
-- `src/antonina/board.py` owns the stdlib board/resource client and `antonina board` commands.
-- `web/` is the Antonina-owned Node/Vite board app; its Skrynia namespace is `antonina` and key is `board-v1`.
-- `src/antonina/_exact_signal.py` and `_process_group.py` provide exact process identity/signalling primitives.
-- `src/antonina/durable.py` provides crash-durable local state writes.
+- `packages/agent-runtime/` owns durable managed-session state, process lifecycle, OpenCode invocation, logs, and recovery semantics.
+- `packages/cli/` owns command parsing/output and packages the precompiled `antonina` executable.
+- `packages/core/` owns shared board/domain/Skrynia behavior used by CLI and web.
+- `web/` is the Antonina-owned React/Vite board app.
 - Durable user state lives under `$XDG_STATE_HOME/antonina` (default `$HOME/.local/state/antonina`).
 - `docs/intent-records/` records durable product constraints and `docs/skills/` contains agentic operating guidance.
 
 ## Non-negotiable constraints
 
-- `project.dependencies` stays empty. Antonina's Python runtime uses only the standard library and its own package.
-- OpenCode is an external executable, not a Python dependency.
-- Process-control code must fail closed when exact ownership cannot be proven. Never replace exact PID/start-time/process-group checks with process-name matching.
-- Lifecycle changes must preserve durable accepted work and deterministic stop/kill/delete/steer authority.
-- Do not add compatibility aliases or legacy paths unless an issue explicitly requires them.
+- Production Antonina behavior is TypeScript compiled to JavaScript and runs on Node.js 22+.
+- OpenCode is an external executable, not an imported runtime library.
+- Do not add native addons merely to emulate the old Python pidfd/flock edge guarantees. Ordinary Node/POSIX process signalling after PID/start-time/marker checks is sufficient.
+- Never infer process ownership from process names.
+- Lifecycle changes must preserve accepted prompts, runner generation ownership, FIFO steer ordering, and coherent stop/kill/delete state.
+- Shared board/domain behavior belongs in `packages/core`; do not duplicate it between CLI and web.
 
 ## Test safety
 
-Tests must never read or mutate ambient Antonina state. The autouse test fixture redirects `XDG_STATE_HOME` to a pytest-owned temporary directory. Any test that spawns a process must own it exactly and converge/reap it before returning.
+Tests must never read or mutate ambient Antonina state. Set `XDG_STATE_HOME` to a test-owned temporary directory. Any test that spawns a process must converge/reap it before returning.
 
-Do not run manual lifecycle experiments against a real `$XDG_STATE_HOME/antonina`. Use an explicit temporary `XDG_STATE_HOME` or a disposable environment.
+Do not run manual lifecycle experiments against a real `$XDG_STATE_HOME/antonina`.
 
 ## Development
 
-Use the locked development environment:
+Use the locked web toolchain for TypeScript during this migration:
 
 ```sh
-uv sync --frozen --extra dev
-uv run ruff format --check .
-uv run ruff check .
-uv run mypy .
-uv run pytest
+npm ci --prefix web
+./web/node_modules/.bin/tsc -p packages/core/tsconfig.json
+./web/node_modules/.bin/tsc -p packages/agent-runtime/tsconfig.json
+./web/node_modules/.bin/tsc -p packages/cli/tsconfig.json
+node --test packages/core/test/*.test.mjs
+node --test packages/agent-runtime/test/*.test.mjs
+node --test packages/cli/test/*.test.mjs
+npm test --prefix web
+npm run build --prefix web
 ```
 
-Before committing, also inspect `git diff --check` and verify that generated caches or local state are not tracked.
+The Python tree is temporary parity material for issue #28 and must not receive new product behavior.

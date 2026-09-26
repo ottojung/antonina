@@ -250,6 +250,16 @@ test('(c) a set whose middle entry is unresolvable fails, and never yields the e
   });
 });
 
+// Title caveat: the "before any I/O" in the title below is scoped to the entry
+// under test. The first sub-case configures `/` as the only entry, so zero I/O is
+// genuinely what it observes. The second puts `/` after a valid root, so an
+// earlier entry has already been resolved by the time `/` is reached: the
+// spelling check is per-entry inside the loop
+// (`managed-roots-config.ts:182-192`), and the source says so at lines 155-157
+// ("a later entry whose spelling is `/` is refused after the entries before it
+// were resolved"). The loader therefore does not guarantee that `/` anywhere in
+// a list is refused before any I/O. This test does not establish that, and does
+// not claim it; it records the ordering for the one-entry case only.
 test('(d) the spelling `/` is refused before any I/O, though core would accept it', async () => {
   await withTree(async (root) => {
     // Core's own validator accepts a `/` root: `pathFormDefect('/')` is null. The
@@ -265,6 +275,9 @@ test('(d) the spelling `/` is refused before any I/O, though core would accept i
 
     // Among other entries, `/` still decides the outcome: the refusal is not
     // postponed to a whole-set judgement that a later valid entry could dilute.
+    // This is about *which* entry decides, not about ordering: the valid entry
+    // before `/` is resolved first, so no I/O assertion is made here -- see the
+    // title caveat above.
     const withOther = await loadManagedRoots(
       env(`${join(root, 'root')}:/`),
       MANAGED_ROOTS_ENV,

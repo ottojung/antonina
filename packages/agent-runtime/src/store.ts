@@ -323,7 +323,15 @@ export function createAgentDirectory(agentId: string, options: StatePathsOptions
 export function removeAgentDirectory(agentId: string, options: StatePathsOptions = {}): void {
   const fs = filesystem(options);
   try {
-    fs.rmSync(agentDir(agentId, options), { recursive: true, force: true });
+    fs.rmSync(agentDir(agentId, options), {
+      recursive: true,
+      force: true,
+      // A just-converged detached runner may still be closing/unlinking its
+      // final files. Retry only the transient recursive-removal races; a
+      // persistent filesystem failure still propagates below.
+      maxRetries: 5,
+      retryDelay: 20,
+    });
     syncDirectory(agentsDir(options), fs);
   } catch (error) {
     if (error instanceof MetadataWriteError) throw error;

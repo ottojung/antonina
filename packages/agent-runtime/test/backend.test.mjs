@@ -13,8 +13,8 @@ import {
   classifyBackendFailure,
   configuredModelAvailable,
   sanitizeBackendError,
-} from '../dist/backend.js';
-import { idleMeta } from '../dist/metadata.js';
+} from '../dist/packages/agent-runtime/src/backend.js';
+import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'antonina-backend-'));

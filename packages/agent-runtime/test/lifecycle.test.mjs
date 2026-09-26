@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { idleMeta } from '../dist/metadata.js';
+import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
 import {
   beginInvocation,
   beginStopLike,
@@ -17,7 +17,7 @@ import {
   reservationInFlight,
   signalInvocation,
   steerQueue,
-} from '../dist/lifecycle.js';
+} from '../dist/packages/agent-runtime/src/lifecycle.js';
 
 function statLine(start = 1234, pgrp = 4242) {
   const fields = ['S', '1', String(pgrp), '0', '0', '0', '0', '0', '0', '0', '0', '7', '11', '0', '0', '0', '0', '0', '0', String(start)];

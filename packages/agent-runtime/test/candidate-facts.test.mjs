@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { gatherCandidatePathFacts } from '../dist/candidate-facts.js';
+import { gatherCandidatePathFacts } from '../dist/packages/agent-runtime/src/candidate-facts.js';
 
 /**
  * The gatherer is the only place in the collection stack that reads the

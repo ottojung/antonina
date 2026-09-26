@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { idleMeta } from '../dist/metadata.js';
+import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
 import {
   MetadataLockError,
   MetadataReadError,
@@ -16,7 +16,7 @@ import {
   updateMeta,
   withAgentLock,
   writeMeta,
-} from '../dist/store.js';
+} from '../dist/packages/agent-runtime/src/store.js';
 
 function root(t) {
   const dir = nodeFs.mkdtempSync(join(tmpdir(), 'antonina-store-'));

@@ -337,13 +337,26 @@ export async function updateMeta(
 
 export function createAgentDirectory(agentId: string, options: StatePathsOptions = {}): boolean {
   const fs = filesystem(options);
+  const directory = agentDir(agentId, options);
+  let created = false;
   try {
     fs.mkdirSync(agentsDir(options), { recursive: true });
-    fs.mkdirSync(agentDir(agentId, options));
+    fs.mkdirSync(directory);
+    created = true;
     syncDirectory(agentsDir(options), fs);
     return true;
   } catch (error) {
-    if (hasCode(error, 'EEXIST')) return false;
+    if (!created && hasCode(error, 'EEXIST')) return false;
+    if (created) {
+      try {
+        fs.rmSync(directory, { recursive: true, force: true, maxRetries: 2, retryDelay: 10 });
+      } catch (cleanupError) {
+        throw new MetadataWriteError(
+          `failed to create and clean up state directory for agent ${agentId}`,
+          { cause: new AggregateError([error, cleanupError]) },
+        );
+      }
+    }
     if (error instanceof MetadataWriteError) throw error;
     throw new MetadataWriteError(`failed to create state directory for agent ${agentId}`, { cause: error });
   }

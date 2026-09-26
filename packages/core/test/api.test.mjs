@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { generateSigningKey } from '../dist/canonical.js';
 import {
   BoardApi,
   BoardDeletedError,
@@ -212,6 +213,37 @@ test('a 403 on the read a mutation is built on is a read failure, and a 403 on i
   assert.equal(writer.hasWriteAccess(), false);
   assert.equal(writer.accessState().storageRejected, true);
   assert.equal(server.signed.operations.length, 1);
+});
+
+test('a credential whose key ID claims a live authority but whose key is not that authority is read-only', async () => {
+  const server = fakeSkrynia();
+  const root = api(server);
+  const initialized = await root.initialize();
+  await root.createIssue('Visible');
+
+  // A well-formed credential that names the root authority but carries a
+  // different signing key pair, as browser storage can hold after a hand edit.
+  const other = await generateSigningKey();
+  const impostor = {
+    ...initialized.credential,
+    keyId: initialized.credential.keyId,
+    publicKey: other.publicKey,
+    privateKey: other.privateKey,
+  };
+
+  const client = api(server, {
+    credential: impostor,
+    trustAnchor: initialized.trustAnchor,
+    rememberedHead: initialized.head,
+  });
+  assert.equal((await client.readBoard()).issues[0].title, 'Visible');
+  assert.equal(client.hasWriteAccess(), false);
+  assert.deepEqual(client.getEffectiveCapabilities(), []);
+  assert.equal(client.accessState().keyId, null);
+  assert.equal(client.accessState().canEdit, false);
+  await assert.rejects(() => client.verifyCredential(), /key ID does not match its public key/);
+  await assert.rejects(() => client.createIssue('Impostor'), /key ID does not match its public key/);
+  assert.equal(server.signed.operations.length, 2, 'a refused credential must not sign an operation');
 });
 
 test('a deleted board is reported as its own state, not as a read failure', async () => {

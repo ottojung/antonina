@@ -126,8 +126,8 @@ export class BoardApi {
   private anchor: BoardTrustAnchor | null;
   private rememberedHead: string | null;
   private storageRejected = false;
-  /** `null` until a verified log has said what this credential may do. */
-  private effectiveCapabilities: BoardCapability[] | null = null;
+  /** `null` until a verified log has matched this credential to a registered key. */
+  private effectiveAuthority: VerifiedAuthority | null = null;
 
   constructor(options: BoardApiOptions = {}) {
     this.store = new SignedBoardStore(options);
@@ -158,7 +158,7 @@ export class BoardApi {
   }
 
   getEffectiveCapabilities(): BoardCapability[] {
-    return this.effectiveCapabilities === null ? [] : [...this.effectiveCapabilities];
+    return this.effectiveAuthority === null ? [] : [...this.effectiveAuthority.capabilities];
   }
 
   /**
@@ -173,7 +173,7 @@ export class BoardApi {
   clearCredential(): void {
     this.credential = null;
     this.storageRejected = false;
-    this.effectiveCapabilities = null;
+    this.effectiveAuthority = null;
   }
 
   async signedBoardExists(): Promise<boolean> {
@@ -246,11 +246,11 @@ export class BoardApi {
     }
 
     const stored = await this.readStored(anchor);
-    const authority = this.requireActiveAuthority(stored.state, credential.keyId);
+    const authority = this.requireActiveAuthority(stored.state, credential);
     this.anchor = anchor;
     this.credential = credential;
     this.storageRejected = false;
-    this.effectiveCapabilities = [...authority.capabilities];
+    this.effectiveAuthority = authority;
     return this.accessState();
   }
 
@@ -258,7 +258,7 @@ export class BoardApi {
     const anchor = this.requireAnchor();
     return {
       boardId: anchor.boardId,
-      keyId: this.credential?.keyId ?? null,
+      keyId: this.effectiveAuthority?.keyId ?? null,
       rootKeyId: anchor.rootKeyId,
       capabilities: this.getEffectiveCapabilities(),
       storageRejected: this.storageRejected,
@@ -448,21 +448,25 @@ export class BoardApi {
     return issue;
   }
 
-  private requireActiveAuthority(state: VerifiedBoardState, keyId: string): VerifiedAuthority {
-    const authority = state.authorities.find((candidate) => candidate.keyId === keyId);
+  private requireActiveAuthority(state: VerifiedBoardState, credential: BoardCredential): VerifiedAuthority {
+    const authority = this.findAuthority(state, credential);
     if (!authority || authority.revoked) {
       throw new AntoninaApiError('Antonina board credential is unknown or revoked');
     }
     return authority;
   }
 
-  private refreshEffectiveCapabilities(state: VerifiedBoardState): void {
-    if (this.credential === null) {
-      this.effectiveCapabilities = null;
-      return;
-    }
-    const authority = state.authorities.find((candidate) => candidate.keyId === this.credential?.keyId);
-    this.effectiveCapabilities = !authority || authority.revoked ? [] : [...authority.capabilities];
+  /**
+   * Identity is the public key the verified log registered, never the `keyId`
+   * string the credential declares about itself.
+   */
+  private findAuthority(state: VerifiedBoardState, credential: BoardCredential): VerifiedAuthority | undefined {
+    return state.authorities.find((candidate) => candidate.publicKey === credential.publicKey);
+  }
+
+  private refreshEffectiveAuthority(state: VerifiedBoardState): void {
+    const authority = this.credential === null ? undefined : this.findAuthority(state, this.credential);
+    this.effectiveAuthority = !authority || authority.revoked ? null : authority;
   }
 
   /** `acceptDeleted` is set only by the append that performed the deletion. */
@@ -471,7 +475,7 @@ export class BoardApi {
       throw new BoardDeletedError();
     }
     this.rememberedHead = stored.state.head;
-    this.refreshEffectiveCapabilities(stored.state);
+    this.refreshEffectiveAuthority(stored.state);
   }
 
   /**
@@ -493,7 +497,7 @@ export class BoardApi {
   }
 
   private async requireUsableCredential(capability: BoardCapability): Promise<BoardCredential> {
-    if (this.credential === null || this.effectiveCapabilities === null) {
+    if (this.credential === null || this.effectiveAuthority === null) {
       // `verifyCredential` establishes board state before it asks for a
       // credential, through the same one read path every command uses. It
       // throws when there is no credential, so `requireCredential` below
@@ -501,7 +505,7 @@ export class BoardApi {
       await this.verifyCredential(this.credential);
     }
     const credential = this.requireCredential();
-    if (!this.effectiveCapabilities?.includes(capability)) {
+    if (!this.effectiveAuthority?.capabilities.includes(capability)) {
       throw new AntoninaApiError('Antonina credential lacks required capability ' + capability);
     }
     return credential;

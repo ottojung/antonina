@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 import { runManagedRunner } from '../../agent-runtime/src/runner.js';
 import { runAgentCommand, type AgentCommandContext } from './agent.js';
 import { runBoardCommand } from './board.js';
@@ -53,6 +56,16 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   return 2;
 }
 
-if (process.argv[1]?.endsWith('/main.js')) {
+function isMainModule(): boolean {
+  const argvEntry = process.argv[1];
+  if (argvEntry === undefined) return false;
+  try {
+    return realpathSync(argvEntry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   void main().then((code) => { process.exitCode = code; });
 }

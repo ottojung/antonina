@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createBrowserBoardApi } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { COMPOSER_READ_ONLY_CALLOUT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, filterLabel, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, openQueueOrder, priorityLabel, queuePosition, trustRequired, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
+import { COMPOSER_READ_ONLY_CALLOUT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, filterLabel, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, trustRequired, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -145,6 +145,7 @@ export default function App() {
   const queueCommit: QueueCommit = {
     reorder: (numbers) => api.reorderQueue(numbers),
     reload: refresh,
+    clearNotice: () => setNotice(undefined),
     notice: setNotice,
     failure: setError,
   };
@@ -190,23 +191,27 @@ export type QueueTarget = number[] | null;
 export interface QueueCommit {
   reorder(numbers: number[]): Promise<number[]>;
   reload(): Promise<void>;
+  clearNotice(): void;
   notice(message: string): void;
   failure(message: string): void;
 }
 
 /**
  * The single write path for priority, shared by the drag target and the
- * move-earlier/move-later controls.
+ * move-earlier/move-later/move-to-position controls.
  *
  * A refused reorder — no `queue.reorder` capability, a concurrent writer that
  * moved the board on, a storage conflict — must not read as success and must not
  * leave the list showing an order the board never accepted, so the failure path
  * re-reads the board (and with it the queue) and surfaces the board's own
  * reason. A `null` target is the deliberate no-op of a boundary move: nothing is
- * sent, and no error is invented for a queue that would not have changed.
+ * sent, and no error is invented for a queue that would not have changed. A
+ * commit that really does send a request drops any standing notice first, so a
+ * refusal can never be read next to a stale "Priority order saved".
  */
 export async function commitQueueOrder(target: QueueTarget, commit: QueueCommit): Promise<number[] | null> {
   if (target === null) return null;
+  commit.clearNotice();
   try {
     const committed = await commit.reorder(target);
     await commit.reload();
@@ -219,19 +224,8 @@ export async function commitQueueOrder(target: QueueTarget, commit: QueueCommit)
   }
 }
 
-/** The issue row a pointer-less test event stands in for, and its shared queue. */
-export type QueueRowTarget = { dataset: { issue?: string; queue?: string; direction?: string } };
-
-export function queueOfTarget(target: QueueRowTarget): number[] {
-  const raw = target.dataset.queue;
-  if (raw === undefined) return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.map(Number) : [];
-  } catch {
-    return [];
-  }
-}
+/** The issue row a pointer-less test event stands in for. */
+export type QueueRowTarget = { dataset: { issue?: string } };
 
 export type IssueDragStart = { currentTarget: QueueRowTarget; dataTransfer: { setData(type: string, value: string): void } | null };
 
@@ -243,7 +237,6 @@ export function issueDragStarted(event: IssueDragStart): void {
 }
 
 export type IssueDrop = {
-  currentTarget: QueueRowTarget;
   dataTransfer: { getData(type: string): string } | null;
   preventDefault(): void;
 };
@@ -253,28 +246,31 @@ export function allowIssueDrop(event: { preventDefault(): void }): void {
 }
 
 /**
- * A drop reorders the queue the row was rendered with, so a drag commits the
- * same complete permutation the move controls commit — never the dragged pair.
+ * A drop reorders the shared queue the row was rendered with, so a drag commits
+ * the same complete permutation the move controls commit — never the dragged
+ * pair. The caller owns the order and the row it was dropped on; the event only
+ * carries the dragged number.
  */
-export function issueDropped(event: IssueDrop): QueueTarget {
+export function issueDropped(event: IssueDrop, order: number[], over: number): QueueTarget {
   event.preventDefault();
   const dragged = Number(event.dataTransfer?.getData(QUEUE_DRAG_TYPE));
-  const order = queueOfTarget(event.currentTarget);
-  const over = Number(event.currentTarget.dataset.issue);
   return moveQueueIssue(order, dragged, order.indexOf(over));
 }
 
-export type IssueMoveClick = { currentTarget: QueueRowTarget; preventDefault(): void };
+export type IssueMoveClick = { preventDefault(): void };
 
 /**
- * The keyboard-reachable alternative to dragging: the same whole-queue
- * permutation, computed from the direction the control names.
+ * The keyboard-reachable alternatives to dragging: the same whole-queue
+ * permutation, computed from the direction or the position the control names.
  */
-export function issueMoveRequested(event: IssueMoveClick): QueueTarget {
+export function issueMoveRequested(event: IssueMoveClick, order: number[], number: number, direction: QueueDirection): QueueTarget {
   event.preventDefault();
-  const order = queueOfTarget(event.currentTarget);
-  const number = Number(event.currentTarget.dataset.issue);
-  return event.currentTarget.dataset.direction === 'later' ? moveQueueLater(order, number) : moveQueueEarlier(order, number);
+  return direction === 'later' ? moveQueueLater(order, number) : moveQueueEarlier(order, number);
+}
+
+export function issueMovedToPosition(event: { preventDefault(): void }, order: number[], number: number, to: number): QueueTarget {
+  event.preventDefault();
+  return moveQueueTo(order, number, to);
 }
 
 export function IssueQueue({ issues, queue, hasWriteAccess, selectedNumber, onSelect, onReorder, empty }: {
@@ -286,31 +282,38 @@ export function IssueQueue({ issues, queue, hasWriteAccess, selectedNumber, onSe
   onReorder: (target: QueueTarget) => Promise<number[] | null>;
   empty: { title: string; body: string };
 }) {
-  // One order for the whole list: the shared queue, then any open issue it has
-  // not caught up with. It is written onto every row so a drag or a move control
-  // recomputes the full permutation from the same snapshot that was rendered.
+  // One order for the whole list, straight from the board's committed queue. The
+  // row hands that same array to every control, so a drop, a step and a
+  // move-to all recompute a full permutation from the snapshot that was rendered.
   const order = openQueueOrder(issues, queue);
-  const attribute = JSON.stringify(order);
   return <>
-    {issues.map((issue) => <IssueQueueRow key={issue.number} issue={issue} order={order} queueAttribute={attribute} position={queuePosition(order, issue.number)} hasWriteAccess={hasWriteAccess} selected={issue.number === selectedNumber} onSelect={onSelect} onReorder={onReorder} />)}
+    {issues.map((issue) => <IssueQueueRow key={issue.number} issue={issue} order={order} position={queuePosition(order, issue.number)} hasWriteAccess={hasWriteAccess} selected={issue.number === selectedNumber} onSelect={onSelect} onReorder={onReorder} />)}
     {!issues.length && <div className="empty-state"><h2>{empty.title}</h2><p>{empty.body}</p></div>}
   </>;
 }
 
-function IssueQueueRow({ issue, order, queueAttribute, position, hasWriteAccess, selected, onSelect, onReorder }: {
+function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSelect, onReorder }: {
   issue: BoardIssue;
   order: number[];
-  queueAttribute: string;
   position: number;
   hasWriteAccess: boolean;
   selected: boolean;
   onSelect: (number: number) => void;
   onReorder: (target: QueueTarget) => Promise<number[] | null>;
 }) {
-  return <div className={`issue-row ${selected ? 'selected' : ''}`} data-issue={issue.number} data-queue={queueAttribute} draggable={hasWriteAccess} onDragStart={hasWriteAccess ? issueDragStarted : undefined} onDragOver={hasWriteAccess ? allowIssueDrop : undefined} onDrop={hasWriteAccess ? (event) => { void onReorder(issueDropped(event)); } : undefined}>
+  // Only a queued row is a drop target: the board's queue holds open issues
+  // only, so accepting a drop on a closed row would offer a cursor for a move
+  // the board cannot commit.
+  const queued = hasWriteAccess && position > 0;
+  return <div className={`issue-row ${selected ? 'selected' : ''}`} data-issue={issue.number} draggable={hasWriteAccess} onDragStart={hasWriteAccess ? issueDragStarted : undefined} onDragOver={queued ? allowIssueDrop : undefined} onDrop={queued ? (event) => { void onReorder(issueDropped(event, order, issue.number)); } : undefined}>
     <button className="issue-select" onClick={() => onSelect(issue.number)} aria-current={selected ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{issue.messages.length} messages{issue.body ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>
     {position > 0 && <span className="queue-position" aria-label={priorityLabel(position)}>{position}</span>}
-    {hasWriteAccess && position > 0 && <span className="queue-controls">{(['earlier', 'later'] as QueueDirection[]).map((direction) => <button key={direction} data-issue={issue.number} data-direction={direction} aria-label={`${QUEUE_MOVE_LABELS[direction]} (#${issue.number})`} disabled={!canMoveInQueue(order, issue.number, direction)} onClick={(event) => { void onReorder(issueMoveRequested(event)); }}>{direction === 'earlier' ? '▲' : '▼'}</button>)}</span>}
+    {queued && <span className="queue-controls">
+      {(['earlier', 'later'] as QueueDirection[]).map((direction) => <button key={direction} aria-label={`${QUEUE_MOVE_LABELS[direction]} (#${issue.number})`} disabled={!canMoveInQueue(order, issue.number, direction)} onClick={(event) => { void onReorder(issueMoveRequested(event, order, issue.number, direction)); }}>{direction === 'earlier' ? '▲' : '▼'}</button>)}
+      <select aria-label={queueMoveToLabel(issue.number)} value={position} onChange={(event) => { void onReorder(issueMovedToPosition(event, order, issue.number, Number(event.target.value))); }}>
+        {queueSlots(order).map((slot) => <option key={slot} value={slot}>{slot}</option>)}
+      </select>
+    </span>}
   </div>;
 }
 

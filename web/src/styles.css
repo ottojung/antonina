@@ -132,6 +132,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .queue-controls { flex: none; display: flex; gap: 3px; }
 .queue-controls button { padding: 4px 7px; border: 1px solid var(--line); background: #fff; color: var(--green-dark); font-size: .68rem; }
 .queue-controls button:disabled { color: #a5a9a1; background: transparent; cursor: default; }
+.queue-controls select { padding: 4px 2px; border: 1px solid var(--line); background: #fff; color: var(--green-dark); font-size: .68rem; }
 .empty-state { padding: 56px 28px; text-align: center; color: var(--muted); }
 .empty-state > span { display: grid; place-items: center; width: 42px; height: 42px; margin: 0 auto 12px; border-radius: 12px; background: #e9ede6; color: var(--green); font-size: 1.2rem; font-weight: 800; }
 .empty-state h2 { margin: 0; color: var(--ink); font-size: 1.05rem; }
@@ -247,6 +248,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
   .pane-heading { padding-left: 16px; padding-right: 16px; }
   .create-form, .access-callout, .filters { margin-left: 16px; margin-right: 16px; }
   .issue-select { padding-left: 16px; padding-right: 16px; }
+  .queue-controls { flex-wrap: wrap; justify-content: flex-end; }
   .issue-line { flex-wrap: wrap; }
   .issue-line time { margin-left: 0; width: 100%; }
   .create-form > div, .name-prompt > div { flex-direction: column; }

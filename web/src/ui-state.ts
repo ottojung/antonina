@@ -69,9 +69,12 @@ export const WRITE_ACCESS_SUMMARY = 'Write access allows issue, description, dep
 export const QUEUE_HINT = 'Issues are listed in the board’s shared priority order.';
 
 export const QUEUE_MOVE_LABELS: Record<QueueDirection, string> = {
-  earlier: 'Move earlier in the priority queue',
-  later: 'Move later in the priority queue',
+  earlier: 'Move one place earlier in the priority queue',
+  later: 'Move one place later in the priority queue',
 };
+
+/** The named alternative to stepping: choose any position in the queue in one commit. */
+export const QUEUE_MOVE_TO_LABEL = 'Move to a chosen position in the priority queue';
 
 export const QUEUE_REORDERED_NOTICE = 'Priority order saved for everyone on this board';
 
@@ -215,6 +218,26 @@ export function moveQueueLater(order: number[], number: number): number[] | null
 /** Whether a move control has anywhere to move to, so a boundary press is offered as a no-op. */
 export function canMoveInQueue(order: number[], number: number, direction: QueueDirection): boolean {
   return (direction === 'earlier' ? moveQueueEarlier(order, number) : moveQueueLater(order, number)) !== null;
+}
+
+/** The one-based slots a move-to control offers: every position the queue has. */
+export function queueSlots(order: number[]): number[] {
+  return order.map((_, index) => index + 1);
+}
+
+/**
+ * Moves an issue to a chosen position, the one-based number a move-to control
+ * names. It is `moveQueueIssue` and nothing else: the same whole-queue
+ * permutation the step controls and a drop commit, so a keyboard user places an
+ * issue exactly as a drag would.
+ */
+export function moveQueueTo(order: number[], number: number, to: number): number[] | null {
+  return moveQueueIssue(order, number, to - 1);
+}
+
+/** The accessible name of a row's move-to control; its options are the slots themselves. */
+export function queueMoveToLabel(number: number): string {
+  return `${QUEUE_MOVE_TO_LABEL}: #${number}`;
 }
 
 /** The one-based position an issue holds in the shared queue, or 0 when unqueued. */

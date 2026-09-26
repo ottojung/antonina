@@ -22,15 +22,19 @@ import {
   moveQueueEarlier,
   moveQueueIssue,
   moveQueueLater,
+  moveQueueTo,
   canMoveInQueue,
   closedIssueOrder,
   openQueueOrder,
   priorityLabel,
   QUEUE_HINT,
   QUEUE_MOVE_LABELS,
+  QUEUE_MOVE_TO_LABEL,
   QUEUE_REORDERED_NOTICE,
   WRITE_ACCESS_SUMMARY,
   queuePosition,
+  queueMoveToLabel,
+  queueSlots,
   REJECTED_CREDENTIAL_COPY,
   trustRequired,
   visibleIssues,
@@ -149,6 +153,24 @@ describe('priority queue moves', () => {
     expect(queuePosition(order, 77)).toBe(0);
     expect(priorityLabel(queuePosition(order, 9))).toBe('Priority 3');
   });
+
+  it('offers every position as a move-to slot and moves there in one whole-queue commit', () => {
+    expect(queueSlots(order)).toEqual([1, 2, 3, 4]);
+    expect(moveQueueTo(order, 1, 1)).toEqual([1, 4, 2, 9]);
+    expect(moveQueueTo(order, 4, 4)).toEqual([2, 9, 1, 4]);
+    expect(moveQueueTo(order, 2, 2)).toBeNull();
+    expect(moveQueueTo(order, 77, 1)).toBeNull();
+    expect(moveQueueTo(order, 1, 5)).toBeNull();
+    // The same permutation the step controls and a drop commit, never a pair.
+    expect(moveQueueTo(order, 1, 1)).toEqual(moveQueueIssue(order, 1, 0));
+    for (const next of [moveQueueTo(order, 1, 1), moveQueueTo(order, 4, 4)]) {
+      expect([...(next as number[])].sort((left, right) => left - right)).toEqual([...order].sort((left, right) => left - right));
+    }
+  });
+
+  it('names the issue a move-to control places, so the slot is read from the options', () => {
+    expect(queueMoveToLabel(1)).toBe('Move to a chosen position in the priority queue: #1');
+  });
 });
 
 describe('board copy', () => {
@@ -171,9 +193,10 @@ describe('board copy', () => {
     expect(QUEUE_HINT).toContain('shared priority order');
   });
 
-  it('names both move directions for the accessible, non-drag controls', () => {
-    expect(QUEUE_MOVE_LABELS.earlier).toBe('Move earlier in the priority queue');
-    expect(QUEUE_MOVE_LABELS.later).toBe('Move later in the priority queue');
+  it('names both step directions and the chosen position for the non-drag controls', () => {
+    expect(QUEUE_MOVE_LABELS.earlier).toBe('Move one place earlier in the priority queue');
+    expect(QUEUE_MOVE_LABELS.later).toBe('Move one place later in the priority queue');
+    expect(QUEUE_MOVE_TO_LABEL).toBe('Move to a chosen position in the priority queue');
     expect(QUEUE_REORDERED_NOTICE).toContain('everyone');
   });
 

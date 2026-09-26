@@ -8,7 +8,7 @@ import {
   issueDragStarted,
   issueDropped,
   issueMoveRequested,
-  queueOfTarget,
+  issueMovedToPosition,
   type IssueDrop,
   type QueueTarget,
 } from './App';
@@ -20,6 +20,7 @@ import {
   openQueueOrder,
   QUEUE_DRAG_TYPE,
   QUEUE_MOVE_LABELS,
+  QUEUE_MOVE_TO_LABEL,
   QUEUE_REORDERED_NOTICE,
   QUEUE_REORDER_FAILED,
 } from './ui-state';
@@ -42,6 +43,7 @@ const empty = emptyIssueList('open', true);
 // handlers with a fake event shows exactly which whole queue would be sent.
 type Row = ReactElement<Record<string, unknown>>;
 type Button = ReactElement<{ disabled?: boolean; onClick?: unknown; 'aria-label'?: string }> & { disabled?: boolean };
+type Select = ReactElement<{ 'aria-label'?: string; value?: number; onChange?: unknown; children?: ReactNode }>;
 
 /**
  * Every host element a render produced. A returned element tree holds the
@@ -78,42 +80,37 @@ function rows(props?: Partial<Parameters<typeof IssueQueue>[0]>): Row[] {
   return rendered(props).filter((node) => node.type === 'div' && typeof node.props['data-issue'] === 'number');
 }
 
+/** The one shared order every row was rendered with, and every control recomputes from. */
+const sharedOrder = openQueueOrder(visible, queue);
+
 function queueButtons(props?: Partial<Parameters<typeof IssueQueue>[0]>): Button[] {
   return rendered(props).filter((node) => node.type === 'button' && typeof node.props['aria-label'] === 'string'
     && (node.props['aria-label'] as string).startsWith('Move ')) as Button[];
 }
 
-/** The queue a row was rendered with, read back off the element as the browser would. */
-function renderedQueue(row: Row): number[] {
-  return queueOfTarget({ dataset: { queue: row.props['data-queue'] as string } });
+/** The move-to control of each queued row, in row order. */
+function moveToControls(props?: Partial<Parameters<typeof IssueQueue>[0]>): Select[] {
+  return rendered(props).filter((node) => node.type === 'select') as Select[];
 }
 
 /** A press of the move control for one issue, as the browser would report it. */
-function fakeClick(row: Row, number: number, direction: 'earlier' | 'later'): QueueTarget {
-  const button = queueButtons().find((node) => (node.props['aria-label'] as string).includes(`(#${number})`)
-    && (node.props['aria-label'] as string).includes(direction));
-  if (!button) throw new Error(`no ${direction} control for issue ${number}`);
-  return issueMoveRequested({
-    currentTarget: { dataset: { issue: String(number), queue: row.props['data-queue'] as string, direction } },
-    preventDefault: () => {},
-  });
+function fakeClick(number: number, direction: 'earlier' | 'later'): QueueTarget {
+  return issueMoveRequested({ preventDefault: () => {} }, sharedOrder, number, direction);
 }
 
 interface FakeTransfer { getData(type: string): string; setData(type: string, value: string): void }
 function fakeDrop(row: Row, dragged: number): { target: QueueTarget; prevented: number } {
   const state = { prevented: 0 };
   const event: IssueDrop = {
-    currentTarget: { dataset: { issue: row.props['data-issue'] as string, queue: row.props['data-queue'] as string } },
     dataTransfer: { getData: (type: string) => (type === QUEUE_DRAG_TYPE ? String(dragged) : '') },
     preventDefault: () => { state.prevented += 1; },
   };
-  return { target: issueDropped(event), prevented: state.prevented };
+  return { target: issueDropped(event, sharedOrder, Number(row.props['data-issue'])), prevented: state.prevented };
 }
 
 describe('issue queue wiring', () => {
   it('renders one row per visible issue in the shared queue order', () => {
     expect(rows().map((row) => row.props['data-issue'])).toEqual([3, 1, 2]);
-    expect(renderedQueue(rows()[0])).toEqual([3, 1, 2]);
   });
 
   it('drives drag-and-drop through the named drag handlers', () => {
@@ -138,17 +135,42 @@ describe('issue queue wiring', () => {
     expect(prevented).toBe(1);
   });
 
-  it('offers the priority position and both move controls to a writer', () => {
+  it('offers the priority position, both step controls and a move-to slot to a writer', () => {
     expect(rendered().map((node) => node.props.className).filter((name) => name === 'queue-position')).toHaveLength(3);
     expect(queueButtons().map((node) => node.props['aria-label'])).toEqual([
-      `Move earlier in the priority queue (#3)`,
-      `Move later in the priority queue (#3)`,
-      `Move earlier in the priority queue (#1)`,
-      `Move later in the priority queue (#1)`,
-      `Move earlier in the priority queue (#2)`,
-      `Move later in the priority queue (#2)`,
+      `Move one place earlier in the priority queue (#3)`,
+      `Move one place later in the priority queue (#3)`,
+      `Move one place earlier in the priority queue (#1)`,
+      `Move one place later in the priority queue (#1)`,
+      `Move one place earlier in the priority queue (#2)`,
+      `Move one place later in the priority queue (#2)`,
     ]);
-    expect(QUEUE_MOVE_LABELS.earlier).toBe('Move earlier in the priority queue');
+    expect(QUEUE_MOVE_LABELS.earlier).toBe('Move one place earlier in the priority queue');
+  });
+
+  it('lets a keyboard user place an issue at a chosen position in one commit', () => {
+    const controls = moveToControls();
+    expect(controls.map((node) => node.props['aria-label'])).toEqual([
+      `${QUEUE_MOVE_TO_LABEL}: #3`,
+      `${QUEUE_MOVE_TO_LABEL}: #1`,
+      `${QUEUE_MOVE_TO_LABEL}: #2`,
+    ]);
+    // The control is a real select: every slot is offered, and the row's own
+    // position is what it currently shows.
+    expect(controls.map((node) => node.props.value)).toEqual([1, 2, 3]);
+    expect(elements(controls[0].props.children as ReactNode).map((option) => option.props.value)).toEqual([1, 2, 3]);
+    expect(issueMovedToPosition({ preventDefault: () => {} }, sharedOrder, 2, 1)).toEqual([2, 3, 1]);
+    // The slot an issue already holds is the same no-op a boundary step is.
+    expect(issueMovedToPosition({ preventDefault: () => {} }, sharedOrder, 2, 3)).toBeNull();
+  });
+
+  it('sends the chosen position through the rendered control as a whole queue', async () => {
+    const sent: Array<number[] | null> = [];
+    const control = moveToControls({ onReorder: async (target: QueueTarget) => { sent.push(target); return null; } }).at(-1)!;
+    expect(typeof control.props.onChange).toBe('function');
+    (control.props.onChange as (event: { preventDefault(): void; target: { value: string } }) => void)({ preventDefault: () => {}, target: { value: '1' } });
+    await Promise.resolve();
+    expect(sent).toEqual([[2, 3, 1]]);
   });
 
   it('disables the move that has nowhere to go instead of sending a rejected queue', () => {
@@ -163,22 +185,28 @@ describe('issue queue wiring', () => {
     expect(readOnly.map((row) => row.props['data-issue'])).toEqual([3, 1, 2]);
     expect(readOnly.every((row) => row.props.draggable === false)).toBe(true);
     expect(readOnly.every((row) => row.props.onDragStart === undefined)).toBe(true);
+    expect(readOnly.every((row) => row.props.onDragOver === undefined)).toBe(true);
     expect(readOnly.every((row) => row.props.onDrop === undefined)).toBe(true);
     expect(queueButtons({ hasWriteAccess: false })).toHaveLength(0);
+    expect(moveToControls({ hasWriteAccess: false })).toHaveLength(0);
   });
 
-  it('gives a closed issue no priority position, because the queue has no closed entries', () => {
+  it('gives a closed issue no priority position and offers it no drop, because the queue has no closed entries', () => {
     const withClosed = [...issues, issue(4, 'closed')];
-    const all = visibleIssues(withClosed, [2, 1], 'all');
-    const mixed = rows({ issues: all, queue: [2, 1] });
+    const all = visibleIssues(withClosed, [2, 1, 3], 'all');
+    const mixed = rows({ issues: all, queue: [2, 1, 3] });
     expect(mixed.map((row) => row.props['data-issue'])).toEqual([2, 1, 3, 4]);
-    // The queue attribute holds every open issue, including the one a stale
-    // queue missed; the closed issue is in no queue at all.
-    expect(renderedQueue(mixed[0])).toEqual([2, 1, 3]);
-    const positions = rendered({ issues: all, queue: [2, 1] }).filter((node) => node.props.className === 'queue-position');
+    const positions = rendered({ issues: all, queue: [2, 1, 3] }).filter((node) => node.props.className === 'queue-position');
     expect(positions).toHaveLength(3);
     expect(positions.map((node) => node.props['aria-label'])).toEqual(['Priority 1', 'Priority 2', 'Priority 3']);
-    expect(mixed[3].props['data-issue']).toBe(4);
+    // A closed row would be a drop the queue cannot hold, so it is not a drop
+    // target at all: the browser is never offered an accepted-drop cursor.
+    const closed = mixed[3];
+    expect(closed.props['data-issue']).toBe(4);
+    expect(closed.props.onDragOver).toBeUndefined();
+    expect(closed.props.onDrop).toBeUndefined();
+    expect(mixed.slice(0, 3).every((row) => row.props.onDragOver === allowIssueDrop)).toBe(true);
+    expect(moveToControls({ issues: all, queue: [2, 1, 3] })).toHaveLength(3);
   });
 
   it('renders the empty state the copy describes, with no rows to reorder', () => {
@@ -194,8 +222,7 @@ describe('issue queue wiring', () => {
 describe('priority reorder requests', () => {
   it('sends the whole reordered queue from a single move-earlier press', async () => {
     const onReorder = vi.fn(async (_target: QueueTarget) => [1, 3, 2]);
-    const [, row] = rows();
-    const target = fakeClick(row, 1, 'earlier');
+    const target = fakeClick(1, 'earlier');
 
     expect(target).toEqual([1, 3, 2]);
     expect(target).toHaveLength(3);
@@ -205,7 +232,7 @@ describe('priority reorder requests', () => {
 
   it('produces the same order from a drop as from the button', () => {
     const [top, , moved] = rows();
-    const byButton = fakeClick(moved, 1, 'earlier');
+    const byButton = fakeClick(1, 'earlier');
     const { target, prevented } = fakeDrop(top, 1);
 
     expect(byButton).toEqual([1, 3, 2]);
@@ -214,9 +241,9 @@ describe('priority reorder requests', () => {
   });
 
   it('reports no request for a boundary move, a self-drop, and a drop with no drag payload', () => {
-    const [first, middle, last] = rows();
-    expect(fakeClick(first, 3, 'earlier')).toBeNull();
-    expect(fakeClick(last, 2, 'later')).toBeNull();
+    const [first, middle] = rows();
+    expect(fakeClick(3, 'earlier')).toBeNull();
+    expect(fakeClick(2, 'later')).toBeNull();
     expect(fakeDrop(middle, 1).target).toBeNull();
     expect(fakeDrop(middle, 0).target).toBeNull();
   });
@@ -230,32 +257,25 @@ describe('priority reorder requests', () => {
     });
     const [row] = elements(tree).filter((node) => node.type === 'div' && typeof node.props['data-issue'] === 'number');
     (row.props.onDrop as (event: IssueDrop) => void)({
-      currentTarget: { dataset: { issue: String(row.props['data-issue']), queue: row.props['data-queue'] as string } },
       dataTransfer: { getData: (type) => (type === QUEUE_DRAG_TYPE ? '1' : '') },
       preventDefault: () => {},
     });
     await Promise.resolve();
     expect(sent).toEqual([[1, 3, 2]]);
   });
-
-  it('tolerates a row whose queue attribute is missing or unreadable', () => {
-    expect(queueOfTarget({ dataset: {} })).toEqual([]);
-    expect(queueOfTarget({ dataset: { queue: 'nope' } })).toEqual([]);
-    expect(queueOfTarget({ dataset: { queue: '{"a":1}' } })).toEqual([]);
-  });
 });
 
 describe('committing a priority reorder', () => {
   const commit = (reorder: (numbers: number[]) => Promise<number[]>) => {
-    const calls: Array<{ reorder: number[][]; reload: number; notice: string[]; failure: string[] }> = [];
-    const record = { reorder: [] as number[][], reload: 0, notice: [] as string[], failure: [] as string[] };
+    const record = { reorder: [] as number[][], reload: 0, cleared: 0, notice: [] as string[], failure: [] as string[] };
     const deps = {
       reorder,
       reload: async () => { record.reload += 1; },
+      clearNotice: () => { record.cleared += 1; },
       notice: (message: string) => { record.notice.push(message); },
       failure: (message: string) => { record.failure.push(message); },
     };
-    return { deps, record, calls };
+    return { deps, record };
   };
 
   it('commits the whole queue, then re-reads and reports success', async () => {
@@ -265,8 +285,17 @@ describe('committing a priority reorder', () => {
     await expect(commitQueueOrder([2, 1, 3], deps)).resolves.toEqual([2, 1, 3]);
     expect(sent).toEqual([[2, 1, 3]]);
     expect(record.reload).toBe(1);
+    expect(record.cleared).toBe(1);
     expect(record.notice).toEqual([QUEUE_REORDERED_NOTICE]);
     expect(record.failure).toEqual([]);
+  });
+
+  it('clears a standing notice before a real commit, so a refusal is never read next to a stale success', async () => {
+    const { deps, record } = commit(async () => { throw new Error('credential is required'); });
+
+    await expect(commitQueueOrder([2, 1, 3], deps)).resolves.toBeNull();
+    expect(record.cleared).toBe(1);
+    expect(record.notice).toEqual([]);
   });
 
   it('re-reads the queue and surfaces the board reason when a reorder is refused', async () => {
@@ -291,6 +320,7 @@ describe('committing a priority reorder', () => {
 
     await expect(commitQueueOrder(null, deps)).resolves.toBeNull();
     expect(record.reload).toBe(0);
+    expect(record.cleared).toBe(0);
     expect(record.notice).toEqual([]);
     expect(record.failure).toEqual([]);
   });

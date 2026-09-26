@@ -32,6 +32,9 @@ case "$1" in
     exit 0
     ;;
   run)
+    if [ -n "$ANTONINA_TEST_CALLS" ]; then
+      printf '%s\n' "$*" >>"$ANTONINA_TEST_CALLS"
+    fi
     last=""
     for arg in "$@"; do last="$arg"; done
     if [ "$last" = "slow" ]; then
@@ -56,6 +59,7 @@ esac
     ...process.env,
     PATH: `${bin}:${process.env.PATH ?? ''}`,
     XDG_STATE_HOME: join(root, 'state'),
+    ANTONINA_TEST_CALLS: join(root, 'opencode-calls.log'),
   };
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return { root, work, env };
@@ -268,4 +272,28 @@ test('backend server failure is persisted and sanitized through status', async (
   assert.equal(body.backend_error.reference, 'err_e2e');
   assert.equal(body.backend_error.automatic_retry_safe, false);
   assert.equal(body.backend_error.request_boundary, 'fresh_session');
+});
+
+
+test('prompt recovers an existing OpenCode session when durable session id was lost', async (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', 'a11d', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'prompt', '--id', 'a11d', '--detach', 'first'], env).status, 0);
+  await waitFor(root, 'a11d', (meta) => meta.state === 'succeeded' && meta.active_runner === false);
+
+  const path = metaPath(root, 'a11d');
+  const meta = JSON.parse(readFileSync(path, 'utf8'));
+  meta.native_session_id = null;
+  writeFileSync(path, JSON.stringify(meta));
+
+  assert.equal(run(['agent', 'prompt', '--id', 'a11d', '--detach', 'recovered'], env).status, 0);
+  const done = await waitFor(
+    root,
+    'a11d',
+    (value) => value.state === 'succeeded' && value.prompt_count === 2 && value.active_runner === false,
+  );
+  assert.equal(done.native_session_id, 'ses_fake');
+
+  const calls = readFileSync(env.ANTONINA_TEST_CALLS, 'utf8');
+  assert.match(calls, /run --auto --session ses_fake .* recovered/);
 });

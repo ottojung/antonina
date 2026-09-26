@@ -15,6 +15,7 @@ import {
   protectionOf,
   readCollectionSnapshot,
   recheckCollectionClaim,
+  removeAuthorizedPath,
   unverifiedCollectionSnapshot,
   boardApiCollectionReader,
 } from '../dist/collection.js';
@@ -717,6 +718,196 @@ test('a withheld authorization is refused the same way when a field is re-pointe
   authorized.status = 'collectible';
 
   assert.throws(() => commitCollectionDeletion(authorized), /was changed after the re-check/);
+});
+
+/**
+ * A re-check over a collectible path, with the facts the gatherer is told to
+ * report, so a test can choose what the candidate's own filesystem observation
+ * was. `overrides` is keyed by path, as in `factsGatherer`.
+ */
+async function authorizedFor(path, overrides) {
+  const { writer, open } = await seeded();
+  await writer.close(open[0].number);
+  await writer.close(open[1].number);
+  const reader = readerFor(writer);
+  const claim = openCollectionClaim(await readCollectionSnapshot(HOST, reader), path);
+  return recheck(claim, writer, { gatherFacts: factsGatherer(overrides) });
+}
+
+test('a collect authorization carries the removal shape the managed-root judgment returned', async () => {
+  // Facts that say the final component is a plain directory.
+  const asDirectory = await authorizedFor(WORKTREE, {});
+  assert.equal(asDirectory.outcome, 'collect');
+  assert.deepEqual(asDirectory.root, { spelled: ROOT, resolved: ROOT });
+  assert.equal(asDirectory.unlinkFinalComponent, false);
+
+  // Facts that say the final component is a symlink resolving, inside the root,
+  // to somewhere else -- so the shape is the other one and is carried, not
+  // re-derived at the removal.
+  const asSymlink = await authorizedFor(WORKTREE, {
+    [WORKTREE]: {
+      path: WORKTREE,
+      resolvedPath: BUILD,
+      finalComponentIsSymlink: true,
+      parentResolvedPath: ROOT,
+    },
+  });
+  assert.equal(asSymlink.outcome, 'collect');
+  assert.deepEqual(asSymlink.root, { spelled: ROOT, resolved: ROOT });
+  assert.equal(asSymlink.unlinkFinalComponent, true);
+});
+
+test('a withheld authorization carries no removal shape, so a collector cannot read one off a refusal', async () => {
+  const { writer, open } = await seeded();
+  // Register the managed root itself: a board collectible verdict, refused by the
+  // path-safety front.
+  await writer.addResourceDependency(HOST, ROOT, open[0].number);
+  await writer.close(open[0].number);
+  const claim = openCollectionClaim(
+    await readCollectionSnapshot(HOST, readerFor(writer)),
+    ROOT,
+  );
+  const authorized = await recheck(claim, writer);
+
+  assert.equal(authorized.outcome, 'withheld');
+  assert.equal(authorized.reason, 'candidate-is-managed-root');
+  // Absent, not `undefined` and not `false`: the keys are not on the object at
+  // all, so "no removal shape was ever authorized" is representable.
+  assert.deepEqual(Object.keys(authorized).sort(), [
+    'boardId',
+    'host',
+    'outcome',
+    'path',
+    'reason',
+    'recheckHead',
+    'snapshotHead',
+    'state',
+    'status',
+  ]);
+  assert.equal('root' in authorized, false);
+  assert.equal('unlinkFinalComponent' in authorized, false);
+});
+
+test('a write to either carried removal-shape field is refused at the commit', async () => {
+  // The root is a frozen object, so the only edit available is substituting a
+  // different one -- which is the edit that matters, because it names the
+  // configured root a removal was taken under.
+  const elsewhere = rootsOf(['/somewhere-else']).roots[0];
+
+  for (const tamper of [
+    (authorized) => { authorized.unlinkFinalComponent = !authorized.unlinkFinalComponent; },
+    (authorized) => { authorized.unlinkFinalComponent = true; },
+    (authorized) => { authorized.root = elsewhere; },
+    // And the structural half: a carried field deleted off the caller's object is
+    // a mismatch too, so a removal shape cannot be stripped before the commit
+    // either. `unlinkFinalComponent` is the field a hand-written comparison list
+    // written before this change would have left out.
+    (authorized) => { delete authorized.unlinkFinalComponent; },
+    (authorized) => { delete authorized.root; },
+  ]) {
+    const authorized = await authorizedFor(WORKTREE, {});
+    assert.equal(authorized.outcome, 'collect');
+    tamper(authorized);
+    assert.throws(
+      () => commitCollectionDeletion(authorized),
+      /was changed after the re-check/,
+    );
+  }
+});
+
+/**
+ * The destructive step's own half, with the filesystem surface it is handed.
+ * `lstat` is on the object and throws if called: the point of carrying the shape
+ * is that the removal has no filesystem observation to make, and this is how a
+ * test says so rather than assuming it.
+ */
+function recordingRemovalFs() {
+  const calls = [];
+  return {
+    calls,
+    fs: {
+      lstat: async () => {
+        calls.push('lstat');
+        throw new Error('the removal observed the path it was authorized for');
+      },
+      rm: async (path, options) => { calls.push(`rm ${path} ${JSON.stringify(options)}`); },
+      unlink: async (path) => { calls.push(`unlink ${path}`); },
+    },
+  };
+}
+
+test('the removal follows the authorized shape and observes nothing of its own', async () => {
+  // Authorized as a plain path, so the removal is recursive. The facts a fresh
+  // observation would have produced are the *other* ones: the seam's `lstat`,
+  // were it called, would have reported a symlink.
+  const asDirectory = recordingRemovalFs();
+  const directoryAuthorization = await authorizedFor(WORKTREE, {});
+  assert.equal(directoryAuthorization.unlinkFinalComponent, false);
+  assert.equal(
+    await removeAuthorizedPath(directoryAuthorization, asDirectory.fs),
+    'unlinked',
+  );
+  assert.deepEqual(asDirectory.calls, [`rm ${WORKTREE} {"recursive":true}`]);
+
+  // Authorized as a symlink, so the removal is an `unlink`. A re-deriving
+  // implementation would see a directory here and recurse into it.
+  const asSymlink = recordingRemovalFs();
+  const symlinkAuthorization = await authorizedFor(WORKTREE, {
+    [WORKTREE]: {
+      path: WORKTREE,
+      resolvedPath: BUILD,
+      finalComponentIsSymlink: true,
+      parentResolvedPath: ROOT,
+    },
+  });
+  assert.equal(symlinkAuthorization.unlinkFinalComponent, true);
+  assert.equal(
+    await removeAuthorizedPath(symlinkAuthorization, asSymlink.fs),
+    'unlinked-symlink',
+  );
+  assert.deepEqual(asSymlink.calls, [`unlink ${WORKTREE}`]);
+});
+
+test('a path that is already gone is absent, and a withheld authorization removes nothing', async () => {
+  const authorized = await authorizedFor(WORKTREE, {});
+  const failing = (code, message) => async () => {
+    const error = new Error(message);
+    error.code = code;
+    throw error;
+  };
+  assert.equal(
+    await removeAuthorizedPath(authorized, {
+      rm: failing('ENOENT', 'no such file or directory'),
+      unlink: failing('ENOENT', 'no such file or directory'),
+    }),
+    'absent',
+  );
+  // Anything else is not swallowed: the authorization is not spent on a removal
+  // that did not happen.
+  await assert.rejects(
+    () => removeAuthorizedPath(authorized, {
+      rm: failing('EACCES', 'permission denied'),
+      unlink: failing('EACCES', 'permission denied'),
+    }),
+    /permission denied/,
+  );
+
+  const { writer, open } = await seeded();
+  await writer.addResourceDependency(HOST, ROOT, open[0].number);
+  await writer.close(open[0].number);
+  const withheld = await recheck(
+    openCollectionClaim(await readCollectionSnapshot(HOST, readerFor(writer)), ROOT),
+    writer,
+  );
+  const calls = [];
+  await assert.rejects(
+    () => removeAuthorizedPath(withheld, {
+      rm: async (path) => { calls.push(path); },
+      unlink: async (path) => { calls.push(path); },
+    }),
+    /carries no removal shape/,
+  );
+  assert.deepEqual(calls, [], 'a refusal removed nothing');
 });
 
 test('a board cannot authorise collecting a configured managed root', async () => {

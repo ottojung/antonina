@@ -284,6 +284,52 @@ test('a root under a symlinked ancestor is judged in resolved coordinates', () =
   );
 });
 
+test('a candidate that agrees with its resolved path skips the resolved-root check', () => {
+  // A root reached through a symlinked ancestor (`/workspace` -> `/data/work`):
+  // its spelled and resolved coordinates share no prefix.
+  const roots = rootsOf([input('/workspace/antonina', '/data/work/antonina')]);
+  // The candidate's spelled path already agrees with its resolved path, so no
+  // symlink was crossed and there is nothing for the resolved check to decide.
+  // Its resolved spelling is not inside the resolved root, so this is only
+  // eligible if that check is genuinely skipped rather than merely harmless.
+  assert.deepEqual(
+    evaluateManagedCandidate(roots, candidate('/workspace/antonina/session-1', {
+      resolvedPath: '/workspace/antonina/session-1',
+      parentResolvedPath: '/data/work/antonina',
+    })),
+    {
+      eligible: true,
+      path: '/workspace/antonina/session-1',
+      root: { spelled: '/workspace/antonina', resolved: '/data/work/antonina' },
+      unlinkFinalComponent: false,
+    },
+  );
+  // The sibling check in a different coordinate is not what was skipped.
+  assert.equal(
+    evaluateManagedCandidate(roots, candidate('/workspace/antonina/session-1', {
+      resolvedPath: '/workspace/antonina/session-1',
+      parentResolvedPath: '/var/elsewhere',
+    })).refusal,
+    'containing-directory-escapes-managed-root',
+  );
+  // A disagreement is not refused on its own: the resolved path still has to land
+  // back inside the resolved root.
+  assert.equal(
+    evaluateManagedCandidate(roots, candidate('/workspace/antonina/session-1', {
+      resolvedPath: '/data/work/antonina/session-1',
+      parentResolvedPath: '/data/work/antonina',
+    })).eligible,
+    true,
+  );
+  assert.equal(
+    evaluateManagedCandidate(roots, candidate('/workspace/antonina/session-1', {
+      resolvedPath: '/data/work/elsewhere/session-1',
+      parentResolvedPath: '/data/work/antonina',
+    })).refusal,
+    'symlink-escapes-managed-root',
+  );
+});
+
 test('a candidate whose containing directory resolves out of the managed root is refused', () => {
   const roots = rootsOf(['/workspace/antonina'].map((path) => input(path)));
   // The candidate resolves inside the root, but the directory holding it is

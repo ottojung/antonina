@@ -63,7 +63,7 @@ npm test --prefix web
 npm run build --prefix web
 ```
 
-During the migration branch the old Python implementation remains only as a parity reference and CI oracle. It is removed at the final cutover.
+The repository contains one supported Antonina runtime: the precompiled TypeScript/Node.js implementation described above.
 
 ## License
 

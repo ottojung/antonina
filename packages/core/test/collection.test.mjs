@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   BoardApi,
@@ -22,35 +25,26 @@ import {
 const STAMP = '2026-09-25T12:00:00.000Z';
 const HOST = 'lubko://server';
 const OTHER_HOST = 'lubko://other';
-const WORKTREE = '/workspace/project';
-const BUILD = '/workspace/build';
 
-// The configured managed collection roots every destructive re-check is judged
-// against. `/workspace` contains both registered paths above; nothing else in
-// these tests is collectible, because nothing else is inside a managed root.
+// The re-check gathers the candidate's filesystem facts itself, so the
+// registered paths have to be real ones. A temporary root stands in for the
+// configured managed root, resolved so that it is the same directory in both
+// coordinate systems even where the temporary directory sits behind a symlink.
+const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'antonina-collection-')));
+process.on('exit', () => rmSync(ROOT, { recursive: true, force: true }));
+const WORKTREE = `${ROOT}/project`;
+const BUILD = `${ROOT}/build`;
+
+// The configured managed collection root every destructive re-check is judged
+// against. The root contains both registered paths above; nothing else in these
+// tests is collectible, because nothing else is inside a managed root.
 const rootsOf = (spelled) => {
   const result = validateManagedRoots(spelled.map((path) => ({ spelled: path, resolved: path })));
   assert.equal(result.ok, true, JSON.stringify(result));
   return result.roots;
 };
 
-const MANAGED = rootsOf(['/workspace']);
-
-/**
- * The filesystem facts a caller must gather for one candidate. These tests
- * spell them out instead of creating directories: the re-check is what is under
- * test, and the facts are inputs to it.
- */
-const factsFor = (path, overrides = {}) => {
-  const separator = path.lastIndexOf('/');
-  return {
-    path,
-    resolvedPath: path,
-    finalComponentIsSymlink: false,
-    parentResolvedPath: separator <= 0 ? '/' : path.slice(0, separator),
-    ...overrides,
-  };
-};
+const MANAGED = rootsOf([ROOT]);
 
 // A minimal Skrynia stand-in: the collector's only contact with the board is
 // this store, so the re-check tests exercise the real verified read path.
@@ -414,16 +408,15 @@ test('an unverified snapshot is empty of decisions however it was built', () => 
 });
 
 /**
- * The re-check builds its own verifying read from a `BoardApi`, so a test cannot
- * hand it a reader of its own; the only things a test chooses are the client and
- * the managed-root judgment. The claim names the path, so the facts default to
- * that path spelled as the board spelled it.
+ * The re-check builds its own verifying read from a `BoardApi` and gathers the
+ * candidate's filesystem facts itself, so a test cannot hand it a reader of its
+ * own or facts of its own; the only things a test chooses are the client and
+ * the managed-root judgment.
  */
 const recheck = (claim, writer, options = {}) => recheckCollectionClaim(
   claim,
   writer,
   options.roots ?? MANAGED,
-  options.facts ?? factsFor(claim.path),
 );
 
 test('a claim can only be opened for a collectible path on the snapshot host', async () => {
@@ -439,7 +432,7 @@ test('a claim can only be opened for a collectible path on the snapshot host', a
     boardId: snapshot.boardId,
     snapshotHead: snapshot.head,
   });
-  assert.throws(() => openCollectionClaim(snapshot, '/workspace'), /protected/);
+  assert.throws(() => openCollectionClaim(snapshot, ROOT), /protected/);
   assert.throws(
     () => openCollectionClaim(unverifiedCollectionSnapshot(HOST, { kind: 'board-missing', message: 'gone' }), WORKTREE),
     /protected/,
@@ -458,7 +451,10 @@ test('the re-check authorizes a path that is still collectible at a later revisi
   const authorized = await recheck(claim, writer);
   assert.equal(authorized.outcome, 'collect');
   assert.equal(authorized.reason, 'still-collectible');
-  assert.equal(authorized.snapshotHead, snapshot.head);
+  // The board moved on between the snapshot and the re-check, so the claim's
+  // revision is not one the re-check read: it reports the revision it verified
+  // and declines to vouch for the one the claim named.
+  assert.equal(authorized.snapshotHead, null);
   assert.notEqual(authorized.recheckHead, snapshot.head);
   assert.deepEqual(commitCollectionDeletion(authorized), {
     state: 'spent',
@@ -587,12 +583,12 @@ test('a board cannot authorise collecting a configured managed root', async () =
   // registry say it owes nothing to any open issue, which is exactly the case
   // where a board acting on its own authority would authorise removing the root
   // that defines every other collection permission.
-  await writer.addResourceDependency(HOST, '/workspace', open[0].number);
+  await writer.addResourceDependency(HOST, ROOT, open[0].number);
   await writer.close(open[0].number);
 
   const snapshot = await readCollectionSnapshot(HOST, readerFor(writer));
-  assert.deepEqual(collectiblePaths(snapshot), ['/workspace']);
-  const claim = openCollectionClaim(snapshot, '/workspace');
+  assert.deepEqual(collectiblePaths(snapshot), [ROOT]);
+  const claim = openCollectionClaim(snapshot, ROOT);
 
   const authorized = await recheck(claim, writer);
   assert.equal(authorized.outcome, 'withheld');
@@ -620,19 +616,42 @@ test('a board cannot authorise collecting a path no managed root contains', asyn
   assert.equal(commitCollectionDeletion(authorized).outcome, 'withheld');
 });
 
-test('a collect authorization is impossible for a candidate the root facts name differently', async () => {
+test('a collect authorization is impossible for a candidate whose own facts resolve elsewhere', async () => {
   const { writer, open } = await seeded();
+  // The registry calls this path collectible and it is spelled inside the managed
+  // root, so nothing but the filesystem can refuse it. But a component of the
+  // path is a symlink out of the root: the directory that holds the candidate is
+  // really /etc. A caller that guessed the facts -- resolved path equal to the
+  // spelled path, parent equal to the root -- would have collected /etc, and the
+  // re-check gathers the facts itself, so it cannot.
+  symlinkSync('/etc', join(ROOT, 'link'));
+  const escaping = `${ROOT}/link/antonina`;
+  await writer.addResourceDependency(HOST, escaping, open[0].number);
   await writer.close(open[0].number);
-  await writer.close(open[1].number);
-  const claim = openCollectionClaim(await readCollectionSnapshot(HOST, readerFor(writer)), WORKTREE);
 
-  // The path is inside the managed root, but the facts are about a path the
-  // claim does not name. A collector is never handed a differently spelled path
-  // than the board recorded, so this is a refusal, not a collect.
-  const elsewhere = await recheck(claim, writer, { facts: factsFor(BUILD) });
-  assert.equal(elsewhere.outcome, 'withheld');
-  assert.equal(elsewhere.reason, 'outside-managed-roots');
-  assert.equal(elsewhere.path, WORKTREE);
+  const claim = openCollectionClaim(await readCollectionSnapshot(HOST, readerFor(writer)), escaping);
+  const authorized = await recheck(claim, writer);
+  assert.equal(authorized.outcome, 'withheld');
+  assert.equal(authorized.reason, 'not-managed-collectible');
+  assert.equal(authorized.status, 'protected');
+  assert.equal(authorized.path, escaping);
+  assert.equal(commitCollectionDeletion(authorized).outcome, 'withheld');
+});
+
+test('a candidate whose filesystem facts cannot be gathered is withheld, not collected', async () => {
+  const { writer, open } = await seeded();
+  // Registered and collectible, spelled inside the managed root, but the
+  // directory that would contain it is not there, so there is no fact about
+  // where the candidate really is. There is no eligible answer without them.
+  const absent = `${ROOT}/never-created/candidate`;
+  await writer.addResourceDependency(HOST, absent, open[0].number);
+  await writer.close(open[0].number);
+
+  const claim = openCollectionClaim(await readCollectionSnapshot(HOST, readerFor(writer)), absent);
+  const authorized = await recheck(claim, writer);
+  assert.equal(authorized.outcome, 'withheld');
+  assert.equal(authorized.reason, 'candidate-facts-unavailable');
+  assert.equal(authorized.status, 'protected');
 });
 
 test('a hand-built state cannot mint a collect authorization', async () => {
@@ -668,8 +687,9 @@ test('a hand-built state cannot mint a collect authorization', async () => {
   assert.equal(authorized.recheckHead, writer.getRememberedHead());
 
   // The reader is gone from the destructive path altogether: it is not a
-  // parameter a caller can pass.
-  assert.equal(recheckCollectionClaim.length, 4);
+  // parameter a caller can pass, and neither are the candidate's filesystem
+  // facts.
+  assert.equal(recheckCollectionClaim.length, 3);
 });
 
 test('a path this module cannot canonicalise is protected, and a sweep survives it', async () => {

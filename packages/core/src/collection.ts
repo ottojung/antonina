@@ -47,9 +47,10 @@ import {
  *
  * A snapshot may be read through any `CollectionReader`, so a snapshot is only
  * ever as trustworthy as the reader behind it. The destructive path is not: the
- * re-check builds its own verifying reader from a `BoardApi` and additionally
- * requires the managed-root judgment for the candidate, so `outcome: 'collect'`
- * cannot be minted from a hand-built state.
+ * re-check builds its own verifying reader from a `BoardApi`, gathers the
+ * candidate's filesystem facts itself, and requires the managed-root judgment
+ * for those facts, so `outcome: 'collect'` cannot be minted from a hand-built
+ * state or from facts a caller supplied.
  */
 
 /** One authoritative read: a verified board revision and the board it belongs to. */
@@ -369,10 +370,20 @@ export function collectiblePaths(snapshot: CollectionSnapshot): string[] {
  * revision that said so, so a later read can be held against it.
  *
  * A claim is advisory: it is evidence of a past verdict, not the authority for
- * a destructive action. `recheckCollectionClaim` re-derives every one of its
- * fields -- the board, the revision, and the protection status of the path --
- * from a fresh authoritative read, so a hand-built claim can produce at most a
- * `withheld` authorization, or one the board actually supports.
+ * a destructive action. `recheckCollectionClaim` re-derives the board identity,
+ * the path, and the protection status of the path from its own fresh
+ * authoritative read, and it gathers the path's own filesystem facts, so a
+ * hand-built claim can produce at most a `withheld` authorization, or one the
+ * board actually supports.
+ *
+ * `host` and `path` are the caller's to fill in but are not trusted as
+ * authority: `boardId` is compared against the board the re-check read, and the
+ * protection answer is derived for `path` by that read. `snapshotHead` is *not*
+ * re-derived: nothing compares it to the revision the re-check read, so a
+ * forged claim can name any revision at all. It is carried for the operator's
+ * benefit, and the re-check reports the claim's revision as
+ * `AuthorizedCollection.snapshotHead` only when the revision it read matches
+ * it, so an authorization never asserts a revision this module did not check.
  */
 export interface CollectionClaim {
   state: 'claimed';
@@ -427,7 +438,15 @@ export type CollectionOutcomeReason =
    * recorded. The specific refusal is reported by the path-safety front; here it
    * is only ever a withheld outcome.
    */
-  | 'not-managed-collectible';
+  | 'not-managed-collectible'
+  /**
+   * The re-check could not gather the candidate's own filesystem facts -- the
+   * path or the directory containing it does not exist, or cannot be resolved --
+   * so no managed-root judgment was possible at all. The facts are gathered here
+   * rather than supplied, precisely so that this is the only way a candidate can
+   * fail for want of them.
+   */
+  | 'candidate-facts-unavailable';
 
 /**
  * The managed-root judgment as a re-check reason. The two refusals that name a
@@ -435,6 +454,11 @@ export type CollectionOutcomeReason =
  * reported under their own names, because they are the two cases a board could
  * otherwise authorise on its own authority. Everything else is a path-safety
  * detail and is reported as one reason.
+ *
+ * This is only ever handed a real `ManagedPathRefusal` from a judgment about
+ * `claim.path`, so there is no case here for a candidate that is inside a
+ * managed root but is not the claimed path: the facts are gathered for
+ * `claim.path`, so a differently spelled candidate is not expressible.
  */
 function managedReason(refusal: ManagedPathRefusal): CollectionOutcomeReason {
   if (refusal === 'candidate-is-managed-root') return 'candidate-is-managed-root';
@@ -461,7 +485,12 @@ export interface AuthorizedCollection {
   host: string;
   path: string;
   boardId: string;
-  snapshotHead: string;
+  /**
+   * The revision the claim named, but only when the re-check's own read landed on
+   * that revision. `null` otherwise, so this field never carries a revision the
+   * re-check did not verify.
+   */
+  snapshotHead: string | null;
   recheckHead: string | null;
   status: ProtectionStatus;
 }
@@ -473,6 +502,84 @@ export interface AuthorizedCollection {
  * look-alike nor a copy of an issued one is accepted.
  */
 const liveAuthorizations = new WeakSet<AuthorizedCollection>();
+
+/**
+ * The two filesystem calls the fact-gathering below makes. This module has no
+ * Node type dependencies, so `node:fs/promises` is reached through a widened
+ * specifier and narrowed by this interface rather than by ambient typings the
+ * package does not have.
+ */
+interface CandidateStats {
+  isSymbolicLink(): boolean;
+}
+
+interface CandidateFactsFs {
+  lstat(target: string): Promise<CandidateStats>;
+  realpath(target: string): Promise<string>;
+}
+
+const candidateFactsSpecifier: string = 'node:fs/promises';
+
+function isMissing(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === 'ENOENT';
+}
+
+/**
+ * The filesystem facts about one candidate, gathered the way the
+ * `CandidatePathFacts` docstring in `managed-roots.ts` prescribes: the
+ * candidate's own `lstat`, the resolved path of the directory containing it, and
+ * the candidate's resolved path -- a real `realpath` for a path that exists, and
+ * the parent resolution with the final component rejoined for one that does not,
+ * because a path that does not exist yet is a real deletion target.
+ *
+ * They are gathered for exactly the path named, so the judgment they feed is
+ * about the path the board recorded and not about a path a caller chose to
+ * describe. `null` means the facts could not be gathered at all -- the containing
+ * directory does not exist or cannot be resolved, or the candidate exists but
+ * cannot be resolved -- and the re-check treats that as a withheld outcome rather
+ * than as an eligible candidate.
+ */
+
+async function gatherCandidateFacts(candidate: string): Promise<CandidatePathFacts | null> {
+  const fs: CandidateFactsFs = await import(candidateFactsSpecifier);
+  const separator = candidate.lastIndexOf('/');
+  const parent = separator <= 0 ? '/' : candidate.slice(0, separator);
+  const base = candidate.slice(separator + 1);
+
+  let finalComponentIsSymlink = false;
+  let exists = true;
+  try {
+    finalComponentIsSymlink = (await fs.lstat(candidate)).isSymbolicLink();
+  } catch (error) {
+    // Only "it is not there" is a fact about a nonexistent path. Anything else --
+    // a permission problem, a name too long -- means the facts are unavailable,
+    // and a candidate whose facts cannot be read is not an eligible candidate.
+    if (!isMissing(error)) return null;
+    exists = false;
+  }
+
+  let parentResolvedPath: string;
+  try {
+    parentResolvedPath = await fs.realpath(parent);
+  } catch {
+    return null;
+  }
+
+  let resolvedPath: string;
+  if (exists) {
+    try {
+      resolvedPath = await fs.realpath(candidate);
+    } catch {
+      return null;
+    }
+  } else {
+    resolvedPath = parentResolvedPath === '/'
+      ? `/${base}`
+      : `${parentResolvedPath}/${base}`;
+  }
+
+  return { path: candidate, resolvedPath, finalComponentIsSymlink, parentResolvedPath };
+}
 
 /**
  * The moment immediately before the destructive action, as a protocol and not
@@ -488,10 +595,12 @@ const liveAuthorizations = new WeakSet<AuthorizedCollection>();
  *    came from and never a local copy of the board.
  * 3. The re-check authorizes deletion only if the fresh verified state still
  *    calls the path collectible *and* a configured managed root authorises
- *    removing it. Every disagreement withholds: the path is protected now, the
+ *    removing it, on the strength of filesystem facts the re-check gathered
+ *    itself. Every disagreement withholds: the path is protected now, the
  *    path is no longer registered at all, the board cannot be read or verified,
- *    the read came back from a different board, or the managed-root judgment
- *    does not find the path collectible.
+ *    the read came back from a different board, the facts about the candidate
+ *    cannot be gathered, or the managed-root judgment does not find the path
+ *    collectible.
  * 4. A re-check that cannot be completed is a `withheld`, never a retry with
  *    the stale snapshot. There is no third option.
  *
@@ -499,8 +608,10 @@ const liveAuthorizations = new WeakSet<AuthorizedCollection>();
  * answers for any board-registered absolute path, so without this step a board
  * could authorise collecting a configured managed root itself, or an absolute
  * path that lies in no managed root at all. `outcome: 'collect'` therefore
- * implies that some configured managed root authorises the removal of exactly
- * the path the board recorded.
+ * implies that some configured managed root authorises the removal of the very
+ * path this re-check named, on the strength of filesystem facts this module
+ * gathered itself: the facts about that path are not a caller's to supply, so a
+ * collector cannot have facts about one path and delete another.
  *
  * The residual window is the interval between the completed re-check read and
  * the destructive step itself. The signed board log is append-only with no
@@ -512,7 +623,6 @@ export async function recheckCollectionClaim(
   claim: CollectionClaim,
   api: BoardApi,
   managed: ManagedRoots,
-  candidate: CandidatePathFacts,
 ): Promise<AuthorizedCollection> {
   const snapshot = await readCollectionSnapshot(claim.host, boardApiCollectionReader(api));
   const issue = (
@@ -529,7 +639,7 @@ export async function recheckCollectionClaim(
       host: claim.host,
       path: claim.path,
       boardId: claim.boardId,
-      snapshotHead: claim.snapshotHead,
+      snapshotHead: head !== null && head === claim.snapshotHead ? head : null,
       recheckHead: head,
       status,
     };
@@ -553,15 +663,16 @@ export async function recheckCollectionClaim(
   }
 
   // Path safety last, so an unowned or renamed candidate is reported as what it
-  // is rather than as a managed-root refusal. A candidate is eligible only if it
-  // is eligible for the path the claim names: the facts a caller supplies are
-  // about a path, and a collector is never handed a differently spelled one.
-  const candidatePath = evaluateManagedCandidate(managed, candidate);
-  if (candidatePath.eligible !== true || candidatePath.path !== claim.path) {
-    const refusal: ManagedPathRefusal = candidatePath.eligible === true
-      ? 'outside-managed-roots'
-      : candidatePath.refusal;
-    return issue('withheld', managedReason(refusal), 'protected', snapshot.head);
+  // is rather than as a managed-root refusal. The facts are gathered here, for
+  // `claim.path` and nothing else, so the judgment below is about the very path
+  // the board recorded rather than about whatever facts a caller chose to pass.
+  const facts = await gatherCandidateFacts(claim.path);
+  if (facts === null) {
+    return issue('withheld', 'candidate-facts-unavailable', 'protected', snapshot.head);
+  }
+  const candidatePath = evaluateManagedCandidate(managed, facts);
+  if (candidatePath.eligible !== true) {
+    return issue('withheld', managedReason(candidatePath.refusal), 'protected', snapshot.head);
   }
 
   return issue('collect', 'still-collectible', 'collectible', snapshot.head);

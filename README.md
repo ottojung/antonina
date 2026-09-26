@@ -2,38 +2,45 @@
 
 Antonina manages long-running local AI coding-agent sessions through a small command-line interface. It also provides the Antonina board, a shared issue and durable-resource registry backed by Skrynia.
 
-Antonina currently uses OpenCode as its coding-agent backend. OpenCode is an external executable; Antonina itself has no third-party Python runtime dependencies.
+Antonina uses TypeScript/Node.js for its CLI, managed-agent runtime, shared board core, and web application. OpenCode remains an external executable.
 
 ## Requirements
 
-- Python 3.12 or later
+- Node.js 22 or later
 - `opencode` available on `PATH`
+
+Normal execution uses precompiled JavaScript. A TypeScript compiler is only a development/build dependency.
 
 ## Install
 
+Build and pack the CLI from a development checkout:
+
 ```sh
-python -m pip install .
+npm ci --prefix web
+./web/node_modules/.bin/tsc -p packages/cli/tsconfig.json
+npm pack ./packages/cli
+npm install -g ./antonina-cli-*.tgz
 ```
 
-This installs the `antonina` executable.
+This installs the `antonina` executable. Release artifacts should ship the already-built package, so execution hosts do not compile TypeScript.
 
 ## Basic usage
 
 ```sh
-antonina new --id a13f09c2 --cwd /workspace/project
-antonina prompt --id a13f09c2 'Investigate the issue and implement the fix.'
-antonina status --id a13f09c2
-antonina log --id a13f09c2
-antonina wait --id a13f09c2
+antonina agent new --id a13f09c2 --cwd /workspace/project
+antonina agent prompt --id a13f09c2 'Investigate the issue and implement the fix.'
+antonina agent status --id a13f09c2
+antonina agent log --id a13f09c2
+antonina agent wait --id a13f09c2 --timeout 3600
 ```
 
-Lifecycle controls are available through `stop`, `kill`, `delete`, and `clean`. The board is available as `antonina board`; set `ANTONINA_BOARD_CAPABILITY` for writes. Use `antonina --help` or `antonina <command> --help` for the complete CLI.
+Lifecycle controls are available through `stop`, `kill`, `delete`, and `clean`. The board is available as `antonina board`; set `ANTONINA_BOARD_CAPABILITY` for writes.
 
 State is stored under `$XDG_STATE_HOME/antonina`, defaulting to `$HOME/.local/state/antonina`.
 
 ## Web board
 
-The Antonina web board is a Node/Vite app under `web/` and stores canonical schema version 2 in the `antonina` Skrynia namespace with key `board-v1`. Build it with:
+The web board is under `web/` and imports the shared board/Skrynia implementation from `packages/core`.
 
 ```sh
 cd web
@@ -42,19 +49,21 @@ npm test
 npm run build
 ```
 
-The deployed web app supports Issues and Resources views, issue bodies separate from comments, writable open-issue bodies, and resource dependency protection. The Python board CLI is stdlib-only and uses ETag compare-and-swap.
-
 ## Development
 
 ```sh
-uv sync --frozen --extra dev
-uv run ruff format --check .
-uv run ruff check .
-uv run mypy .
-uv run pytest
+npm ci --prefix web
+./web/node_modules/.bin/tsc -p packages/core/tsconfig.json
+./web/node_modules/.bin/tsc -p packages/agent-runtime/tsconfig.json
+./web/node_modules/.bin/tsc -p packages/cli/tsconfig.json
+node --test packages/core/test/*.test.mjs
+node --test packages/agent-runtime/test/*.test.mjs
+node --test packages/cli/test/*.test.mjs
+npm test --prefix web
+npm run build --prefix web
 ```
 
-Runtime Python dependencies must remain empty; development-only tooling belongs in the `dev` extra.
+During the migration branch the old Python implementation remains only as a parity reference and CI oracle. It is removed at the final cutover.
 
 ## License
 

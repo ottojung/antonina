@@ -30,7 +30,7 @@ antonina board show NUMBER --json
 
 The board trust anchor and credential come from Antonina's config directory. Never print, copy into comments, or otherwise expose credentials, private keys, tokens, or other secrets.
 
-Comments need an author. Prefer one stable identity for the orchestrator, configured with `ANTONINA_BOARD_AUTHOR`, for example `openclaw@mycelium-dev`. Passing `--author` explicitly is also valid.
+Comments need an author. Prefer one stable identity for the orchestrator, configured with `ANTONINA_BOARD_AUTHOR`, for example `openclaw@marceline-dev`. Passing `--author` explicitly is also valid.
 
 If the board is readable but not editable, do not pretend to claim or complete work. Read enough state to diagnose the problem, then stop without making unrecorded substantive changes.
 

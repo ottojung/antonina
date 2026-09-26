@@ -55,6 +55,7 @@ import {
   updateMeta,
   writeMeta,
   type StatePathsOptions,
+  type StoreFs,
 } from '../../agent-runtime/src/store.js';
 
 export const EXIT_OK = 0;
@@ -76,6 +77,7 @@ export interface AgentCommandContext {
   io: AgentCommandIo;
   home?: string;
   entryScript?: string;
+  storeFs?: StoreFs;
 }
 
 interface Parsed {
@@ -85,9 +87,11 @@ interface Parsed {
 }
 
 function paths(context: AgentCommandContext): StatePathsOptions {
-  return context.home === undefined
-    ? { env: context.env }
-    : { env: context.env, home: context.home };
+  return {
+    env: context.env,
+    ...(context.home === undefined ? {} : { home: context.home }),
+    ...(context.storeFs === undefined ? {} : { fs: context.storeFs }),
+  };
 }
 
 function parse(argv: string[], booleanFlags: readonly string[] = []): Parsed {

@@ -502,25 +502,31 @@ const authorizationSeal: unique symbol = Symbol('antonina.collection.authorizati
  *
  * The `[authorizationSeal]` key is module-private, so no caller can construct
  * one of these: the only way to obtain an authorization is a completed re-check.
+ *
+ * Every carried field is `readonly`. That is the type-level half of the
+ * guarantee, and it stops a caller from re-pointing an authorization in
+ * TypeScript. It is not the guarantee itself: a `readonly` field is still an
+ * ordinary writable property at runtime, so the runtime half is
+ * `issuedAuthorizations` below, which records what this module handed out and
+ * is what the commit function compares against.
  */
 export interface AuthorizedCollection {
   readonly [authorizationSeal]: true;
-  state: 'authorized';
-  outcome: 'collect' | 'withheld';
-  reason: CollectionOutcomeReason;
-  host: string;
-  path: string;
-  boardId: string;
+  readonly state: 'authorized';
+  readonly outcome: 'collect' | 'withheld';
+  readonly reason: CollectionOutcomeReason;
+  readonly host: string;
+  readonly path: string;
+  readonly boardId: string;
   /**
    * The revision the claim named, but only when the re-check's own read landed on
    * that revision. `null` otherwise, so this field never carries a revision the
    * re-check did not verify.
    */
-  snapshotHead: string | null;
-  recheckHead: string | null;
-  status: ProtectionStatus;
+  readonly snapshotHead: string | null;
+  readonly recheckHead: string | null;
+  readonly status: ProtectionStatus;
 }
-
 
 /**
  * The authorizations this process has issued and not yet committed. Membership
@@ -528,6 +534,25 @@ export interface AuthorizedCollection {
  * look-alike nor a copy of an issued one is accepted.
  */
 const liveAuthorizations = new WeakSet<AuthorizedCollection>();
+
+/**
+ * What each issued authorization carried at the moment it was issued, kept
+ * module-private beside the `WeakSet` for the same reason: the commit function
+ * reads `outcome`, `reason`, `host`, `path` and `recheckHead` back out of the
+ * caller's object, and a caller still holds a writable reference to that object.
+ * Membership alone therefore answers "did this process issue this?", but not
+ * "does it still say what it said?", and an object whose `path` has been
+ * re-pointed at a path no re-check ever read is still a live member. This
+ * module-private record is the source of truth for the commit, so re-pointing
+ * is refused rather than reported.
+ *
+ * This is a private record, not a brand: nothing here is exported, and no cast
+ * or hand-built value can put an entry into it.
+ */
+const issuedAuthorizations = new WeakMap<AuthorizedCollection, IssuedAuthorization>();
+
+/** The fields of an authorization, as recorded when the re-check issued it. */
+type IssuedAuthorization = Omit<AuthorizedCollection, typeof authorizationSeal>;
 
 /**
  * The moment immediately before the destructive action, as a protocol and not
@@ -567,6 +592,12 @@ const liveAuthorizations = new WeakSet<AuthorizedCollection>();
  * containing directory could not be read or resolved -- yields a withheld
  * outcome, never an eligible candidate.
  *
+ * What the re-check issues is the authority to act on one path, as it read it.
+ * It is not a token a caller may re-point afterwards: the fields are `readonly`
+ * in the interface, and `commitCollectionDeletion` re-derives them from what
+ * this function recorded here, so assigning to any of them after the re-check
+ * is refused rather than obeyed.
+ *
  * This module performs no filesystem I/O. `CandidatePathFacts` in
  * `managed-roots.ts` is the recipe a gatherer implements, and the node-side
  * implementation lives with the rest of the collector, in
@@ -604,6 +635,7 @@ export async function recheckCollectionClaim(
       status,
     };
     liveAuthorizations.add(authorization);
+    issuedAuthorizations.set(authorization, { ...authorization });
     return authorization;
   };
 
@@ -657,25 +689,61 @@ export interface CompletedCollection {
 
 /**
  * An authorization is accepted only while it is the live record this process
- * issued for a completed re-check, and committing it consumes it: one
- * completed re-check can authorize at most one destructive action, and a copy
- * of the record is not that authorization. A withheld authorization reports
- * `withheld`, and the caller leaves the path alone.
+ * issued for a completed re-check, and only while it still says what it said
+ * when it was issued: every field the commit reads back is compared against the
+ * module-private record of the issue, so a caller cannot re-point the authority
+ * at another path, host, board, revision, outcome or reason after the re-check
+ * has completed. Committing consumes it: one completed re-check can authorize at
+ * most one destructive action, and a copy of the record is not that
+ * authorization. A withheld authorization reports `withheld`, and the caller
+ * leaves the path alone.
+ *
+ * A refusal over changed fields does not consume the authorization: a caller
+ * that wrote to it by mistake can put the re-check's own values back and commit
+ * what was actually authorized, and nothing is granted by that, because the
+ * values compared against are the ones the re-check recorded.
  */
 export function commitCollectionDeletion(authorized: AuthorizedCollection): CompletedCollection {
-  if (!liveAuthorizations.has(authorized)) {
+  const issued = liveAuthorizations.has(authorized)
+    ? issuedAuthorizations.get(authorized)
+    : undefined;
+  if (issued === undefined) {
     throw new Error(
       `Collection authorization for ${authorized.path} is not a live authorization: `
       + 'it was already committed, or it was not issued by a completed re-check',
     );
   }
+  if (!isUnchanged(authorized, issued)) {
+    throw new Error(
+      `Collection authorization for ${authorized.path} was changed after the re-check: `
+      + 'an authorization authorizes only the path, host, board, revision, outcome and reason '
+      + 'the re-check read, and this one no longer carries them',
+    );
+  }
   liveAuthorizations.delete(authorized);
+  issuedAuthorizations.delete(authorized);
   return {
     state: 'spent',
-    outcome: authorized.outcome,
-    reason: authorized.reason,
-    host: authorized.host,
-    path: authorized.path,
-    recheckHead: authorized.recheckHead,
+    outcome: issued.outcome,
+    reason: issued.reason,
+    host: issued.host,
+    path: issued.path,
+    recheckHead: issued.recheckHead,
   };
+}
+
+/** Every carried field, so a caller-owned edit to any one of them is a mismatch. */
+function isUnchanged(
+  authorized: AuthorizedCollection,
+  issued: IssuedAuthorization,
+): boolean {
+  return authorized.state === issued.state
+    && authorized.outcome === issued.outcome
+    && authorized.reason === issued.reason
+    && authorized.host === issued.host
+    && authorized.path === issued.path
+    && authorized.boardId === issued.boardId
+    && authorized.snapshotHead === issued.snapshotHead
+    && authorized.recheckHead === issued.recheckHead
+    && authorized.status === issued.status;
 }

@@ -665,6 +665,60 @@ test('one re-check authorizes one deletion, and a copy of it is not that authori
   assert.throws(() => commitCollectionDeletion(authorized), /not a live authorization/);
 });
 
+/**
+ * The seal and the WeakSet prove that a record is the one this process issued for
+ * a completed re-check. They say nothing about the record's *fields*, which stay
+ * writable in JavaScript whatever the interface says, and the commit function
+ * reads them back out. So a re-pointing route exists unless the commit also
+ * compares the carried fields against what was recorded when the authorization
+ * was issued. `readonly` is the type-level half of that and holds no force at
+ * runtime, so these tests assign through it deliberately.
+ */
+test('an authorization cannot be re-pointed after the re-check, whatever the caller writes on it', async () => {
+  const { writer, open } = await seeded();
+  await writer.close(open[0].number);
+  await writer.close(open[1].number);
+  const reader = readerFor(writer);
+  const claim = openCollectionClaim(await readCollectionSnapshot(HOST, reader), WORKTREE);
+  const authorized = await recheck(claim, writer);
+  assert.equal(authorized.outcome, 'collect');
+
+  // A caller that holds a `collect` authorization and disagrees with the re-check
+  // re-points it at another path, another host, and a story of its own.
+  authorized.path = BUILD;
+  authorized.host = OTHER_HOST;
+  authorized.outcome = 'withheld';
+  authorized.reason = 'outside-managed-roots';
+  authorized.status = 'protected';
+  authorized.boardId = 'some-other-board';
+  authorized.snapshotHead = 'forged-snapshot-head';
+  authorized.recheckHead = 'forged-recheck-head';
+
+  assert.throws(() => commitCollectionDeletion(authorized), /was changed after the re-check/);
+});
+
+test('a withheld authorization is refused the same way when a field is re-pointed', async () => {
+  const { writer, open } = await seeded();
+  await writer.addResourceDependency(HOST, ROOT, open[0].number);
+  await writer.close(open[0].number);
+
+  const snapshot = await readCollectionSnapshot(HOST, readerFor(writer));
+  const claim = openCollectionClaim(snapshot, ROOT);
+  const authorized = await recheck(claim, writer);
+  assert.equal(authorized.outcome, 'withheld');
+
+  // A withheld authorization is not a licence to collect anything, so there is
+  // nothing to re-point for a caller's own gain; but the commit function reads
+  // these fields back out, and it must report the tampering rather than answer
+  // with a `CompletedCollection` built from a caller's assignments.
+  authorized.path = WORKTREE;
+  authorized.outcome = 'collect';
+  authorized.reason = 'still-collectible';
+  authorized.status = 'collectible';
+
+  assert.throws(() => commitCollectionDeletion(authorized), /was changed after the re-check/);
+});
+
 test('a board cannot authorise collecting a configured managed root', async () => {
   const { writer, open } = await seeded();
   // The board registers the configured managed root itself. Protection and

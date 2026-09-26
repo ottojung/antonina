@@ -133,7 +133,8 @@ export function readMeta(agentId: string, options: StatePathsOptions = {}): Agen
   try {
     validateAgentMetadata(meta);
   } catch (error) {
-    throw new MetadataReadError(`managed-agent metadata for ${agentId} is incompatible or malformed`, { cause: error });
+    const detail = error instanceof Error ? `: ${error.message}` : '';
+    throw new MetadataReadError(`managed-agent metadata for ${agentId} is incompatible or malformed${detail}`, { cause: error });
   }
   if (persistedAgentId(meta.id) !== agentId) {
     throw new MetadataReadError(`managed-agent metadata id for ${agentId} is malformed or mismatched`);

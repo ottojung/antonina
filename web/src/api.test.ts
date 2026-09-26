@@ -307,3 +307,75 @@ describe('browser board session', () => {
     expect(client.api.getTrustAnchor()).toBeNull();
   });
 });
+
+describe('the shared priority queue through the session', () => {
+  async function boardWithThreeIssues() {
+    const server = fakeSkrynia();
+    const storage = memoryStorage();
+    const owner = session(server, storage);
+    const initialized = await owner.initialize();
+    await owner.api.createIssue('First');
+    await owner.api.createIssue('Second');
+    await owner.api.createIssue('Third');
+    return { server, storage, owner, initialized };
+  }
+
+  it('reads the board and its queue in one pass', async () => {
+    const { server, storage } = await boardWithThreeIssues();
+    const reader = session(server, storage);
+
+    const state = await reader.readState();
+
+    expect(state?.board.issues.map((issue) => issue.number)).toEqual([1, 2, 3]);
+    expect(state?.queue).toEqual([1, 2, 3]);
+  });
+
+  it('seeds the queue oldest-issue first at initialization', async () => {
+    const { server, storage } = await boardWithThreeIssues();
+    await session(server, storage).api.reorderQueue([3, 1, 2]);
+    await session(server, storage).api.createIssue('Fourth');
+
+    expect((await session(server, storage).readState())?.queue).toEqual([3, 1, 2, 4]);
+  });
+
+  it('commits a reorder and shows the same order to a second client that only reads', async () => {
+    const { server, storage, initialized } = await boardWithThreeIssues();
+    const writer = session(server, storage);
+
+    const committed = await writer.api.reorderQueue([2, 3, 1]);
+
+    expect(committed).toEqual([2, 3, 1]);
+    const reader = session(server);
+    await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
+    expect((await reader.readState())?.queue).toEqual([2, 3, 1]);
+    expect(await reader.api.getQueue()).toEqual([2, 3, 1]);
+  });
+
+  it('leaves the stored board untouched when a reorder is refused', async () => {
+    const { server, storage } = await boardWithThreeIssues();
+    const before = server.signed;
+
+    await expect(session(server, storage).api.reorderQueue([1, 2])).rejects.toThrow('every open issue exactly once');
+    expect(server.signed).toBe(before);
+    expect((await session(server, storage).api.getQueue())).toEqual([1, 2, 3]);
+  });
+
+  it('never lets a read-only credential reorder the shared queue', async () => {
+    const { server, initialized } = await boardWithThreeIssues();
+    const reader = session(server);
+    await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
+
+    expect(reader.api.hasWriteAccess()).toBe(false);
+    await expect(reader.api.reorderQueue([3, 2, 1])).rejects.toThrow('credential is required');
+    expect((server.signed as { operations: unknown[] }).operations.length).toBe(4);
+  });
+
+  it('keeps a newly opened issue in the queue a client re-reads after a close', async () => {
+    const { server, storage } = await boardWithThreeIssues();
+    const client = session(server, storage);
+    await client.api.close(2);
+    expect((await client.readState())?.queue).toEqual([1, 3]);
+    await client.api.reopen(2);
+    expect((await client.readState())?.queue).toEqual([1, 3, 2]);
+  });
+});

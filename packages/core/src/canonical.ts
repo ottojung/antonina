@@ -64,7 +64,9 @@ export interface SigningKeyPair {
 }
 
 export async function keyIdFromPublicKey(publicKey: string): Promise<string> {
-  return sha256Id('ed25519', base64UrlDecode(publicKey));
+  const bytes = base64UrlDecode(publicKey);
+  if (bytes.byteLength !== 32) throw new Error('Ed25519 public key must be 32 bytes');
+  return sha256Id('ed25519', bytes);
 }
 
 export async function generateSigningKey(): Promise<SigningKeyPair> {

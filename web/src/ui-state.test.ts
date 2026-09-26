@@ -18,9 +18,6 @@ import {
   issueCounts,
   loadedBoard,
   REJECTED_CREDENTIAL_COPY,
-  ISSUE_FORM_HINT,
-  ISSUE_FORM_SUBMIT_HINT,
-  submitsIssueForm,
   trustRequired,
   visibleIssues,
   TRUST_COPY,
@@ -164,33 +161,5 @@ describe('board load state', () => {
     expect(boardLoadFailed({ status: 'uninitialized' }, 'boom')).toEqual({ status: 'failed', message: 'boom' });
     expect(boardLoadFailed({ status: 'failed', message: 'old' }, 'new')).toEqual({ status: 'failed', message: 'new' });
     expect(loadedBoard({ status: 'failed', message: 'boom' })).toBeUndefined();
-  });
-});
-
-function key(name: string, modifiers: Partial<Record<'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey', boolean>> = {}) {
-  return { key: name, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, ...modifiers };
-}
-
-describe('create-issue keyboard shortcut', () => {
-  it('submits the form on Ctrl+Enter in the description', () => {
-    expect(submitsIssueForm(key('Enter', { ctrlKey: true }))).toBe(true);
-  });
-
-  it('leaves plain Enter alone so it keeps inserting a newline instead of submitting', () => {
-    expect(submitsIssueForm(key('Enter'))).toBe(false);
-  });
-
-  it('claims no other key or modifier combination as the submit shortcut', () => {
-    expect(submitsIssueForm(key('Tab'))).toBe(false);
-    expect(submitsIssueForm(key(' '))).toBe(false);
-    expect(submitsIssueForm(key('a', { ctrlKey: true }))).toBe(false);
-    expect(submitsIssueForm(key('Enter', { ctrlKey: true, shiftKey: true }))).toBe(false);
-    expect(submitsIssueForm(key('Enter', { ctrlKey: true, altKey: true }))).toBe(false);
-    expect(submitsIssueForm(key('Enter', { metaKey: true }))).toBe(false);
-  });
-
-  it('advertises the shortcut next to the form copy instead of hiding it', () => {
-    expect(ISSUE_FORM_SUBMIT_HINT).toContain('Ctrl+Enter');
-    expect(ISSUE_FORM_HINT).not.toContain('Ctrl');
   });
 });

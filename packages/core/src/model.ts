@@ -113,7 +113,7 @@ export type PathFormDefect =
   | 'non-canonical';
 
 export function pathFormDefect(path: string): PathFormDefect | null {
-  if (typeof path !== 'string' || path.length === 0) return 'empty';
+  if (path.length === 0) return 'empty';
   if (path === '/') return null;
   if (path.split('/').some((segment) => segment === '..')) return 'parent-traversal';
   if (!path.startsWith('/')) return 'relative';

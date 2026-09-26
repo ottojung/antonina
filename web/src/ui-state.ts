@@ -33,6 +33,20 @@ export const DELETED_COPY = {
 
 export const ISSUE_FORM_HINT = 'The description holds the task context; the conversation holds updates and questions.';
 
+export const ISSUE_FORM_SUBMIT_HINT = 'Ctrl+Enter creates the issue from the description.';
+
+export type IssueFormKey = { key: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean };
+
+/**
+ * Ctrl+Enter in the description is the only keystroke that submits the create
+ * form. Plain Enter is left alone so it keeps inserting a newline, and no
+ * other modifier combination is a shortcut, so the submit button stays the
+ * one obvious control.
+ */
+export function submitsIssueForm(key: IssueFormKey): boolean {
+  return key.key === 'Enter' && key.ctrlKey && !key.metaKey && !key.shiftKey && !key.altKey;
+}
+
 export type AccessCallout = { title: string; body: string; action: string };
 
 export type ReadOnlyAccess = 'read-only' | 'rejected';

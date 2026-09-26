@@ -8,6 +8,12 @@ export type CanonicalValue =
 
 const textEncoder = new TextEncoder();
 
+function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
 function canonicalize(value: CanonicalValue): string {
   if (value === null) return 'null';
   if (typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
@@ -44,7 +50,7 @@ export function base64UrlDecode(value: string): Uint8Array {
 }
 
 export async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
-  return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', ownedBuffer(bytes)));
 }
 
 export async function sha256Id(prefix: string, bytes: Uint8Array): Promise<string> {
@@ -74,22 +80,22 @@ export async function generateSigningKey(): Promise<SigningKeyPair> {
 }
 
 async function importPublicKey(publicKey: string): Promise<CryptoKey> {
-  return crypto.subtle.importKey('raw', base64UrlDecode(publicKey), 'Ed25519', false, ['verify']);
+  return crypto.subtle.importKey('raw', ownedBuffer(base64UrlDecode(publicKey)), 'Ed25519', false, ['verify']);
 }
 
 async function importPrivateKey(privateKey: string): Promise<CryptoKey> {
-  return crypto.subtle.importKey('pkcs8', base64UrlDecode(privateKey), 'Ed25519', false, ['sign']);
+  return crypto.subtle.importKey('pkcs8', ownedBuffer(base64UrlDecode(privateKey)), 'Ed25519', false, ['sign']);
 }
 
 export async function signBytes(privateKey: string, bytes: Uint8Array): Promise<string> {
   const key = await importPrivateKey(privateKey);
-  return base64UrlEncode(new Uint8Array(await crypto.subtle.sign('Ed25519', key, bytes)));
+  return base64UrlEncode(new Uint8Array(await crypto.subtle.sign('Ed25519', key, ownedBuffer(bytes))));
 }
 
 export async function verifyBytes(publicKey: string, signature: string, bytes: Uint8Array): Promise<boolean> {
   try {
     const key = await importPublicKey(publicKey);
-    return crypto.subtle.verify('Ed25519', key, base64UrlDecode(signature), bytes);
+    return crypto.subtle.verify('Ed25519', key, ownedBuffer(base64UrlDecode(signature)), ownedBuffer(bytes));
   } catch {
     return false;
   }

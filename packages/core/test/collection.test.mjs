@@ -862,6 +862,127 @@ test('a write to either carried removal-shape field is refused at the commit', a
 });
 
 /**
+ * The ordering the destructive step depends on. The commit's comparison is the
+ * same comparison, but the commit runs *after* the removal, so a test that only
+ * asserts a refusal at the commit says nothing about whether a re-pointed
+ * removal shape can reach `fs.rm` or `fs.unlink` at all.
+ *
+ * So these assert on the seam -- the calls the filesystem surface recorded -- and
+ * not on how the implementation happens to spell the guarantee: an implementation
+ * that read `authorized.unlinkFinalComponent` off the caller's object would pass
+ * the commit test and fail every one of these.
+ */
+test('a removal shape re-pointed after the re-check cannot reach the filesystem', async () => {
+  // Authorized as a plain path, so the issued shape is `rm` recursive. The caller
+  // claims it was a symlink: if the removal read the caller's object, this would
+  // `unlink` a worktree, and if it followed the forged shape it would try to
+  // remove a directory it was never authorized to descend into.
+  const unlinkInsteadOfRm = recordingRemovalFs();
+  const asDirectory = await authorizedFor(WORKTREE, {});
+  assert.equal(asDirectory.unlinkFinalComponent, false);
+  asDirectory.unlinkFinalComponent = true;
+  await assert.rejects(
+    () => removeAuthorizedPath(asDirectory, unlinkInsteadOfRm.fs),
+    /was changed after the re-check/,
+  );
+  assert.deepEqual(unlinkInsteadOfRm.calls, [], 'a re-pointed removal shape reached the filesystem');
+
+  // And symmetrically: authorized as a symlink, the caller claims the other
+  // shape. A `rm --recursive` here would descend into the very link the re-check
+  // said must never be followed.
+  const rmInsteadOfUnlink = recordingRemovalFs();
+  const asSymlink = await authorizedFor(WORKTREE, {
+    [WORKTREE]: {
+      path: WORKTREE,
+      resolvedPath: BUILD,
+      finalComponentIsSymlink: true,
+      parentResolvedPath: ROOT,
+    },
+  });
+  assert.equal(asSymlink.unlinkFinalComponent, true);
+  asSymlink.unlinkFinalComponent = false;
+  await assert.rejects(
+    () => removeAuthorizedPath(asSymlink, rmInsteadOfUnlink.fs),
+    /was changed after the re-check/,
+  );
+  assert.deepEqual(rmInsteadOfUnlink.calls, [], 'a re-pointed removal shape reached the filesystem');
+});
+
+test('a re-pointed path is refused at the removal, with nothing removed', async () => {
+  // The `path` half is the pre-existing hole the removal now closes too: the
+  // removal used to take the caller's `path` and delete whatever it named.
+  const asOtherPath = recordingRemovalFs();
+  const authorized = await authorizedFor(WORKTREE, {});
+  assert.equal(authorized.unlinkFinalComponent, false);
+  authorized.path = BUILD;
+  await assert.rejects(
+    () => removeAuthorizedPath(authorized, asOtherPath.fs),
+    /was changed after the re-check/,
+  );
+  assert.deepEqual(
+    asOtherPath.calls,
+    [],
+    'a removal ran against a path the re-check never read',
+  );
+
+  // The structural edits refuse on the same door: a stripped removal shape and a
+  // substituted root each leave nothing to act on.
+  for (const tamper of [
+    (record) => { delete record.unlinkFinalComponent; },
+    (record) => { record.root = rootsOf(['/somewhere-else']).roots[0]; },
+  ]) {
+    const untouched = recordingRemovalFs();
+    const record = await authorizedFor(WORKTREE, {});
+    tamper(record);
+    await assert.rejects(
+      () => removeAuthorizedPath(record, untouched.fs),
+      /was changed after the re-check/,
+    );
+    assert.deepEqual(untouched.calls, [], 'a re-pointed record reached the filesystem');
+  }
+});
+
+test('the removal acts on the issued record, so an untouched authorization removes what the re-check read', async () => {
+  // The positive control for the new door: the check the removal now makes first
+  // must not refuse the authorization the re-check just issued, or collection
+  // would remove nothing at all.
+  const removal = recordingRemovalFs();
+  const authorized = await authorizedFor(WORKTREE, {});
+  assert.equal(await removeAuthorizedPath(authorized, removal.fs), 'unlinked');
+  assert.deepEqual(removal.calls, [`rm ${WORKTREE} {"recursive":true}`]);
+  // The removal does not consume: the commit is what spends the authorization, so
+  // a refused removal leaves it committable and a successful one is still spent
+  // exactly once.
+  assert.equal(commitCollectionDeletion(authorized).outcome, 'collect');
+  assert.throws(
+    () => commitCollectionDeletion(authorized),
+    /not a live authorization/,
+  );
+});
+
+test('a spent or unissued authorization removes nothing, and a copy is not the record', async () => {
+  // `removeAuthorizedPath` takes the same door as the commit, so it is refused
+  // for the same reasons, and it refuses them before the filesystem is reached:
+  // there is no window in which an unissued record has already been acted on.
+  const spent = await authorizedFor(WORKTREE, {});
+  assert.equal(commitCollectionDeletion(spent).outcome, 'collect');
+  const afterCommit = recordingRemovalFs();
+  await assert.rejects(
+    () => removeAuthorizedPath(spent, afterCommit.fs),
+    /not a live authorization/,
+  );
+  assert.deepEqual(afterCommit.calls, [], 'a spent authorization removed something');
+
+  const copy = recordingRemovalFs();
+  const original = await authorizedFor(WORKTREE, {});
+  await assert.rejects(
+    () => removeAuthorizedPath({ ...original }, copy.fs),
+    /not a live authorization/,
+  );
+  assert.deepEqual(copy.calls, [], 'a copy of an authorization removed something');
+});
+
+/**
  * The destructive step's own half, with the filesystem surface it is handed.
  * `lstat` is on the object and throws if called: the point of carrying the shape
  * is that the removal has no filesystem observation to make, and this is how a

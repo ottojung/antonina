@@ -566,7 +566,11 @@ export async function collectDelete(
   // 7. The removal, at the board-recorded spelling and in the shape the re-check
   //    authorized. The authorization names one path and the CLI acts on that path
   //    and no other; it observes nothing about the path to work out how to remove
-  //    it, because the re-check already decided that.
+  //    it, because the re-check already decided that. The removal takes the path
+  //    and the shape from core's module-private record of the issue rather than
+  //    from this object, so anything written onto the authorization between the
+  //    re-check and here is refused before the filesystem is reached -- there is
+  //    no step at which a re-pointed shape is acted on and caught afterwards.
   const removal = await removeAuthorizedPath(authorized, options.removalFs ?? DEFAULT_REMOVAL_FS);
 
   // 8. The authorization is spent exactly once, after the action it authorized.

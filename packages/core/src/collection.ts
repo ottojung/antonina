@@ -666,9 +666,10 @@ type OmitSeal<T> = T extends unknown ? Omit<T, typeof authorizationSeal> : never
  *
  * What the re-check issues is the authority to act on one path, as it read it.
  * It is not a token a caller may re-point afterwards: the fields are `readonly`
- * in the interface, and `commitCollectionDeletion` re-derives them from what
- * this function recorded here, so assigning to any of them after the re-check
- * is refused rather than obeyed.
+ * in the interface, and both `removeAuthorizedPath` and `commitCollectionDeletion`
+ * re-derive them from what this function recorded here, so assigning to any of
+ * them after the re-check is refused rather than obeyed -- the removal before it
+ * touches the filesystem, and the commit after.
  *
  * This module performs no filesystem I/O. `CandidatePathFacts` in
  * `managed-roots.ts` is the recipe a gatherer implements, and the node-side
@@ -806,24 +807,13 @@ export interface CompletedCollection {
  * that wrote to it by mistake can put the re-check's own values back and commit
  * what was actually authorized, and nothing is granted by that, because the
  * values compared against are the ones the re-check recorded.
+ *
+ * The check is not this function's alone: `removeAuthorizedPath` takes the same
+ * record through the same door, so the destructive step refuses a re-pointed
+ * authorization before it calls the filesystem, not after.
  */
 export function commitCollectionDeletion(authorized: AuthorizedCollection): CompletedCollection {
-  const issued = liveAuthorizations.has(authorized)
-    ? issuedAuthorizations.get(authorized)
-    : undefined;
-  if (issued === undefined) {
-    throw new Error(
-      `Collection authorization for ${authorized.path} is not a live authorization: `
-      + 'it was already committed, or it was not issued by a completed re-check',
-    );
-  }
-  if (!isUnchanged(authorized, issued)) {
-    throw new Error(
-      `Collection authorization for ${authorized.path} was changed after the re-check: `
-      + 'an authorization authorizes only the path, host, board, revision, outcome, reason and '
-      + 'removal shape the re-check read, and this one no longer carries them',
-    );
-  }
+  const issued = issuedRecordOf(authorized);
   liveAuthorizations.delete(authorized);
   issuedAuthorizations.delete(authorized);
   return {
@@ -848,8 +838,9 @@ export function commitCollectionDeletion(authorized: AuthorizedCollection): Comp
  * nor a renamed one passes. The key set is what makes the check automatic: a
  * field added to the authorization later is compared with no edit here.
  *
- * The seal is a non-enumerable module-private symbol, so it is outside this
- * comparison without being special-cased, and its own value is not what decides
+ * The seal is a module-private symbol, so `Object.keys` leaves it out of this
+ * comparison -- and out of the copy `{ ...authorization }` makes of the record --
+ * without either place special-casing it, and its own value is not what decides
  * anything: liveness is membership in the process's own `WeakSet`.
  *
  * `root` is compared by identity, not field by field. It is the very frozen
@@ -863,6 +854,39 @@ function isUnchanged<T extends object>(authorized: T, issued: T): boolean {
   if (present.length !== carried.length) return false;
   if (!carried.every((field) => present.includes(field))) return false;
   return carried.every((field) => Object.is(authorized[field], issued[field]));
+}
+
+/**
+ * The module-private record of what the re-check issued for `authorized`, or a
+ * refusal. One door, because two functions consume the record and neither may
+ * reach the filesystem or report a completion on the caller's own values.
+ *
+ * So a caller holding a writable reference to the authorization cannot re-point
+ * the authority anywhere: both the commit and the removal read the issued record
+ * and refuse a divergent one, which is the whole of the guarantee. The fields are
+ * not frozen -- `readonly` in the interface holds no force at runtime -- and this
+ * is not a freeze; it is a comparison, and it is made *before* either consumer
+ * acts, so a divergent authorization is refused with nothing done rather than
+ * refused after the bytes are gone.
+ */
+function issuedRecordOf(authorized: AuthorizedCollection): IssuedAuthorization {
+  const issued = liveAuthorizations.has(authorized)
+    ? issuedAuthorizations.get(authorized)
+    : undefined;
+  if (issued === undefined) {
+    throw new Error(
+      `Collection authorization for ${authorized.path} is not a live authorization: `
+      + 'it was already committed, or it was not issued by a completed re-check',
+    );
+  }
+  if (!isUnchanged(authorized, issued)) {
+    throw new Error(
+      `Collection authorization for ${authorized.path} was changed after the re-check: `
+      + 'an authorization authorizes only the path, host, board, revision, outcome, reason and '
+      + 'removal shape the re-check read, and this one no longer carries them',
+    );
+  }
+  return issued;
 }
 
 /**
@@ -889,7 +913,15 @@ export interface AuthorizedRemovalFs {
   rm(path: string, options: { readonly recursive: true }): Promise<void>;
 }
 
-/** What a removal did, as `collect delete` reports it. */
+/**
+ * What a removal did, as `collect delete` reports it.
+ *
+ * A reportable outcome is only reachable from the issued record, never from the
+ * caller's object: the path and the removal shape used here come out of
+ * `issuedAuthorizations`, and an authorization whose carried fields have been
+ * re-pointed since the re-check is refused before any `unlink` or `rm` call. The
+ * fields are not frozen, and this is why that does not matter.
+ */
 export type AuthorizedRemoval = 'unlinked' | 'unlinked-symlink' | 'absent';
 
 function isAbsent(error: unknown): boolean {
@@ -915,18 +947,29 @@ function isAbsent(error: unknown): boolean {
  * A path that is already gone is `absent`: the goal state already holds. Any
  * other failure throws, so an authorization is never spent on a removal that did
  * not happen. A `withheld` authorization is refused here, before any call.
+ *
+ * The path and the removal shape are read off the module-private record of the
+ * re-check, not off the caller's object, and the same re-pointing comparison the
+ * commit makes is made here first. That is the order the guarantee lives in: a
+ * caller that writes `unlinkFinalComponent` or `path` after the re-check has
+ * nothing to gain, because the refusal lands before `fs.unlink` or `fs.rm` is
+ * reached -- the re-check's own values are what would have been used had the
+ * caller left the record alone, and a divergent record is not acted on at all.
+ * Nothing here freezes anything; a caller may still write to the object, and the
+ * write costs it the removal.
  */
 export async function removeAuthorizedPath(
   authorized: AuthorizedCollection,
   fs: AuthorizedRemovalFs,
 ): Promise<AuthorizedRemoval> {
-  if (authorized.outcome !== 'collect') {
+  const issued = issuedRecordOf(authorized);
+  if (issued.outcome !== 'collect') {
     throw new Error(
-      `Refusing to remove ${authorized.path}: this authorization withheld (${authorized.reason}), `
+      `Refusing to remove ${issued.path}: this authorization withheld (${issued.reason}), `
       + 'so it carries no removal shape',
     );
   }
-  const { path, unlinkFinalComponent } = authorized;
+  const { path, unlinkFinalComponent } = issued;
   try {
     if (unlinkFinalComponent) {
       await fs.unlink(path);

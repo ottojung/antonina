@@ -5,6 +5,7 @@ import {
   boardApiCollectionReader,
   collectiblePaths,
   commitCollectionDeletion,
+  issuedCollectionReport,
   openCollectionClaim,
   protectionOf,
   readCollectionSnapshot,
@@ -324,6 +325,43 @@ export type CollectDeleteResult = {
   value: CollectDeleteReport;
 };
 
+/**
+ * The report, built from the record the re-check left behind rather than from
+ * the authorization object this module happens to hold.
+ *
+ * The report is the one consumer of the authorization that is not destructive,
+ * and that is exactly why it needed the same door the removal and the commit
+ * already take. A report is a lie about what was verified if it can name values
+ * no re-check read, and it is the *non*-destructive consumer, so the
+ * re-derivation `hosts.md` states for destructive consumers never covered it: a
+ * record re-pointed after the re-check was refused by the removal with nothing
+ * removed and would still have been reported verbatim here, naming a path, host
+ * or board that no re-check examined. The removal refusing is not a substitute for
+ * the report being honest, because the report outlives the refusal in whatever
+ * reads it.
+ *
+ * So this is one function over core's `issuedCollectionReport`, and it is exported
+ * and named rather than left inline: it is the whole of the report, it is the seam
+ * a test can drive with a re-pointed record, and there is no second copy of it for
+ * the refusal text to be built from. A re-pointed record has no report at all --
+ * core refuses it, with the reason, before anything is said -- which is this
+ * tree's convention for a refusal rather than a new concept invented here.
+ */
+export function collectDeleteReport(
+  authorized: AuthorizedCollection,
+): CollectDeleteReportBase {
+  const issued = issuedCollectionReport(authorized);
+  return {
+    host: issued.host,
+    boardId: issued.boardId,
+    path: issued.path,
+    outcome: issued.outcome,
+    reason: issued.reason,
+    recheckHead: issued.recheckHead,
+    snapshotHead: issued.snapshotHead,
+  };
+}
+
 export interface CollectDeleteOptions {
   host: string;
   path: string;
@@ -424,23 +462,22 @@ export async function collectDelete(
     gatherCandidatePathFacts,
   );
 
-  const report: CollectDeleteReportBase = {
-    host: authorized.host,
-    boardId: authorized.boardId,
-    path: authorized.path,
-    outcome: authorized.outcome,
-    reason: authorized.reason,
-    recheckHead: authorized.recheckHead,
-    snapshotHead: authorized.snapshotHead,
-  };
+  // The report, and the refusal text below, are built from the record the
+  // re-check left behind rather than from `authorized`: this module's own
+  // reference is a writable object, and a report that can name a path, host or
+  // board no re-check read is a lie about what was verified. A re-pointed record
+  // is refused here, before the confirmation gate and before any filesystem call,
+  // with the reason and nothing else -- so the report a user sees is either the
+  // one the re-check stands behind or there is no report.
+  const report = collectDeleteReport(authorized);
 
   // 5. Anything but `collect` is a refusal: printed verbatim, with board-state
   //    advice when the reason is a board-state failure, and nothing touched.
-  if (authorized.outcome !== 'collect') {
+  if (report.outcome !== 'collect') {
     throw new CollectRefusedError(
-      authorized.reason,
-      `refusing to collect ${authorized.path} on ${authorized.host}: ${authorized.reason}`,
-      isCollectionFailureKind(authorized.reason) ? authorized.reason : null,
+      report.reason,
+      `refusing to collect ${report.path} on ${report.host}: ${report.reason}`,
+      isCollectionFailureKind(report.reason) ? report.reason : null,
     );
   }
 

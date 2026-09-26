@@ -19,6 +19,10 @@ import {
   unverifiedCollectionSnapshot,
   boardApiCollectionReader,
 } from '../dist/collection.js';
+// A namespace import alongside the named one, so a test that needs a member this
+// module does not export *yet* fails as one failing assertion rather than as a
+// link-time `SyntaxError` that takes every other test in the file with it.
+import * as collection from '../dist/collection.js';
 
 const STAMP = '2026-09-25T12:00:00.000Z';
 const HOST = 'lubko://server';
@@ -1324,4 +1328,95 @@ test('a snapshot names the board and revision it decided from, and a forged one 
   assert.equal(authorized.reason, 'wrong-board');
   assert.equal(authorized.snapshotHead, null);
   assert.equal(authorized.recheckHead, writer.getRememberedHead());
+});
+
+/**
+ * A report is a *non-destructive* consumer of the authorization: it names the
+ * path, host, board and revisions to a human or a script and touches nothing. It
+ * is therefore not covered by the guarantee `hosts.md` states for destructive
+ * consumers, and the first assertion here is that the door it would need does not
+ * exist at all. `removeAuthorizedPath` and `commitCollectionDeletion` both read
+ * the module-private record, so the caller's own object is the *only* source a
+ * report in this tree can be built from -- and that object is writable.
+ */
+test('a report reads the issued record, and a re-pointed authorization has no report', async () => {
+  assert.equal(
+    typeof collection.issuedCollectionReport,
+    'function',
+    'nothing in core hands a collector the issued path/host/board, so a report can only be built '
+    + 'from the caller\'s own authorization object',
+  );
+
+  const repointed = await authorizedFor(WORKTREE, {});
+  assert.equal(repointed.outcome, 'collect');
+  repointed.path = BUILD;
+  repointed.host = OTHER_HOST;
+  repointed.boardId = 'a-board-no-recheck-read';
+
+  // The three destructive steps are already refused here, so nothing the report
+  // would name is acted on. What is *not* refused today is the naming itself.
+  await assert.rejects(() => removeAuthorizedPath(repointed, recordingRemovalFs().fs), /was changed after the re-check/);
+  assert.throws(() => commitCollectionDeletion(repointed), /was changed after the re-check/);
+  assert.throws(() => collection.issuedCollectionReport(repointed), /was changed after the re-check/);
+
+  // The positive control, because a door that refuses everything is not a door:
+  // an untouched authorization reports exactly what the re-check issued.
+  const untouched = await authorizedFor(WORKTREE, {});
+  assert.deepEqual(collection.issuedCollectionReport(untouched), {
+    host: HOST,
+    boardId: untouched.boardId,
+    path: WORKTREE,
+    outcome: 'collect',
+    reason: 'still-collectible',
+    recheckHead: untouched.recheckHead,
+    snapshotHead: untouched.snapshotHead,
+  });
+  // And it is a value, not the live record: it is a different object, it carries
+  // no removal shape, and nothing a caller writes to it can reach the record.
+  const report = collection.issuedCollectionReport(untouched);
+  assert.notEqual(report, untouched);
+  assert.deepEqual(Object.keys(report).sort(), [
+    'boardId',
+    'host',
+    'outcome',
+    'path',
+    'reason',
+    'recheckHead',
+    'snapshotHead',
+  ]);
+  report.path = BUILD;
+  assert.equal(collection.issuedCollectionReport(untouched).path, WORKTREE);
+  assert.equal(commitCollectionDeletion(untouched).path, WORKTREE);
+});
+
+test('the issued report covers a refusal and is refused for a spent or unissued record', async () => {
+  // A withheld authorization reports the reason and names the path the re-check
+  // examined, with no removal shape on it.
+  const { writer, open } = await seeded();
+  await writer.addResourceDependency(HOST, ROOT, open[0].number);
+  await writer.close(open[0].number);
+  const withheld = await recheck(
+    openCollectionClaim(await readCollectionSnapshot(HOST, readerFor(writer)), ROOT),
+    writer,
+  );
+  assert.equal(withheld.outcome, 'withheld');
+  assert.deepEqual(collection.issuedCollectionReport(withheld), {
+    host: HOST,
+    boardId: withheld.boardId,
+    path: ROOT,
+    outcome: 'withheld',
+    reason: 'candidate-is-managed-root',
+    recheckHead: withheld.recheckHead,
+    snapshotHead: withheld.snapshotHead,
+  });
+
+  // Liveness is the same door the removal and the commit read, so a spent
+  // record and a copy of a live one have no report either: a report is not a way
+  // to keep naming an authorization the process no longer holds.
+  const spent = await authorizedFor(WORKTREE, {});
+  assert.equal(commitCollectionDeletion(spent).outcome, 'collect');
+  assert.throws(() => collection.issuedCollectionReport(spent), /not a live authorization/);
+
+  const live = await authorizedFor(WORKTREE, {});
+  assert.throws(() => collection.issuedCollectionReport({ ...live }), /not a live authorization/);
 });

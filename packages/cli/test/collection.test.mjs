@@ -11,7 +11,14 @@ import test from 'node:test';
 import { BoardApi } from '../dist/packages/core/src/api.js';
 import { runBoardCommand } from '../dist/packages/cli/src/board.js';
 import { MANAGED_ROOTS_ENV } from '../dist/packages/agent-runtime/src/managed-roots-config.js';
-import { collectDelete, removeAuthorizedPath } from '../dist/packages/cli/src/collection.js';
+import {
+  collectDelete,
+  removeAuthorizedPath,
+} from '../dist/packages/cli/src/collection.js';
+// A namespace import alongside the named one, so a test that needs a member this
+// module does not export *yet* fails as one failing assertion rather than as a
+// link-time `SyntaxError` that takes every other test in the file with it.
+import * as collectModule from '../dist/packages/cli/src/collection.js';
 import {
   openCollectionClaim,
   readCollectionSnapshot,
@@ -998,5 +1005,65 @@ test('a refusal and an un-confirmed pending report are owed no commit at all', a
       /refusing to collect/,
     );
     assert.equal(commitCalls, 0, 'a refusal spent nothing');
+  });
+});
+
+/**
+ * The report is the one consumer of the authorization that is *not* destructive,
+ * so it is the one `hosts.md`'s "every destructive consumer re-derives" never
+ * covered: before the fix the report and the refusal text below were built from
+ * `collectDelete`'s own reference to the authorization, so a record re-pointed
+ * after the re-check would have been named verbatim while the removal refused to
+ * act on it -- a report naming a path, host or board no re-check examined.
+ *
+ * `collectDeleteReport` is the whole of that building, and it takes the same
+ * module-private door the removal and the commit take, so a re-pointed record
+ * produces no report at all rather than a report of the caller's values.
+ */
+test('the delete report and the refusal text are built from the issued record, not the caller\'s object', async () => {
+  assert.equal(
+    typeof collectModule.collectDeleteReport,
+    'function',
+    'the CLI has no report builder of its own to route through the issued record',
+  );
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    await mkdir(context.worktree, { recursive: true });
+    const managed = await loadManagedRoots(collectEnv(context));
+    const reader = boardApiCollectionReader(context.reader);
+    const authorized = await recheckCollectionClaim(
+      openCollectionClaim(await readCollectionSnapshot(HOST, reader), context.worktree),
+      context.reader,
+      managed.roots,
+      gatherCandidatePathFacts,
+    );
+    assert.equal(authorized.outcome, 'collect');
+
+    // Untouched: the report is what the command has always printed.
+    const reported = collectModule.collectDeleteReport(authorized);
+    assert.deepEqual(reported, {
+      host: HOST,
+      boardId: context.reader.accessState().boardId,
+      path: context.worktree,
+      outcome: 'collect',
+      reason: 'still-collectible',
+      recheckHead: authorized.recheckHead,
+      snapshotHead: authorized.snapshotHead,
+    });
+
+    // Re-pointed at a path, a host and a board no re-check ever read. The removal
+    // and the commit already refuse this record; the report is the half that used
+    // to obey it.
+    const repointed = await recheckCollectionClaim(
+      openCollectionClaim(await readCollectionSnapshot(HOST, reader), context.worktree),
+      context.reader,
+      managed.roots,
+      gatherCandidatePathFacts,
+    );
+    repointed.path = join(context.managed, 'build');
+    repointed.host = OTHER_HOST;
+    repointed.boardId = 'a-board-no-recheck-read';
+    assert.throws(() => collectModule.collectDeleteReport(repointed), /was changed after the re-check/);
+    assert.equal(existsSync(context.worktree), true, 'nothing was removed');
   });
 });

@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 const CLI = resolve('packages/cli/dist/packages/cli/src/main.js');
@@ -128,6 +128,14 @@ case "$1" in
       sleep 30
       exit 0
     fi
+    if [ "$last" = "term-trap" ]; then
+      # A backend that refuses to die politely: SIGTERM is ignored, so only a
+      # SIGKILL escalation to the recorded process group can stop it.
+      trap '' TERM
+      echo "term-trap-armed"
+      sleep 300
+      exit 0
+    fi
     if [ "$last" = "server-error" ]; then
       echo '{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_e2e"}}'
       exit 1
@@ -145,6 +153,9 @@ esac
     ...process.env,
     PATH: `${pathBin}:${process.env.PATH ?? ''}`,
     XDG_STATE_HOME: join(root, 'state'),
+    // Trust/credential configuration must also be test-owned: without this the
+    // suite would read the operator's real ~/.config/antonina.
+    XDG_CONFIG_HOME: join(root, 'config'),
     ANTONINA_TEST_CALLS: join(root, 'opencode-calls.log'),
     [OPENCODE_BIN_ENV]: opencode,
   };
@@ -802,4 +813,311 @@ test('fixture guard: an unpinned backend falls into the PATH trap instead of a r
   // The escape was produced on purpose here; clear it so the shared guard does
   // not double-report it.
   rmSync(escapes, { force: true });
+});
+
+// ---------------------------------------------------------------- GAP-CLI-1
+// The invariant, in one sentence: an attached (non-detached) prompt's exit code
+// is the invocation's own outcome, so a backend that failed is reported as a
+// failure by the foreground command that ran it -- success is never reported
+// for work that failed.
+test('attached prompt reports the invocation outcome, not unconditional success', (t) => {
+  const handle = fixture(t);
+  const { work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', 'a7ac', '--cwd', work], env).status, 0);
+  const failing = run(['agent', 'prompt', '--id', 'a7ac', 'server-error'], env);
+  assert.equal(
+    failing.status,
+    1,
+    `an attached prompt whose backend failed must exit non-zero; stderr: ${failing.stderr}`,
+  );
+  assertFixtureInvoked(handle, 'server-error');
+  // The succeeding path stays pinned too: the same command, same exit-code
+  // wiring, opposite outcome.
+  assert.equal(run(['agent', 'new', '--id', 'a7ad', '--cwd', work], env).status, 0);
+  const succeeding = run(['agent', 'prompt', '--id', 'a7ad', 'ok'], env);
+  assert.equal(succeeding.status, 0, succeeding.stderr);
+  assert.match(succeeding.stdout, /FAKE:ok/);
+});
+
+// ---------------------------------------------------------------- GAP-CLI-2
+// cmdLog's own tail window: `--lines N` is the count the user asked for, not a
+// fixed default, and the default itself is 50. The log below is written by the
+// test (the invocation is not run) so the tail boundary is exact.
+test('log tails exactly the requested number of lines, defaulting to fifty', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '1099', '--cwd', work], env).status, 0);
+  const logPath = join(root, 'state', 'antonina', 'agents', '1099', 'output.log');
+  const lines = Array.from({ length: 60 }, (_, index) => `line-${index + 1}`);
+  writeFileSync(logPath, `${lines.join('\n')}\n`);
+
+  const three = run(['agent', 'log', '--id', '1099', '--lines', '3'], env);
+  assert.equal(three.status, 0, three.stderr);
+  assert.deepEqual(three.stdout.split('\n').filter(Boolean), ['line-58', 'line-59', 'line-60']);
+
+  const fifty = run(['agent', 'log', '--id', '1099'], env);
+  assert.equal(fifty.status, 0, fifty.stderr);
+  const shown = fifty.stdout.split('\n').filter(Boolean);
+  assert.equal(shown.length, 50, 'the default tail window is 50 lines');
+  assert.equal(shown[0], 'line-11');
+  assert.equal(shown.at(-1), 'line-60');
+});
+
+test('log on an agent with no output yet says so and succeeds', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '109a', '--cwd', work], env).status, 0);
+  assert.equal(existsSync(join(root, 'state', 'antonina', 'agents', '109a', 'output.log')), false);
+  const result = run(['agent', 'log', '--id', '109a'], env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /\(no output yet\)/);
+});
+
+// An async front end is required here: `--follow` must stay open across a live
+// invocation, stream what the invocation writes, and only then return.
+function followLog(args, env) {
+  const child = spawn(process.execPath, [CLI, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const out = [];
+  const err = [];
+  child.stdout.on('data', (chunk) => out.push(chunk.toString('utf8')));
+  child.stderr.on('data', (chunk) => err.push(chunk.toString('utf8')));
+  const exited = new Promise((resolve) => {
+    child.on('close', (status) => resolve({ status, stdout: out.join(''), stderr: err.join('') }));
+  });
+  return { child, exited, stdout: () => out.join(''), stderr: () => err.join('') };
+}
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('log --follow streams a live invocation and returns when it reaches a terminal state', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', '109b', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'prompt', '--id', '109b', '--detach', 'slow'], env).status, 0);
+  const live = await waitFor(root, '109b', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
+  t.after(() => {
+    try { process.kill(-live.pid, 'SIGKILL'); } catch {}
+    try { process.kill(live.pid, 'SIGKILL'); } catch {}
+  });
+
+  const followed = followLog(['agent', 'log', '--id', '109b', '--follow'], env);
+  await delay(1_500);
+  assert.equal(
+    followed.child.exitCode,
+    null,
+    'log --follow must keep following while the invocation is still running',
+  );
+  assert.match(followed.stdout(), /slow-start/, 'log --follow must stream the live invocation output');
+
+  assert.equal(run(['agent', 'stop', '--id', '109b'], env).status, 0);
+  const result = await Promise.race([
+    followed.exited,
+    delay(20_000).then(() => null),
+  ]);
+  assert.notEqual(result, null, 'log --follow must return once the agent reaches a terminal state');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(followed.stdout(), /slow-start/);
+  assertFixtureInvoked(handle, 'slow');
+  await waitFor(root, '109b', (meta) => meta.state === 'stopped');
+});
+
+test('log --follow reports a vanished agent directory instead of following forever', async (t) => {
+  if (!existsSync('/proc/self/stat')) {
+    t.skip('/proc is unavailable on this host: process identity cannot be checked');
+    return;
+  }
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', '109c', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'prompt', '--id', '109c', '--detach', 'slow'], env).status, 0);
+  const live = await waitFor(
+    root,
+    '109c',
+    (meta) => meta.state === 'running' && typeof meta.pid === 'number' && meta.pid > 1,
+  );
+  // The agent's state is removed from under a live --follow; the runner and its
+  // invocation outlive the directory they were writing into, so both are reaped
+  // by this test rather than by the command under test.
+  t.after(() => {
+    for (const pid of [live.pid, live.runner_pid]) {
+      if (typeof pid !== 'number') continue;
+      try { process.kill(-pid, 'SIGKILL'); } catch {}
+      try { process.kill(pid, 'SIGKILL'); } catch {}
+    }
+  });
+
+  const followed = followLog(['agent', 'log', '--id', '109c', '--follow'], env);
+  await delay(1_000);
+  assert.equal(followed.child.exitCode, null, 'log --follow must be following while the agent is live');
+  rmSync(join(root, 'state', 'antonina', 'agents', '109c'), { recursive: true, force: true });
+
+  const result = await Promise.race([followed.exited, delay(20_000).then(() => null)]);
+  assert.notEqual(result, null, 'log --follow must return when the agent directory vanishes');
+  assert.equal(result.status, 3, `expected EXIT_NOT_FOUND, stderr: ${result.stderr}`);
+  assertFixtureInvoked(handle, 'slow');
+});
+
+// ---------------------------------------------------------------- GAP-CLI-3
+// The invariant, in one sentence: `stop` escalates SIGTERM to SIGKILL on the
+// recorded process group for a backend that refuses to die politely, and only
+// reports the agent stopped once the invocation is actually gone.
+test('stop escalates SIGTERM to SIGKILL for a backend that ignores SIGTERM', async (t) => {
+  if (!existsSync('/proc/self/stat')) {
+    t.skip('/proc is unavailable on this host: liveness cannot be decided on PID plus start ticks');
+    return;
+  }
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', '7e40', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'prompt', '--id', '7e40', '--detach', 'term-trap'], env).status, 0);
+  const live = await waitFor(
+    root,
+    '7e40',
+    (meta) => meta.state === 'running' && typeof meta.pid === 'number' && meta.pid > 1,
+    12_000,
+  );
+  const pid = live.pid;
+  const ticks = live.start_time;
+  t.after(() => {
+    try { process.kill(-pid, 'SIGKILL'); } catch {}
+    try { process.kill(pid, 'SIGKILL'); } catch {}
+  });
+  // The trap has to be armed before stop, otherwise SIGTERM could land first.
+  const armed = await waitFor(
+    root,
+    '7e40',
+    () => readFileSync(join(root, 'state', 'antonina', 'agents', '7e40', 'output.log'), 'utf8').includes('term-trap-armed'),
+    12_000,
+  );
+  assert.ok(armed);
+
+  const startedAt = Date.now();
+  // stop waits 10s for a polite death before escalating, so this cannot use
+  // the 15s default timeout of run().
+  const stopped = spawnSync(process.execPath, [CLI, 'agent', 'stop', '--id', '7e40'], {
+    env,
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  const elapsed = Date.now() - startedAt;
+  assert.equal(stopped.status, 0, `stop must succeed via escalation; stderr: ${stopped.stderr}`);
+  assert.match(stopped.stdout, /stopped agent 7e40/);
+  assert.ok(
+    elapsed >= 10_000,
+    `stop must wait for the SIGTERM grace period before escalating; took ${elapsed}ms`,
+  );
+  assert.equal(
+    procStartTicks(pid),
+    null,
+    'the invocation must be gone once stop reports success, escalation or not',
+  );
+  assert.equal(JSON.parse(readFileSync(metaPath(root, '7e40'), 'utf8')).state, 'stopped');
+  assertFixtureInvoked(handle, 'term-trap');
+  void ticks;
+});
+
+// The mirror invariant: when even SIGKILL does not make the invocation go away,
+// stop must fail closed rather than record a stop that never happened. The
+// target is a real live process (real PID, real start ticks, real env markers)
+// whose recorded *group* does not exist, so the group signal is a no-op and the
+// process cannot be reaped. Liveness is decided on PID plus start ticks, never
+// on a process name.
+test('stop refuses to report success when the invocation cannot be terminated', async (t) => {
+  if (!existsSync('/proc/self/stat')) {
+    t.skip('/proc is unavailable on this host: liveness cannot be decided on PID plus start ticks');
+    return;
+  }
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', '7e41', '--cwd', work], env).status, 0);
+
+  const invocationId = 'c'.repeat(32);
+  // A live, harmless bystander that carries the markers the runtime uses to
+  // confirm ownership, and that the test reaps itself.
+  const victim = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+    env: { ...env, ANTONINA_AGENT_ID: '7e41', ANTONINA_INVOCATION_ID: invocationId },
+    stdio: 'ignore',
+  });
+  const reaped = new Promise((resolve) => victim.on('close', () => resolve()));
+  t.after(async () => {
+    try { victim.kill('SIGKILL'); } catch {}
+    await reaped;
+  });
+
+  const ticks = procStartTicks(victim.pid);
+  assert.equal(typeof ticks, 'number', 'the bystander must be alive with real start ticks');
+
+  const path = metaPath(root, '7e41');
+  const meta = JSON.parse(readFileSync(path, 'utf8'));
+  Object.assign(meta, {
+    state: 'running',
+    active_runner: false,
+    pending_prompt: null,
+    runner_reservation: null,
+    pid: victim.pid,
+    // No such process group: the escalation signal is a no-op, so the
+    // invocation stays alive through SIGTERM and SIGKILL alike.
+    pgid: 99999999,
+    start_time: ticks,
+    invocation_id: invocationId,
+    started_at: 1,
+  });
+  writeFileSync(path, JSON.stringify(meta));
+
+  // stop waits 10s for a polite death and 5s more after escalating.
+  const stopped = spawnSync(process.execPath, [CLI, 'agent', 'stop', '--id', '7e41'], {
+    env,
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  assert.equal(
+    stopped.status,
+    1,
+    `stop must fail closed when the invocation survives escalation; stderr: ${stopped.stderr}`,
+  );
+  assert.match(stopped.stderr, /did not terminate/);
+  const after = JSON.parse(readFileSync(path, 'utf8'));
+  assert.notEqual(
+    after.state,
+    'stopped',
+    'a stop that never terminated the invocation must not be recorded as stopped',
+  );
+  victim.kill('SIGKILL');
+  await reaped;
+});
+
+// ---------------------------------------------------------------- GAP-CLI-4
+// The invariant, in one sentence: `agent new` refuses a --cwd that is not an
+// existing directory, and it refuses it *before* creating any state, so a typo
+// cannot leave a half-built agent on disk.
+test('new refuses a --cwd that is not an existing directory and creates no state', (t) => {
+  const { root, work, env } = fixture(t);
+  const missing = join(root, 'no-such-directory');
+  const result = run(['agent', 'new', '--id', '4ec1', '--cwd', missing], env);
+  assert.equal(result.status, 1, `expected a refusal, got: ${result.stdout}${result.stderr}`);
+  assert.match(result.stderr, /working directory does not exist/);
+  assert.equal(existsSync(missing), false, 'the refused working directory must not be created');
+  assert.equal(
+    existsSync(join(root, 'state', 'antonina', 'agents', '4ec1')),
+    false,
+    'a refused new must not leave an agent directory behind',
+  );
+
+  // A path that exists but is a regular file is the other half of the same
+  // guard: isDirectory must be consulted, not just existence.
+  const file = join(work, 'not-a-directory');
+  writeFileSync(file, 'regular file\n');
+  const asFile = run(['agent', 'new', '--id', '4ec2', '--cwd', file], env);
+  assert.equal(asFile.status, 1, `expected a refusal, got: ${asFile.stdout}${asFile.stderr}`);
+  assert.match(asFile.stderr, /working directory does not exist/);
+  assert.equal(
+    existsSync(join(root, 'state', 'antonina', 'agents', '4ec2')),
+    false,
+    'a refused new must not leave an agent directory behind',
+  );
+
+  // The positive direction, so the guard cannot be satisfied by refusing every
+  // --cwd: a real existing directory is still accepted.
+  const accepted = run(['agent', 'new', '--id', '4ec3', '--cwd', work, '--json'], env);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(JSON.parse(accepted.stdout).cwd, work);
+  assert.equal(existsSync(join(root, 'state', 'antonina', 'agents', '4ec3', 'meta.json')), true);
 });

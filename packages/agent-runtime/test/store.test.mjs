@@ -115,6 +115,28 @@ test('lock-open failure propagates and does not run the authoritative mutation',
   assert.equal(readMeta('ab', options)?.prompt_count, 0);
 });
 
+test('lock initialization failure propagates and removes the partial lock file', async (t) => {
+  const options = root(t);
+  createAgentDirectory('a0', options);
+  writeMeta('a0', idleMeta('a0', '/tmp', null, 5), options);
+  let mutated = false;
+  const failing = {
+    ...options,
+    fs: storeFs({
+      fsyncSync() {
+        throw ioError('EIO', 'injected lock fsync failure');
+      },
+    }),
+  };
+  await assert.rejects(
+    updateMeta('a0', () => { mutated = true; }, failing),
+    MetadataLockError,
+  );
+  assert.equal(mutated, false);
+  assert.equal(nodeFs.existsSync(join(agentDir('a0', options), '.lock')), false);
+  assert.equal(readMeta('a0', options)?.prompt_count, 0);
+});
+
 test('persistence failure propagates instead of reporting a committed mutation', async (t) => {
   const options = root(t);
   createAgentDirectory('ac', options);
@@ -132,6 +154,23 @@ test('persistence failure propagates instead of reporting a committed mutation',
     MetadataWriteError,
   );
   assert.equal(readMeta('ac', options)?.prompt_count, 0);
+});
+
+test('agent-directory creation failure cleans up uncommitted state', (t) => {
+  const options = root(t);
+  const failing = {
+    ...options,
+    fs: storeFs({
+      fsyncSync() {
+        throw ioError('EIO', 'injected directory sync failure');
+      },
+    }),
+  };
+  assert.throws(
+    () => createAgentDirectory('a1', failing),
+    MetadataWriteError,
+  );
+  assert.equal(nodeFs.existsSync(agentDir('a1', options)), false);
 });
 
 test('late update after deletion is the only missing-state no-op and never recreates state', async (t) => {

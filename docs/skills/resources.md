@@ -6,9 +6,11 @@ Resource registration is dependency and liveness metadata, not exclusive ownersh
 
 ## Garbage collection semantics
 
-A deterministic garbage collector runs regularly on hosts, but it is deliberately opaque to agents. Agents do not know when a collection pass will happen and must never plan around cadence or timing.
+No collection pass runs on a cadence, and nothing schedules one. The only thing that can remove a host resource is a human running `antonina board collect delete` with `--confirm`; the collector is deliberately opaque to agents in the sense that an agent never triggers it, so never plan around cadence or timing that does not exist, and do not assume a path is safe because no one has come for it yet.
 
-Any path not protected by at least one open Antonina board issue may disappear at any time. A resource is protected while any dependent issue is open and collectible when all dependents are closed. Closing the last open dependent issue can make the resource collectible immediately; do not rely on a grace period.
+`antonina agent clean` is a different thing and does not collect host resources: it is a manual sweep of Antonina's own durable agent state for agents in a terminal state older than a retention period.
+
+A path is collectible only when it is registered on that host and no open Antonina board issue depends on it. A path no human has registered with `antonina board resource add` is protected — absence of a decision is never an authorization to delete — and registration is a human action that nothing in the agent lifecycle performs, so in practice no path is collectible at all until someone has registered it. A registered resource is protected while any dependent issue is open and collectible when all dependents are closed. Closing the last open dependent issue can make the resource collectible immediately; do not rely on a grace period.
 
 ## Commands
 
@@ -29,7 +31,7 @@ antonina board collect list --host lubko://phoebe-dev
 antonina board collect delete --host lubko://phoebe-dev --path /workspace/project-worktree [--confirm]
 ```
 
-`collect list` is a dry run. It prints every path on that host that one verified board revision calls collectible, each line naming the board and the revision the answer came from. It needs no credential and no managed roots. A board it cannot read or cannot verify is a failure on stderr with a non-zero exit, never an empty list.
+`collect list` is a dry run. It prints every path on that host that one verified board revision calls collectible, each line naming the board and the revision the answer came from. It needs no managed roots and no board credential — it only reads — but it does need a trust anchor for the board, from `ANTONINA_BOARD_TRUST` or from a configured credential; with neither, the board cannot be verified at all and the command exits non-zero. A board it cannot read or cannot verify is a failure on stderr with a non-zero exit, never an empty list.
 
 `collect delete` removes a path, and needs `--confirm`. Without it the command performs the whole re-check and then reports what it would do, naming the revision it read:
 
@@ -38,6 +40,8 @@ would delete /workspace/project-worktree on lubko://phoebe-dev (a symlink would 
 ```
 
 **The delete reports the revision it re-read, which may be newer than the listing you based it on.** Nothing pins the revision you read. The human line names exactly one revision, the one the command's own re-check verified; the JSON report carries `recheckHead` (the revision acted on) and `snapshotHead` (the revision the claim named, `null` when the board moved on in between), and only `recheckHead` is authority. A pending report has no `removal` key; its presence in the JSON is what marks a report as a completed removal, so a script can tell the two apart.
+
+**There are two refusals on this path, and only the first is about timing.** The re-check issues the authority to act on the one path it read, not a token its holder may re-point: both destructive steps re-derive the path, host, board, revision, outcome, reason and removal shape from the record the re-check itself left behind, and an authorization whose carried values no longer match it is refused before any `unlink` or `rm` — with nothing done, not performed against the re-pointed values and refused afterwards. Single-use is enforced where the record of the issue is consumed, which is the commit: one completed re-check can produce at most one completion record. A removal only reads that record and does not spend it, so what one re-check bounds is the number of completions it can yield and not the number of removals performed from it — a collector that removes without ever committing is the shape that would remove more than once from one re-check. This command removes and only then commits, so in this command one re-check is one removal, and a removal that was performed is owed exactly one commit. A script reading the report should therefore treat the reported path, host and board as the ones acted on, and not as a claim the edit-resistant re-derivation already made for it. The two hazards are independent: the window below can lose a path that was protected after the re-check read, and the re-pointing refusal can stop an action the board would have permitted.
 
 **The deletion is immediate and irreversible, and the residual window is real and unclosable.** Between the re-check's read and the unlink, a path can become protected again; if it does, it is still deleted. The signed board log is append-only with no lease or compare-and-delete primitive, so the protocol can promise only that the path was unowed at the last authoritative read. Minimize the interval: read the listing, then delete promptly, and re-run the listing if you hesitated.
 

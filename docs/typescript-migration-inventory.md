@@ -23,7 +23,7 @@ Important invariants include strict schema version 2 parsing, JavaScript-safe is
 
 `packages/agent-runtime` owns durable state and execution semantics; `packages/cli` owns command parsing and presentation.
 
-Durable state lives under `$XDG_STATE_HOME/antonina`, falling back to `$HOME/.local/state/antonina`. Metadata is written by atomic replacement with fsync, and concurrent metadata changes are serialized by a stale-reclaimable Node lockfile protocol.
+Durable state lives under `$XDG_STATE_HOME/antonina`, falling back to `$HOME/.local/state/antonina`. Metadata is written by atomic replacement with fsync, and concurrent metadata changes are serialized by a stale-reclaimable Node lockfile protocol. Both reads and writes validate the complete version-4 schema; there is no legacy metadata compatibility mode.
 
 The runtime preserves the important high-level lifecycle invariants from the retired implementation:
 
@@ -34,7 +34,7 @@ The runtime preserves the important high-level lifecycle invariants from the ret
 - ordinary prompts reject genuinely busy agents while `--steer` is hard preemption followed by FIFO continuation;
 - stop/kill cancel running or reserved work and converge metadata;
 - delete records a tombstone before converging live work, and clean rechecks candidates under the metadata lock;
-- status/list sanitize malformed persisted fields rather than copying corrupt authority into output;
+- managed-agent metadata is exact schema version 4; old, incomplete, extended, or malformed records fail closed at the persistence boundary;
 - recognized backend failures are stored as bounded structured diagnostics, and retries require explicit replay-safety evidence.
 
 ## Deliberate process-control simplification

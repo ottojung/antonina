@@ -10,6 +10,7 @@ import {
   runnerGeneration,
   runnerReservationMode,
   runnerReservationState,
+  steerSequence,
   type AgentMetadata,
   type PersistedAgentState,
 } from './metadata.js';
@@ -36,20 +37,12 @@ export interface RunnerIdentity extends ProcessIdentity {}
 
 export function invocationIdentity(meta: AgentMetadata): InvocationIdentity | null {
   const pid = persistedProcessInteger(meta.pid, 1);
-  const pgid = meta.pgid === null || meta.pgid === undefined
-    ? pid
-    : persistedProcessInteger(meta.pgid, 1);
+  const pgid = persistedProcessInteger(meta.pgid, 1);
   const startTicks = persistedProcessInteger(meta.start_time, 0);
   const agentId = persistedAgentId(meta.id);
-  if (pid === null || pgid === null || startTicks === null || agentId === null) return null;
-  let invocationId: string | undefined;
-  if (meta.invocation_id !== null && meta.invocation_id !== undefined) {
-    const parsed = persistedInvocationId(meta.invocation_id);
-    if (parsed === null) return null;
-    invocationId = parsed;
-  }
-  return invocationId === undefined
-    ? { pid, pgid, startTicks, agentId }
+  const invocationId = persistedInvocationId(meta.invocation_id);
+  return pid === null || pgid === null || startTicks === null || agentId === null || invocationId === null
+    ? null
     : { pid, pgid, startTicks, agentId, invocationId };
 }
 
@@ -78,7 +71,7 @@ export function deriveState(meta: AgentMetadata | null, now = Date.now() / 1000)
   if (state === null) return 'unknown';
   if (state !== 'running') return state;
   if (invocationAlive(meta)) return 'running';
-  if (meta.pid === null || meta.pid === undefined) {
+  if (meta.pid === null) {
     const launched = persistedTimestamp(meta.started_at) ?? persistedTimestamp(meta.created_at);
     if (launched !== null && now >= launched && now - launched < PID_START_WINDOW_SECONDS) return 'running';
   }
@@ -142,15 +135,10 @@ export interface SteerItem {
   queued_at: number;
 }
 
-export function steerSequence(meta: AgentMetadata): number | null {
-  if (!Object.hasOwn(meta, 'steer_seq')) return 0;
-  const value = meta.steer_seq;
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
-}
+export { steerSequence };
 
 export function steerQueue(meta: AgentMetadata, sequence = steerSequence(meta)): SteerItem[] | null {
-  if (sequence === null) return null;
-  if (!Object.hasOwn(meta, 'steer_queue')) return [];
+  if (sequence === null || !Object.hasOwn(meta, 'steer_queue')) return null;
   const value = meta.steer_queue;
   if (!Array.isArray(value)) return null;
   const result: SteerItem[] = [];
@@ -255,7 +243,7 @@ export function reservationInFlight(meta: AgentMetadata, now = Date.now() / 1000
 export function reconcileDeadMeta(meta: AgentMetadata, now = Date.now() / 1000): boolean {
   if (persistedLifecycleState(meta) !== 'running') return false;
   if (invocationAlive(meta) || runnerAlive(meta) || reservationInFlight(meta, now)) return false;
-  if (meta.pid === null || meta.pid === undefined) {
+  if (meta.pid === null) {
     const launched = persistedTimestamp(meta.started_at) ?? persistedTimestamp(meta.created_at);
     if (launched !== null && now >= launched && now - launched < PID_START_WINDOW_SECONDS) return false;
   }

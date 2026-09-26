@@ -2,7 +2,7 @@ import * as nodeFs from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import type { AgentMetadata } from './metadata.js';
+import { validateAgentMetadata, type AgentMetadata } from './metadata.js';
 import { persistedAgentId, procStartTicks } from './process.js';
 
 const LOCK_RETRY_MS = 25;
@@ -130,6 +130,12 @@ export function readMeta(agentId: string, options: StatePathsOptions = {}): Agen
     throw new MetadataReadError(`managed-agent metadata for ${agentId} is malformed`);
   }
   const meta = value as AgentMetadata;
+  try {
+    validateAgentMetadata(meta);
+  } catch (error) {
+    const detail = error instanceof Error ? `: ${error.message}` : '';
+    throw new MetadataReadError(`managed-agent metadata for ${agentId} is incompatible or malformed${detail}`, { cause: error });
+  }
   if (persistedAgentId(meta.id) !== agentId) {
     throw new MetadataReadError(`managed-agent metadata id for ${agentId} is malformed or mismatched`);
   }
@@ -159,6 +165,11 @@ function syncDirectory(path: string, fs: StoreFs): void {
 export function writeMeta(agentId: string, meta: AgentMetadata, options: StatePathsOptions = {}): void {
   if (persistedAgentId(agentId) !== agentId || persistedAgentId(meta.id) !== agentId) {
     throw new MetadataWriteError('managed-agent metadata id is malformed or mismatched');
+  }
+  try {
+    validateAgentMetadata(meta);
+  } catch (error) {
+    throw new MetadataWriteError(`refusing to persist incompatible or malformed metadata for agent ${agentId}`, { cause: error });
   }
   const fs = filesystem(options);
   const destination = metaPath(agentId, options);

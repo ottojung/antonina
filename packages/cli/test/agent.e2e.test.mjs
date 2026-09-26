@@ -315,61 +315,39 @@ test('agent ids canonicalize at every CLI boundary and preserve exit-code distin
   assert.equal(run(['agent', 'status', '--id', 'deadbeef', '--json'], env).status, 3);
 });
 
-test('list and status sanitize malformed persisted summary metadata', (t) => {
+test('list and status fail closed on malformed or old metadata', (t) => {
   const { root, work, env } = fixture(t);
   assert.equal(run(['agent', 'new', '--id', 'cab1e', '--cwd', work], env).status, 0);
   const path = metaPath(root, 'cab1e');
-  const meta = JSON.parse(readFileSync(path, 'utf8'));
-  Object.assign(meta, {
-    created_at: {},
-    started_at: 'bad',
-    finished_at: false,
-    last_activity_at: -1,
-    prompt_count: false,
-    cwd: 0,
-    title: {},
-    exit_code: '7',
-    exit_signal: 0,
-    variant: '',
-  });
+
+  let meta = JSON.parse(readFileSync(path, 'utf8'));
+  meta.created_at = {};
   writeFileSync(path, JSON.stringify(meta));
 
   const status = run(['agent', 'status', '--id', 'cab1e', '--json'], env);
-  assert.equal(status.status, 0, status.stderr);
-  const body = JSON.parse(status.stdout);
-  for (const field of [
-    'created_at', 'started_at', 'finished_at', 'last_activity_at',
-    'prompt_count', 'cwd', 'title', 'exit_code', 'exit_signal', 'variant',
-  ]) {
-    assert.ok(body.metadata_errors.includes(field), `missing metadata error for ${field}`);
-  }
-  assert.equal(body.created_at, null);
-  assert.equal(body.started_at, null);
-  assert.equal(body.finished_at, null);
-  assert.equal(body.last_activity_at, null);
-  assert.equal(body.prompts, null);
-  assert.equal(body.cwd, null);
-  assert.equal(body.title, null);
-  assert.equal(body.exit_code, null);
-  assert.equal(body.exit_signal, null);
-  assert.equal(body.variant, null);
-
-  const textStatus = run(['agent', 'status', '--id', 'cab1e'], env);
-  assert.equal(textStatus.status, 0, textStatus.stderr);
-  assert.match(textStatus.stdout, /<invalid>/);
-  assert.match(textStatus.stdout, /malformed persisted summary metadata/);
+  assert.equal(status.status, 1);
+  assert.match(status.stderr, /created_at is malformed/);
 
   const listed = run(['agent', 'list', '--json'], env);
-  assert.equal(listed.status, 0, listed.stderr);
-  const entry = JSON.parse(listed.stdout).agents.find((value) => value.id === 'cab1e');
-  assert.equal(entry.created_at, null);
-  assert.equal(entry.prompts, null);
-  assert.equal(entry.cwd, null);
-  assert.equal(entry.title, null);
-  assert.equal(entry.finished_at, null);
-  assert.equal(entry.last_activity_at, null);
-});
+  assert.equal(listed.status, 1);
+  assert.match(listed.stderr, /created_at is malformed/);
 
+  meta = JSON.parse(readFileSync(path, 'utf8'));
+  meta.created_at = 1;
+  meta.agent_version = 3;
+  writeFileSync(path, JSON.stringify(meta));
+  const oldVersion = run(['agent', 'status', '--id', 'cab1e', '--json'], env);
+  assert.equal(oldVersion.status, 1);
+  assert.match(oldVersion.stderr, /unsupported managed-agent metadata version: 3/);
+
+  meta = JSON.parse(readFileSync(path, 'utf8'));
+  meta.agent_version = 4;
+  delete meta.active_runner;
+  writeFileSync(path, JSON.stringify(meta));
+  const missing = run(['agent', 'status', '--id', 'cab1e', '--json'], env);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /metadata fields are not canonical/);
+});
 
 test('prompt rejects malformed durable execution configuration before reservation', (t) => {
   const { root, work, env } = fixture(t);
@@ -453,8 +431,7 @@ test('status exposes canonical and malformed steer metadata', (t) => {
   meta.steer_seq = false;
   meta.steer_queue = [];
   writeFileSync(path, JSON.stringify(meta));
-  status = JSON.parse(run(['agent', 'status', '--id', '57ee', '--json'], env).stdout);
-  assert.equal(status.steers_pending, null);
-  assert.equal(status.next_steer, null);
-  assert.equal(status.steer_metadata_error, 'malformed persisted steer metadata');
+  const malformed = run(['agent', 'status', '--id', '57ee', '--json'], env);
+  assert.equal(malformed.status, 1);
+  assert.match(malformed.stderr, /steer_seq is malformed/);
 });

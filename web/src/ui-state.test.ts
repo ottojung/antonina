@@ -111,7 +111,7 @@ describe('board load state', () => {
   });
 
   it('treats a deleted board as terminal instead of retryable', () => {
-    const cause = new BoardDeletedError('Antonina board has been deleted');
+    const cause = new BoardDeletedError();
     expect(boardDeleted(cause)).toBe(true);
     expect(trustRequired(cause)).toBe(false);
     expect(firstRunUnresolved(cause)).toEqual({ status: 'deleted' });

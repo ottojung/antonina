@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -15,6 +15,7 @@ import {
   buildAgentCommand,
   classifyBackendFailure,
   configuredModelAvailable,
+  discoverSessionId,
   resolveOpencode,
   sanitizeBackendError,
 } from '../dist/packages/agent-runtime/src/backend.js';
@@ -92,6 +93,27 @@ function fixture(t) {
   return selectExecRoot('antonina-backend-', undefined, undefined, t);
 }
 
+// Every test that reaches backend code owns both Antonina XDG roots for its
+// duration and restores whatever the ambient value was, so no case here can
+// read or mutate the operator's real `trust.json` / `credential.json` or state.
+function xdgScope(t, prefix) {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  const previous = {
+    state: process.env.XDG_STATE_HOME,
+    config: process.env.XDG_CONFIG_HOME,
+  };
+  process.env.XDG_STATE_HOME = join(root, 'state');
+  process.env.XDG_CONFIG_HOME = join(root, 'config');
+  t.after(() => {
+    for (const [key, value] of [['XDG_STATE_HOME', previous.state], ['XDG_CONFIG_HOME', previous.config]]) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+  return root;
+}
+
 test('recognized OpenCode server failure becomes bounded structured diagnostics', (t) => {
   const root = fixture(t);
   const log = join(root, 'output.log');
@@ -121,6 +143,39 @@ test('ordinary task failure is not misclassified and continuation stays explicit
   const continuation = classifyBackendFailure(log, 0, 1, true);
   assert.equal(continuation?.request_boundary, 'continuation');
   assert.equal(continuation?.fresh_session_useful, null);
+});
+
+test('a prior invocation server error is never attributed to the next invocation', (t) => {
+  xdgScope(t, 'antonina-backend-xdg-');
+  const root = fixture(t);
+  const log = join(root, 'output.log');
+
+  // The backend log is opened in append mode and shared across invocations, so
+  // the marker can sit entirely below the start offset of the invocation that
+  // just failed. A read that ignores the offset would inherit that verdict.
+  const prior = 'Unexpected server error {"ref":"err_prior"}\n';
+  writeFileSync(log, prior);
+  const start = Buffer.byteLength(prior);
+  writeFileSync(log, `${prior}this invocation made progress and failed for other reasons\n`);
+  const size = statSync(log).size;
+  assert.ok(size > start);
+  // The window cap must not be what confines the read here: with a log this
+  // small, a zero-based read and an offset-based read see different bytes, and
+  // the cap clamps neither.
+  assert.ok(size < BACKEND_DIAGNOSTIC_MAX_BYTES, 'fixture must be small enough that the cap is not load-bearing');
+
+  assert.equal(classifyBackendFailure(log, start, 1, false), null);
+
+  // The same confinement governs the byte count: diagnostics describe this
+  // invocation's own output, not everything the file has ever held.
+  const clean = 'ordinary progress line\n';
+  writeFileSync(log, `${clean}Unexpected server error {"ref":"err_own"}\n`);
+  const ownStart = Buffer.byteLength(clean);
+  const ownSize = statSync(log).size;
+  const error = classifyBackendFailure(log, ownStart, 1, false);
+  assert.equal(error?.classification, 'transient_backend_server_error');
+  assert.equal(error?.reference, 'err_own');
+  assert.equal(error?.diagnostic_bytes, ownSize - ownStart);
 });
 
 test('retry policy requires positive replay-safety evidence and is bounded', () => {
@@ -315,6 +370,46 @@ test('fixture guard: an uncreatable fixture parent is a named failure, never a s
       return true;
     },
   );
+});
+
+test('session discovery adopts only an exactly titled native session', (t) => {
+  xdgScope(t, 'antonina-backend-xdg-');
+  const root = fixture(t);
+  const bin = join(root, 'opencode');
+  const pathBin = join(root, 'path-bin');
+  const escapes = join(root, 'path-escapes.log');
+  mkdirSync(pathBin);
+  // Any bare `opencode` lookup in this environment must land on the recorded
+  // trap, never on a real host backend.
+  writeFileSync(join(pathBin, 'opencode'), `#!/bin/sh
+printf '%s %s\\n' "$0" "$*" >>'${escapes}'
+exit 70
+`, { mode: 0o755 });
+  // The fixture answers `session list` from a shell builtin only: the suite
+  // hands it a PATH containing nothing but the trap, so it must not depend on
+  // any external command being reachable.
+  const answer = (rows) => writeFileSync(bin, `#!/bin/sh
+printf '%s\\n' '${JSON.stringify(rows)}'
+`, { mode: 0o755 });
+  const env = { [OPENCODE_BIN_ENV]: bin, PATH: pathBin };
+
+  // Agent `a1b`'s native session is titled `antonina-a1b`, a strict superset of
+  // agent `a1`'s `antonina-a1`, and is the more recently created row: a prefix
+  // match would hand `a1` the other agent's session and continue-mode would
+  // then attach the wrong conversation.
+  const longer = { id: 'ses_longer', title: 'antonina-a1b', created: 20 };
+  const exact = { id: 'ses_exact', title: 'antonina-a1', created: 10 };
+  answer([longer, exact]);
+  assert.equal(discoverSessionId('a1', env), 'ses_exact');
+  assert.equal(discoverSessionId('a1b', env), 'ses_longer');
+
+  // And with only the longer-id session present, the shorter agent adopts
+  // nothing rather than borrowing its neighbour's session.
+  answer([longer]);
+  assert.equal(discoverSessionId('a1', env), null);
+  assert.equal(discoverSessionId('a1b', env), 'ses_longer');
+
+  assert.deepEqual(recordedInvocations(escapes), [], 'a non-fixture opencode was executed via PATH');
 });
 
 test('continuation command uses persisted session and configured variant', () => {

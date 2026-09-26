@@ -207,7 +207,7 @@ async function rememberFreshSession(agentId: string, options: RunnerOptions): Pr
   const sessionId = discoverSessionId(agentId, options.env);
   if (sessionId === null) return;
   await updateMeta(agentId, (current) => {
-    if (current.native_session_id === null || current.native_session_id === undefined) {
+    if (current.native_session_id === null) {
       current.native_session_id = sessionId;
     }
   }, options);
@@ -272,7 +272,13 @@ async function runInvocation(
       }, options);
       return false;
     }
-    const accepted = await recordSpawned(agentId, pid, procStartTicks(pid), invocationId, options);
+    let accepted: boolean;
+    try {
+      accepted = await recordSpawned(agentId, pid, procStartTicks(pid), invocationId, options);
+    } catch (error) {
+      try { process.kill(-pid, 'SIGKILL'); } catch {}
+      throw error;
+    }
     if (!accepted) {
       try { process.kill(-pid, 'SIGKILL'); } catch {}
       return false;

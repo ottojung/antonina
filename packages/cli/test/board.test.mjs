@@ -1,34 +1,89 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+
 import { BoardApi } from '../../core/dist/api.js';
-import { runBoardCommand } from '../dist/packages/cli/src/board.js';
+import { serializeBoardCredential, serializeBoardTrustAnchor } from '../../core/dist/credential.js';
+import { runBoardCommand, BOARD_CREDENTIAL_ENV, BOARD_TRUST_ENV } from '../dist/packages/cli/src/board.js';
 
-const CAPABILITY = 'a'.repeat(64);
-const stamp = '2026-09-24T10:00:00.000Z';
+const STAMP = '2026-09-25T12:00:00.000Z';
 
-function issue(number = 1, state = 'open') {
-  return { number, title: `Issue ${number}`, body: '', state, createdAt: stamp, updatedAt: stamp, messages: [] };
+function jsonResponse(value, status = 200, etag) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (etag !== undefined) headers.ETag = etag;
+  return new Response(JSON.stringify(value), { status, headers });
 }
-function board(issues = [issue()], nextIssueNumber = 2, resources = []) {
-  return { schemaVersion: 2, nextIssueNumber, issues, resources };
+
+function fakeSkrynia() {
+  const capability = 'a'.repeat(64);
+  let signed = null;
+  let revision = 0;
+  const etag = () => `"v${revision}"`;
+
+  return {
+    capability,
+    get signed() { return signed; },
+    async fetch(url, init = {}) {
+      const method = init.method ?? 'GET';
+      const text = String(url);
+      if (text.endsWith('/store/antonina/board-v1')) {
+        return method === 'GET' ? new Response(null, { status: 404 }) : new Response(null, { status: 405 });
+      }
+      if (!text.endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
+      if (method === 'GET') {
+        return signed === null ? new Response(null, { status: 404 }) : jsonResponse(signed, 200, etag());
+      }
+      if (method === 'POST') {
+        if (signed !== null) return new Response(null, { status: 409 });
+        signed = JSON.parse(String(init.body));
+        revision += 1;
+        return jsonResponse({ mode: 'capability-write', capability }, 201);
+      }
+      if (method === 'PUT') {
+        const headers = new Headers(init.headers);
+        if (headers.get('X-Skrynia-Capability') !== capability) return jsonResponse({ error: 'invalid capability' }, 403);
+        if (headers.get('If-Match') !== etag()) return new Response(null, { status: 412 });
+        signed = JSON.parse(String(init.body));
+        revision += 1;
+        return new Response(null, { status: 200 });
+      }
+      return new Response(null, { status: 405 });
+    },
+  };
 }
-function response(value, status = 200, etag) {
-  return new Response(JSON.stringify(value), { status, headers: etag === undefined ? {} : { ETag: etag } });
+
+function client(server, options = {}) {
+  let sequence = 0;
+  return new BoardApi({
+    fetch: server.fetch.bind(server),
+    now: () => new Date(STAMP),
+    newId: () => `cli-${++sequence}`,
+    ...options,
+  });
 }
+
 function memoryIo() {
   const out = [];
   const err = [];
   return { out, err, io: { stdout: (text) => out.push(text), stderr: (text) => err.push(text) } };
 }
 
-test('board CLI emits deterministic JSON list output', async () => {
-  const client = new BoardApi({
-    fetch: async () => response(board(), 200, '"v1"'),
-  });
+function run(argv, context) {
   const capture = memoryIo();
-  const code = await runBoardCommand(['list', '--json'], { env: {}, io: capture.io, createClient: () => client });
+  return runBoardCommand(argv, { env: {}, io: capture.io, ...context }).then((code) => ({ code, ...capture }));
+}
+
+test('board CLI emits deterministic JSON list output for a read-only client', async () => {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  const initialized = await owner.initialize();
+  await owner.createIssue('First', 'signed board');
+
+  const reader = client(server, { trustAnchor: initialized.trustAnchor });
+  const capture = memoryIo();
+  const code = await runBoardCommand(['list', '--json'], { env: {}, io: capture.io, createClient: () => reader });
+
   assert.equal(code, 0);
-  assert.deepEqual(JSON.parse(capture.out[0]), [issue()]);
+  assert.equal(JSON.parse(capture.out[0])[0].title, 'First');
   assert.deepEqual(capture.err, []);
 });
 
@@ -37,67 +92,87 @@ test('board CLI requires author from flag or environment', async () => {
   const code = await runBoardCommand(['comment', '1', 'hello'], {
     env: {},
     io: capture.io,
-    createClient: () => new BoardApi({ capability: CAPABILITY }),
+    createClient: () => client(fakeSkrynia()),
   });
   assert.equal(code, 1);
   assert.match(capture.err[0], /ANTONINA_BOARD_AUTHOR/);
 });
 
-test('core retries create against the latest ETag and counter', async () => {
-  const initial = board();
-  const winner = board([issue(), { ...issue(2), title: 'Winner' }], 3);
-  const final = board([...winner.issues, { ...issue(3), title: 'Mine' }], 4);
-  const responses = [
-    response(initial, 200, '"v1"'),
-    response({}, 412),
-    response(winner, 200, '"v2"'),
-    response({}, 200),
-    response(final, 200, '"v3"'),
-  ];
-  const requests = [];
-  const client = new BoardApi({
-    capability: CAPABILITY,
-    now: () => new Date(stamp),
-    fetch: async (_url, init) => {
-      requests.push(init);
-      const next = responses.shift();
-      if (!next) throw new Error('response queue exhausted');
-      return next;
-    },
-  });
-  const created = await client.createIssue('Mine');
-  assert.equal(created.number, 3);
-  assert.match(String(requests[1].body), /"number":2/);
-  assert.match(String(requests[3].body), /"number":3/);
-});
-
 test('no board CLI command creates a missing board', async () => {
-  const requests = [];
-  const client = new BoardApi({
-    capability: CAPABILITY,
-    fetch: async (_url, init) => {
-      requests.push(init);
-      return response({ error: 'not_found' }, 404);
-    },
-  });
+  const server = fakeSkrynia();
+  const methods = [];
+  const reader = client(server, { fetch: async (url, init = {}) => { methods.push(init.method); return server.fetch(url, init); } });
 
-  for (const command of [['list'], ['create', 'Mine'], ['resource', 'add', '1', 'lubko://server', '/path']]) {
-    const capture = memoryIo();
-    const code = await runBoardCommand(command, { env: {}, io: capture.io, createClient: () => client });
+  for (const command of [['list'], ['access'], ['queue', 'list'], ['create', 'Mine']]) {
+    const { code, err } = await run(command, { createClient: () => reader });
     assert.equal(code, 1, command.join(' '));
-    assert.match(capture.err[0], /Antonina board does not exist/);
+    assert.match(err[0], /does not exist|credential is required|already exists|required/);
   }
 
-  assert.equal(requests.length, 3);
-  assert.equal(requests.every((init) => init?.method === undefined), true);
+  assert.equal(methods.includes('POST'), false);
+  assert.equal(server.signed, null);
 });
 
-test('core fails capability validation before network', async () => {
-  let calls = 0;
-  const client = new BoardApi({
-    capability: 'bad',
-    fetch: async () => { calls += 1; return response(board(), 200, '"v1"'); },
+test('a missing board fails closed for a client that holds a valid credential', async () => {
+  const elsewhere = await client(fakeSkrynia()).initialize();
+  const server = fakeSkrynia();
+  const writer = client(server, { credential: elsewhere.credential });
+  await assert.rejects(() => writer.createIssue('Mine'), /does not exist/);
+
+  const { code, err } = await run(['create', 'Mine'], { createClient: () => writer });
+
+  assert.equal(code, 1);
+  assert.match(err[0], /does not exist/);
+  assert.equal(server.signed, null);
+});
+
+test('board CLI reports an existing board instead of taking the trust root again', async () => {
+  const server = fakeSkrynia();
+  await client(server).initialize();
+
+  const { code, err } = await run(['initialize'], { createClient: () => client(server) });
+
+  assert.equal(code, 1);
+  assert.match(err[0], /already exists/);
+});
+
+test('board CLI reports the trust anchor and root credential after initialization', async () => {
+  const server = fakeSkrynia();
+  const { code, out } = await run(['initialize', '--json'], { createClient: () => client(server) });
+
+  assert.equal(code, 0);
+  const printed = JSON.parse(out[0]);
+  assert.equal(printed.credential.keyId, printed.trustAnchor.rootKeyId);
+  assert.equal(printed.board.nextIssueNumber, 1);
+  assert.equal(server.signed.operations[0].kind, 'board.initialize');
+});
+
+test('board CLI hands the initializer the copyable trust anchor and credential', async () => {
+  const server = fakeSkrynia();
+  const { out } = await run(['initialize'], { createClient: () => client(server) });
+  const anchor = JSON.parse(out[2]);
+  const credential = JSON.parse(out[4]);
+
+  assert.equal(out[1], 'Trust anchor (public):');
+  assert.equal(serializeBoardTrustAnchor(anchor), out[2]);
+  assert.equal(serializeBoardCredential(credential), out[4]);
+  assert.equal(credential.storageCapability, server.capability);
+  assert.equal(credential.rootKeyId, anchor.rootKeyId);
+});
+
+test('board CLI refuses environment credentials it cannot parse or reconcile', async () => {
+  const malformed = await run(['access'], { env: { [BOARD_CREDENTIAL_ENV]: 'not json' } });
+  assert.equal(malformed.code, 1);
+  assert.match(malformed.err[0], /must contain valid JSON/);
+
+  const first = await client(fakeSkrynia()).initialize();
+  const second = await client(fakeSkrynia()).initialize();
+  const mismatched = await run(['access'], {
+    env: {
+      [BOARD_CREDENTIAL_ENV]: serializeBoardCredential(first.credential),
+      [BOARD_TRUST_ENV]: serializeBoardTrustAnchor(second.trustAnchor),
+    },
   });
-  await assert.rejects(() => client.close(1), /64 hexadecimal/);
-  assert.equal(calls, 0);
+  assert.equal(mismatched.code, 1);
+  assert.match(mismatched.err[0], /does not match the configured board trust anchor/);
 });

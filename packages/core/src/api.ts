@@ -1,186 +1,328 @@
+import { generateSigningKey } from './canonical.js';
 import {
-  BOARD_SCHEMA_VERSION,
+  ANTONINA_NAMESPACE,
+  DEFAULT_BOARD_BASE_URL,
+  LEGACY_BOARD_KEY,
+  SIGNED_BOARD_KEY,
+  SignedBoardStore,
+  SignedBoardStoreError,
+  type SignedBoardStoreOptions,
+  type StoredSignedBoard,
+} from './board-store.js';
+import {
+  createBoardCredential,
+  credentialTrustAnchor,
+  parseBoardCredential,
+  parseBoardTrustAnchor,
+  verifyBoardCredential,
+  verifyBoardTrustAnchor,
+  type BoardCredential,
+} from './credential.js';
+import {
   MAX_SAFE_INTEGER,
   canonicalHost,
   canonicalPath,
   emptyBoard,
-  parseBoard,
   resourceViews,
   type Board,
   type BoardIssue,
-  type BoardMessage,
   type BoardResource,
   type IssueState,
   type ResourceView,
 } from './model.js';
+import {
+  BOARD_CAPABILITIES,
+  type BoardCapability,
+  type BoardOperationKind,
+  type BoardOperationPayload,
+  type BoardTrustAnchor,
+  type VerifiedAuthority,
+  type VerifiedBoardState,
+} from './operations.js';
 
-export const ANTONINA_NAMESPACE = 'antonina';
-export const BOARD_KEY = 'board-v1';
-export const CAPABILITY_STORAGE_KEY = 'antonina:skrynia:capability:board-v1';
-export const DEFAULT_BOARD_BASE_URL = 'https://vau.place/_skrynia';
-const MAX_ATTEMPTS = 6;
-const CAPABILITY_PATTERN = /^[0-9a-f]{64}$/i;
+export {
+  ANTONINA_NAMESPACE,
+  DEFAULT_BOARD_BASE_URL,
+  LEGACY_BOARD_KEY,
+  SIGNED_BOARD_KEY,
+};
+export const BOARD_KEY = SIGNED_BOARD_KEY;
 
-export interface CapabilityStorage {
-  get(key: string): string | null;
-  set(key: string, value: string): void;
-  remove(key: string): void;
+const MUTATING_CAPABILITIES = new Set<BoardCapability>([
+  'issue.create',
+  'issue.edit',
+  'issue.delete',
+  'issue.comment',
+  'issue.state',
+  'queue.reorder',
+  'resource.modify',
+  'board.delete',
+  'authority.delegate',
+  'authority.revoke',
+]);
+
+export class AntoninaApiError extends Error {}
+
+/** The signed board exists but this client cannot verify it without a trust anchor. */
+export class BoardTrustRequiredError extends AntoninaApiError {}
+
+export interface BoardApiOptions extends SignedBoardStoreOptions {
+  credential?: BoardCredential | null;
+  trustAnchor?: BoardTrustAnchor | null;
+  rememberedHead?: string | null;
 }
 
-export interface BoardApiOptions {
-  fetch?: typeof fetch;
-  baseUrl?: string;
-  capability?: string | null;
-  capabilityStorage?: CapabilityStorage;
-  now?: () => Date;
-  newId?: () => string;
-  maxAttempts?: number;
-}
-
-interface StoredBoard {
-  board: Board;
-  etag: string;
+export interface BoardAccessState {
+  boardId: string;
+  keyId: string | null;
+  rootKeyId: string;
+  capabilities: BoardCapability[];
+  storageVerified: boolean;
+  canEdit: boolean;
 }
 
 export interface BoardInitialization {
   board: Board;
-  capability: string;
-}
-
-type Mutation = (board: Board) => Board;
-
-export class AntoninaApiError extends Error {}
-
-function defaultId(): string {
-  return typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  credential: BoardCredential;
+  trustAnchor: BoardTrustAnchor;
+  head: string;
 }
 
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+function sameAnchor(left: BoardTrustAnchor, right: BoardTrustAnchor): boolean {
+  return left.boardId === right.boardId
+    && left.rootKeyId === right.rootKeyId
+    && left.rootPublicKey === right.rootPublicKey;
+}
+
+function normalizeCapabilities(values: readonly BoardCapability[]): BoardCapability[] {
+  const unique = [...new Set(values)];
+  for (const capability of unique) {
+    if (!(BOARD_CAPABILITIES as readonly string[]).includes(capability)) {
+      throw new AntoninaApiError('Unknown Antonina board capability: ' + String(capability));
+    }
+  }
+  return unique.sort();
+}
+
+function hasMutationCapability(capabilities: readonly BoardCapability[]): boolean {
+  return capabilities.some((capability) => MUTATING_CAPABILITIES.has(capability));
+}
+
 export class BoardApi {
-  private readonly fetcher: typeof fetch;
-  private readonly url: string;
-  private capability: string | null;
-  private readonly capabilityStorage: CapabilityStorage | undefined;
-  private readonly now: () => Date;
-  private readonly newId: () => string;
-  private readonly maxAttempts: number;
+  private readonly store: SignedBoardStore;
+  private credential: BoardCredential | null;
+  private anchor: BoardTrustAnchor | null;
+  private rememberedHead: string | null;
+  private storageVerified = false;
+  private effectiveCapabilities: BoardCapability[] = [];
 
   constructor(options: BoardApiOptions = {}) {
-    const baseUrl = options.baseUrl ?? '/_skrynia';
-    if (options.maxAttempts !== undefined && options.maxAttempts < 1) {
-      throw new RangeError('maxAttempts must be positive');
+    this.store = new SignedBoardStore(options);
+    this.credential = options.credential === undefined || options.credential === null
+      ? null
+      : parseBoardCredential(options.credential);
+    const credentialAnchor = this.credential === null ? null : credentialTrustAnchor(this.credential);
+    const configuredAnchor = options.trustAnchor === undefined || options.trustAnchor === null
+      ? null
+      : parseBoardTrustAnchor(options.trustAnchor);
+    if (credentialAnchor !== null && configuredAnchor !== null && !sameAnchor(credentialAnchor, configuredAnchor)) {
+      throw new AntoninaApiError('Antonina credential does not match the configured board trust anchor');
     }
-    this.fetcher = options.fetch ?? fetch.bind(globalThis);
-    this.url = `${baseUrl.replace(/\/$/, '')}/store/${encodeURIComponent(ANTONINA_NAMESPACE)}/${encodeURIComponent(BOARD_KEY)}`;
-    this.capability = options.capability?.trim() || null;
-    this.capabilityStorage = options.capabilityStorage;
-    this.now = options.now ?? (() => new Date());
-    this.newId = options.newId ?? defaultId;
-    this.maxAttempts = options.maxAttempts ?? MAX_ATTEMPTS;
+    this.anchor = configuredAnchor ?? credentialAnchor;
+    this.rememberedHead = options.rememberedHead ?? null;
   }
 
-  getCapability(): string | null {
-    return this.capability;
+  getCredential(): BoardCredential | null {
+    return this.credential === null ? null : clone(this.credential);
+  }
+
+  getTrustAnchor(): BoardTrustAnchor | null {
+    return this.anchor === null ? null : clone(this.anchor);
+  }
+
+  getRememberedHead(): string | null {
+    return this.rememberedHead;
+  }
+
+  getEffectiveCapabilities(): BoardCapability[] {
+    return [...this.effectiveCapabilities];
   }
 
   hasWriteAccess(): boolean {
-    return this.capability !== null;
+    return this.storageVerified && hasMutationCapability(this.effectiveCapabilities);
   }
 
-  setCapability(capability: string): void {
-    const cleanCapability = capability.trim();
-    if (!cleanCapability) throw new AntoninaApiError('Antonina write capability is required');
-    if (!CAPABILITY_PATTERN.test(cleanCapability)) {
-      throw new AntoninaApiError('Antonina write capability must be 64 hexadecimal characters');
-    }
-    this.capability = cleanCapability;
-    this.capabilityStorage?.set(CAPABILITY_STORAGE_KEY, cleanCapability);
+  clearCredential(): void {
+    this.credential = null;
+    this.storageVerified = false;
+    this.effectiveCapabilities = [];
   }
 
-  clearCapability(): void {
-    this.capability = null;
-    this.capabilityStorage?.remove(CAPABILITY_STORAGE_KEY);
+  async signedBoardExists(): Promise<boolean> {
+    return this.store.signedBoardExists();
   }
 
-  /** Reads the board without ever creating it; a missing board is `null`. */
-  async readBoard(): Promise<Board | null> {
-    return (await this.read())?.board ?? null;
+  async legacyBoardExists(): Promise<boolean> {
+    return (await this.store.readLegacyBoard()) !== null;
   }
 
   /**
-   * Deliberately creates the board and adopts its one-time editing capability.
-   * The only way to create a board; reading never does.
+   * Reads the signed board without ever creating it; a missing board is `null`
+   * and an existing board is only readable through a configured trust anchor.
    */
-  async initializeBoard(): Promise<BoardInitialization> {
-    if (await this.read()) throw new AntoninaApiError('The Antonina board already exists');
-    const response = await this.fetcher(this.url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Skrynia-Mode': 'capability-write' },
-      body: JSON.stringify(emptyBoard()),
-    });
-    if (response.status === 409) throw new AntoninaApiError('The Antonina board already exists');
-    if (response.status !== 201) throw await this.httpError('POST', response);
-    const created = await this.parseJson(response, 'Skrynia POST antonina/board-v1') as { mode?: unknown; capability?: unknown };
-    if (created.mode !== 'capability-write' || typeof created.capability !== 'string') {
-      throw new AntoninaApiError('Skrynia did not return the capability for the Antonina board');
+  async readBoard(): Promise<Board | null> {
+    if (this.anchor === null) {
+      if (await this.store.signedBoardExists()) {
+        throw new BoardTrustRequiredError('Antonina signed board exists; this client has no trust anchor for it');
+      }
+      return null;
     }
-    this.setCapability(created.capability);
-    return { board: (await this.requireStored()).board, capability: created.capability };
+    const stored = await this.store.read(this.anchor, this.rememberedHead);
+    if (stored === null) return null;
+    this.acceptStored(stored);
+    return clone(stored.state.board);
+  }
+
+  /**
+   * Deliberately creates the signed board and adopts its one-time root
+   * credential. The only way to create a board; reading never does, and a
+   * second initializer is refused instead of taking the trust root.
+   */
+  async initialize(initialBoard: Board = emptyBoard()): Promise<BoardInitialization> {
+    if (await this.store.signedBoardExists()) {
+      throw new AntoninaApiError('The Antonina signed board already exists');
+    }
+    const initialized = await this.store.initialize(initialBoard);
+    this.anchor = credentialTrustAnchor(initialized.credential);
+    this.credential = initialized.credential;
+    this.acceptStored(initialized);
+    this.storageVerified = true;
+    this.refreshEffectiveCapabilities(initialized.state);
+    return {
+      board: clone(initialized.state.board),
+      credential: clone(initialized.credential),
+      trustAnchor: clone(this.anchor),
+      head: initialized.state.head,
+    };
+  }
+
+  async migrateLegacy(): Promise<BoardInitialization> {
+    const legacy = await this.store.readLegacyBoard();
+    if (legacy === null) throw new AntoninaApiError('Legacy Antonina board-v1 does not exist');
+    return this.initialize(legacy);
+  }
+
+  async trustBoard(anchorValue: BoardTrustAnchor): Promise<Board> {
+    const anchor = await verifyBoardTrustAnchor(anchorValue);
+    if (this.anchor !== null && !sameAnchor(this.anchor, anchor)) {
+      throw new AntoninaApiError('Refusing to replace the trusted Antonina board root implicitly');
+    }
+    const stored = await this.store.require(anchor, this.rememberedHead);
+    this.anchor = anchor;
+    this.acceptStored(stored);
+    this.storageVerified = false;
+    this.refreshEffectiveCapabilities(stored.state);
+    return clone(stored.state.board);
+  }
+
+  async verifyCredential(credentialValue: BoardCredential | null = this.credential): Promise<BoardAccessState> {
+    if (credentialValue === null) throw new AntoninaApiError('Antonina board credential is required');
+    const credential = await verifyBoardCredential(credentialValue);
+    const anchor = credentialTrustAnchor(credential);
+    if (this.anchor !== null && !sameAnchor(this.anchor, anchor)) {
+      throw new AntoninaApiError('Antonina credential does not match the trusted board root');
+    }
+
+    let stored: StoredSignedBoard;
+    try {
+      stored = await this.store.verifyStorageCapability(credential, this.rememberedHead);
+    } catch (error) {
+      this.storageVerified = false;
+      this.effectiveCapabilities = [];
+      throw error;
+    }
+
+    const authority = this.requireActiveAuthority(stored.state, credential.keyId);
+    this.anchor = anchor;
+    this.credential = credential;
+    this.acceptStored(stored);
+    this.storageVerified = true;
+    this.effectiveCapabilities = [...authority.capabilities];
+    return this.accessState();
+  }
+
+  accessState(): BoardAccessState {
+    const anchor = this.requireAnchor();
+    return {
+      boardId: anchor.boardId,
+      keyId: this.credential?.keyId ?? null,
+      rootKeyId: anchor.rootKeyId,
+      capabilities: [...this.effectiveCapabilities],
+      storageVerified: this.storageVerified,
+      canEdit: this.hasWriteAccess(),
+    };
+  }
+
+  async loadState(): Promise<VerifiedBoardState> {
+    const stored = await this.readStored();
+    return clone(stored.state);
+  }
+
+  async loadBoard(): Promise<Board> {
+    return clone((await this.readStored()).state.board);
   }
 
   async listIssues(state?: IssueState): Promise<BoardIssue[]> {
-    const issues = (await this.requireStored()).board.issues;
+    const issues = (await this.loadBoard()).issues;
     return issues
       .filter((issue) => state === undefined || issue.state === state)
       .sort((left, right) => left.number - right.number);
   }
 
   async getIssue(number: number): Promise<BoardIssue> {
-    return this.requireIssue((await this.requireStored()).board.issues, number);
+    return clone(this.requireIssue((await this.loadBoard()).issues, number));
+  }
+
+  async getQueue(): Promise<number[]> {
+    return [...(await this.readStored()).state.queue];
+  }
+
+  async reorderQueue(numbers: number[]): Promise<number[]> {
+    const committed = await this.append('queue.reorder', { numbers: [...numbers] }, 'queue.reorder');
+    return [...committed.state.queue];
   }
 
   async createIssue(title: string, body = ''): Promise<BoardIssue> {
     const cleanTitle = title.trim();
     if (!cleanTitle) throw new AntoninaApiError('Issue title is required');
     let createdNumber = 0;
-    const committed = await this.mutate((board) => {
-      createdNumber = board.nextIssueNumber;
-      if (createdNumber >= MAX_SAFE_INTEGER) {
-        throw new AntoninaApiError('Antonina issue number space is exhausted');
-      }
-      const timestamp = this.now().toISOString();
-      const created: BoardIssue = {
-        number: createdNumber,
-        title: cleanTitle,
-        body: body.trim(),
-        state: 'open',
-        createdAt: timestamp,
-        updatedAt: timestamp,
-        messages: [],
-      };
-      return {
-        ...board,
-        nextIssueNumber: board.nextIssueNumber + 1,
-        issues: [...board.issues, created],
-      };
-    });
-    return this.requireIssue(committed.issues, createdNumber);
+    const committed = await this.append(
+      'issue.create',
+      (state) => {
+        createdNumber = state.board.nextIssueNumber;
+        if (createdNumber >= MAX_SAFE_INTEGER) throw new AntoninaApiError('Antonina issue number space is exhausted');
+        return { number: createdNumber, title: cleanTitle, body: body.trim() };
+      },
+      'issue.create',
+    );
+    return clone(this.requireIssue(committed.state.board.issues, createdNumber));
   }
 
-  editIssueBody(number: number, body: string): Promise<BoardIssue> {
-    return this.updateIssue(number, (issue) => {
-      if (issue.state === 'closed') throw new AntoninaApiError(`Closed issue descriptions cannot be edited (Antonina issue ${number} is closed)`);
-      return { ...issue, body: body.trim() };
-    });
+  async editIssueBody(number: number, body: string): Promise<BoardIssue> {
+    const committed = await this.append(
+      'issue.edit',
+      { number, title: null, body: body.trim() },
+      'issue.edit',
+    );
+    return clone(this.requireIssue(committed.state.board.issues, number));
   }
 
   async listResources(host?: string, issueNumber?: number): Promise<ResourceView[]> {
-    return resourceViews((await this.requireStored()).board, host, issueNumber);
+    return resourceViews(await this.loadBoard(), host, issueNumber);
   }
 
   async addResourceDependency(host: string, path: string, issueNumber: number): Promise<BoardResource> {
@@ -192,35 +334,16 @@ export class BoardApi {
     } catch (error) {
       throw new AntoninaApiError(error instanceof Error ? error.message : 'Invalid resource');
     }
-    let resultKey = '';
-    const committed = await this.mutate((board) => {
-      const issue = this.requireIssue(board.issues, issueNumber);
-      if (issue.state !== 'open') throw new AntoninaApiError(`A resource dependency requires an open issue; Antonina issue ${issueNumber} is closed`);
-      const candidate = clone(board);
-      const timestamp = this.now().toISOString();
-      const current = candidate.resources.find((resource) => resource.host === cleanHost && resource.path === cleanPath);
-      if (current) {
-        if (!current.issueNumbers.includes(issueNumber)) {
-          current.issueNumbers.push(issueNumber);
-          current.issueNumbers.sort((a, b) => a - b);
-          current.updatedAt = timestamp;
-        }
-      } else {
-        candidate.resources.push({
-          host: cleanHost,
-          path: cleanPath,
-          issueNumbers: [issueNumber],
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        });
-      }
-      candidate.resources.sort((left, right) => left.host.localeCompare(right.host) || left.path.localeCompare(right.path));
-      resultKey = JSON.stringify([cleanHost, cleanPath]);
-      return candidate;
-    });
-    const resource = committed.resources.find((entry) => JSON.stringify([entry.host, entry.path]) === resultKey);
+    const committed = await this.append(
+      'resource.add',
+      { number: issueNumber, host: cleanHost, path: cleanPath },
+      'resource.modify',
+    );
+    const resource = committed.state.board.resources.find(
+      (entry) => entry.host === cleanHost && entry.path === cleanPath,
+    );
     if (!resource) throw new AntoninaApiError('Antonina resource disappeared after mutation');
-    return resource;
+    return clone(resource);
   }
 
   async removeResourceDependency(host: string, path: string, issueNumber: number): Promise<BoardResource[]> {
@@ -232,131 +355,167 @@ export class BoardApi {
     } catch (error) {
       throw new AntoninaApiError(error instanceof Error ? error.message : 'Invalid resource');
     }
-    const committed = await this.mutate((board) => {
-      const candidate = clone(board);
-      const index = candidate.resources.findIndex((resource) => resource.host === cleanHost && resource.path === cleanPath);
-      const current = index < 0 ? undefined : candidate.resources[index];
-      if (!current || !current.issueNumbers.includes(issueNumber)) {
-        throw new AntoninaApiError('Antonina resource dependency does not exist');
-      }
-      current.issueNumbers = current.issueNumbers.filter((number) => number !== issueNumber);
-      if (current.issueNumbers.length === 0) {
-        candidate.resources.splice(index, 1);
-      } else {
-        current.updatedAt = this.latestTimestamp(current.updatedAt);
-      }
-      return candidate;
-    });
-    return committed.resources;
+    const committed = await this.append(
+      'resource.remove',
+      { number: issueNumber, host: cleanHost, path: cleanPath },
+      'resource.modify',
+    );
+    return clone(committed.state.board.resources);
   }
 
-  comment(number: number, author: string, body: string): Promise<BoardIssue> {
+  async comment(number: number, author: string, body: string): Promise<BoardIssue> {
     const cleanAuthor = author.trim();
     const cleanBody = body.trim();
-    if (!cleanAuthor) return Promise.reject(new AntoninaApiError('Message author is required'));
-    if (!cleanBody) return Promise.reject(new AntoninaApiError('Message body is required'));
-    const messageId = this.newId();
-    return this.updateIssue(number, (issue) => {
-      const lastMessageAt = issue.messages.at(-1)?.createdAt;
-      const createdAt = this.latestTimestamp(lastMessageAt);
-      const message: BoardMessage = { id: messageId, author: cleanAuthor, body: cleanBody, createdAt };
-      return { ...issue, messages: [...issue.messages, message] };
-    });
+    if (!cleanAuthor) throw new AntoninaApiError('Message author is required');
+    if (!cleanBody) throw new AntoninaApiError('Message body is required');
+    const committed = await this.append(
+      'issue.comment',
+      { number, author: cleanAuthor, body: cleanBody },
+      'issue.comment',
+    );
+    return clone(this.requireIssue(committed.state.board.issues, number));
   }
 
-  close(number: number): Promise<BoardIssue> {
-    return this.updateIssue(number, (issue) => ({ ...issue, state: 'closed' }));
+  async close(number: number): Promise<BoardIssue> {
+    const committed = await this.append('issue.close', { number }, 'issue.state');
+    return clone(this.requireIssue(committed.state.board.issues, number));
   }
 
-  reopen(number: number): Promise<BoardIssue> {
-    return this.updateIssue(number, (issue) => ({ ...issue, state: 'open' }));
+  async reopen(number: number): Promise<BoardIssue> {
+    const committed = await this.append('issue.reopen', { number }, 'issue.state');
+    return clone(this.requireIssue(committed.state.board.issues, number));
+  }
+
+  async deleteIssue(number: number): Promise<Board> {
+    const committed = await this.append('issue.delete', { number }, 'issue.delete');
+    return clone(committed.state.board);
+  }
+
+  async deleteBoard(): Promise<void> {
+    await this.append('board.delete', {}, 'board.delete');
+  }
+
+  async delegateCredential(capabilities: readonly BoardCapability[]): Promise<BoardCredential> {
+    const current = await this.requireUsableCredential('authority.delegate');
+    const normalized = normalizeCapabilities(capabilities);
+    for (const capability of normalized) {
+      if (!this.effectiveCapabilities.includes(capability)) {
+        throw new AntoninaApiError('Delegation cannot add capability ' + capability);
+      }
+    }
+    const child = await generateSigningKey();
+    await this.append(
+      'authority.delegate',
+      {
+        childKeyId: child.keyId,
+        childPublicKey: child.publicKey,
+        capabilities: normalized,
+      },
+      'authority.delegate',
+    );
+    return createBoardCredential(this.requireAnchor(), child, current.storageCapability);
+  }
+
+  async revokeCredential(keyId: string): Promise<VerifiedAuthority[]> {
+    const committed = await this.append(
+      'authority.revoke',
+      { keyId },
+      'authority.revoke',
+    );
+    return clone(committed.state.authorities);
+  }
+
+  async listAuthorities(): Promise<VerifiedAuthority[]> {
+    return clone((await this.readStored()).state.authorities);
+  }
+
+  private requireAnchor(): BoardTrustAnchor {
+    if (this.anchor === null) {
+      throw new AntoninaApiError('Antonina board trust anchor is required before board state can be accepted');
+    }
+    return this.anchor;
   }
 
   private requireIssue(issues: BoardIssue[], number: number): BoardIssue {
     const issue = issues.find((candidate) => candidate.number === number);
-    if (!issue) throw new AntoninaApiError(`Antonina issue ${number} does not exist`);
+    if (!issue) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
     return issue;
   }
 
-  private updateIssue(number: number, update: (issue: BoardIssue) => BoardIssue): Promise<BoardIssue> {
-    return this.mutate((board) => {
-      const current = this.requireIssue(board.issues, number);
-      const updated = update(clone(current));
-      const lastMessageAt = updated.messages.at(-1)?.createdAt;
-      return {
-        ...board,
-        issues: board.issues.map((issue) => issue.number === number
-          ? { ...updated, updatedAt: this.latestTimestamp(current.updatedAt, lastMessageAt) }
-          : issue),
-      };
-    }).then((board) => this.requireIssue(board.issues, number));
-  }
-
-  private latestTimestamp(...floors: Array<string | undefined>): string {
-    const now = this.now().getTime();
-    const floor = Math.max(now, ...floors.map((timestamp) => timestamp ? Date.parse(timestamp) : Number.NEGATIVE_INFINITY));
-    return new Date(floor).toISOString();
-  }
-
-  private requireCapability(): string {
-    if (!this.capability) throw new AntoninaApiError('A Antonina write capability is required');
-    if (!CAPABILITY_PATTERN.test(this.capability)) {
-      throw new AntoninaApiError('The Antonina write capability must be 64 hexadecimal characters');
+  private requireActiveAuthority(state: VerifiedBoardState, keyId: string): VerifiedAuthority {
+    const authority = state.authorities.find((candidate) => candidate.keyId === keyId);
+    if (!authority || authority.revoked) {
+      throw new AntoninaApiError('Antonina board credential is unknown or revoked');
     }
-    return this.capability;
+    return authority;
   }
 
-  private async mutate(mutate: Mutation): Promise<Board> {
-    const capability = this.requireCapability();
-    let stored = await this.requireStored();
-    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const candidate = mutate(clone(stored.board));
-      const response = await this.fetcher(this.url, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Skrynia-Capability': capability,
-          'If-Match': stored.etag,
-        },
-        body: JSON.stringify(candidate),
-      });
-      if (response.status === 412) {
-        stored = await this.requireStored();
-        continue;
-      }
-      if (response.status !== 200) throw await this.httpError('PUT', response);
-      return (await this.requireStored()).board;
+  private refreshEffectiveCapabilities(state: VerifiedBoardState): void {
+    if (this.credential === null) {
+      this.effectiveCapabilities = [];
+      return;
     }
-    throw new AntoninaApiError('Antonina board changed too often; the conditional write was not committed');
+    const authority = state.authorities.find((candidate) => candidate.keyId === this.credential?.keyId);
+    if (!authority || authority.revoked) {
+      this.storageVerified = false;
+      this.effectiveCapabilities = [];
+      return;
+    }
+    this.effectiveCapabilities = [...authority.capabilities];
   }
 
-  private async requireStored(): Promise<StoredBoard> {
-    const stored = await this.read();
-    if (!stored) throw new AntoninaApiError('Antonina board does not exist');
+  private acceptStored(stored: StoredSignedBoard): void {
+    if (stored.state.deleted) throw new AntoninaApiError('Antonina board has been deleted');
+    this.rememberedHead = stored.state.head;
+    this.refreshEffectiveCapabilities(stored.state);
+  }
+
+  private async readStored(): Promise<StoredSignedBoard> {
+    const stored = await this.store.require(this.requireAnchor(), this.rememberedHead);
+    this.acceptStored(stored);
     return stored;
   }
 
-  private async read(): Promise<StoredBoard | null> {
-    const response = await this.fetcher(this.url, { cache: 'no-store' });
-    if (response.status === 404) return null;
-    if (response.status !== 200) throw await this.httpError('GET', response);
-    const etag = response.headers.get('ETag');
-    if (!etag) throw new AntoninaApiError('Skrynia GET board-v1 returned no ETag; refusing an unsafe board write');
-    const value = await this.parseJson(response, 'Skrynia GET antonina/board-v1');
-    return { board: parseBoard(value), etag };
-  }
-
-  private async parseJson(response: Response, context: string): Promise<unknown> {
-    try {
-      return await response.json();
-    } catch (error) {
-      throw new AntoninaApiError(`${context} returned invalid JSON`, { cause: error });
+  private async requireUsableCredential(capability: BoardCapability): Promise<BoardCredential> {
+    if (this.credential === null) throw new AntoninaApiError('Antonina board credential is required');
+    if (!this.storageVerified) await this.verifyCredential(this.credential);
+    if (!this.effectiveCapabilities.includes(capability)) {
+      throw new AntoninaApiError('Antonina credential lacks required capability ' + capability);
     }
+    return this.credential;
   }
 
-  private async httpError(method: string, response: Response): Promise<Error> {
-    return new AntoninaApiError(`Skrynia ${method} ${ANTONINA_NAMESPACE}/${BOARD_KEY} failed (${response.status})`);
+  private async append(
+    kind: Exclude<BoardOperationKind, 'board.initialize'>,
+    payload: BoardOperationPayload | ((state: VerifiedBoardState) => BoardOperationPayload),
+    capability: BoardCapability,
+  ): Promise<StoredSignedBoard> {
+    const credential = await this.requireUsableCredential(capability);
+    try {
+      const stored = await this.store.append(
+        credential,
+        { kind, payload },
+        this.rememberedHead,
+      );
+      this.acceptStored(stored);
+      this.storageVerified = true;
+      return stored;
+    } catch (error) {
+      if (error instanceof SignedBoardStoreError && /failed \(403\)/.test(error.message)) {
+        this.storageVerified = false;
+      }
+      throw error;
+    }
   }
 }
 
-export { BOARD_SCHEMA_VERSION, parseBoard } from './model.js';
+export { BOARD_CAPABILITIES } from './operations.js';
+export { emptyBoard, parseBoard } from './model.js';
+export type { Board, BoardIssue, BoardResource, IssueState, ResourceView } from './model.js';
+export type { BoardCredential } from './credential.js';
+export type {
+  BoardCapability,
+  BoardTrustAnchor,
+  VerifiedAuthority,
+  VerifiedBoardState,
+} from './operations.js';

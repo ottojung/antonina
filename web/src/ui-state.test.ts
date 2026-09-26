@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { BoardDeletedError, BoardTrustRequiredError } from './api';
 import { emptyBoard, type Board, type BoardIssue } from './model';
 import {
+  accessCallout,
+  boardAccess,
   boardDeleted,
   boardLoadFailed,
   boardLoaded,
+  COMPOSER_READ_ONLY_CALLOUT,
   DELETED_COPY,
   emptyIssueList,
   filterLabel,
@@ -14,6 +17,7 @@ import {
   groupResources,
   issueCounts,
   loadedBoard,
+  REJECTED_CREDENTIAL_COPY,
   trustRequired,
   visibleIssues,
   TRUST_COPY,
@@ -76,6 +80,24 @@ describe('board copy', () => {
   it('keeps empty-state copy distinct from the read-only access callout', () => {
     expect(emptyIssueList('all', false).body).not.toBe(READ_ONLY_CALLOUT.body);
     expect(emptyIssueList('all', true).body).not.toBe(READ_ONLY_CALLOUT.body);
+  });
+
+  it('names the access state the user is in and gives a rejected credential its own callout', () => {
+    expect(boardAccess(true, false)).toBe('editable');
+    expect(boardAccess(true, true)).toBe('editable');
+    expect(boardAccess(false, false)).toBe('read-only');
+    expect(boardAccess(false, true)).toBe('rejected');
+
+    expect(accessCallout('editable')).toBeNull();
+    expect(accessCallout('read-only')).toBe(READ_ONLY_CALLOUT);
+    expect(accessCallout('rejected')).toBe(REJECTED_CREDENTIAL_COPY);
+    expect(accessCallout('read-only', COMPOSER_READ_ONLY_CALLOUT)).toBe(COMPOSER_READ_ONLY_CALLOUT);
+    expect(accessCallout('rejected', COMPOSER_READ_ONLY_CALLOUT)).toBe(REJECTED_CREDENTIAL_COPY);
+
+    expect(COMPOSER_READ_ONLY_CALLOUT.title).toBe('Want to join the conversation?');
+    expect(REJECTED_CREDENTIAL_COPY.body).not.toBe(READ_ONLY_CALLOUT.body);
+    expect(REJECTED_CREDENTIAL_COPY.body).not.toBe(COMPOSER_READ_ONLY_CALLOUT.body);
+    expect(REJECTED_CREDENTIAL_COPY.action).not.toBe(READ_ONLY_CALLOUT.action);
   });
 });
 

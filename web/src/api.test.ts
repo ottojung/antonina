@@ -241,6 +241,46 @@ describe('browser board session', () => {
     expect(other.hasCredential()).toBe(false);
   });
 
+  it('stays read-only when a stored credential names a live authority but holds another key', async () => {
+    const { server, storage } = await initializedBoard();
+    await session(server, storage).api.createIssue('Visible');
+    const other = await generateSigningKey();
+    storage.set('antonina:board-v2:credential', JSON.stringify({
+      ...storedCredential(storage),
+      publicKey: other.publicKey,
+      privateKey: other.privateKey,
+    }));
+
+    const reopened = session(server, storage);
+    await expect(reopened.read()).resolves.toMatchObject({ issues: [{ title: 'Visible' }] });
+    expect(reopened.api.hasWriteAccess()).toBe(false);
+    expect(reopened.api.getEffectiveCapabilities()).toEqual([]);
+    await expect(reopened.api.createIssue('Impostor')).rejects.toThrow('key ID does not match its public key');
+    expect((server.signed as { operations: unknown[] }).operations.length).toBe(2);
+    expect(reopened.api.accessState().keyId).toBeNull();
+  });
+
+  it('reports a rejected stored credential after a read that still succeeds', async () => {
+    const { server, storage } = await initializedBoard();
+    await session(server, storage).api.createIssue('Visible');
+    const foreign = await generateSigningKey();
+    storage.set('antonina:board-v2:credential', JSON.stringify({
+      ...storedCredential(storage),
+      privateKey: foreign.privateKey,
+    }));
+
+    const reopened = session(server, storage);
+    await expect(reopened.read()).resolves.toMatchObject({ issues: [{ title: 'Visible' }] });
+
+    const access = reopened.api.accessState();
+    expect(reopened.hasCredential()).toBe(true);
+    expect(access.credentialRejection).toBe('unverified');
+    expect(access.keyId).toBeNull();
+    expect(access.canEdit).toBe(false);
+    expect(reopened.api.hasWriteAccess()).toBe(false);
+    expect((server.signed as { operations: unknown[] }).operations.length).toBe(2);
+  });
+
   it('remembers the accepted head so a replaced history is refused after a reload', async () => {
     const server = fakeSkrynia();
     const storage = memoryStorage();

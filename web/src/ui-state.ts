@@ -33,10 +33,42 @@ export const DELETED_COPY = {
 
 export const ISSUE_FORM_HINT = 'The description holds the task context; the conversation holds updates and questions.';
 
+export type AccessCallout = { title: string; body: string; action: string };
+
+export type ReadOnlyAccess = 'read-only' | 'rejected';
+
+export type BoardAccess = 'editable' | ReadOnlyAccess;
+
 export const READ_ONLY_CALLOUT = {
   title: 'Read-only board',
   body: 'You can read every issue and resource. Enable editing in this browser to make changes.',
+  action: 'Enable editing',
 } as const;
+
+export const COMPOSER_READ_ONLY_CALLOUT = {
+  title: 'Want to join the conversation?',
+  body: 'Enable editing in this browser to make changes.',
+  action: 'Enable editing',
+} as const;
+
+export const REJECTED_CREDENTIAL_COPY = {
+  title: 'This board rejected the credential in this browser',
+  body: 'The board credential stored in this browser was rejected, so the board is read-only. Paste a fresh credential that this board still accepts.',
+  action: 'Paste a fresh credential',
+} as const;
+
+/** A stored credential the board refused is its own state, not a browser holding none. */
+export function boardAccess(hasWriteAccess: boolean, credentialRejected: boolean): BoardAccess {
+  if (hasWriteAccess) return 'editable';
+  return credentialRejected ? 'rejected' : 'read-only';
+}
+
+export function accessCallout(access: ReadOnlyAccess, readOnly?: AccessCallout): AccessCallout;
+export function accessCallout(access: BoardAccess, readOnly?: AccessCallout): AccessCallout | null;
+export function accessCallout(access: BoardAccess, readOnly: AccessCallout = READ_ONLY_CALLOUT): AccessCallout | null {
+  if (access === 'editable') return null;
+  return access === 'rejected' ? REJECTED_CREDENTIAL_COPY : readOnly;
+}
 
 const FILTER_LABELS: Record<IssueFilter, string> = { open: 'Open', closed: 'Closed', all: 'All' };
 

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { generateSigningKey } from '../dist/canonical.js';
 import {
   BoardApi,
   BoardDeletedError,
@@ -98,6 +99,7 @@ test('a trust anchor permits verified read-only replay without a credential', as
   const board = await reader.loadBoard();
   assert.equal(board.issues[0].title, 'Visible');
   assert.equal(reader.hasWriteAccess(), false);
+  assert.equal(reader.accessState().credentialRejection, null);
   await assert.rejects(() => reader.createIssue('Blocked'), /credential is required/);
 });
 
@@ -214,6 +216,114 @@ test('a 403 on the read a mutation is built on is a read failure, and a 403 on i
   assert.equal(server.signed.operations.length, 1);
 });
 
+test('a credential whose key ID claims a live authority but whose key is not that authority is read-only', async () => {
+  const server = fakeSkrynia();
+  const root = api(server);
+  const initialized = await root.initialize();
+  await root.createIssue('Visible');
+
+  // A well-formed credential that names the root authority but carries a
+  // different signing key pair, as browser storage can hold after a hand edit.
+  const other = await generateSigningKey();
+  const impostor = {
+    ...initialized.credential,
+    keyId: initialized.credential.keyId,
+    publicKey: other.publicKey,
+    privateKey: other.privateKey,
+  };
+
+  const client = api(server, {
+    credential: impostor,
+    trustAnchor: initialized.trustAnchor,
+    rememberedHead: initialized.head,
+  });
+  assert.equal((await client.readBoard()).issues[0].title, 'Visible');
+  assert.equal(client.hasWriteAccess(), false);
+  assert.deepEqual(client.getEffectiveCapabilities(), []);
+  assert.equal(client.accessState().keyId, null);
+  assert.equal(client.accessState().canEdit, false);
+  await assert.rejects(() => client.verifyCredential(), /key ID does not match its public key/);
+  await assert.rejects(() => client.createIssue('Impostor'), /key ID does not match its public key/);
+  assert.equal(server.signed.operations.length, 2, 'a refused credential must not sign an operation');
+});
+
+test('a credential holding the live public key with a foreign private key is read-only', async () => {
+  const server = fakeSkrynia();
+  const root = api(server);
+  const initialized = await root.initialize();
+  await root.createIssue('Visible');
+
+  const other = await generateSigningKey();
+  const impostor = {
+    ...initialized.credential,
+    privateKey: other.privateKey,
+  };
+
+  const client = api(server, {
+    credential: impostor,
+    trustAnchor: initialized.trustAnchor,
+    rememberedHead: initialized.head,
+  });
+  assert.equal((await client.readBoard()).issues[0].title, 'Visible');
+  assert.equal(client.hasWriteAccess(), false);
+  assert.deepEqual(client.getEffectiveCapabilities(), []);
+  assert.equal(client.accessState().credentialRejection, 'unverified');
+  await assert.rejects(() => client.verifyCredential(), /private key does not match its public key/);
+  await assert.rejects(() => client.createIssue('Impostor'), /private key does not match its public key/);
+  assert.equal(server.signed.operations.length, 2, 'a refused credential must not sign an operation');
+});
+
+test('a credential whose key ID is not derived from the live public key is read-only', async () => {
+  const server = fakeSkrynia();
+  const root = api(server);
+  const initialized = await root.initialize();
+  await root.createIssue('Visible');
+
+  const impostor = {
+    ...initialized.credential,
+    keyId: `ed25519:${'A'.repeat(43)}`,
+  };
+
+  const client = api(server, {
+    credential: impostor,
+    trustAnchor: initialized.trustAnchor,
+    rememberedHead: initialized.head,
+  });
+  assert.equal((await client.readBoard()).issues[0].title, 'Visible');
+  assert.equal(client.hasWriteAccess(), false);
+  assert.deepEqual(client.getEffectiveCapabilities(), []);
+  assert.equal(client.accessState().credentialRejection, 'unverified');
+  await assert.rejects(() => client.verifyCredential(), /key ID does not match its public key/);
+  await assert.rejects(() => client.createIssue('Impostor'), /key ID does not match its public key/);
+  assert.equal(server.signed.operations.length, 2, 'a refused credential must not sign an operation');
+});
+
+test('a well-formed credential for a key this board never registered is read-only', async () => {
+  const server = fakeSkrynia();
+  const root = api(server);
+  const initialized = await root.initialize();
+  await root.createIssue('Visible');
+
+  const foreign = await generateSigningKey();
+  const client = api(server, {
+    credential: {
+      ...initialized.credential,
+      keyId: foreign.keyId,
+      publicKey: foreign.publicKey,
+      privateKey: foreign.privateKey,
+    },
+    trustAnchor: initialized.trustAnchor,
+    rememberedHead: initialized.head,
+  });
+  assert.equal((await client.readBoard()).issues[0].title, 'Visible');
+  assert.equal(client.hasWriteAccess(), false);
+  assert.deepEqual(client.getEffectiveCapabilities(), []);
+  assert.equal(client.accessState().credentialRejection, 'unknown');
+  await assert.rejects(() => client.verifyCredential(), /unknown or revoked/);
+  await assert.rejects(() => client.createIssue('Impostor'), /unknown or revoked/);
+  assert.equal(server.signed.operations.length, 2, 'a credential for an unregistered key must not sign an operation');
+});
+
 test('a deleted board is reported as its own state, not as a read failure', async () => {
   const server = fakeSkrynia();
   const owner = api(server);
@@ -261,6 +371,9 @@ test('revocation invalidates a delegated credential on its next verification', a
     trustAnchor: initialized.trustAnchor,
     rememberedHead: root.getRememberedHead(),
   });
+  assert.equal((await delegated.loadBoard()).issues.length, 0);
+  assert.equal(delegated.accessState().credentialRejection, 'revoked');
+  assert.equal(delegated.hasWriteAccess(), false);
   await assert.rejects(() => delegated.verifyCredential(), /unknown or revoked/);
   assert.equal(delegated.hasWriteAccess(), false);
 });

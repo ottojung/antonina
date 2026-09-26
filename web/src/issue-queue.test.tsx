@@ -135,12 +135,21 @@ describe('issue queue wiring', () => {
     expect(rows().map((row) => row.props['data-issue'])).toEqual([3, 1, 2]);
   });
 
-  it('drives drag-and-drop through the named drag handlers on the handle', () => {
-    const grip = gripOf(rows()[0]);
-    expect(grip.props.draggable).toBe(true);
-    expect(grip.props.onDragStart).toBe(issueDragStarted);
-    expect(grip.props.onDragOver).toBe(allowIssueDrop);
-    expect(typeof grip.props.onDrop).toBe('function');
+  it('starts the drag on the handle and lands it on the whole row', () => {
+    // The split is the fix: a drag must start from a deliberate handle, but it
+    // must be able to land anywhere on the row, or a user has to hit a 16px
+    // glyph at the far right of the target row and a near-miss does nothing.
+    for (const row of rows({ selectedNumber: 1 })) {
+      const grip = gripOf(row);
+      expect(grip.props.draggable).toBe(true);
+      expect(grip.props.onDragStart).toBe(issueDragStarted);
+      expect(row.props.onDragOver).toBe(allowIssueDrop);
+      expect(typeof row.props.onDrop).toBe('function');
+      // The drop handlers live on the row alone, so the grip cannot quietly
+      // become a second, narrower drop target.
+      expect(grip.props.onDragOver).toBeUndefined();
+      expect(grip.props.onDrop).toBeUndefined();
+    }
   });
 
   it('keeps every control of the row out of the draggable subtree', () => {
@@ -150,13 +159,19 @@ describe('issue queue wiring', () => {
     for (const row of rows({ selectedNumber: 1 })) {
       expect(row.props.draggable).toBeUndefined();
       expect(row.props.onDragStart).toBeUndefined();
-      expect(row.props.onDragOver).toBeUndefined();
-      expect(row.props.onDrop).toBeUndefined();
       const draggable = inside(row).filter((node) => node.props.draggable !== undefined);
       expect(draggable).toHaveLength(1);
       expect(draggable[0]).toBe(gripOf(row));
       // Nothing a user presses to do something else lives under the handle.
       expect(inside(gripOf(row))).toEqual([]);
+      // Every control of the row sits outside the draggable subtree, including
+      // the step buttons and the move-to control of the selected row.
+      const inDrag = (node: Row): Row[] => elements(node.props.children as ReactNode)
+        .flatMap((child) => [child, ...inside(child)]);
+      const underGrip = new Set(inDrag(gripOf(row)));
+      const controls = inside(row).filter((node) => node.type === 'button' || node.type === 'select');
+      expect(controls.length).toBeGreaterThan(0);
+      expect(controls.every((node) => !underGrip.has(node))).toBe(true);
     }
   });
 
@@ -256,6 +271,7 @@ describe('issue queue wiring', () => {
     // offer the browser a drop.
     expect(grips({ hasWriteAccess: false })).toEqual([]);
     expect(readOnly.every((row) => inside(row).every((node) => node.props.draggable === undefined))).toBe(true);
+    expect(readOnly.every((row) => row.props.onDragStart === undefined && row.props.onDragOver === undefined && row.props.onDrop === undefined)).toBe(true);
     expect(readOnly.every((row) => inside(row).every((node) => node.props.onDragStart === undefined && node.props.onDragOver === undefined && node.props.onDrop === undefined))).toBe(true);
     expect(queueButtons({ hasWriteAccess: false })).toHaveLength(0);
     // Not even the selected row gets a move-to control, so a visitor cannot
@@ -274,16 +290,19 @@ describe('issue queue wiring', () => {
     // A closed row would be a drop the queue cannot hold, so it is not a drop
     // target at all: the browser is never offered an accepted-drop cursor, and
     // there is no handle to start a drag from, so no drag can start that could
-    // only fail. The three open rows each carry one, and each of them wires the
-    // draggable flag to the same two handlers.
+    // only fail. The three open rows each accept a drop on the whole row, and
+    // each of them wires the draggable flag to the same single start handler.
     const closed = mixed[3];
     expect(closed.props['data-issue']).toBe(4);
+    expect(closed.props.onDragOver).toBeUndefined();
+    expect(closed.props.onDrop).toBeUndefined();
+    expect(closed.props.draggable).toBeUndefined();
     expect(inside(closed).filter((node) => node.props.draggable !== undefined)).toEqual([]);
     expect(inside(closed).filter((node) => node.props.onDragOver !== undefined || node.props.onDrop !== undefined || node.props.onDragStart !== undefined)).toEqual([]);
     expect(grips({ issues: all, queue: [2, 1, 3] })).toHaveLength(3);
-    expect(mixed.slice(0, 3).every((row) => gripOf(row).props.onDragOver === allowIssueDrop)).toBe(true);
+    expect(mixed.slice(0, 3).every((row) => row.props.onDragOver === allowIssueDrop)).toBe(true);
+    expect(mixed.slice(0, 3).every((row) => typeof row.props.onDrop === 'function')).toBe(true);
     expect(mixed.slice(0, 3).every((row) => gripOf(row).props.draggable === true && gripOf(row).props.onDragStart === issueDragStarted)).toBe(true);
-    expect(mixed.slice(0, 3).every((row) => typeof gripOf(row).props.onDrop === 'function')).toBe(true);
     // A closed issue is not in the shared order, so it is never the selected
     // row that carries the move-to control.
     expect(moveToControls({ issues: all, queue: [2, 1, 3] })).toHaveLength(0);
@@ -330,6 +349,24 @@ describe('priority reorder requests', () => {
     expect(fakeDrop(middle, 0).target).toBeNull();
   });
 
+  it('accepts a drop anywhere on the row and commits the same order as the button', async () => {
+    const sent: Array<number[] | null> = [];
+    const [top, , second] = rows({ onReorder: async (target: QueueTarget) => { sent.push(target); return null; } });
+    // The drop is driven through the row's own prop — the whole row is the
+    // target, not the grip at its far right.
+    (second.props.onDrop as (event: IssueDrop) => void)({
+      dataTransfer: { getData: (type) => (type === QUEUE_DRAG_TYPE ? '1' : '') },
+      preventDefault: () => {},
+    });
+    await Promise.resolve();
+    // Row order is 3, 1, 2, so a drop takes the dragged issue to the row it
+    // landed on: dropping issue 1 on the row of issue 2 is the same whole queue
+    // that row's step button commits for a one-place-later move of issue 1.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual(issueMoveRequested({ preventDefault: () => {} }, sharedOrder, 1, 'later'));
+    expect(top.props.onDrop).toBeDefined();
+  });
+
   it('hands the drop target the whole queue, not the dragged pair', async () => {
     const sent: Array<number[] | null> = [];
     const tree = IssueQueue({
@@ -338,8 +375,7 @@ describe('priority reorder requests', () => {
       empty,
     });
     const [row] = elements(tree).filter((node) => node.type === 'div' && typeof node.props['data-issue'] === 'number');
-    (gripOf(row).props.onDrop as (event: IssueDrop) => void)({
-      dataTransfer: { getData: (type) => (type === QUEUE_DRAG_TYPE ? '1' : '') },
+    (row.props.onDrop as (event: IssueDrop) => void)({      dataTransfer: { getData: (type) => (type === QUEUE_DRAG_TYPE ? '1' : '') },
       preventDefault: () => {},
     });
     await Promise.resolve();

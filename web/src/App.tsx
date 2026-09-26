@@ -331,11 +331,20 @@ function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSel
   // Only a queued row offers a move at all: the board's queue holds open issues
   // only, so a move on a closed row is one the board cannot commit, and a
   // read-only visitor has no write path to reach. The grip that carries the drag
-  // is rendered on the same condition, so its draggable flag and its three drag
-  // handlers cannot disagree with the controls beside it — a row the board could
-  // never accept a move from is not draggable at all.
+  // and the row that accepts the drop are both gated on that one predicate, so a
+  // row the board could never accept a move from accepts no drop and is not
+  // draggable at all.
+  // A drag must start at a deliberate handle, so `draggable` and `onDragStart`
+  // live on the grip and nowhere else. The drop, though, lands anywhere on the
+  // row: a target the size of a 16px glyph is a near-miss waiting to happen.
+  // Splitting the four handlers this way is the point — the drag originates only
+  // at the grip, and the whole row is the drop target.
+  // The drop reads the issue it landed on from the props the row already holds,
+  // so there is no data attribute string channel to trust.
   const queued = hasWriteAccess && position > 0;
-  return <div className={`issue-row ${selected ? 'selected' : ''}`} data-issue={issue.number}>
+  return <div className={`issue-row ${selected ? 'selected' : ''}`} data-issue={issue.number}
+    onDragOver={queued ? allowIssueDrop : undefined}
+    onDrop={queued ? (event) => { void onReorder(issueDropped(event, order, issue.number)); } : undefined}>
     <button className="issue-select" onClick={() => onSelect(issue.number)} aria-current={selected ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{issue.messages.length} messages{issue.body ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>
     {position > 0 && <span className="queue-position" aria-label={priorityLabel(position)}>{position}</span>}
     {queued && <span className="queue-controls">
@@ -346,7 +355,7 @@ function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSel
           buttons and the move-to control are the keyboard-reachable ways to move
           an issue, and the grip is hidden from assistive technology rather than
           announced as a control that does not itself move anything. */}
-      <span className="queue-grip" data-issue={issue.number} draggable aria-hidden="true" onDragStart={issueDragStarted} onDragOver={allowIssueDrop} onDrop={(event) => { void onReorder(issueDropped(event, order, issue.number)); }}>⠿</span>
+      <span className="queue-grip" data-issue={issue.number} draggable aria-hidden="true" onDragStart={issueDragStarted}>⠿</span>
       {(['earlier', 'later'] as QueueDirection[]).map((direction) => <button key={direction} aria-label={`${QUEUE_MOVE_LABELS[direction]} (#${issue.number})`} disabled={!canMoveInQueue(order, issue.number, direction)} onClick={(event) => { void onReorder(issueMoveRequested(event, order, issue.number, direction)); }}>{direction === 'earlier' ? '▲' : '▼'}</button>)}
       {/* The move-to control belongs to the selected row alone. Offering every
           slot on every row would render one option per slot per row, so a

@@ -1,6 +1,7 @@
 import { generateSigningKey } from './canonical.js';
 import {
   ANTONINA_NAMESPACE,
+  BoardDeletedError,
   BoardMissingError,
   DEFAULT_BOARD_BASE_URL,
   SIGNED_BOARD_KEY,
@@ -43,6 +44,7 @@ import {
 
 export {
   ANTONINA_NAMESPACE,
+  BoardDeletedError,
   BoardMissingError,
   DEFAULT_BOARD_BASE_URL,
   SIGNED_BOARD_KEY,
@@ -66,9 +68,6 @@ export class AntoninaApiError extends Error {}
 
 /** The signed board exists but this client cannot verify it without a trust anchor. */
 export class BoardTrustRequiredError extends AntoninaApiError {}
-
-/** The signed board was deliberately deleted, so its key can never be used again. */
-export class BoardDeletedError extends AntoninaApiError {}
 
 /**
  * Skrynia refused the storage capability this credential carries, so the
@@ -469,7 +468,7 @@ export class BoardApi {
   /** `acceptDeleted` is set only by the append that performed the deletion. */
   private acceptStored(stored: StoredSignedBoard, acceptDeleted = false): void {
     if (stored.state.deleted && !acceptDeleted) {
-      throw new BoardDeletedError('Antonina board has been deleted');
+      throw new BoardDeletedError();
     }
     this.rememberedHead = stored.state.head;
     this.refreshEffectiveCapabilities(stored.state);
@@ -524,7 +523,7 @@ export class BoardApi {
       this.storageRejected = false;
       return stored;
     } catch (error) {
-      if (error instanceof SignedBoardStoreError && error.status === 403) {
+      if (error instanceof SignedBoardStoreError && error.status === 403 && error.method === 'PUT') {
         this.storageRejected = true;
         throw new BoardStorageRejectedError(error);
       }

@@ -130,7 +130,13 @@ test('mutating commands name initialization before they demand a credential', as
   const methods = [];
   const reader = client(server, { fetch: async (url, init = {}) => { methods.push(init.method); return server.fetch(url, init); } });
 
-  for (const command of [['access'], ['create', 'Mine']]) {
+  for (const command of [
+    ['access'],
+    ['create', 'Mine'],
+    ['close', '1'],
+    ['resource', 'add', '1', 'lubko://host', '/workspace'],
+    ['credential', 'delegate', 'issue.create'],
+  ]) {
     const { code, err } = await run(command, { createClient: () => reader });
     assert.equal(code, 1, command.join(' '));
     assert.equal(err[0], missing, command.join(' '));

@@ -29,10 +29,13 @@ const DEFAULT_MAX_ATTEMPTS = 6;
 export class SignedBoardStoreError extends Error {
   /** The Skrynia HTTP status, when this error came from a response. */
   readonly status: number | null;
+  /** The Skrynia HTTP method this request used, when it reached a response. */
+  readonly method: string | null;
 
-  constructor(message: string, options: { cause?: unknown; status?: number } = {}) {
+  constructor(message: string, options: { cause?: unknown; status?: number; method?: string } = {}) {
     super(message, { cause: options.cause });
     this.status = options.status ?? null;
+    this.method = options.method ?? null;
   }
 }
 
@@ -40,6 +43,13 @@ export class SignedBoardStoreError extends Error {
 export class BoardMissingError extends SignedBoardStoreError {
   constructor() {
     super('Antonina signed board does not exist');
+  }
+}
+
+/** The signed board was deliberately deleted, so its key can never be used again. */
+export class BoardDeletedError extends SignedBoardStoreError {
+  constructor() {
+    super('Antonina board has been deleted');
   }
 }
 
@@ -152,6 +162,19 @@ export class SignedBoardStore {
     return stored;
   }
 
+  /**
+   * The read an operation is built on. A board deleted since this client last
+   * read it can never carry another operation, whoever signed it.
+   */
+  private async requireAppendable(
+    anchor: BoardTrustAnchor,
+    previouslyAcceptedHead?: string | null,
+  ): Promise<StoredSignedBoard> {
+    const stored = await this.require(anchor, previouslyAcceptedHead);
+    if (stored.state.deleted) throw new BoardDeletedError();
+    return stored;
+  }
+
   async signedBoardExists(): Promise<boolean> {
     const response = await this.fetcher(this.url, { cache: 'no-store' });
     if (response.status === 404) return false;
@@ -211,7 +234,7 @@ export class SignedBoardStore {
     const signer = credentialSigningKey(credential);
     const requestedTimestamp = request.timestamp ?? this.now().toISOString();
     const nonce = request.nonce ?? this.newId();
-    let stored = await this.require(anchor, previouslyAcceptedHead);
+    let stored = await this.requireAppendable(anchor, previouslyAcceptedHead);
 
     for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
       const timestamp = canonicalTimestampAtOrAfter(
@@ -244,7 +267,7 @@ export class SignedBoardStore {
         body: JSON.stringify(candidate),
       });
       if (response.status === 412) {
-        stored = await this.require(anchor, stored.state.head);
+        stored = await this.requireAppendable(anchor, stored.state.head);
         continue;
       }
       if (response.status !== 200) throw this.httpError('PUT', SIGNED_BOARD_KEY, response);
@@ -267,7 +290,7 @@ export class SignedBoardStore {
   private httpError(method: string, key: string, response: Response): SignedBoardStoreError {
     return new SignedBoardStoreError(
       `Skrynia ${method} ${ANTONINA_NAMESPACE}/${key} failed (${response.status})`,
-      { status: response.status },
+      { status: response.status, method },
     );
   }
 }

@@ -221,6 +221,57 @@ test('board CLI hands the initializer the copyable trust anchor and credential',
   assert.equal(credential.rootKeyId, anchor.rootKeyId);
 });
 
+test('board CLI prints only the credential for a pipe-friendly initialization', async () => {
+  const server = fakeSkrynia();
+  const { code, out, err } = await run(['initialize', '--credential'], { createClient: () => client(server) });
+
+  assert.equal(code, 0);
+  assert.deepEqual(err, []);
+  assert.equal(out.length, 1);
+  const credential = JSON.parse(out[0]);
+  assert.equal(out[0], serializeBoardCredential(credential));
+  assert.equal(credential.storageCapability, server.capability);
+});
+
+test('board CLI prints only the trust anchor for a pipe-friendly initialization', async () => {
+  const server = fakeSkrynia();
+  const { code, out, err } = await run(['initialize', '--trust-anchor'], { createClient: () => client(server) });
+
+  assert.equal(code, 0);
+  assert.deepEqual(err, []);
+  assert.equal(out.length, 1);
+  const anchor = JSON.parse(out[0]);
+  assert.equal(out[0], serializeBoardTrustAnchor(anchor));
+  assert.ok(anchor.rootKeyId);
+  assert.equal('credential' in anchor, false);
+});
+
+test('board CLI refuses to print both initialization values at once', async () => {
+  const server = fakeSkrynia();
+  const { code, out, err } = await run(
+    ['initialize', '--credential', '--trust-anchor'],
+    { createClient: () => client(server) },
+  );
+
+  assert.equal(code, 1);
+  assert.deepEqual(out, []);
+  assert.match(err[0], /one value at a time/);
+  assert.equal(server.signed, null);
+});
+
+test('a pipe-friendly initialization leaves stdout empty when the board already exists', async () => {
+  const server = fakeSkrynia();
+  await client(server).initialize();
+
+  for (const argv of [['initialize', '--credential'], ['initialize', '--trust-anchor']]) {
+    const { code, out, err } = await run(argv, { createClient: () => client(server) });
+    assert.equal(code, 1);
+    assert.deepEqual(out, []);
+    assert.match(err[0], /already exists/);
+    assert.equal(/storageCapability|rootKeyId/.test(err.join('\n')), false);
+  }
+});
+
 test('board CLI refuses environment credentials it cannot parse or reconcile', async () => {
   const malformed = await run(['access'], { env: { [BOARD_CREDENTIAL_ENV]: 'not json' } });
   assert.equal(malformed.code, 1);

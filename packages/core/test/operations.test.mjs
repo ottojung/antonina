@@ -63,7 +63,7 @@ test('equal and attenuated delegated capabilities are accepted', async () => {
   const { root, anchor, log } = await initialized();
   const parent = await generateSigningKey();
   const child = await generateSigningKey();
-  const parentCapabilities = ['authority.delegate', 'issue.create', 'issue.comment'];
+  const parentCapabilities = ['authority.delegate', 'issue.comment', 'issue.create'];
 
   await append(log, root, 'authority.delegate', {
     childKeyId: parent.keyId,
@@ -73,7 +73,7 @@ test('equal and attenuated delegated capabilities are accepted', async () => {
   await append(log, parent, 'authority.delegate', {
     childKeyId: child.keyId,
     childPublicKey: child.publicKey,
-    capabilities: ['issue.create', 'issue.comment'],
+    capabilities: ['issue.comment', 'issue.create'],
   }, 2);
   await append(log, child, 'issue.create', { number: 1, title: 'Delegated', body: '' }, 3);
 

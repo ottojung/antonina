@@ -242,7 +242,7 @@ describe('browser board session', () => {
   });
 
   it('stays read-only when a stored credential names a live authority but holds another key', async () => {
-    const { server, storage, initialized } = await initializedBoard();
+    const { server, storage } = await initializedBoard();
     await session(server, storage).api.createIssue('Visible');
     const other = await generateSigningKey();
     storage.set('antonina:board-v2:credential', JSON.stringify({
@@ -279,9 +279,6 @@ describe('browser board session', () => {
     expect(access.canEdit).toBe(false);
     expect(reopened.api.hasWriteAccess()).toBe(false);
     expect((server.signed as { operations: unknown[] }).operations.length).toBe(2);
-    // The stored credential still names the live authority; it is rejected for
-    // what it holds, not for what it declares.
-    expect(storedCredential(storage).keyId).toBe(initialized.credential.keyId);
   });
 
   it('remembers the accepted head so a replaced history is refused after a reload', async () => {

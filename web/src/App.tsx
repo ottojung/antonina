@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { createBrowserBoardApi } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { accessCallout, boardDeleted, boardLoadFailed, boardLoaded, DELETED_COPY, emptyIssueList, filterLabel, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, loadedBoard, trustRequired, visibleIssues, FIRST_RUN_COPY, ISSUE_FORM_HINT, TRUST_COPY, type BoardLoad, type IssueFilter } from './ui-state';
+import { COMPOSER_READ_ONLY_CALLOUT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, DELETED_COPY, emptyIssueList, filterLabel, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, loadedBoard, trustRequired, visibleIssues, FIRST_RUN_COPY, ISSUE_FORM_HINT, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type IssueFilter, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -15,8 +15,7 @@ export default function App() {
   const [selectedNumber, setSelectedNumber] = useState<number>();
   const [filter, setFilter] = useState<IssueFilter>('open');
   const [displayName, setDisplayName] = useState(() => window.localStorage.getItem(DISPLAY_NAME_KEY) ?? '');
-  const [hasWriteAccess, setHasWriteAccess] = useState(false);
-  const [credentialRejected, setCredentialRejected] = useState(false);
+  const [access, setAccess] = useState<BoardAccess>('read-only');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [credentialInput, setCredentialInput] = useState('');
   const [anchorInput, setAnchorInput] = useState('');
@@ -31,13 +30,11 @@ export default function App() {
       const board = await session.read();
       setLoad(boardLoaded(board));
       if (board === null) {
-        setHasWriteAccess(false);
-        setCredentialRejected(false);
+        setAccess('read-only');
         setError(undefined);
         return;
       }
-      setHasWriteAccess(session.hasCredential() && api.hasWriteAccess());
-      setCredentialRejected(session.hasCredential() && api.accessState().credentialRejection !== null);
+      setAccess(session.hasCredential() ? boardAccess(api.hasWriteAccess(), api.accessState().credentialRejection !== null) : 'read-only');
       setError(undefined);
     } catch (cause) {
       if (trustRequired(cause)) {
@@ -64,8 +61,8 @@ export default function App() {
 
   const visible = board ? visibleIssues(board.issues, filter) : [];
   const counts = issueCounts(board?.issues ?? []);
+  const hasWriteAccess = access === 'editable';
   const empty = emptyIssueList(filter, hasWriteAccess);
-  const callout = accessCallout(hasWriteAccess, credentialRejected);
   const selected = board?.issues.find((issue) => issue.number === selectedNumber);
   useEffect(() => { if (selected && !visible.some((issue) => issue.number === selected.number)) setSelectedNumber(undefined); }, [selected, visible]);
 
@@ -101,14 +98,13 @@ export default function App() {
   async function saveCredential(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError(undefined);
     try {
-      const access = await session.enableEditing(credentialInput);
-      setHasWriteAccess(access.canEdit);
-      setCredentialRejected(access.credentialRejection !== null);
+      const enabled = await session.enableEditing(credentialInput);
+      setAccess(enabled.canEdit ? 'editable' : 'read-only');
       setCredentialInput('');
       setNotice('Write access saved in this browser');
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'The credential could not be saved'); }
   }
-  function clearCredential() { session.clearCredential(); setHasWriteAccess(false); setCredentialRejected(false); setNotice('Write access cleared from this browser'); }
+  function clearCredential() { session.clearCredential(); setAccess('read-only'); setNotice('Write access cleared from this browser'); }
   async function copyKey(text: string | null, label: string) {
     if (!text) return;
     try { await navigator.clipboard.writeText(text); setNotice(`${label} copied`); }
@@ -128,7 +124,7 @@ export default function App() {
     try {
       const { board: created } = await session.initialize();
       setLoad({ status: 'ready', board: created });
-      setHasWriteAccess(true);
+      setAccess('editable');
       setNotice('Board initialized; this browser holds the root signing credential');
     } catch (cause) {
       const { load: resolved, error } = firstRunResolved(await resolveFirstRun(), cause);
@@ -162,12 +158,12 @@ export default function App() {
         <div className="pane-heading"><div><p className="eyebrow">One board, everyone’s work</p><h1>{view === 'issues' ? 'Issues' : 'Resources'}</h1><p>{view === 'issues' ? 'Track what needs attention and discuss the details together.' : 'Registered paths are protected while at least one dependent Antonina issue remains open.'}</p></div></div>
         {view === 'issues' ? <>
           {hasWriteAccess ? <form className="create-form" onSubmit={createIssue}><label htmlFor="new-issue">Create an issue</label><input ref={createInputRef} id="new-issue" name="title" placeholder="What needs doing?" maxLength={200} required /><label htmlFor="new-issue-body">Description</label><textarea id="new-issue-body" name="body" placeholder="Describe the goal, context, or acceptance criteria…" maxLength={10_000} /><small>{ISSUE_FORM_HINT}</small><button type="submit">Create issue</button></form>
-            : <div className="access-callout"><div><strong>{callout?.title}</strong><p>{callout?.body}</p></div><button onClick={() => setSettingsOpen(true)}>{callout?.action}</button></div>}
+            : <AccessCallout access={access} className="access-callout" onAction={() => setSettingsOpen(true)} />}
           <nav className="filters" aria-label="Filter issues">{(['open', 'closed', 'all'] as const).map((value) => <button key={value} className={filter === value ? 'active' : ''} aria-pressed={filter === value} onClick={() => setFilter(value)}>{filterLabel(value)}<span>{counts[value]}</span></button>)}</nav>
           <div className="issue-list" aria-label="Issues">{visible.map((issue) => <button key={issue.number} className={`issue-row ${issue.number === selectedNumber ? 'selected' : ''}`} onClick={() => setSelectedNumber(issue.number)} aria-current={issue.number === selectedNumber ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{issue.messages.length} messages{issue.body ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>)}{!visible.length && <div className="empty-state"><h2>{empty.title}</h2><p>{empty.body}</p></div>}</div>
-        </> : <ResourcesView board={board!} issues={board!.issues} hasWriteAccess={hasWriteAccess} credentialRejected={credentialRejected} onOpenIssue={openIssue} onAdd={(host, path, number) => run(() => api.addResourceDependency(host, path, number), 'Resource dependency added')} onRemove={(resource, number) => run(() => api.removeResourceDependency(resource.host, resource.path, number), resource.issueNumbers.length === 1 ? 'Dependency removed; resource unregistered' : 'Resource dependency removed')} onEnableEditing={() => setSettingsOpen(true)} />}
+        </> : <ResourcesView board={board!} issues={board!.issues} access={access} onOpenIssue={openIssue} onAdd={(host, path, number) => run(() => api.addResourceDependency(host, path, number), 'Resource dependency added')} onRemove={(resource, number) => run(() => api.removeResourceDependency(resource.host, resource.path, number), resource.issueNumbers.length === 1 ? 'Dependency removed; resource unregistered' : 'Resource dependency removed')} onEnableEditing={() => setSettingsOpen(true)} />}
       </aside>
-      {view === 'issues' ? selected ? <Thread issue={selected} hasWriteAccess={hasWriteAccess} credentialRejected={credentialRejected} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.number, body), 'Description updated')} close={() => void run(() => api.close(selected.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.number), 'Issue reopened')} back={() => setSelectedNumber(undefined)} />
+      {view === 'issues' ? selected ? <Thread issue={selected} access={access} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.number, body), 'Description updated')} close={() => void run(() => api.close(selected.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.number), 'Issue reopened')} back={() => setSelectedNumber(undefined)} />
         : <section className="thread welcome"><div className="welcome-mark" aria-hidden="true">A</div><p className="eyebrow">Shared issue board</p><h2>Choose an issue to join the conversation.</h2></section> : null}
     </main>
     {settingsOpen && <SettingsPanel displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} hasWriteAccess={hasWriteAccess} credentialInput={credentialInput} setCredentialInput={setCredentialInput} saveCredential={saveCredential} clearCredential={clearCredential} credentialText={session.credentialText()} trustAnchorText={session.trustAnchorText()} copyKey={copyKey} close={closeSettings} />}
@@ -182,13 +178,18 @@ function TrustAnchor({ error, anchorInput, setAnchorInput, trusting, trust, retr
   return <section className="first-run"><p className="eyebrow">Antonina</p><h1>{TRUST_COPY.title}</h1><p>{TRUST_COPY.body}</p><form className="stacked-form" onSubmit={trust}><label htmlFor="trust-anchor">Board trust anchor</label><textarea id="trust-anchor" value={anchorInput} onChange={(event) => setAnchorInput(event.target.value)} required /><small>{TRUST_COPY.hint}</small>{error && <p role="alert">{error}</p>}<div className="first-run-actions"><button className="primary" disabled={trusting || !anchorInput.trim()} type="submit">{TRUST_COPY.action}</button><button className="quiet" disabled={trusting} onClick={retry}>{FIRST_RUN_COPY.recheck}</button></div></form></section>;
 }
 
-function ResourcesView({ board, issues, hasWriteAccess, credentialRejected, onOpenIssue, onAdd, onRemove, onEnableEditing }: { board: Board; issues: BoardIssue[]; hasWriteAccess: boolean; credentialRejected: boolean; onOpenIssue: (number: number) => void; onAdd: (host: string, path: string, number: number) => Promise<unknown>; onRemove: (resource: BoardResource, number: number) => Promise<unknown>; onEnableEditing: () => void }) {
+function AccessCallout({ access, readOnly, className, onAction }: { access: ReadOnlyAccess; readOnly?: AccessCallout; className?: string; onAction: () => void }) {
+  const callout = accessCallout(access, readOnly);
+  return <div className={className}><div><strong>{callout.title}</strong><p>{callout.body}</p></div><button onClick={onAction}>{callout.action}</button></div>;
+}
+
+function ResourcesView({ board, issues, access, onOpenIssue, onAdd, onRemove, onEnableEditing }: { board: Board; issues: BoardIssue[]; access: BoardAccess; onOpenIssue: (number: number) => void; onAdd: (host: string, path: string, number: number) => Promise<unknown>; onRemove: (resource: BoardResource, number: number) => Promise<unknown>; onEnableEditing: () => void }) {
   const grouped = groupResources(board.resources);
-  const callout = accessCallout(hasWriteAccess, credentialRejected);
+  const hasWriteAccess = access === 'editable';
   async function add(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await onAdd(String(data.get('host')), String(data.get('path')), Number(data.get('issue'))); if (result) form.reset(); }
   return <div className="resources-view">
-    {hasWriteAccess && <form className="resource-form" onSubmit={add}><h2>Register a resource</h2><p>Add a host and path, protected by at least one open issue.</p><label htmlFor="resource-host">Lubko host</label><input id="resource-host" name="host" placeholder="lubko://server-name" required /><label htmlFor="resource-path">Absolute path</label><input id="resource-path" name="path" placeholder="/registered/path" required /><label htmlFor="resource-issue">Open issue</label><select id="resource-issue" name="issue" required><option value="">Choose an open issue</option>{issues.filter((issue) => issue.state === 'open').map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add dependency</button></form>}
-    {callout && <div className="access-callout"><div><strong>{callout.title}</strong><p>{callout.body}</p></div><button onClick={onEnableEditing}>{callout.action}</button></div>}
+    {hasWriteAccess && <form className="resource-form" onSubmit={add}><h2>Register a resource</h2><p>Add a host and path, protected by at least one open issue.</p><label htmlFor="resource-host">Lubko host</label><input id="resource-host" name="host" placeholder="lubko://server-name" required /><label htmlFor="resource-path">Absolute path</label><input id="resource-path" name="path" placeholder="/registered/path" required /><label htmlFor="resource-issue">Open issue</label><select id="resource-issue" name="issue" required><option value="">Choose an issue</option>{issues.filter((issue) => issue.state === 'open').map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add dependency</button></form>}
+    {access !== 'editable' && <AccessCallout access={access} className="access-callout" onAction={onEnableEditing} />}
 
     {grouped.map(([host, resources]) => <section className="resource-host" key={host}><h2>{host}</h2>{resources.map((resource) => <article className="resource-card" key={resource.path}><header><code>{resource.path}</code><span className={`resource-state ${resourceState(resource, issues)}`}>{resourceState(resource, issues)}</span></header><div className="dependency-chips">{resource.issueNumbers.map((number) => { const issue = issues.find((entry) => entry.number === number)!; return <span className="dependency-chip" key={number}><button onClick={() => onOpenIssue(number)}>#{number} {issue.title}</button><span className={`state-label ${issue.state}`}>{issue.state}</span>{hasWriteAccess && <button aria-label={`Remove issue ${number}`} onClick={() => void onRemove(resource, number)}>×</button>}</span>; })}</div>{hasWriteAccess && <AddDependency resource={resource} issues={issues} add={onAdd} />}</article>)}</section>)}
     {!board.resources.length && <div className="empty-state"><h2>No resources registered</h2><p>Registered paths appear here grouped by Lubko host.</p></div>}
@@ -196,15 +197,15 @@ function ResourcesView({ board, issues, hasWriteAccess, credentialRejected, onOp
 }
 function AddDependency({ resource, issues, add }: { resource: BoardResource; issues: BoardIssue[]; add: (host: string, path: string, number: number) => Promise<unknown> }) { const options = issues.filter((issue) => issue.state === 'open' && !resource.issueNumbers.includes(issue.number)); if (!options.length) return null; return <form className="dependency-add" onSubmit={async (event) => { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await add(resource.host, resource.path, Number(data.get('issue'))); if (result) form.reset(); }}><select name="issue" required defaultValue=""><option value="" disabled>Add open issue dependency…</option>{options.map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add</button></form>; }
 
-function Thread({ issue, hasWriteAccess, credentialRejected, displayName, setDisplayName, saveDisplayName, openSettings, comment, editBody, close, reopen, back }: { issue: BoardIssue; hasWriteAccess: boolean; credentialRejected: boolean; displayName: string; setDisplayName: (value: string) => void; saveDisplayName: (event?: FormEvent<HTMLFormElement>) => void; openSettings: () => void; comment: (event: FormEvent<HTMLFormElement>) => Promise<void>; editBody: (body: string) => Promise<unknown>; close: () => void; reopen: () => void; back: () => void }) {
+function Thread({ issue, access, displayName, setDisplayName, saveDisplayName, openSettings, comment, editBody, close, reopen, back }: { issue: BoardIssue; access: BoardAccess; displayName: string; setDisplayName: (value: string) => void; saveDisplayName: (event?: FormEvent<HTMLFormElement>) => void; openSettings: () => void; comment: (event: FormEvent<HTMLFormElement>) => Promise<void>; editBody: (body: string) => Promise<unknown>; close: () => void; reopen: () => void; back: () => void }) {
   const [editing, setEditing] = useState(false); const [body, setBody] = useState(issue.body);
-  const callout = accessCallout(hasWriteAccess, credentialRejected);
+  const hasWriteAccess = access === 'editable';
   useEffect(() => { setBody(issue.body); setEditing(false); }, [issue.body, issue.number]);
   const date = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
   return <article className="thread"><button className="back-button" onClick={back}><span aria-hidden="true">←</span> All issues</button><header className="thread-header"><div className="thread-title"><p className="eyebrow">Issue #{issue.number} <span className={`state-label ${issue.state}`}>{issue.state}</span></p><h1>{issue.title}</h1><p>Updated {formatUpdatedAt(issue.updatedAt)} · {issue.messages.length} messages</p></div>{hasWriteAccess ? <button className={`state-action ${issue.state}`} onClick={issue.state === 'open' ? close : reopen}>{issue.state === 'open' ? 'Close issue' : 'Reopen issue'}</button> : <span className="read-only-label">Read-only view</span>}</header>
     <section className="issue-description"><div className="description-heading"><h2>Description</h2>{hasWriteAccess && issue.state === 'open' && !editing && <button onClick={() => setEditing(true)}>Edit description</button>}</div>{editing ? <form onSubmit={async (event) => { event.preventDefault(); const result = await editBody(body); if (result) setEditing(false); }}><textarea value={body} onChange={(event) => setBody(event.target.value)} maxLength={10_000} aria-label="Issue description" /><div><button type="submit">Save description</button><button type="button" onClick={() => { setBody(issue.body); setEditing(false); }}>Cancel</button></div></form> : issue.body ? <p>{issue.body}</p> : <p className="empty-description">No description was provided.</p>}</section>
     <section className="messages" aria-label="Issue conversation"><h2>Conversation</h2>{issue.messages.length ? issue.messages.map((message) => <article className="message" key={message.id}><div className="message-meta"><span className="avatar" aria-hidden="true">{message.author.slice(0, 1).toUpperCase()}</span><div><strong>{message.author}</strong><time dateTime={message.createdAt}>{date.format(new Date(message.createdAt))}</time></div></div><p>{message.body}</p></article>) : <div className="conversation-empty"><h2>No conversation yet</h2><p>Add the first message to share context or ask a question.</p></div>}</section>
-    <div className="composer-area">{callout ? <div className="composer-access"><div><strong>{callout.title}</strong><p>{callout.body}</p></div><button onClick={openSettings}>{callout.action}</button></div> : !displayName.trim() ? <form className="name-prompt" onSubmit={saveDisplayName}><label htmlFor="composer-name">Before you post, tell everyone who you are</label><div><input id="composer-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} required /><button type="submit">Save name</button></div></form> : <form className="composer" onSubmit={comment}><div className="composer-heading"><label htmlFor="comment-body">Add a message</label><span>Posting as <strong>{displayName}</strong></span></div><textarea id="comment-body" name="body" maxLength={10_000} required /><div><span>Keep it useful and concise.</span><button type="submit">Post message</button></div></form>}</div>
+    <div className="composer-area">{access !== 'editable' ? <AccessCallout access={access} readOnly={COMPOSER_READ_ONLY_CALLOUT} className="composer-access" onAction={openSettings} /> : !displayName.trim() ? <form className="name-prompt" onSubmit={saveDisplayName}><label htmlFor="composer-name">Before you post, tell everyone who you are</label><div><input id="composer-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} required /><button type="submit">Save name</button></div></form> : <form className="composer" onSubmit={comment}><div className="composer-heading"><label htmlFor="comment-body">Add a message</label><span>Posting as <strong>{displayName}</strong></span></div><textarea id="comment-body" name="body" maxLength={10_000} required /><div><span>Keep it useful and concise.</span><button type="submit">Post message</button></div></form>}</div>
   </article>;
 }
 

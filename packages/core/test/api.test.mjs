@@ -99,6 +99,7 @@ test('a trust anchor permits verified read-only replay without a credential', as
   const board = await reader.loadBoard();
   assert.equal(board.issues[0].title, 'Visible');
   assert.equal(reader.hasWriteAccess(), false);
+  assert.equal(reader.accessState().credentialRejection, null);
   await assert.rejects(() => reader.createIssue('Blocked'), /credential is required/);
 });
 
@@ -295,6 +296,32 @@ test('a credential whose key ID is not derived from the live public key is read-
   await assert.rejects(() => client.verifyCredential(), /key ID does not match its public key/);
   await assert.rejects(() => client.createIssue('Impostor'), /key ID does not match its public key/);
   assert.equal(server.signed.operations.length, 2, 'a refused credential must not sign an operation');
+});
+
+test('a well-formed credential for a key this board never registered is read-only', async () => {
+  const server = fakeSkrynia();
+  const root = api(server);
+  const initialized = await root.initialize();
+  await root.createIssue('Visible');
+
+  const foreign = await generateSigningKey();
+  const client = api(server, {
+    credential: {
+      ...initialized.credential,
+      keyId: foreign.keyId,
+      publicKey: foreign.publicKey,
+      privateKey: foreign.privateKey,
+    },
+    trustAnchor: initialized.trustAnchor,
+    rememberedHead: initialized.head,
+  });
+  assert.equal((await client.readBoard()).issues[0].title, 'Visible');
+  assert.equal(client.hasWriteAccess(), false);
+  assert.deepEqual(client.getEffectiveCapabilities(), []);
+  assert.equal(client.accessState().credentialRejection, 'unknown');
+  await assert.rejects(() => client.verifyCredential(), /unknown or revoked/);
+  await assert.rejects(() => client.createIssue('Impostor'), /unknown or revoked/);
+  assert.equal(server.signed.operations.length, 2, 'a credential for an unregistered key must not sign an operation');
 });
 
 test('a deleted board is reported as its own state, not as a read failure', async () => {

@@ -155,18 +155,25 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function summaryTimestamp(meta: AgentMetadata, field: string, errors: string[]): number | null {
+  const raw = meta[field];
+  if (raw === undefined || raw === null) return null;
+  const value = persistedTimestamp(raw);
+  if (value === null) errors.push(field);
+  return value;
+}
+
 function summary(meta: AgentMetadata): {
   created_at: number | null;
+  last_activity_at: number | null;
+  finished_at: number | null;
   prompts: number | null;
   cwd: string | null;
   title: string | null;
   metadata_errors?: string[];
 } {
   const errors: string[] = [];
-  const created = meta.created_at === undefined || meta.created_at === null
-    ? null
-    : persistedTimestamp(meta.created_at);
-  if (meta.created_at !== undefined && meta.created_at !== null && created === null) errors.push('created_at');
+  const createdAt = summaryTimestamp(meta, 'created_at', errors);
   const prompts = typeof meta.prompt_count === 'number' && Number.isSafeInteger(meta.prompt_count) && meta.prompt_count >= 0
     ? meta.prompt_count
     : meta.prompt_count === undefined
@@ -178,9 +185,31 @@ function summary(meta: AgentMetadata): {
   const title = typeof meta.title === 'string' ? meta.title : meta.title === undefined || meta.title === null
     ? null
     : (errors.push('title'), null);
-  return errors.length > 0
-    ? { created_at: created, prompts, cwd, title, metadata_errors: errors }
-    : { created_at: created, prompts, cwd, title };
+  const finishedAt = summaryTimestamp(meta, 'finished_at', errors);
+  const lastActivityAt = summaryTimestamp(meta, 'last_activity_at', errors);
+  const result = {
+    created_at: createdAt,
+    last_activity_at: lastActivityAt,
+    finished_at: finishedAt,
+    prompts,
+    cwd,
+    title,
+  };
+  return errors.length > 0 ? { ...result, metadata_errors: errors } : result;
+}
+
+function listEntryJson(agentId: string, state: string, item: ReturnType<typeof summary>): Record<string, unknown> {
+  return {
+    id: agentId,
+    state,
+    prompts: item.prompts,
+    cwd: item.cwd,
+    title: item.title,
+    created_at: item.created_at,
+    last_activity_at: item.last_activity_at,
+    finished_at: item.finished_at,
+    ...(item.metadata_errors === undefined ? {} : { metadata_errors: item.metadata_errors }),
+  };
 }
 
 function humanAge(epoch: number | null): string {
@@ -241,20 +270,21 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
   const selected = limit === null ? entries : entries.slice(0, limit);
   if (parsed.flags.has('--json')) {
     context.io.stdout(stableJson({
-      agents: selected.map(({ agentId, state, summary: item }) => ({ id: agentId, state, ...item })),
+      agents: selected.map(({ agentId, state, summary: item }) => listEntryJson(agentId, state, item)),
     }));
   } else if (selected.length === 0) {
     context.io.stdout('(no agents)');
   } else {
     context.io.stdout('ID  STATE  P  AGE  CWD  TITLE');
     for (const entry of selected) {
+      const errors = new Set(entry.summary.metadata_errors ?? []);
       context.io.stdout([
         entry.agentId,
         entry.state,
-        entry.summary.prompts ?? 0,
-        humanAge(entry.summary.created_at),
-        entry.summary.cwd ?? '',
-        (entry.summary.title ?? '').replace(/\n/g, ' '),
+        errors.has('prompt_count') ? '<invalid>' : entry.summary.prompts ?? 0,
+        errors.has('created_at') ? '<invalid>' : humanAge(entry.summary.created_at),
+        errors.has('cwd') ? '<invalid>' : entry.summary.cwd ?? '',
+        errors.has('title') ? '<invalid>' : (entry.summary.title ?? '').replace(/\n/g, ' '),
       ].join('  '));
     }
   }
@@ -263,30 +293,60 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
 
 function statusJson(agentId: string, meta: AgentMetadata): Record<string, unknown> {
   const item = summary(meta);
-  const state = deriveState(meta);
-  return {
+  const errors = [...(item.metadata_errors ?? [])];
+  const optionalString = (field: string): string | null => {
+    const raw = meta[field];
+    if (raw === undefined || raw === null) return null;
+    if (typeof raw !== 'string' || raw.length === 0) {
+      errors.push(field);
+      return null;
+    }
+    return raw;
+  };
+  const positiveInteger = (field: string): number | null => {
+    const raw = meta[field];
+    if (raw === undefined || raw === null) return null;
+    if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw <= 0) {
+      errors.push(field);
+      return null;
+    }
+    return raw;
+  };
+  const integer = (field: string): number | null => {
+    const raw = meta[field];
+    if (raw === undefined || raw === null) return null;
+    if (typeof raw !== 'number' || !Number.isSafeInteger(raw)) {
+      errors.push(field);
+      return null;
+    }
+    return raw;
+  };
+  const startedAt = summaryTimestamp(meta, 'started_at', errors);
+  const exitSignal = positiveInteger('exit_signal');
+  const status: Record<string, unknown> = {
     id: agentId,
-    state,
+    state: deriveState(meta),
     alive: invocationAlive(meta),
-    native_session_id: typeof meta.native_session_id === 'string' ? meta.native_session_id : null,
-    pid: typeof meta.pid === 'number' && Number.isSafeInteger(meta.pid) ? meta.pid : null,
-    pgid: typeof meta.pgid === 'number' && Number.isSafeInteger(meta.pgid) ? meta.pgid : null,
-    runner_pid: typeof meta.runner_pid === 'number' && Number.isSafeInteger(meta.runner_pid) ? meta.runner_pid : null,
+    native_session_id: optionalString('native_session_id'),
+    pid: positiveInteger('pid'),
+    pgid: positiveInteger('pgid'),
+    runner_pid: positiveInteger('runner_pid'),
     cwd: item.cwd,
     title: item.title,
     created_at: item.created_at,
-    started_at: persistedTimestamp(meta.started_at),
-    finished_at: persistedTimestamp(meta.finished_at),
-    last_activity_at: persistedTimestamp(meta.last_activity_at),
-    exit_code: typeof meta.exit_code === 'number' && Number.isSafeInteger(meta.exit_code) ? meta.exit_code : null,
-    exit_signal: typeof meta.exit_signal === 'number' && Number.isSafeInteger(meta.exit_signal) ? meta.exit_signal : null,
+    started_at: startedAt,
+    finished_at: item.finished_at,
+    last_activity_at: item.last_activity_at,
+    exit_code: integer('exit_code'),
+    exit_signal: exitSignal,
     prompts: item.prompts,
     model: 'opencode/space-bunny-free',
-    variant: typeof meta.variant === 'string' ? meta.variant : null,
+    variant: optionalString('variant'),
     backend_error: sanitizeBackendError(meta.backend_error),
-    log: logPath(agentId, paths({ env: process.env, cwd: process.cwd(), io: { stdout() {}, stderr() {} } })),
-    ...(item.metadata_errors === undefined ? {} : { metadata_errors: item.metadata_errors }),
+    log: '',
   };
+  if (errors.length > 0) status.metadata_errors = errors;
+  return status;
 }
 
 async function cmdStatus(args: string[], context: AgentCommandContext): Promise<number> {
@@ -300,16 +360,21 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
   if (parsed.flags.has('--json')) {
     context.io.stdout(JSON.stringify(status, null, 2));
   } else {
+    const errors = new Set(Array.isArray(status.metadata_errors) ? status.metadata_errors as string[] : []);
+    const shown = (field: string, value: unknown, fallback = '-'): string => errors.has(field) ? '<invalid>' : String(value ?? fallback);
     context.io.stdout(`agent:      ${agentId}`);
     context.io.stdout(`state:      ${String(status.state)}`);
     context.io.stdout(`alive:      ${status.alive === true ? 'yes' : 'no'}`);
-    context.io.stdout(`cwd:        ${String(status.cwd ?? '-')}`);
-    context.io.stdout(`created:    ${String(status.created_at ?? '-')}`);
-    context.io.stdout(`started:    ${String(status.started_at ?? '-')}`);
-    context.io.stdout(`finished:   ${String(status.finished_at ?? '-')}`);
-    context.io.stdout(`exit code:  ${String(status.exit_code ?? '-')}`);
-    context.io.stdout(`prompts:    ${String(status.prompts ?? 0)}`);
-    context.io.stdout(`title:      ${String(status.title ?? '-')}`);
+    context.io.stdout(`cwd:        ${shown('cwd', status.cwd)}`);
+    context.io.stdout(`created:    ${shown('created_at', status.created_at)}`);
+    context.io.stdout(`started:    ${shown('started_at', status.started_at)}`);
+    context.io.stdout(`finished:   ${shown('finished_at', status.finished_at)}`);
+    context.io.stdout(`exit code:  ${shown('exit_code', status.exit_code)}`);
+    context.io.stdout(`prompts:    ${shown('prompt_count', status.prompts, '0')}`);
+    context.io.stdout(`title:      ${shown('title', status.title)}`);
+    if (errors.size > 0) {
+      context.io.stdout(`metadata:   malformed persisted summary metadata: ${[...errors].join(', ')}`);
+    }
   }
   return EXIT_OK;
 }

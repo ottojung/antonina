@@ -51,6 +51,32 @@ function hasCode(error: unknown, code: string): boolean {
   return error instanceof Error && (error as NodeJS.ErrnoException).code === code;
 }
 
+function agentDirectoryMissing(
+  agentId: string,
+  options: StatePathsOptions,
+  fs: StoreFs,
+  errorKind: 'read' | 'write',
+): boolean {
+  const directory = agentDir(agentId, options);
+  let fd: number;
+  try {
+    fd = fs.openSync(directory, 'r');
+  } catch (error) {
+    if (hasCode(error, 'ENOENT')) return true;
+    const message = `failed to inspect state directory for agent ${agentId}`;
+    if (errorKind === 'read') throw new MetadataReadError(message, { cause: error });
+    throw new MetadataWriteError(message, { cause: error });
+  }
+  try {
+    fs.closeSync(fd);
+  } catch (error) {
+    const message = `failed to close state directory for agent ${agentId}`;
+    if (errorKind === 'read') throw new MetadataReadError(message, { cause: error });
+    throw new MetadataWriteError(message, { cause: error });
+  }
+  return false;
+}
+
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -87,7 +113,10 @@ export function readMeta(agentId: string, options: StatePathsOptions = {}): Agen
   try {
     raw = fs.readFileSync(metaPath(agentId, options), 'utf8') as string;
   } catch (error) {
-    if (hasCode(error, 'ENOENT')) return null;
+    if (hasCode(error, 'ENOENT')) {
+      if (agentDirectoryMissing(agentId, options, fs, 'read')) return null;
+      throw new MetadataReadError(`metadata file is missing for agent ${agentId}`, { cause: error });
+    }
     throw new MetadataReadError(`failed to read metadata for agent ${agentId}`, { cause: error });
   }
 
@@ -152,7 +181,7 @@ export function writeMeta(agentId: string, meta: AgentMetadata, options: StatePa
     }
     try { fs.unlinkSync(temporary); } catch {}
     if (error instanceof MetadataWriteError) throw error;
-    if (hasCode(error, 'ENOENT')) {
+    if (hasCode(error, 'ENOENT') && agentDirectoryMissing(agentId, options, fs, 'write')) {
       throw new AgentStateMissingError(`agent state disappeared while writing metadata for ${agentId}`, { cause: error });
     }
     throw new MetadataWriteError(`failed to persist metadata for agent ${agentId}`, { cause: error });

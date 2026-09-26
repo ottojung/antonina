@@ -34,8 +34,9 @@ export const MANAGED_ROOTS_ENV = 'ANTONINA_COLLECT_ROOTS';
 /**
  * The filesystem surface this loader needs, injected as `store.ts` and
  * `candidate-facts.ts` inject theirs: `realpath` is the only I/O performed, and
- * the seam is what makes the "before any I/O" half of the ordering rule below
- * observable in a test rather than merely asserted in a comment.
+ * the seam is what makes the "before that entry is resolved" half of the
+ * ordering rule below observable in a test rather than merely asserted in a
+ * comment.
  */
 export interface RootsFs {
   realpath: typeof realpathCall;
@@ -126,13 +127,17 @@ function defectSpelling(defect: ManagedRootDefect, spellings: readonly string[])
  *     `managed-roots.ts:135-138` disclaims when it says it "trusts the caller".
  *     This loader is that caller.
  *
- * (b) A spelling that is not canonical is refused *before any I/O*, with core's
- *     own `pathFormDefect` and core's own `path-form` shape, so a relative or
- *     `..`-bearing spelling is never resolved against this process's working
- *     directory and reported back as some path the operator never configured.
- *     The order is load-bearing: form check, then the filesystem-root spelling
- *     check, then `realpath`, then the resolved-root check, then
- *     `validateManagedRoots`. Each step only knows what the previous one proved.
+ * (b) A spelling that is not canonical is refused *before that entry is
+ *     resolved*, with core's own `pathFormDefect` and core's own `path-form`
+ *     shape, so a relative or `..`-bearing spelling is never resolved against
+ *     this process's working directory and reported back as some path the
+ *     operator never configured. The order is load-bearing: form check, then the
+ *     filesystem-root spelling check, then `realpath`, then the resolved-root
+ *     check, then `validateManagedRoots`. Each step only knows what the previous
+ *     one proved. All of these are per-entry, in the order the configuration
+ *     names them: entry N's spelling is judged before entry N is resolved, not
+ *     before any entry is, so an earlier entry has already been resolved by the
+ *     time a later one's defect is decided.
  *
  * (c) A spelling that cannot be resolved is a configuration error reported
  *     against *that* spelling, never dropped. Silently dropping it would leave a
@@ -145,9 +150,11 @@ function defectSpelling(defect: ManagedRootDefect, spellings: readonly string[])
  *     are two different operator mistakes and `isWithin` special-cases
  *     `root === '/'` to `path.startsWith('/')` -- so `/` as a root makes every
  *     containment check this module's own validator supports vacuous. The
- *     spelling is refused before I/O; the resolved coordinate is refused after
- *     the `realpath` that produces it, because one symlink hop from a plausible
- *     directory reaches that state. Neither reaches `validateManagedRoots`.
+ *     spelling is refused before that entry is resolved; the resolved coordinate
+ *     is refused after the `realpath` that produces it, because one symlink hop
+ *     from a plausible directory reaches that state. Like (b), the spelling
+ *     check is per-entry: a later entry whose spelling is `/` is refused after
+ *     the entries before it were resolved. Neither reaches `validateManagedRoots`.
  *
  * (e) A failed validation hands core's `ManagedRootDefect` back by identity and
  *     the success path returns `validateManagedRoots`'s own `roots` value
@@ -173,7 +180,7 @@ export async function loadManagedRoots(
 
   const roots: ManagedCollectionRoot[] = [];
   for (const spelling of spellings) {
-    // (b), first: form, before anything else and before any I/O.
+    // (b), first: form, before anything else and before this entry is resolved.
     const form = pathFormDefect(spelling);
     if (form !== null) {
       return { ok: false, spelling, defect: { kind: 'path-form', path: spelling, defect: form } };

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
@@ -717,6 +718,65 @@ test('a withheld authorization is refused the same way when a field is re-pointe
   authorized.status = 'collectible';
 
   assert.throws(() => commitCollectionDeletion(authorized), /was changed after the re-check/);
+});
+
+/**
+ * The field list `isUnchanged` compares is hand-maintained, so a field added to
+ * `AuthorizedCollection` later would be recorded and never compared: the exact
+ * bug class the re-pointing refusal exists to close. This reads the interface's
+ * own field names out of the source and asserts the commit refuses a write to
+ * each one, so a new field fails here unless `isUnchanged` is updated with it.
+ *
+ * The seal is excluded: it is a module-private symbol a caller cannot even name,
+ * and liveness is membership in the process's own `WeakSet`, so its value on the
+ * caller's object is not what decides anything.
+ */
+async function carriedFieldNames() {
+  const source = await readFile(new URL('../src/collection.ts', import.meta.url), 'utf8');
+  const body = source.match(/export interface AuthorizedCollection \{([^}]*)\}/);
+  assert.notEqual(body, null, 'AuthorizedCollection interface not found in collection.ts');
+  return [...body[1].matchAll(/readonly (?:\[authorizationSeal\]|([A-Za-z][A-Za-z0-9]*))\s*:/g)]
+    .map((match) => match[1])
+    .filter((name) => name !== undefined);
+}
+
+test('every field the authorization carries is compared, by field name rather than by hand', async () => {
+  const fields = await carriedFieldNames();
+  assert.deepEqual(
+    [...fields].sort(),
+    [
+      'boardId',
+      'host',
+      'outcome',
+      'path',
+      'reason',
+      'recheckHead',
+      'snapshotHead',
+      'state',
+      'status',
+    ],
+    'the interface gained or lost a carried field; isUnchanged and this test both follow it',
+  );
+
+  for (const field of fields) {
+    const { writer, open } = await seeded();
+    await writer.close(open[0].number);
+    await writer.close(open[1].number);
+    const claim = openCollectionClaim(await readCollectionSnapshot(HOST, readerFor(writer)), WORKTREE);
+    const authorized = await recheck(claim, writer);
+    assert.equal(authorized.outcome, 'collect', field);
+
+    // Any value the re-check did not record, for whatever the field's type: a
+    // tampered field is a mismatch whatever the caller wrote into it.
+    const issued = authorized[field];
+    authorized[field] = issued === null ? 'forged' : `${issued}-forged`;
+
+    assert.throws(
+      () => commitCollectionDeletion(authorized),
+      /was changed after the re-check/,
+      `a write to ${field} was not refused`,
+    );
+  }
 });
 
 test('a board cannot authorise collecting a configured managed root', async () => {

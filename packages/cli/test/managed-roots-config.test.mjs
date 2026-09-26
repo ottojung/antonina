@@ -142,6 +142,44 @@ test('the two filesystem-root refusals render as two different sentences', async
   });
 });
 
+test('a root reached through a chain of symlinks that ends at the filesystem root is refused', async () => {
+  await withTree(async ({ root }) => {
+    // Two hops, because a refusal proved for one hop is not a refusal proved for
+    // a chain: every hop is followed before the resolved coordinate exists, so
+    // the resolved `/` here is the product of two resolutions and not one.
+    const first = join(root, 'first');
+    const second = join(root, 'second');
+    await symlink('/', first);
+    await symlink(first, second);
+
+    const result = await load({ [MANAGED_ROOTS_ENV]: second });
+
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.deepEqual(result.defect, {
+      kind: 'root-resolves-to-filesystem-root',
+      path: second,
+      resolved: '/',
+    });
+    assert.equal(result.spelling, second);
+    assert.match(describeRootsDefect(result), /resolves to the filesystem root \//);
+  });
+});
+
+test('the filesystem root spelled with a trailing slash is refused as a path form', async () => {
+  await withTree(async () => {
+    // `//` is the same directory as `/`, so if a trailing slash were accepted
+    // this spelling would be a second way to say the refused root. It is refused
+    // earlier, as a non-canonical spelling, and that is the more honest answer:
+    // the spelling is not one this loader accepts at all.
+    const result = await load({ [MANAGED_ROOTS_ENV]: '//' });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.spelling, '//');
+    assert.equal(result.defect.kind, 'path-form');
+    assert.match(describeRootsDefect(result), /canonical absolute POSIX path/);
+  });
+});
+
 test('an unresolvable root is rendered with the loader\'s own message', async () => {
   await withTree(async ({ root }) => {
     const good = join(root, 'good');

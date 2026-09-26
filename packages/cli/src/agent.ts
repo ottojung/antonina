@@ -7,7 +7,7 @@ import {
 } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { configuredModelAvailable } from '../../agent-runtime/src/backend.js';
+import { configuredModelAvailable, sanitizeBackendError } from '../../agent-runtime/src/backend.js';
 import {
   beginInvocation,
   beginStopLike,
@@ -282,7 +282,7 @@ function statusJson(agentId: string, meta: AgentMetadata): Record<string, unknow
     prompts: item.prompts,
     model: 'opencode/space-bunny-free',
     variant: typeof meta.variant === 'string' ? meta.variant : null,
-    backend_error: typeof meta.backend_error === 'object' && meta.backend_error !== null ? meta.backend_error : null,
+    backend_error: sanitizeBackendError(meta.backend_error),
     log: logPath(agentId, paths({ env: process.env, cwd: process.cwd(), io: { stdout() {}, stderr() {} } })),
     ...(item.metadata_errors === undefined ? {} : { metadata_errors: item.metadata_errors }),
   };

@@ -42,11 +42,11 @@ unchanged — the same arithmetic, recomputed from the trees at this head and re
   `delete --force reaps the live runner process before removing the agent` (`:410`) and
   `delete --force cancels an in-flight runner reservation and reports it` (`:468`).
 
-**And three counts change in the segment this front adds**, `f5fe5cc → 65caa73`, which is 15
+**And three counts change in the segment this front adds**, `f5fe5cc → 65caa73`, which is 16
 commits: the `40e5099` fixture-guard front, the `69d0e9b` lock-ownership front, the `5eaa48d`
 release marker, and the `65caa73` board/board-config and web UX work. The attribution is
 established here, not carried, and it reconciles file by file with nothing left over.
-`git diff --numstat f5fe5cc 65caa73 -- 'packages/*/test/*' web/src` names **five** test files
+`git diff --numstat f5fe5cc 65caa73 -- 'packages/*/test/*' web/src` names **seven** test files
 changed and **one** added, and no core test file at all:
 
 - **core 128 → 128, and no core test file is touched in the delta.** `git diff --numstat f5fe5cc
@@ -59,7 +59,8 @@ changed and **one** added, and no core test file at all:
   `releasing a lock never deletes a replacement lock held by the same process`,
   `reclaiming a stale lock never unlinks a different tokenless record sharing pid and start ticks`
   and `lock initialization failure never unlinks another owner's create-before-write window`
-  (verified additions), from `cf1719e` (41 added lines) and `b16c8a1` (68 added lines), merged as
+  (verified additions), one from `0bf1736` (33 added lines), one from `cf1719e` (41 added lines)
+  and two from `b16c8a1` (68 added lines), all merged as
   `69d0e9b`. The one `backend` case is
   `fixture guard: an uncreatable fixture parent is a named failure, never a substitution`
   (`:293`), from `49144e0` in `40e5099`.
@@ -69,13 +70,14 @@ changed and **one** added, and no core test file at all:
   `uncreatable fixture parent` guard case as in `backend.test.mjs`, at `:762`, from `49144e0`. The
   five `board` cases are `a board command takes its trust anchor and credential from the config
   files`, `the config directory follows XDG_CONFIG_HOME and the home fallback`,
-  `a board command refuses a config file it cannot parse and names its path` and
-  `a board command has no identity when the config files are absent` (+4, from `9299298`, the
+  `a board command refuses a config file it cannot parse and names its path`,
+  `a board command has no identity when the config files are absent` and
+  `a trust anchor and credential from different boards are still refused` (+5, from `9299298`, the
   front that reads trust and credential from the config directory rather than the environment) and
   `the injected home resolves the config directory when XDG_CONFIG_HOME is unset` (+1, from
   `3dc3735`). **One name was also removed, and that is stated rather than absorbed into the
   count:** `9299298` deletes `board CLI refuses environment credentials it cannot parse or
-  reconcile` and replaces it with the four cases above, so the net is +4 rather than +5 from that
+  reconcile` and adds five cases in its place, so the net is +4 from that
   commit. `packages/cli/test/collection.test.mjs` is also touched by the delta (8 insertions, 2
   deletions, all of it the `TEST_HOME` injection and the reworded trust-anchor error) but its
   `^test(` count is **33 on both sides** — that commit changed how those 33 tests find their
@@ -109,7 +111,8 @@ choose between "the note is stale" and "it was fixed".
 
 **Which head this table is pinned to.** The tables below are measured on `65caa73`, which **is** the
 release head: `git rev-parse release/2026-09-26-2` = `65caa735bbf00fab3acf092784d93e86fcc45280`
-= `git rev-parse main` = `git rev-parse HEAD` in this worktree. This is the **fourth** re-pin of
+= `git rev-parse main` = `65caa73`, which is the head this note was measured on and the parent of
+this documentation-only commit. This is the **fourth** re-pin of
 this note: it was first pinned to a *front branch* head (`888001e`, on
 `issue-20-per-entry-coverage`, not a release head; that front was voided and its numbers are not
 carried forward), then re-pinned to `79b7880`, then to `f5fe5cc`, and is now re-pinned again to
@@ -477,7 +480,8 @@ nothing else), and `git log --all -SANTONINA_FIXTURE_ROOT` returns **four** comm
 the three the previous pin recorded: `538e009` ("docs: re-pin the verification baseline to the
 merged release head d896ed8"), `40015d8` ("docs: refresh the verification baseline for the
 fixture-front head e2b4d96"), `a0710e8` (the unlanded `79b7880` re-pin front on `issue-20-repin2`),
-and `3e9c418` (the unlanded `f5fe5cc` re-pin front on `issue-20-repin3`). **All four are
+and `3e9c418` (the unlanded `f5fe5cc` re-pin front on `issue-20-repin3`), and this commit, which
+is the fifth. **All four are
 documentation-only refreshes of this note that mention the string in order to deny it**, and the
 count went from three to four only because a fourth re-pin front was cut. Their landing status
 differs and is stated per commit rather than flattened: `538e009` has landed (it is an ancestor of
@@ -746,7 +750,7 @@ which is a deliberately explicit subset of it. This is finding F10 of
 `"test": "npm run test:core && npm run test:runtime && npm run test:cli && npm run test:web"` and
 still contains no `tsc`; `package.json:10-11` are still the only routes to the conformance project;
 and `tsconfig.conformance.json` still exists, which is why the harness runs that `tsc -p`
-conditionally. The 15 commits in this delta touch neither the root scripts nor that project file
+conditionally. The 16 commits in this delta touch neither the root scripts nor that project file
 (`git diff --name-only f5fe5cc 65caa73` names no root `package.json` and no `tsconfig*.json`; it does
 name `packages/cli/package.json`, which is the CLI's own `0.1.1` version bump from `dfa42b4` and
 carries no test route), but the claim was re-read against the tree at this head rather than assumed,

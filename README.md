@@ -32,9 +32,16 @@ This installs the `antonina` executable. Release artifacts should ship the alrea
 
 The Antonina board stores issues and durable resources in Skrynia as a signed operation log under `antonina/board-v2`. The CLI is available as `antonina board`; set `ANTONINA_BOARD_TRUST` to read it and `ANTONINA_BOARD_CREDENTIAL` to write to it.
 
-The board is created deliberately, not by reading it: open the web board and use its first-run **Initialize board** action. That browser becomes the initial editor and keeps the board's root signing credential and its public trust anchor, both copyable from Settings; share the anchor with readers and the credential with editors. No CLI command and no page load creates a missing board, and a second initializer is refused instead of taking the trust root.
+Reading the board never creates it. Creation is deliberate and has a single path, `BoardApi.initialize()`, reached either from the web board's first-run **Initialize board** action or from `antonina board initialize`; there is no second or fallback creation path, and a second initializer is refused with a non-zero exit instead of taking the trust root. The initializer keeps the board's root signing credential and its public trust anchor, both copyable from the web board's Settings; share the anchor with readers and the credential with editors.
 
-`antonina board initialize` prints the same trust anchor and root credential for an agent, and `antonina board credential delegate` mints attenuated credentials.
+`antonina board initialize` prints both values for a human, and `--credential` or `--trust-anchor` prints exactly one serialized value on stdout for a script. Pass at most one of them:
+
+```sh
+antonina board initialize --credential > .antonina-credential
+antonina board initialize --trust-anchor > .antonina-trust
+```
+
+`antonina board credential delegate` mints attenuated credentials.
 
 A credential's Skrynia storage capability can go stale: setup accepts it, the first real mutation is refused, and that client then stays read-only until it is given a freshly copied credential.
 

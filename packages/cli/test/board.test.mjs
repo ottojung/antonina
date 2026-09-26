@@ -221,6 +221,89 @@ test('board CLI hands the initializer the copyable trust anchor and credential',
   assert.equal(credential.rootKeyId, anchor.rootKeyId);
 });
 
+test('board CLI prints only the credential for a pipe-friendly initialization', async () => {
+  const server = fakeSkrynia();
+  const { code, out, err } = await run(['initialize', '--credential'], { createClient: () => client(server) });
+
+  assert.equal(code, 0);
+  assert.deepEqual(err, []);
+  assert.equal(out.length, 1);
+  const credential = JSON.parse(out[0]);
+  assert.equal(out[0], serializeBoardCredential(credential));
+  assert.equal(credential.storageCapability, server.capability);
+});
+
+test('board CLI prints only the trust anchor for a pipe-friendly initialization', async () => {
+  const server = fakeSkrynia();
+  const { code, out, err } = await run(['initialize', '--trust-anchor'], { createClient: () => client(server) });
+
+  assert.equal(code, 0);
+  assert.deepEqual(err, []);
+  assert.equal(out.length, 1);
+  const anchor = JSON.parse(out[0]);
+  assert.equal(out[0], serializeBoardTrustAnchor(anchor));
+  assert.ok(anchor.rootKeyId);
+  assert.equal('credential' in anchor, false);
+});
+
+test('board CLI refuses to print both initialization values at once', async () => {
+  const server = fakeSkrynia();
+  const { code, out, err } = await run(
+    ['initialize', '--credential', '--trust-anchor'],
+    { createClient: () => client(server) },
+  );
+
+  assert.equal(code, 1);
+  assert.deepEqual(out, []);
+  assert.match(err[0], /one value at a time/);
+  assert.equal(server.signed, null);
+});
+
+test('board CLI refuses to print a secret value as JSON', async () => {
+  const server = fakeSkrynia();
+  const conflict = 'antonina board: --json cannot be combined with --credential or --trust-anchor';
+
+  for (const argv of [['initialize', '--credential', '--json'], ['initialize', '--trust-anchor', '--json']]) {
+    const { code, out, err } = await run(argv, { createClient: () => client(server) });
+    assert.equal(code, 1, argv.join(' '));
+    assert.deepEqual(out, [], argv.join(' '));
+    assert.equal(err.length, 1, argv.join(' '));
+    assert.equal(err[0], conflict, argv.join(' '));
+    assert.equal(server.signed, null, argv.join(' '));
+  }
+});
+
+test('board CLI refuses a repeated or unrecognized flag to initialize', async () => {
+  const server = fakeSkrynia();
+  const unexpected = 'antonina board: unexpected arguments for initialize';
+
+  for (const argv of [
+    ['initialize', '--credential', '--credential'],
+    ['initialize', '--credential', 'stray'],
+    ['initialize', '--unknown'],
+  ]) {
+    const { code, out, err } = await run(argv, { createClient: () => client(server) });
+    assert.equal(code, 1, argv.join(' '));
+    assert.deepEqual(out, [], argv.join(' '));
+    assert.equal(err.length, 1, argv.join(' '));
+    assert.equal(err[0], unexpected, argv.join(' '));
+    assert.equal(server.signed, null, argv.join(' '));
+  }
+});
+
+test('a pipe-friendly initialization leaves stdout empty when the board already exists', async () => {
+  const server = fakeSkrynia();
+  await client(server).initialize();
+
+  for (const argv of [['initialize', '--credential'], ['initialize', '--trust-anchor']]) {
+    const { code, out, err } = await run(argv, { createClient: () => client(server) });
+    assert.equal(code, 1);
+    assert.deepEqual(out, []);
+    assert.match(err[0], /already exists/);
+    assert.equal(/storageCapability|rootKeyId/.test(err.join('\n')), false);
+  }
+});
+
 test('board CLI refuses environment credentials it cannot parse or reconcile', async () => {
   const malformed = await run(['access'], { env: { [BOARD_CREDENTIAL_ENV]: 'not json' } });
   assert.equal(malformed.code, 1);

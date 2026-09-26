@@ -106,6 +106,12 @@ function option(args: string[], name: string): { value?: string; rest: string[] 
   return { value, rest: [...args.slice(0, index), ...args.slice(index + 2)] };
 }
 
+function flag(args: string[], name: string): { value: boolean; rest: string[] } {
+  const index = args.indexOf(name);
+  if (index < 0) return { value: false, rest: args };
+  return { value: true, rest: [...args.slice(0, index), ...args.slice(index + 1)] };
+}
+
 function parseJsonEnv(raw: string, name: string): unknown {
   try {
     return JSON.parse(raw);
@@ -159,9 +165,21 @@ async function execute(
   env: Record<string, string | undefined>,
 ): Promise<CommandResult> {
   switch (parsed.command) {
-    case 'initialize':
-      if (parsed.args.length !== 0) throw new AntoninaApiError('initialize takes no arguments');
-      return { mode: 'initialize', value: await client.initialize() };
+    case 'initialize': {
+      const credentialFlag = flag(parsed.args, '--credential');
+      const trustFlag = flag(credentialFlag.rest, '--trust-anchor');
+      if (trustFlag.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for initialize');
+      if (credentialFlag.value && trustFlag.value) {
+        throw new AntoninaApiError('initialize prints one value at a time; pass either --credential or --trust-anchor');
+      }
+      if (parsed.json && (credentialFlag.value || trustFlag.value)) {
+        throw new AntoninaApiError('--json cannot be combined with --credential or --trust-anchor');
+      }
+      const initialized = await client.initialize();
+      if (credentialFlag.value) return { mode: 'credential', value: initialized.credential };
+      if (trustFlag.value) return { mode: 'trust', value: initialized.trustAnchor };
+      return { mode: 'initialize', value: initialized };
+    }
     case 'access':
       if (parsed.args.length !== 0) throw new AntoninaApiError('access takes no arguments');
       return { mode: 'access', value: await client.verifyCredential() };

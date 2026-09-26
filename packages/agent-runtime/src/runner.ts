@@ -26,7 +26,6 @@ import {
 } from './metadata.js';
 import { procStartTicks } from './process.js';
 import {
-  agentDir,
   logPath,
   readMeta,
   updateMeta,
@@ -234,7 +233,6 @@ async function runInvocation(
   let attempt = 0;
   while (true) {
     const invocationId = randomBytes(16).toString('hex');
-    const directory = agentDir(agentId, options);
     const logFile = logPath(agentId, options);
     const fd = openSync(logFile, 'a', 0o600);
     const invocationLogStart = fstatSync(fd).size;

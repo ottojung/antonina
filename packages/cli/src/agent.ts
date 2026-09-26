@@ -602,7 +602,7 @@ async function cmdPrompt(args: string[], context: AgentCommandContext): Promise<
     if (active === true && (reservationState === 'reserved' || reservationState === 'claimed')) {
       const reservation = meta.runner_reservation as Record<string, unknown>;
       const mode = runnerReservationMode(reservation);
-      const currentGeneration = runnerGeneration(meta.runner_gen ?? 0, 0);
+      const currentGeneration = runnerGeneration(meta.runner_gen, 0);
       const accepted = pendingPrompt(meta);
       if (mode === null || currentGeneration === null) {
         decision.action = 'busy';
@@ -636,7 +636,7 @@ async function cmdPrompt(args: string[], context: AgentCommandContext): Promise<
       setActiveRunner(meta, false);
     }
 
-    const currentGeneration = runnerGeneration(meta.runner_gen ?? 0, 0);
+    const currentGeneration = runnerGeneration(meta.runner_gen, 0);
     const promptCount = nextPromptCount(meta);
     if (currentGeneration === null || promptCount === null) {
       decision.action = 'busy';

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createBrowserBoardApi } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { COMPOSER_READ_ONLY_CALLOUT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, filterLabel, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, loadedBoard, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, trustRequired, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
+import { COMPOSER_READ_ONLY_CALLOUT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, boardReadOutcome, canMoveInQueue, DELETED_COPY, emptyIssueList, filterLabel, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, formatUpdatedAt, groupResources, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, trustRequired, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -54,8 +54,8 @@ export default function App() {
   // the board reported with its issues, and the same snapshot orders every
   // render. There is no other order to fall back to, and no other read.
   const ready = load.status === 'ready' ? load : undefined;
-  const board = loadedBoard(load);
-  const hasBoard = board !== undefined;
+  const board = ready?.board;
+  const hasBoard = ready !== undefined;
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
     if (!hasBoard) return;
@@ -113,51 +113,37 @@ export default function App() {
   async function trustBoard(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setTrusting(true); setError(undefined);
     try {
-      // Trusting verifies the log and returns the board, but not the queue, so
-      // the load is the one read that carries both. See BrowserBoardSession.
-      await session.trust(anchorInput);
+      // Trusting verifies the whole log, so the load is the state that call
+      // verified: no second read, and no queue without its board.
+      const trusted = boardReadOutcome(await session.trust(anchorInput));
       setAnchorInput('');
-      setLoad(boardLoaded(await session.readState()));
+      if (trusted.error) { setError(trusted.error); return; }
+      setLoad(trusted.load);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'The trust anchor could not be accepted'); }
     finally { setTrusting(false); }
   }
   async function initializeBoard() {
     setInitializing(true); setError(undefined); setNotice(undefined);
+    const show = (outcome: FirstRunOutcome) => {
+      setLoad(outcome.load);
+      if (outcome.error) setError(outcome.error); else if (outcome.notice) setNotice(outcome.notice);
+    };
     try {
-      // Whether this browser won the board is settled by this call alone, so its
-      // failure is the only place a lost race can come from: a board that is
-      // there now was created by someone else, and any other failure is reported
-      // as itself. It returns the board but not the queue, so the read below
-      // still follows; see BrowserBoardSession.
-      await session.initialize();
+      // Whether this browser won the board is settled by this call alone, so a
+      // call that delivers no state is the only place a lost race can come
+      // from: a board that is there now was created by someone else, and any
+      // other failure is reported as itself. The state it did verify is the
+      // load, so the board is never claimed readable before it has been read.
+      const created: BoardRead = { state: (await session.initialize()).state };
+      setAccess('editable');
+      show(firstRunOutcome(created));
     } catch (cause) {
-      const { load: resolved, error } = firstRunResolved(await resolveFirstRun(), cause);
-      setLoad(resolved);
-      if (error) setError(error);
-      else setNotice(FIRST_RUN_COPY.raced);
-      setInitializing(false);
-      return;
-    }
-    setAccess('editable');
-    // The board is this browser's now, so a failure of the read that follows is
-    // a real failure and never the race above: the reason is shown, and the
-    // board is not claimed to be readable until it has been read.
-    try {
-      const state = await session.readState();
-      // A read that found no board has not loaded one, so it is a failure and
-      // not a success with nothing behind it.
-      if (state === null) throw new Error(FIRST_RUN_COPY.readFailed);
-      setLoad(boardLoaded(state));
-      setNotice(FIRST_RUN_COPY.initialized);
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : FIRST_RUN_COPY.readFailed;
-      setError(message);
-      setLoad(boardLoadFailed(load, message));
+      show(firstRunOutcome({ failure: cause }, await resolveFirstRun()));
     } finally { setInitializing(false); }
   }
-  async function resolveFirstRun(): Promise<BoardLoad> {
-    try { return boardLoaded(await session.readState()); }
-    catch (cause) { return firstRunUnresolved(cause); }
+  async function resolveFirstRun(): Promise<BoardRead> {
+    try { return { state: await session.readState() }; }
+    catch (cause) { return { failure: cause }; }
   }
   /** The one write path for priority: it commits a whole queue or changes nothing. */
   const queueCommit = useCallback((target: number[]): WriteCommit<number[]> => ({

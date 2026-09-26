@@ -234,6 +234,13 @@ test('persistence failure propagates instead of reporting a committed mutation',
     MetadataWriteError,
   );
   assert.equal(readMeta('ac', options)?.prompt_count, 0);
+  // The temp file this call created is uncommitted state and must be gone. A
+  // path the exclusive create never took is somebody else's file and stays.
+  assert.deepEqual(
+    nodeFs.readdirSync(agentDir('ac', options)).filter((name) => name.startsWith('.meta-') && name.endsWith('.tmp')),
+    [],
+    'no .meta-*.tmp entry is left behind by the failed write',
+  );
 });
 
 test('agent-directory creation failure cleans up uncommitted state', (t) => {
@@ -577,16 +584,13 @@ test('the liveness probe alone reclaims a lock naming a reaped process', async (
   t.after(() => nodeFs.rmSync(lockPath, { force: true }));
 });
 
-test('a probe failure is not proof of life, so it never wedges the record', async (t) => {
+test('an unreachable owner is never treated as dead', async (t) => {
   // A process owned by another user is unsignalable, so the probe fails with
-  // EPERM. The probe answers only "can this process still be running?"; a probe
-  // that cannot reach the process has not established life, and the record is
-  // stale authority to be reclaimed under the same compare-and-swap as any other
-  // dead owner. Narrowing the probe's catch to ESRCH-only would instead classify
-  // EPERM as life, and every such record would wedge its waiters for the whole
-  // budget on every boot. This host has no process owned by another uid, so the
-  // EPERM outcome is injected at the probe for the one pid the record names, and
-  // the real probe is checked first so the record still names a running process.
+  // EPERM. That failure has not established death, so the record stays authority
+  // and the acquisition waits out its budget and fails closed. This host has no
+  // process owned by another uid, so the EPERM outcome is injected at the probe
+  // for the one pid the record names, and the real probe is checked first so the
+  // record still names a running process.
   const options = root(t);
   const child = spawn(process.execPath, ['-e', 'process.stdout.write("ready\\n"); setInterval(() => {}, 1000)'], {
     stdio: ['ignore', 'pipe', 'ignore'],
@@ -628,20 +632,20 @@ test('a probe failure is not proof of life, so it never wedges the record', asyn
     (value) => ({ value }),
     (error) => ({ error }),
   );
-  // Distinguish "reclaimed after one observation" from "waited out the budget".
-  assert.equal(
-    result.error,
-    undefined,
-    `an unreachable owner must be reclaimed, not waited out (attempts=${bounded.state.attempts}): ${result.error}`,
+  // Distinguish "reclaimed as dead" from "waited out the budget and failed closed".
+  assert.ok(
+    result.error instanceof MetadataLockError,
+    `an unreachable owner must not be reclaimed; the acquisition must fail closed `
+      + `(attempts=${bounded.state.attempts}): ${result.error}`,
   );
-  assert.equal(result.value, 'ok');
-  assert.equal(bounded.state.attempts, 2, 'reclaiming costs one observation and one retry');
+  assert.equal(result.value, undefined, 'the critical section must never be entered');
+  assert.ok(bounded.state.attempts > 1, 'the lock path was observed more than once, so life was re-probed');
+  assert.deepEqual(bounded.state.installed, [], 'no record was installed by this process');
   assert.equal(
-    JSON.parse(bounded.state.installed[0]).pid,
-    process.pid,
-    'the reclaimed record must be replaced by this process\'s own acquisition',
+    nodeFs.readFileSync(lockPath, 'utf8'),
+    raw,
+    'the unreachable owner\'s record is left byte-identical',
   );
-  assert.equal(nodeFs.existsSync(lockPath), false, 'the reclaimed lock was released');
 });
 
 test('metadata is published by an exclusive, fsynced sequence that never recreates state', (t) => {

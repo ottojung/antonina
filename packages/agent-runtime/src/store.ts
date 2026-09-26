@@ -272,8 +272,13 @@ function sameAcquisition(left: LockOwner, right: LockOwner): boolean {
 function lockOwnerAlive(owner: LockOwner): boolean {
   try {
     process.kill(owner.pid, 0);
-  } catch {
-    return false;
+  } catch (error) {
+    // Only ESRCH proves the owner is gone. Any other failure (EPERM for a live
+    // owner under a different uid, EINTR, an injected error) has not established
+    // death, and treating it as death would let this process unlink a live
+    // owner's lock and enter the critical section alongside it.
+    if (hasCode(error, 'ESRCH')) return false;
+    return true;
   }
   if (owner.startTicks === null) return true;
   return procStartTicks(owner.pid) === owner.startTicks;

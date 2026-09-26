@@ -421,6 +421,20 @@ test('a board command has no identity when the config files are absent', async (
   assert.match(err[0], /does not exist; run: antonina board initialize/);
 });
 
+test('the injected home resolves the config directory when XDG_CONFIG_HOME is unset', async () => {
+  // The home fallback has to be reachable through the command context, not just
+  // through the path helper: this is the only thing keeping a test that exports
+  // no XDG_CONFIG_HOME off the ambient `~/.config/antonina`.
+  const initialized = await client(fakeSkrynia()).initialize();
+  const home = mkdtempSync(join(tmpdir(), 'antonina-board-home-'));
+  mkdirSync(join(home, '.config', 'antonina'), { recursive: true });
+  writeFileSync(join(home, '.config', 'antonina', 'trust.json'), serializeBoardTrustAnchor(initialized.trustAnchor));
+
+  const identity = configuredIdentity({ env: {}, home, io: { stdout() {}, stderr() {} } });
+  assert.deepEqual(identity.trustAnchor, initialized.trustAnchor);
+  assert.equal(identity.credential, null);
+});
+
 test('a trust anchor and credential from different boards are still refused', async () => {
   const first = await client(fakeSkrynia()).initialize();
   const second = await client(fakeSkrynia()).initialize();

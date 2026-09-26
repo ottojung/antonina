@@ -47,9 +47,11 @@ Initialization is single-use, so this is a one-time setup: a second `initialize`
 
 ```sh
 config="${XDG_CONFIG_HOME:-$HOME/.config}/antonina"
+mkdir -p "$config" && chmod 700 "$config"
 initialized=$(antonina board initialize --json)
 jq -r .trustAnchor <<<"$initialized" > "$config/trust.json"
 jq -r .credential  <<<"$initialized" > "$config/credential.json"
+chmod 600 "$config/"*.json
 ```
 
 `--credential` and `--trust-anchor` exist for the cases where you already hold the other value from somewhere else and want exactly one serialized value on stdout; each is a separate invocation of `initialize`, so neither is a second step after initializing.

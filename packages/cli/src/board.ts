@@ -148,7 +148,13 @@ function flag(args: string[], name: string): { value: boolean; rest: string[] } 
 export function configuredIdentity(
   context: BoardCommandContext,
 ): { credential: BoardCredential | null; trustAnchor: BoardTrustAnchor | null } {
-  const files = loadBoardConfigFiles({ env: context.env });
+  // The injected home has to reach the loader, not merely be accepted by the
+  // context: it is what keeps a test's `XDG_CONFIG_HOME`-less run off the
+  // ambient `~/.config/antonina`, and what makes the documented home fallback
+  // resolvable without reading `homedir()`.
+  const files = context.home === undefined
+    ? loadBoardConfigFiles({ env: context.env })
+    : loadBoardConfigFiles({ env: context.env, home: context.home });
   return {
     credential: configuredValue(files.credential),
     trustAnchor: configuredValue(files.trust),

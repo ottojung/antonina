@@ -554,7 +554,16 @@ export interface AuthorizedCollect extends AuthorizationCommon {
   /**
    * The configured managed root whose judgment authorized this path. Carried so a
    * caller can report which configured root it acted under without re-deriving
-   * it, and so the removal is taken as the same root the judgment named.
+   * it.
+   *
+   * It is the judgment's own frozen entry, and it is one of the fields
+   * `isUnchanged` compares, so a substituted root is refused before the removal
+   * touches the filesystem and before the commit. It is *not* something the
+   * removal takes its path under: `removeAuthorizedPath` acts on `path` and the
+   * `unlinkFinalComponent` instruction, and it makes no containment judgment of
+   * its own -- containment was decided once, by the judgment that produced this
+   * value, from the facts gathered about `path`. So this field is the record of
+   * which root authorized the act, and nothing more.
    */
   readonly root: ManagedCollectionRoot;
   /**
@@ -600,14 +609,14 @@ const liveAuthorizations = new WeakSet<AuthorizedCollection>();
 
 /**
  * What each issued authorization carried at the moment it was issued, kept
- * module-private beside the `WeakSet` for the same reason: the commit function
- * reads `outcome`, `reason`, `host`, `path` and `recheckHead` back out of the
- * caller's object, and a caller still holds a writable reference to that object.
- * Membership alone therefore answers "did this process issue this?", but not
- * "does it still say what it said?", and an object whose `path` has been
+ * module-private beside the `WeakSet` for the same reason: the consumers read
+ * `outcome`, `reason`, `host`, `path`, `boardId` and `recheckHead` back out of
+ * the caller's object, and a caller still holds a writable reference to that
+ * object. Membership alone therefore answers "did this process issue this?", but
+ * not "does it still say what it said?", and an object whose `path` has been
  * re-pointed at a path no re-check ever read is still a live member. This
- * module-private record is the source of truth for the commit, so re-pointing
- * is refused rather than reported.
+ * module-private record is the source of truth for the commit, the removal and
+ * the report, so re-pointing is refused rather than reported.
  *
  * This is a private record, not a brand: nothing here is exported, and no cast
  * or hand-built value can put an entry into it.
@@ -666,10 +675,11 @@ type OmitSeal<T> = T extends unknown ? Omit<T, typeof authorizationSeal> : never
  *
  * What the re-check issues is the authority to act on one path, as it read it.
  * It is not a token a caller may re-point afterwards: the fields are `readonly`
- * in the interface, and both `removeAuthorizedPath` and `commitCollectionDeletion`
- * re-derive them from what this function recorded here, so assigning to any of
- * them after the re-check is refused rather than obeyed -- the removal before it
- * touches the filesystem, and the commit after.
+ * in the interface, and `removeAuthorizedPath`, `commitCollectionDeletion` and
+ * `issuedCollectionReport` all re-derive what they need from what this function
+ * recorded here, so assigning to any of the fields after the re-check is refused
+ * rather than obeyed -- the removal and the report before they touch the
+ * filesystem or say anything, and the commit after.
  *
  * This module performs no filesystem I/O. `CandidatePathFacts` in
  * `managed-roots.ts` is the recipe a gatherer implements, and the node-side
@@ -831,6 +841,72 @@ export function commitCollectionDeletion(authorized: AuthorizedCollection): Comp
 }
 
 /**
+ * What a collector may *say* about an authorization: the path, the host, the
+ * board and the two revisions, as the re-check recorded them, plus the outcome
+ * and the reason it issued.
+ *
+ * A report is not a destructive consumer -- it names things and touches nothing --
+ * so it is the consumer `hosts.md`'s "every destructive consumer re-derives" does
+ * not reach, and it is exactly where a re-pointed authorization would have
+ * surfaced as a lie rather than as a refusal. This shape is the alternative: it
+ * carries only the issued values, it is built from the record rather than from the
+ * caller's object, and it carries no removal shape, so a report cannot be a
+ * second place a `withheld` authorization is read as an actionable one.
+ *
+ * `snapshotHead` and `recheckHead` are carried here for the same reason they are
+ * carried on the authorization: the report tells a script which revision was
+ * verified and which one the claim named, and only the first is authority.
+ */
+export interface IssuedCollectionReport {
+  readonly host: string;
+  readonly boardId: string;
+  readonly path: string;
+  readonly outcome: 'collect' | 'withheld';
+  readonly reason: CollectionOutcomeReason;
+  readonly recheckHead: string | null;
+  readonly snapshotHead: string | null;
+}
+
+/**
+ * The report a collector builds, read off the module-private record through the
+ * same door `removeAuthorizedPath` and `commitCollectionDeletion` use.
+ *
+ * The three consumers are one guarantee, not three: nothing a collector can do
+ * with an authorization -- remove it, commit it, or describe it to a human or a
+ * script -- reads the caller's writable object. That matters for the third of
+ * those because a report is not destructive, so a re-pointed record used to reach
+ * the JSON and the refusal text unchanged while the removal refused to act on it.
+ * A report that named a path, host or board no re-check examined is a lie about
+ * what was verified, and the only honest repair is to have no way to build one.
+ *
+ * So a re-pointed authorization is *refused* here, on the same door and with the
+ * same comparison, rather than being quietly corrected: the tree's convention is
+ * that a refusal reports its reason and touches nothing, and a corrected report
+ * would be a new user-facing concept -- one that tells an operator a command
+ * collected something the record no longer describes. A record this process no
+ * longer holds live -- spent, copied, or never issued -- has no report either,
+ * for the same reason: it is not a value the re-check is standing behind.
+ *
+ * The return value is a fresh object carrying only the issued identity, never the
+ * record itself, so nothing a caller does to it can write back onto the
+ * authorization and nothing it can read off it is the removal shape.
+ */
+export function issuedCollectionReport(
+  authorized: AuthorizedCollection,
+): IssuedCollectionReport {
+  const issued = issuedRecordOf(authorized);
+  return {
+    host: issued.host,
+    boardId: issued.boardId,
+    path: issued.path,
+    outcome: issued.outcome,
+    reason: issued.reason,
+    recheckHead: issued.recheckHead,
+    snapshotHead: issued.snapshotHead,
+  };
+}
+
+/**
  * Every carried field, so a caller-owned edit to any one of them is a mismatch.
  *
  * The comparison is structural rather than a hand-written list of field names,
@@ -862,16 +938,18 @@ function isUnchanged<T extends object>(authorized: T, issued: T): boolean {
 
 /**
  * The module-private record of what the re-check issued for `authorized`, or a
- * refusal. One door, because two functions consume the record and neither may
- * reach the filesystem or report a completion on the caller's own values.
+ * refusal. One door, because three functions consume the record and none of them
+ * may reach the filesystem, report a completion, or report anything at all on the
+ * caller's own values.
  *
  * So a caller holding a writable reference to the authorization cannot re-point
- * the authority anywhere: both the commit and the removal read the issued record
- * and refuse a divergent one, which is the whole of the guarantee. The fields are
- * not frozen -- `readonly` in the interface holds no force at runtime -- and this
- * is not a freeze; it is a comparison, and it is made *before* either consumer
- * acts, so a divergent authorization is refused with nothing done rather than
- * refused after the bytes are gone.
+ * the authority anywhere: the commit, the removal and the report all read the
+ * issued record and refuse a divergent one, which is the whole of the guarantee.
+ * The fields are not frozen -- `readonly` in the interface holds no force at
+ * runtime -- and this is not a freeze; it is a comparison, and it is made
+ * *before* any consumer acts or speaks, so a divergent authorization is refused
+ * with nothing done and nothing said rather than refused after the bytes are gone
+ * or after a report has named a path no re-check read.
  */
 function issuedRecordOf(authorized: AuthorizedCollection): IssuedAuthorization {
   const issued = liveAuthorizations.has(authorized)

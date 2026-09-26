@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createBrowserBoardApi } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { COMPOSER_READ_ONLY_CALLOUT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, filterLabel, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, trustRequired, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
+import { COMPOSER_READ_ONLY_CALLOUT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, filterLabel, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, loadedBoard, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, trustRequired, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -54,7 +54,7 @@ export default function App() {
   // the board reported with its issues, and the same snapshot orders every
   // render. There is no other order to fall back to, and no other read.
   const ready = load.status === 'ready' ? load : undefined;
-  const board = ready?.board;
+  const board = loadedBoard(load);
   const hasBoard = board !== undefined;
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {

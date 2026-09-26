@@ -116,7 +116,6 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .issue-row { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
 .issue-row:hover { background: #f0f3ed; }
 .issue-row.selected { background: #dcebe1; box-shadow: inset 4px 0 var(--green); }
-.issue-row[draggable="true"] { cursor: grab; }
 .issue-select { flex: 1; min-width: 0; display: flex; gap: 12px; text-align: left; padding: 17px 24px; border: 0; background: transparent; color: var(--ink); }
 .issue-summary { min-width: 0; flex: 1; }
 .issue-line { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: .73rem; }
@@ -130,6 +129,10 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .row-arrow { align-self: center; color: #777d74; font-size: 1.35rem; }
 .queue-position { flex: none; display: grid; place-items: center; min-width: 22px; height: 22px; border-radius: 999px; background: #e7ece5; color: var(--green-dark); font-size: .72rem; font-weight: 800; }
 .queue-controls { flex: none; display: flex; gap: 3px; }
+/* The grip is the element that carries the drag, so the grab cursor is bound to
+   the draggable flag rather than to the row, and the two cannot drift apart. */
+.queue-grip { flex: none; display: grid; place-items: center; min-width: 16px; color: #a5a9a1; font-size: .95rem; line-height: 1; cursor: grab; }
+.queue-grip[draggable="true"]:active { cursor: grabbing; }
 .queue-controls button { padding: 4px 7px; border: 1px solid var(--line); background: #fff; color: var(--green-dark); font-size: .68rem; }
 .queue-controls button:disabled { color: #a5a9a1; background: transparent; cursor: default; }
 .queue-controls select { padding: 4px 2px; border: 1px solid var(--line); background: #fff; color: var(--green-dark); font-size: .68rem; }

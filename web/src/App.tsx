@@ -70,17 +70,13 @@ export default function App() {
   const selected = board?.issues.find((issue) => issue.number === selectedNumber);
   useEffect(() => { if (selected && !visible.some((issue) => issue.number === selected.number)) setSelectedNumber(undefined); }, [selected, visible]);
 
+  const clearOutcome = useCallback(() => clearBothOutcomes(() => setError(undefined), () => setNotice(undefined)), []);
+  /** Every write goes through the one commit path, so callers only say what to send. */
   async function run<T>(action: () => Promise<T>, success: string): Promise<T | null> {
-    setError(undefined); setNotice(undefined);
-    try { const result = await action(); await refresh(); setNotice(success); return result; }
-    catch (cause) {
-      const message = cause instanceof Error ? cause.message : 'The change could not be saved';
-      // A refused mutation drops this client to read-only, so read access
-      // again instead of leaving a stale edit indicator until the next poll.
-      await refresh();
-      setError(message);
-      return null;
-    }
+    return commitWrite<T>(
+      { write: action, reload: refresh, clear: clearOutcome, notice: setNotice, failure: setError },
+      { success, failure: 'The change could not be saved' },
+    );
   }
   async function createIssue(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = event.currentTarget;
@@ -142,14 +138,14 @@ export default function App() {
     catch (cause) { return firstRunUnresolved(cause); }
   }
   /** The one write path for priority: it commits a whole queue or changes nothing. */
-  const queueCommit: QueueCommit = {
-    reorder: (numbers) => api.reorderQueue(numbers),
+  const queueCommit = useCallback((target: number[]): WriteCommit<number[]> => ({
+    write: () => api.reorderQueue(target),
     reload: refresh,
-    clearNotice: () => setNotice(undefined),
+    clear: clearOutcome,
     notice: setNotice,
     failure: setError,
-  };
-  const reorderQueue = useCallback((numbers: number[] | null) => commitQueueOrder(numbers, queueCommit), [api]);
+  }), [api, refresh, clearOutcome]);
+  const reorderQueue = useCallback((target: QueueTarget) => commitQueueOrder(target, queueCommit), [queueCommit]);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
   if (load.status === 'loading') return <main className="centered"><div><span className="loading-dot" /> Loading your shared board…</div></main>;
@@ -188,44 +184,75 @@ export type IssueFormKey = Pick<ReactKeyboardEvent, 'key' | 'ctrlKey' | 'metaKey
 /** What a drag or a move control reports: the whole reordered open queue. */
 export type QueueTarget = number[] | null;
 
-export interface QueueCommit {
-  reorder(numbers: number[]): Promise<number[]>;
+/** The issue row a pointer-less test event stands in for. */
+export type QueueRowTarget = { dataset: { issue?: string } };
+
+/** What a write reports, and what it names itself when the board refuses with no reason. */
+export interface WriteOutcome {
+  success: string;
+  failure: string;
+}
+
+/**
+ * Every write clears the whole standing outcome, not half of it. The two are
+ * rendered one above the other, so clearing only the notice would leave a
+ * success message sitting under the error of something that failed earlier, and
+ * clearing only the error would leave a stale "saved" above a new refusal.
+ */
+export function clearBothOutcomes(clearError: () => void, clearNotice: () => void): void {
+  clearError();
+  clearNotice();
+}
+
+export interface WriteCommit<T> {
+  write(): Promise<T>;
   reload(): Promise<void>;
-  clearNotice(): void;
+  clear(): void;
   notice(message: string): void;
   failure(message: string): void;
+}
+
+/**
+ * The one write path, shared by every mutation this app makes.
+ *
+ * It clears the standing outcome first, so a new outcome can never be read next
+ * to the one it replaced: a success is not shown beside a stale error, and a
+ * refusal is not shown beside a stale "saved".
+ *
+ * A refused write — no capability, a concurrent writer that moved the board on, a
+ * storage conflict — must not read as success and must not leave the list showing
+ * state the board never accepted, so the failure path re-reads the board and
+ * surfaces the board's own reason, falling back to the caller's own wording only
+ * when the refusal carries none.
+ */
+export async function commitWrite<T>(commit: WriteCommit<T>, outcome: WriteOutcome): Promise<T | null> {
+  commit.clear();
+  try {
+    const written = await commit.write();
+    await commit.reload();
+    commit.notice(outcome.success);
+    return written;
+  } catch (cause) {
+    await commit.reload();
+    commit.failure(cause instanceof Error ? cause.message : outcome.failure);
+    return null;
+  }
 }
 
 /**
  * The single write path for priority, shared by the drag target and the
  * move-earlier/move-later/move-to-position controls.
  *
- * A refused reorder — no `queue.reorder` capability, a concurrent writer that
- * moved the board on, a storage conflict — must not read as success and must not
- * leave the list showing an order the board never accepted, so the failure path
- * re-reads the board (and with it the queue) and surfaces the board's own
- * reason. A `null` target is the deliberate no-op of a boundary move: nothing is
- * sent, and no error is invented for a queue that would not have changed. A
- * commit that really does send a request drops any standing notice first, so a
- * refusal can never be read next to a stale "Priority order saved".
+ * A `null` target is the deliberate no-op of a boundary move: nothing is sent, no
+ * board is re-read, and no error is invented for a queue that would not have
+ * changed. Every target that is a permutation gets its commit and goes through
+ * `commitWrite`, so a reorder is committed exactly the way a comment or a state
+ * change is.
  */
-export async function commitQueueOrder(target: QueueTarget, commit: QueueCommit): Promise<number[] | null> {
+export async function commitQueueOrder(target: QueueTarget, commitFor: (target: number[]) => WriteCommit<number[]>): Promise<number[] | null> {
   if (target === null) return null;
-  commit.clearNotice();
-  try {
-    const committed = await commit.reorder(target);
-    await commit.reload();
-    commit.notice(QUEUE_REORDERED_NOTICE);
-    return committed;
-  } catch (cause) {
-    await commit.reload();
-    commit.failure(cause instanceof Error ? cause.message : QUEUE_REORDER_FAILED);
-    return null;
-  }
+  return commitWrite(commitFor(target), { success: QUEUE_REORDERED_NOTICE, failure: QUEUE_REORDER_FAILED });
 }
-
-/** The issue row a pointer-less test event stands in for. */
-export type QueueRowTarget = { dataset: { issue?: string } };
 
 export type IssueDragStart = { currentTarget: QueueRowTarget; dataTransfer: { setData(type: string, value: string): void } | null };
 
@@ -301,15 +328,25 @@ function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSel
   onSelect: (number: number) => void;
   onReorder: (target: QueueTarget) => Promise<number[] | null>;
 }) {
-  // Only a queued row is a drop target: the board's queue holds open issues
-  // only, so accepting a drop on a closed row would offer a cursor for a move
-  // the board cannot commit. The drag affordance is gated on the same thing, so
-  // a row the board could never accept a move from is not draggable at all.
+  // Only a queued row offers a move at all: the board's queue holds open issues
+  // only, so a move on a closed row is one the board cannot commit, and a
+  // read-only visitor has no write path to reach. The grip that carries the drag
+  // is rendered on the same condition, so its draggable flag and its three drag
+  // handlers cannot disagree with the controls beside it — a row the board could
+  // never accept a move from is not draggable at all.
   const queued = hasWriteAccess && position > 0;
-  return <div className={`issue-row ${selected ? 'selected' : ''}`} data-issue={issue.number} draggable={queued} onDragStart={queued ? issueDragStarted : undefined} onDragOver={queued ? allowIssueDrop : undefined} onDrop={queued ? (event) => { void onReorder(issueDropped(event, order, issue.number)); } : undefined}>
+  return <div className={`issue-row ${selected ? 'selected' : ''}`} data-issue={issue.number}>
     <button className="issue-select" onClick={() => onSelect(issue.number)} aria-current={selected ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{issue.messages.length} messages{issue.body ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>
     {position > 0 && <span className="queue-position" aria-label={priorityLabel(position)}>{position}</span>}
     {queued && <span className="queue-controls">
+      {/* The drag lives on a grip, not on the row, so a pointer press on the
+          select button, the step buttons or the move-to control can no longer
+          start a row drag instead of activating the control under it. The grip
+          is a visual affordance, so it takes no role and no tab stop: the step
+          buttons and the move-to control are the keyboard-reachable ways to move
+          an issue, and the grip is hidden from assistive technology rather than
+          announced as a control that does not itself move anything. */}
+      <span className="queue-grip" data-issue={issue.number} draggable aria-hidden="true" onDragStart={issueDragStarted} onDragOver={allowIssueDrop} onDrop={(event) => { void onReorder(issueDropped(event, order, issue.number)); }}>⠿</span>
       {(['earlier', 'later'] as QueueDirection[]).map((direction) => <button key={direction} aria-label={`${QUEUE_MOVE_LABELS[direction]} (#${issue.number})`} disabled={!canMoveInQueue(order, issue.number, direction)} onClick={(event) => { void onReorder(issueMoveRequested(event, order, issue.number, direction)); }}>{direction === 'earlier' ? '▲' : '▼'}</button>)}
       {/* The move-to control belongs to the selected row alone. Offering every
           slot on every row would render one option per slot per row, so a

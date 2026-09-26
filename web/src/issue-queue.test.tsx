@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import {
   allowIssueDrop,
+  clearBothOutcomes,
   commitQueueOrder,
   IssueQueue,
   issueDragStarted,
@@ -80,6 +81,27 @@ function rows(props?: Partial<Parameters<typeof IssueQueue>[0]>): Row[] {
   return rendered(props).filter((node) => node.type === 'div' && typeof node.props['data-issue'] === 'number');
 }
 
+/** The elements a row rendered, however deeply they are nested in it. */
+function inside(node: Row): Row[] {
+  return elements(node.props.children as ReactNode);
+}
+
+/**
+ * The drag handle of each row. The drag lives here rather than on the row, so
+ * these are the elements to read the drag wiring off, and the elements whose
+ * subtree must hold none of the row's controls.
+ */
+function grips(props?: Partial<Parameters<typeof IssueQueue>[0]>): Row[] {
+  return rendered(props).filter((node) => node.type === 'span' && node.props.className === 'queue-grip');
+}
+
+/** The drag handle of one row, addressed by the same row element. */
+function gripOf(row: Row): Row {
+  const [grip] = inside(row).filter((node) => node.props.className === 'queue-grip');
+  expect(grip).toBeDefined();
+  return grip!;
+}
+
 /** The one shared order every row was rendered with, and every control recomputes from. */
 const sharedOrder = openQueueOrder(visible, queue);
 
@@ -113,20 +135,37 @@ describe('issue queue wiring', () => {
     expect(rows().map((row) => row.props['data-issue'])).toEqual([3, 1, 2]);
   });
 
-  it('drives drag-and-drop through the named drag handlers', () => {
-    const [row] = rows();
-    expect(row.props.draggable).toBe(true);
-    expect(row.props.onDragStart).toBe(issueDragStarted);
-    expect(row.props.onDragOver).toBe(allowIssueDrop);
-    expect(typeof row.props.onDrop).toBe('function');
+  it('drives drag-and-drop through the named drag handlers on the handle', () => {
+    const grip = gripOf(rows()[0]);
+    expect(grip.props.draggable).toBe(true);
+    expect(grip.props.onDragStart).toBe(issueDragStarted);
+    expect(grip.props.onDragOver).toBe(allowIssueDrop);
+    expect(typeof grip.props.onDrop).toBe('function');
+  });
+
+  it('keeps every control of the row out of the draggable subtree', () => {
+    // The row itself is not draggable any more, and the handle carries the drag
+    // on its own, so a press that starts on the select button, a step button or
+    // the move-to control cannot originate inside a draggable element.
+    for (const row of rows({ selectedNumber: 1 })) {
+      expect(row.props.draggable).toBeUndefined();
+      expect(row.props.onDragStart).toBeUndefined();
+      expect(row.props.onDragOver).toBeUndefined();
+      expect(row.props.onDrop).toBeUndefined();
+      const draggable = inside(row).filter((node) => node.props.draggable !== undefined);
+      expect(draggable).toHaveLength(1);
+      expect(draggable[0]).toBe(gripOf(row));
+      // Nothing a user presses to do something else lives under the handle.
+      expect(inside(gripOf(row))).toEqual([]);
+    }
   });
 
   it('carries the dragged issue number on the drag event and accepts the drop', () => {
     const stored: Array<[string, string]> = [];
-    const startRow = rows()[0];
+    const grip = gripOf(rows()[0]);
     const start: FakeTransfer = { getData: (type) => stored.find(([t]) => t === type)?.[1] ?? '', setData: (type, value) => void stored.push([type, value]) };
     // A real element's dataset holds strings, so the handler sees "3".
-    issueDragStarted({ currentTarget: { dataset: { issue: String(startRow.props['data-issue']) } }, dataTransfer: start });
+    issueDragStarted({ currentTarget: { dataset: { issue: String(grip.props['data-issue']) } }, dataTransfer: start });
 
     expect(stored).toEqual([[QUEUE_DRAG_TYPE, '3']]);
     expect(start.getData(QUEUE_DRAG_TYPE)).toBe('3');
@@ -213,10 +252,11 @@ describe('issue queue wiring', () => {
   it('shows a read-only visitor the shared order and none of the controls', () => {
     const readOnly = rows({ hasWriteAccess: false });
     expect(readOnly.map((row) => row.props['data-issue'])).toEqual([3, 1, 2]);
-    expect(readOnly.every((row) => row.props.draggable === false)).toBe(true);
-    expect(readOnly.every((row) => row.props.onDragStart === undefined)).toBe(true);
-    expect(readOnly.every((row) => row.props.onDragOver === undefined)).toBe(true);
-    expect(readOnly.every((row) => row.props.onDrop === undefined)).toBe(true);
+    // No handle at all, so there is nothing draggable and nothing that could
+    // offer the browser a drop.
+    expect(grips({ hasWriteAccess: false })).toEqual([]);
+    expect(readOnly.every((row) => inside(row).every((node) => node.props.draggable === undefined))).toBe(true);
+    expect(readOnly.every((row) => inside(row).every((node) => node.props.onDragStart === undefined && node.props.onDragOver === undefined && node.props.onDrop === undefined))).toBe(true);
     expect(queueButtons({ hasWriteAccess: false })).toHaveLength(0);
     // Not even the selected row gets a move-to control, so a visitor cannot
     // reach the write path by selecting their way through the list.
@@ -233,15 +273,17 @@ describe('issue queue wiring', () => {
     expect(positions.map((node) => node.props['aria-label'])).toEqual(['Priority 1', 'Priority 2', 'Priority 3']);
     // A closed row would be a drop the queue cannot hold, so it is not a drop
     // target at all: the browser is never offered an accepted-drop cursor, and
-    // it is not draggable either, so no drag can start that could only fail.
+    // there is no handle to start a drag from, so no drag can start that could
+    // only fail. The three open rows each carry one, and each of them wires the
+    // draggable flag to the same two handlers.
     const closed = mixed[3];
     expect(closed.props['data-issue']).toBe(4);
-    expect(closed.props.onDragOver).toBeUndefined();
-    expect(closed.props.onDrop).toBeUndefined();
-    expect(closed.props.draggable).toBe(false);
-    expect(closed.props.onDragStart).toBeUndefined();
-    expect(mixed.slice(0, 3).every((row) => row.props.onDragOver === allowIssueDrop)).toBe(true);
-    expect(mixed.slice(0, 3).every((row) => row.props.draggable === true && row.props.onDragStart === issueDragStarted)).toBe(true);
+    expect(inside(closed).filter((node) => node.props.draggable !== undefined)).toEqual([]);
+    expect(inside(closed).filter((node) => node.props.onDragOver !== undefined || node.props.onDrop !== undefined || node.props.onDragStart !== undefined)).toEqual([]);
+    expect(grips({ issues: all, queue: [2, 1, 3] })).toHaveLength(3);
+    expect(mixed.slice(0, 3).every((row) => gripOf(row).props.onDragOver === allowIssueDrop)).toBe(true);
+    expect(mixed.slice(0, 3).every((row) => gripOf(row).props.draggable === true && gripOf(row).props.onDragStart === issueDragStarted)).toBe(true);
+    expect(mixed.slice(0, 3).every((row) => typeof gripOf(row).props.onDrop === 'function')).toBe(true);
     // A closed issue is not in the shared order, so it is never the selected
     // row that carries the move-to control.
     expect(moveToControls({ issues: all, queue: [2, 1, 3] })).toHaveLength(0);
@@ -296,7 +338,7 @@ describe('priority reorder requests', () => {
       empty,
     });
     const [row] = elements(tree).filter((node) => node.type === 'div' && typeof node.props['data-issue'] === 'number');
-    (row.props.onDrop as (event: IssueDrop) => void)({
+    (gripOf(row).props.onDrop as (event: IssueDrop) => void)({
       dataTransfer: { getData: (type) => (type === QUEUE_DRAG_TYPE ? '1' : '') },
       preventDefault: () => {},
     });
@@ -307,14 +349,14 @@ describe('priority reorder requests', () => {
 
 describe('committing a priority reorder', () => {
   const commit = (reorder: (numbers: number[]) => Promise<number[]>) => {
-    const record = { reorder: [] as number[][], reload: 0, cleared: 0, notice: [] as string[], failure: [] as string[] };
-    const deps = {
-      reorder,
+    const record = { reload: 0, clearedNotice: 0, clearedError: 0, notice: [] as string[], failure: [] as string[] };
+    const deps = (target: number[]) => ({
+      write: () => reorder(target),
       reload: async () => { record.reload += 1; },
-      clearNotice: () => { record.cleared += 1; },
+      clear: () => clearBothOutcomes(() => { record.clearedError += 1; }, () => { record.clearedNotice += 1; }),
       notice: (message: string) => { record.notice.push(message); },
       failure: (message: string) => { record.failure.push(message); },
-    };
+    });
     return { deps, record };
   };
 
@@ -325,16 +367,21 @@ describe('committing a priority reorder', () => {
     await expect(commitQueueOrder([2, 1, 3], deps)).resolves.toEqual([2, 1, 3]);
     expect(sent).toEqual([[2, 1, 3]]);
     expect(record.reload).toBe(1);
-    expect(record.cleared).toBe(1);
+    // Both halves of the standing outcome go: a saved order is never shown
+    // beside an error from something else, and a refusal is never shown beside
+    // a stale success.
+    expect(record.clearedNotice).toBe(1);
+    expect(record.clearedError).toBe(1);
     expect(record.notice).toEqual([QUEUE_REORDERED_NOTICE]);
     expect(record.failure).toEqual([]);
   });
 
-  it('clears a standing notice before a real commit, so a refusal is never read next to a stale success', async () => {
+  it('clears a standing notice and a standing error before a real commit', async () => {
     const { deps, record } = commit(async () => { throw new Error('credential is required'); });
 
     await expect(commitQueueOrder([2, 1, 3], deps)).resolves.toBeNull();
-    expect(record.cleared).toBe(1);
+    expect(record.clearedNotice).toBe(1);
+    expect(record.clearedError).toBe(1);
     expect(record.notice).toEqual([]);
   });
 
@@ -360,7 +407,8 @@ describe('committing a priority reorder', () => {
 
     await expect(commitQueueOrder(null, deps)).resolves.toBeNull();
     expect(record.reload).toBe(0);
-    expect(record.cleared).toBe(0);
+    expect(record.clearedNotice).toBe(0);
+    expect(record.clearedError).toBe(0);
     expect(record.notice).toEqual([]);
     expect(record.failure).toEqual([]);
   });

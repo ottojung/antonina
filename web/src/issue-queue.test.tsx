@@ -19,6 +19,7 @@ import {
   visibleIssues,
   canMoveInQueue,
   openQueueOrder,
+  priorityLabel,
   QUEUE_DRAG_TYPE,
   QUEUE_MOVE_LABELS,
   QUEUE_MOVE_TO_LABEL,
@@ -84,6 +85,30 @@ function rows(props?: Partial<Parameters<typeof IssueQueue>[0]>): Row[] {
 /** The elements a row rendered, however deeply they are nested in it. */
 function inside(node: Row): Row[] {
   return elements(node.props.children as ReactNode);
+}
+
+/** Every string in a subtree, in the order the reader would reach it. */
+function textOf(node: ReactNode): string {
+  if (node === null || node === undefined || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join('');
+  if (!isValidElement<Record<string, unknown>>(node)) return '';
+  return textOf(node.props.children as ReactNode);
+}
+
+/** Whether an element is hidden from assistive technology. */
+function isHidden(node: ReactElement<Record<string, unknown>>): boolean {
+  return node.props['aria-hidden'] === true || node.props['aria-hidden'] === 'true';
+}
+
+/** What a screen reader reaches: the text that is not hidden from it. */
+function spokenTextOf(node: ReactNode): string {
+  if (node === null || node === undefined || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(spokenTextOf).join('');
+  if (!isValidElement<Record<string, unknown>>(node)) return '';
+  if (isHidden(node)) return '';
+  return spokenTextOf(node.props.children as ReactNode);
 }
 
 /**
@@ -286,7 +311,7 @@ describe('issue queue wiring', () => {
     expect(mixed.map((row) => row.props['data-issue'])).toEqual([2, 1, 3, 4]);
     const positions = rendered({ issues: all, queue: [2, 1, 3] }).filter((node) => node.props.className === 'queue-position');
     expect(positions).toHaveLength(3);
-    expect(positions.map((node) => node.props['aria-label'])).toEqual(['Priority 1', 'Priority 2', 'Priority 3']);
+    expect(positions.map((node) => spokenTextOf(node))).toEqual(['Priority 1', 'Priority 2', 'Priority 3']);
     // A closed row would be a drop the queue cannot hold, so it is not a drop
     // target at all: the browser is never offered an accepted-drop cursor, and
     // there is no handle to start a drag from, so no drag can start that could
@@ -308,6 +333,30 @@ describe('issue queue wiring', () => {
     expect(moveToControls({ issues: all, queue: [2, 1, 3] })).toHaveLength(0);
     expect(moveToControls({ issues: all, queue: [2, 1, 3], selectedNumber: 4 })).toHaveLength(0);
     expect(moveToControls({ issues: all, queue: [2, 1, 3], selectedNumber: 1 })).toHaveLength(1);
+  });
+
+  it('names the priority badge in text a reader is actually given', () => {
+    const badges = rendered().filter((node) => node.props.className === 'queue-position');
+    expect(badges).toHaveLength(3);
+    for (const [index, badge] of badges.entries()) {
+      const position = index + 1;
+      // Naming is prohibited on the implicit generic role, so an aria-label here
+      // was never announced and the badge read as a bare digit. The wording is
+      // text in the tree, and the glyph is what assistive technology skips.
+      expect(badge.props['aria-label']).toBeUndefined();
+      expect(spokenTextOf(badge)).toBe(priorityLabel(position));
+      expect(spokenTextOf(badge)).toBe(`Priority ${position}`);
+      const [word, glyph] = inside(badge);
+      expect(word.props.className).toBe('visually-hidden');
+      expect(textOf(word)).toBe(priorityLabel(position));
+      expect(glyph.props['aria-hidden']).toBe('true');
+      expect(textOf(glyph)).toBe(String(position));
+    }
+    // The wording survives to real markup, which is what a reader's tree is
+    // built from, and the priority is legible from it without the glyph.
+    const markup = renderToStaticMarkup(<ul>{badges}</ul>);
+    expect(markup).toContain('Priority 1');
+    expect(markup).toContain('class="visually-hidden"');
   });
 
   it('renders the empty state the copy describes, with no rows to reorder', () => {

@@ -25,6 +25,11 @@ button, input, textarea { outline: none; }
 button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 0 0 0 3px #fff, 0 0 0 6px #398063; }
 h1, h2, h3, p { overflow-wrap: anywhere; }
 
+/* Text that is in the accessibility tree without being seen. It is clipped to a
+   single pixel rather than set to display:none, because a hidden box takes its
+   text out of the tree with it. */
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
 .app-shell { min-height: 100vh; }
 .topbar { height: 72px; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; border-bottom: 1px solid var(--line); background: rgba(250, 251, 248, .96); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(14px); }
 .brand { display: flex; align-items: center; gap: 11px; border: 0; border-radius: 8px; background: none; color: var(--ink); padding: 3px; }
@@ -255,6 +260,10 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
   .create-form, .access-callout, .filters { margin-left: 16px; margin-right: 16px; }
   .issue-select { padding-left: 16px; padding-right: 16px; }
   .queue-controls { flex-wrap: wrap; justify-content: flex-end; }
+  /* The row's narrow layout reasserts the utility rather than inheriting it, so
+     no rule in this block can leave hidden wording showing as an unstyled run of
+     text inside the badge. */
+  .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
   .issue-line { flex-wrap: wrap; }
   .issue-line time { margin-left: 0; width: 100%; }
   .create-form > div, .name-prompt > div { flex-direction: column; }

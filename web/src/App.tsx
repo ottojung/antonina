@@ -346,7 +346,11 @@ function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSel
     onDragOver={queued ? allowIssueDrop : undefined}
     onDrop={queued ? (event) => { void onReorder(issueDropped(event, order, issue.number)); } : undefined}>
     <button className="issue-select" onClick={() => onSelect(issue.number)} aria-current={selected ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{issue.messages.length} messages{issue.body ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>
-    {position > 0 && <span className="queue-position" aria-label={priorityLabel(position)}>{position}</span>}
+    {/* The badge carries its name as text: an aria-label on a span whose only
+        role is the implicit generic is prohibited and is never announced, so
+        the position was spoken as a bare digit. The wording is real text, the
+        glyph is the part hidden from assistive technology. */}
+    {position > 0 && <span className="queue-position"><span className="visually-hidden">{priorityLabel(position)}</span><span aria-hidden="true">{position}</span></span>}
     {queued && <span className="queue-controls">
       {/* The drag lives on a grip, not on the row, so a pointer press on the
           select button, the step buttons or the move-to control can no longer

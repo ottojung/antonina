@@ -31,15 +31,10 @@ Do not run manual lifecycle experiments against a real `$XDG_STATE_HOME/antonina
 Use the repository's locked TypeScript toolchain:
 
 ```sh
-npm ci --prefix web
-./web/node_modules/.bin/tsc -p packages/core/tsconfig.json
-./web/node_modules/.bin/tsc -p packages/agent-runtime/tsconfig.json
-./web/node_modules/.bin/tsc -p packages/cli/tsconfig.json
-node --test packages/core/test/*.test.mjs
-node --test packages/agent-runtime/test/*.test.mjs
-node --test packages/cli/test/*.test.mjs
-npm test --prefix web
-npm run build --prefix web
+npm run bootstrap
+npm run typecheck
+npm test
+npm run build
 ```
 
 There is no alternate Python runtime. Product behavior belongs in the TypeScript packages above.

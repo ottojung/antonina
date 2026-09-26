@@ -59,6 +59,38 @@ test('metadata round-trips and mismatched durable identity fails closed', (t) =>
   assert.throws(() => readMeta('a11d', options), MetadataReadError);
 });
 
+test('read and write boundaries reject old incomplete or extended schemas', (t) => {
+  const options = root(t);
+  createAgentDirectory('a12', options);
+  const canonical = idleMeta('a12', '/tmp', null, 5);
+  writeMeta('a12', canonical, options);
+
+  const old = { ...canonical, agent_version: 3 };
+  assert.throws(
+    () => writeMeta('a12', old, options),
+    /refusing to persist incompatible or malformed metadata/,
+  );
+
+  const missing = { ...canonical };
+  delete missing.active_runner;
+  assert.throws(
+    () => writeMeta('a12', missing, options),
+    /refusing to persist incompatible or malformed metadata/,
+  );
+
+  const extended = { ...canonical, legacy: true };
+  assert.throws(
+    () => writeMeta('a12', extended, options),
+    /refusing to persist incompatible or malformed metadata/,
+  );
+
+  nodeFs.writeFileSync(join(agentDir('a12', options), 'meta.json'), JSON.stringify(old));
+  assert.throws(() => readMeta('a12', options), /unsupported managed-agent metadata version: 3/);
+
+  nodeFs.writeFileSync(join(agentDir('a12', options), 'meta.json'), JSON.stringify(missing));
+  assert.throws(() => readMeta('a12', options), /metadata fields are not canonical/);
+});
+
 test('missing metadata is absence only when the agent directory is gone', (t) => {
   const options = root(t);
   assert.equal(readMeta('a11d', options), null);

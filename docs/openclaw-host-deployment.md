@@ -202,7 +202,8 @@ failed dispatch with:
 Unknown agent id "opencode"
 ```
 
-That mapping is the current area being verified.
+That explicit mapping resolved the dispatch problem. The first complete ACP child run
+was then accepted and executed successfully.
 
 ## Gateway experiment
 
@@ -228,20 +229,34 @@ The delegation test is intentionally trivial:
 Ask OpenClaw to spawn an ACP OpenCode child that replies with an exact short string.
 ```
 
-Progress so far:
+Progress:
 
 - Gateway startup: successful.
 - ACPX plugin loading: successful.
 - OpenCode ACP process startup: successful after removing the unsupported
   `--model` argument.
 - ACPX backend initialization: successful.
-- OpenClaw ACP spawn admission: reached successfully after giving the temporary
-  loopback test caller the host-mutation capabilities OpenClaw requires for ACP.
-- Child session creation: reached.
-- Final child dispatch: still being verified; the last concrete blocker was the
-  missing OpenClaw agent entry named `opencode`.
+- OpenClaw ACP spawn admission: successful after giving the temporary loopback test
+  caller the host-mutation capabilities OpenClaw requires for ACP.
+- Child session creation: successful.
+- Child dispatch through the explicit `opencode` OpenClaw agent entry: successful.
+- The child completed the requested task and the Gateway log contained exactly:
 
-This document should be updated when the first complete child run succeeds.
+  ```text
+  LIVE-ACP-SPAWN-OK
+  ```
+
+The smoke test therefore proves the important execution path:
+
+```text
+Gateway -> sessions_spawn -> ACPX -> OpenCode ACP -> task completion
+```
+
+The temporary HTTP caller did not receive the child completion as a normal wake-up:
+OpenClaw logged that the active requester session could not be woken and fell back
+to requester-agent handoff. That is a property of the ad-hoc HTTP smoke-test caller,
+not a failure of the ACP child itself. It remains relevant when deciding how Antonina
+should invoke or subscribe to OpenClaw work.
 
 ## Important unsuccessful paths
 
@@ -348,7 +363,7 @@ At minimum verify:
 [ ] Gateway reaches ready state
 [ ] Gateway is loopback-bound unless explicitly intended otherwise
 [ ] Gateway authentication is configured
-[ ] an OpenClaw-controlled ACP child can complete a trivial task
+[x] an OpenClaw-controlled ACP child can complete a trivial task
 [ ] the completed child actually used the desired OpenCode/Space Bunny path
 [ ] daemon/service survives a host/session restart
 ```
@@ -357,7 +372,7 @@ At minimum verify:
 
 The experiment still needs to settle:
 
-- the cleanest OpenClaw agent/session mapping for ACP-backed OpenCode children;
+- the cleanest production requester/session handoff for ACP-backed OpenCode children;
 - the minimal production Gateway tool policy needed for ACP orchestration;
 - the final daemon/service mechanism on a Guix Antonina host;
 - the exact boundary between shared immutable configuration and host-local mutable
@@ -367,6 +382,6 @@ The experiment still needs to settle:
 - whether OpenClaw configuration itself should be generated wholesale or composed
   from a small shared base plus host-specific overlays.
 
-The next milestone is deliberately small: complete one trivial ACP child task through
-OpenClaw, then install the Gateway as a persistent daemon without broadening the
-design prematurely.
+The next milestone is deliberately small: install the Gateway as a persistent daemon,
+remove the broad temporary HTTP smoke-test tool exposure, and verify that the same
+ACP child path still works without broadening the design prematurely.

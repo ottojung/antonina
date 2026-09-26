@@ -19,8 +19,10 @@ import {
   queueSteer,
   reconcileDeadMeta,
   reservationInFlight,
+  runnerAlive,
   setActiveRunner,
   signalInvocation,
+  signalRunner,
   steerQueue,
   steerSequence,
   waitForInvocationGone,
@@ -699,6 +701,21 @@ async function cmdPrompt(args: string[], context: AgentCommandContext): Promise<
   return followAttached(agentId, context);
 }
 
+async function waitForRunnerGone(
+  agentId: string,
+  context: AgentCommandContext,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const meta = readMeta(agentId, paths(context));
+    if (meta === null || !runnerAlive(meta)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const meta = readMeta(agentId, paths(context));
+  return meta === null || !runnerAlive(meta);
+}
+
 async function stopLike(
   command: 'stop' | 'kill',
   args: string[],
@@ -792,6 +809,14 @@ async function cmdDelete(args: string[], context: AgentCommandContext): Promise<
   if (ownsWork) {
     const result = await stopLike('kill', ['--id', agentId], context);
     if (result !== EXIT_OK) return result;
+
+    if (!await waitForRunnerGone(agentId, context, 2_000)) {
+      const current = readMeta(agentId, paths(context));
+      if (current !== null) signalRunner(current, 'SIGKILL');
+      if (!await waitForRunnerGone(agentId, context, 2_000)) {
+        throw new Error(`delete: runner for agent ${agentId} did not terminate`);
+      }
+    }
   }
   removeAgentDirectory(agentId, paths(context));
   context.io.stdout(`deleted agent ${agentId}`);

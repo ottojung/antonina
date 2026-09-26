@@ -84,3 +84,15 @@ kind: constraint
 
 Deciding whether a registered path is safe to touch and deciding whether it is still owed protection are separate responsibilities with separate owners. Collection answers only the second. Neither answer may be inferred from a process, directory, or file name, and no collector may widen the set of paths it may act on beyond what a verified board revision authorized.
 
+$id-6971682678022844
+title: The two declarations of a candidate's filesystem facts are one shape
+date: 2026/09/26
+source: @ottojung
+kind: constraint
+
+A candidate's filesystem facts are declared twice, once as the recipe the shared board model consumes and once as the declaration a host-side gatherer returns, and the two are two declarations of one thing rather than two things permitted to drift. They are held together by mutual assignability: each must be assignable to the other, in both directions, so a fact added, removed, or retyped on one side is a change to the other as well. One direction is not the constraint and does not satisfy it, because a one-directional reading tolerates precisely the failure the constraint exists to exclude: the recipe naming a fact that the gatherer never supplies, so a re-check proceeds on facts that answer less than it asked. An extra fact the gatherer supplies and the recipe does not name is the same failure from the other side, since the recipe would be answering a question the facts do not answer.
+
+The re-check is entitled to the completeness of this shape and to nothing looser. What a required gatherer owes is the recipe, so a re-check that receives a gatherer declaration differing from the recipe in any field, in either direction, has been handed a gatherer that opted out of the guarantees the re-check issues; a re-check is never entitled to treat whatever a gatherer happened to return as the facts it was promised, and the fact that a gatherer is a required input is a requirement on the shape of what it returns and not merely on its presence.
+
+The coupling fixes the shape and nothing else. It does not establish how the facts are gathered: nothing holds a gatherer to having really resolved the resolved path, or to having examined the final component rather than assumed it, so the recipe remains the only account of the gathering, and a change to the gathering is a change to the recipe rather than a private detail of an implementation. Nor does it freeze the shape, and it is not a gate against change: a fact may be added to both declarations at once, which is a decision about what a re-check may rely on and not a refactor of how it relies on it. A declaration that is widened past the recipe -- made to admit values of any kind, or any set of fields -- is assignable in both directions by construction and has therefore broken the constraint while appearing to satisfy it; mutual assignability is a statement about two declarations being the same, and it is silent about whether either one is still a description of the facts a re-check needs. What the constraint withholds is only the ability to make the two disagree.
+

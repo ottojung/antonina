@@ -22,7 +22,6 @@ import {
 
 export const ANTONINA_NAMESPACE = 'antonina';
 export const SIGNED_BOARD_KEY = 'board-v2';
-export const LEGACY_BOARD_KEY = 'board-v1';
 export const DEFAULT_BOARD_BASE_URL = 'https://vau.place/_skrynia';
 
 const DEFAULT_MAX_ATTEMPTS = 6;
@@ -101,7 +100,6 @@ function boardTimestampFloor(board: Board): string | undefined {
 export class SignedBoardStore {
   private readonly fetcher: typeof fetch;
   private readonly signedUrl: string;
-  private readonly legacyUrl: string;
   private readonly maxAttempts: number;
   private readonly now: () => Date;
   private readonly newId: () => string;
@@ -113,7 +111,6 @@ export class SignedBoardStore {
     const baseUrl = (options.baseUrl ?? '/_skrynia').replace(/\/$/, '');
     this.fetcher = options.fetch ?? fetch.bind(globalThis);
     this.signedUrl = `${baseUrl}/store/${encodeURIComponent(ANTONINA_NAMESPACE)}/${encodeURIComponent(SIGNED_BOARD_KEY)}`;
-    this.legacyUrl = `${baseUrl}/store/${encodeURIComponent(ANTONINA_NAMESPACE)}/${encodeURIComponent(LEGACY_BOARD_KEY)}`;
     this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     this.now = options.now ?? (() => new Date());
     this.newId = options.newId ?? defaultId;
@@ -145,13 +142,6 @@ export class SignedBoardStore {
     if (response.status === 404) return false;
     if (response.status === 200) return true;
     throw this.httpError('GET', SIGNED_BOARD_KEY, response);
-  }
-
-  async readLegacyBoard(): Promise<Board | null> {
-    const response = await this.fetcher(this.legacyUrl, { cache: 'no-store' });
-    if (response.status === 404) return null;
-    if (response.status !== 200) throw this.httpError('GET', LEGACY_BOARD_KEY, response);
-    return parseBoard(await this.parseJson(response, 'Skrynia GET antonina/board-v1'));
   }
 
   async initialize(initialBoard: Board = emptyBoard()): Promise<InitializeSignedBoardResult> {

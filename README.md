@@ -34,7 +34,7 @@ The Antonina board stores issues and durable resources in Skrynia as a signed op
 
 The board is created deliberately, not by reading it: open the web board and use its first-run **Initialize board** action. That browser becomes the initial editor and keeps the board's root signing credential and its public trust anchor, both copyable from Settings; share the anchor with readers and the credential with editors. No CLI command and no page load creates a missing board, and a second initializer is refused instead of taking the trust root.
 
-`antonina board initialize` prints the same trust anchor and root credential for an agent, `antonina board migrate` imports an existing unsigned `board-v1` once, and `antonina board credential delegate` mints attenuated credentials.
+`antonina board initialize` prints the same trust anchor and root credential for an agent, and `antonina board credential delegate` mints attenuated credentials.
 
 ```sh
 antonina board --help

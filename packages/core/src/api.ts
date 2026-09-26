@@ -2,7 +2,6 @@ import { generateSigningKey } from './canonical.js';
 import {
   ANTONINA_NAMESPACE,
   DEFAULT_BOARD_BASE_URL,
-  LEGACY_BOARD_KEY,
   SIGNED_BOARD_KEY,
   SignedBoardStore,
   SignedBoardStoreError,
@@ -43,7 +42,6 @@ import {
 export {
   ANTONINA_NAMESPACE,
   DEFAULT_BOARD_BASE_URL,
-  LEGACY_BOARD_KEY,
   SIGNED_BOARD_KEY,
 };
 export const BOARD_KEY = SIGNED_BOARD_KEY;
@@ -166,10 +164,6 @@ export class BoardApi {
     return this.store.signedBoardExists();
   }
 
-  async legacyBoardExists(): Promise<boolean> {
-    return (await this.store.readLegacyBoard()) !== null;
-  }
-
   /**
    * Reads the signed board without ever creating it; a missing board is `null`
    * and an existing board is only readable through a configured trust anchor.
@@ -208,12 +202,6 @@ export class BoardApi {
       trustAnchor: clone(this.anchor),
       head: initialized.state.head,
     };
-  }
-
-  async migrateLegacy(): Promise<BoardInitialization> {
-    const legacy = await this.store.readLegacyBoard();
-    if (legacy === null) throw new AntoninaApiError('Legacy Antonina board-v1 does not exist');
-    return this.initialize(legacy);
   }
 
   async trustBoard(anchorValue: BoardTrustAnchor): Promise<Board> {

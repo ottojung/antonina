@@ -229,15 +229,15 @@ test('history from another board or root cannot be spliced in', async () => {
   await assert.rejects(() => verifyAndReplayOperationLog(spliced, left.anchor), /(different board|predecessor chain)/);
 });
 
-test('migration bootstrap is an explicit root-signed attestation of legacy state', async () => {
+test('initialization attests a non-empty starting board as root-signed state', async () => {
   const { root, anchor, log } = await setup();
-  const legacy = {
+  const initial = {
     schemaVersion: 2,
     nextIssueNumber: 2,
     issues: [{
       number: 1,
       title: 'Imported',
-      body: 'legacy snapshot',
+      body: 'initial snapshot',
       state: 'open',
       createdAt: timestamp(0),
       updatedAt: timestamp(0),
@@ -245,7 +245,7 @@ test('migration bootstrap is an explicit root-signed attestation of legacy state
     }],
     resources: [],
   };
-  await append(log, root, 'board.initialize', { board: legacy }, 1);
+  await append(log, root, 'board.initialize', { board: initial }, 1);
 
   const replayed = await verifyAndReplayOperationLog(log, anchor);
   assert.equal(replayed.board.issues[0].title, 'Imported');

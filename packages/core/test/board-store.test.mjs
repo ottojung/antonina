@@ -15,7 +15,6 @@ function jsonResponse(value, status, etag) {
 function fakeSkrynia() {
   const capability = 'a'.repeat(64);
   let signed = null;
-  let legacy = null;
   let revision = 0;
   let beforePut = null;
 
@@ -25,7 +24,6 @@ function fakeSkrynia() {
     get signed() { return signed; },
     set signed(value) { signed = value; },
     get revision() { return revision; },
-    set legacy(value) { legacy = value; },
     set beforePut(value) { beforePut = value; },
     capability,
     bump(value) {
@@ -34,13 +32,7 @@ function fakeSkrynia() {
     },
     async fetch(url, init = {}) {
       const method = init.method ?? 'GET';
-      const isSigned = String(url).endsWith('/store/antonina/board-v2');
-      const isLegacy = String(url).endsWith('/store/antonina/board-v1');
-      if (isLegacy) {
-        if (method !== 'GET') return new Response(null, { status: 405 });
-        return legacy === null ? new Response(null, { status: 404 }) : jsonResponse(legacy, 200, '"legacy"');
-      }
-      if (!isSigned) return new Response(null, { status: 404 });
+      if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
 
       if (method === 'GET') {
         return signed === null ? new Response(null, { status: 404 }) : jsonResponse(signed, 200, etag());
@@ -171,37 +163,14 @@ test('tampered persisted history is rejected instead of becoming derived state',
   );
 });
 
-test('legacy board-v1 is only exposed as an explicit migration source', async () => {
+test('initialization and later appends are floored by the initial board timestamps', async () => {
   const server = fakeSkrynia();
-  const legacy = {
+  const initial = {
     ...emptyBoard(),
     nextIssueNumber: 2,
     issues: [{
       number: 1,
-      title: 'Legacy',
-      body: '',
-      state: 'open',
-      createdAt: '2026-09-25T12:00:00.000Z',
-      updatedAt: '2026-09-25T12:00:00.000Z',
-      messages: [],
-    }],
-  };
-  server.legacy = legacy;
-  const store = new SignedBoardStore({ fetch: server.fetch.bind(server) });
-
-  assert.deepEqual(await store.readLegacyBoard(), legacy);
-  assert.equal(server.signed, null);
-});
-
-
-test('initialization and later appends are floored by imported board timestamps', async () => {
-  const server = fakeSkrynia();
-  const legacy = {
-    ...emptyBoard(),
-    nextIssueNumber: 2,
-    issues: [{
-      number: 1,
-      title: 'Future legacy timestamp',
+      title: 'Future initial timestamp',
       body: '',
       state: 'open',
       createdAt: '2026-09-25T13:00:00.000Z',
@@ -215,7 +184,7 @@ test('initialization and later appends are floored by imported board timestamps'
     newId: (() => { let sequence = 0; return () => `floor-${++sequence}`; })(),
   });
 
-  const initialized = await store.initialize(legacy);
+  const initialized = await store.initialize(initial);
   assert.equal(initialized.log.operations[0].timestamp, '2026-09-25T13:00:00.000Z');
 
   const committed = await store.append(initialized.credential, {

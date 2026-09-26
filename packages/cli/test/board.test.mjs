@@ -24,11 +24,7 @@ function fakeSkrynia() {
     get signed() { return signed; },
     async fetch(url, init = {}) {
       const method = init.method ?? 'GET';
-      const text = String(url);
-      if (text.endsWith('/store/antonina/board-v1')) {
-        return method === 'GET' ? new Response(null, { status: 404 }) : new Response(null, { status: 405 });
-      }
-      if (!text.endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
+      if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
       if (method === 'GET') {
         return signed === null ? new Response(null, { status: 404 }) : jsonResponse(signed, 200, etag());
       }

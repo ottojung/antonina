@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { BoardApi, BOARD_CAPABILITIES, BoardTrustRequiredError } from '../dist/api.js';
-import { emptyBoard } from '../dist/model.js';
 
 const STAMP = '2026-09-25T12:00:00.000Z';
 
@@ -15,24 +14,15 @@ function jsonResponse(value, status, etag) {
 function fakeSkrynia() {
   const capability = 'a'.repeat(64);
   let signed = null;
-  let legacy = null;
   let revision = 0;
   const etag = () => `"v${revision}"`;
 
   return {
     capability,
     get signed() { return signed; },
-    set legacy(value) { legacy = value; },
     async fetch(url, init = {}) {
       const method = init.method ?? 'GET';
-      const text = String(url);
-      const isSigned = text.endsWith('/store/antonina/board-v2');
-      const isLegacy = text.endsWith('/store/antonina/board-v1');
-      if (isLegacy) {
-        if (method !== 'GET') return new Response(null, { status: 405 });
-        return legacy === null ? new Response(null, { status: 404 }) : jsonResponse(legacy, 200, '"legacy"');
-      }
-      if (!isSigned) return new Response(null, { status: 404 });
+      if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
       if (method === 'GET') {
         return signed === null ? new Response(null, { status: 404 }) : jsonResponse(signed, 200, etag());
       }
@@ -225,31 +215,16 @@ test('mutations fail closed on a missing board instead of creating one', async (
   assert.equal(methods.includes('POST'), false);
 });
 
-test('legacy migration is explicit and root-signs the imported board', async () => {
+test('the unsigned board-v1 format has no reader, migrator, or converter', async () => {
   const server = fakeSkrynia();
-  server.legacy = {
-    ...emptyBoard(),
-    nextIssueNumber: 2,
-    issues: [{
-      number: 1,
-      title: 'Legacy',
-      body: 'unsigned source',
-      state: 'open',
-      createdAt: STAMP,
-      updatedAt: STAMP,
-      messages: [],
-    }],
-  };
-  const client = api(server);
+  const urls = [];
+  const client = api(server, {
+    fetch: async (url, init = {}) => { urls.push(String(url)); return server.fetch(url, init); },
+  });
 
-  assert.equal(await client.legacyBoardExists(), true);
   assert.equal(await client.signedBoardExists(), false);
-  assert.equal(server.signed, null);
+  assert.equal(await client.readBoard(), null);
 
-  const migrated = await client.migrateLegacy();
-  assert.equal(migrated.board.issues[0].title, 'Legacy');
-  assert.equal(migrated.credential.keyId, migrated.trustAnchor.rootKeyId);
-  assert.equal(client.hasWriteAccess(), true);
-  assert.equal(server.signed.operations[0].kind, 'board.initialize');
-  assert.equal(server.signed.operations[0].payload.board.issues[0].title, 'Legacy');
+  assert.equal(server.signed, null);
+  assert.deepEqual([...new Set(urls)], ['/_skrynia/store/antonina/board-v2']);
 });

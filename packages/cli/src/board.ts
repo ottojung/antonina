@@ -159,9 +159,6 @@ async function execute(
     case 'initialize':
       if (parsed.args.length !== 0) throw new AntoninaApiError('initialize takes no arguments');
       return { mode: 'initialize', value: await client.initialize() };
-    case 'migrate':
-      if (parsed.args.length !== 0) throw new AntoninaApiError('migrate takes no arguments');
-      return { mode: 'migrate', value: await client.migrateLegacy() };
     case 'access':
       if (parsed.args.length !== 0) throw new AntoninaApiError('access takes no arguments');
       return { mode: 'access', value: await client.verifyCredential() };
@@ -310,10 +307,10 @@ function humanIssue(issue: BoardIssue): string {
 }
 
 function humanLines(result: CommandResult, parsed: ParsedCommand): string[] {
-  if (result.mode === 'initialize' || result.mode === 'migrate') {
+  if (result.mode === 'initialize') {
     const initialized = result.value as BoardInitialization;
     return [
-      result.mode === 'initialize' ? 'Antonina signed board initialized.' : 'Legacy board migrated into signed board-v2.',
+      'Antonina signed board initialized.',
       'Trust anchor (public):',
       serializeBoardTrustAnchor(initialized.trustAnchor),
       'Root credential (secret; store securely):',

@@ -86,9 +86,9 @@ export class BrowserBoardApi extends BoardApi {
 
     super({
       ...options,
-      credential: options.credential ?? credential,
-      trustAnchor: options.trustAnchor ?? trustAnchor,
-      rememberedHead: options.rememberedHead ?? rememberedHead,
+      credential: options.credential === undefined ? credential : options.credential,
+      trustAnchor: options.trustAnchor === undefined ? trustAnchor : options.trustAnchor,
+      rememberedHead: options.rememberedHead === undefined ? rememberedHead : options.rememberedHead,
     });
     this.stateStorage = storage;
 
@@ -180,6 +180,13 @@ export class BrowserBoardApi extends BoardApi {
     super.clearCredential();
     this.stateStorage.remove(BOARD_CREDENTIAL_STORAGE_KEY);
     this.persistPublicState();
+  }
+
+  forgetTrustedBoard(): void {
+    super.clearTrust();
+    this.stateStorage.remove(BOARD_CREDENTIAL_STORAGE_KEY);
+    this.stateStorage.remove(BOARD_TRUST_STORAGE_KEY);
+    this.stateStorage.remove(BOARD_HEAD_STORAGE_KEY);
   }
 
   override async delegateCredential(capabilities: readonly BoardCapability[]): Promise<BoardCredential> {

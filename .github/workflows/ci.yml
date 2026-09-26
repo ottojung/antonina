@@ -10,22 +10,74 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  typescript:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-node@v6
         with:
-          python-version: "3.12"
-      - name: Install uv
-        run: python -m pip install "uv==0.10.12"
-      - name: Sync
-        run: uv sync --frozen --extra dev
-      - name: Ruff format
-        run: uv run ruff format --check .
-      - name: Ruff
-        run: uv run ruff check .
-      - name: Mypy
-        run: uv run mypy .
-      - name: Tests
-        run: uv run pytest
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web toolchain
+        run: npm ci --prefix web
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Core tests
+        run: node --test packages/core/test/*.test.mjs
+      - name: Agent runtime tests
+        run: node --test packages/agent-runtime/test/*.test.mjs
+      - name: CLI tests
+        run: node --test packages/cli/test/*.test.mjs
+      - name: Pack precompiled CLI
+        run: npm pack ./packages/cli --pack-destination /tmp
+      - name: Install and run packed CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="$(find /tmp -maxdepth 1 -name 'antonina-cli-*.tgz' -print -quit)"
+          test -n "$package"
+          mkdir -p /tmp/antonina-install /tmp/antonina-work /tmp/antonina-fake-bin
+          npm install --prefix /tmp/antonina-install "$package"
+          antonina=/tmp/antonina-install/node_modules/.bin/antonina
+          export XDG_STATE_HOME=/tmp/antonina-state
+          output="$("$antonina" agent list --json)"
+          test "$output" = '{"agents":[]}'
+
+          cat >/tmp/antonina-fake-bin/opencode <<'EOF'
+          #!/bin/sh
+          case "$1" in
+            models)
+              echo "opencode/space-bunny-free"
+              ;;
+            session)
+              echo '[{"id":"ses_pkg","title":"antonina-a11d","created":100}]'
+              ;;
+            run)
+              last=""
+              for arg in "$@"; do last="$arg"; done
+              echo "PACKED:$last"
+              ;;
+            *)
+              exit 2
+              ;;
+          esac
+          EOF
+          chmod +x /tmp/antonina-fake-bin/opencode
+          export PATH="/tmp/antonina-fake-bin:$PATH"
+
+          "$antonina" agent new --id a11d --cwd /tmp/antonina-work
+          "$antonina" agent prompt --id a11d --detach hello
+          for _ in $(seq 1 100); do
+            status="$("$antonina" agent status --id a11d --json)"
+            if printf '%s' "$status" | grep -q '"state": "succeeded"'; then
+              break
+            fi
+            sleep 0.1
+          done
+          printf '%s' "$status" | grep -q '"state": "succeeded"'
+          grep -q 'PACKED:hello' /tmp/antonina-state/antonina/agents/a11d/output.log
+      - name: Web tests
+        run: npm test --prefix web
+      - name: Web build
+        run: npm run build --prefix web

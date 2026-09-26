@@ -1,0 +1,5 @@
+{
+  "name": "@antonina/agent-runtime",
+  "private": true,
+  "type": "module"
+}

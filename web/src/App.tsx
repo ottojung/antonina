@@ -34,7 +34,7 @@ export default function App() {
   const selected = board?.issues.find((issue) => issue.number === selectedNumber);
   useEffect(() => { if (selected && !visible.some((issue) => issue.number === selected.number)) setSelectedNumber(undefined); }, [selected, visible]);
 
-  async function run<T extends Board | BoardIssue | BoardResource | undefined>(action: () => Promise<T>, success: string): Promise<T | null> {
+  async function run<T>(action: () => Promise<T>, success: string): Promise<T | null> {
     setError(undefined); setNotice(undefined);
     try { const result = await action(); await refresh(); setNotice(success); return result; }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'The change could not be saved'); return null; }

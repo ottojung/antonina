@@ -59,11 +59,12 @@ test('metadata round-trips and mismatched durable identity fails closed', (t) =>
   assert.throws(() => readMeta('a11d', options), MetadataReadError);
 });
 
-test('missing metadata is absence but malformed or unreadable metadata is an error', (t) => {
+test('missing metadata is absence only when the agent directory is gone', (t) => {
   const options = root(t);
   assert.equal(readMeta('a11d', options), null);
 
   createAgentDirectory('a11d', options);
+  assert.throws(() => readMeta('a11d', options), /metadata file is missing/);
   nodeFs.writeFileSync(join(agentDir('a11d', options), 'meta.json'), '{');
   assert.throws(() => readMeta('a11d', options), /malformed JSON/);
 

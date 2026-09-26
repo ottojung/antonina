@@ -169,6 +169,51 @@ test('a stale storage capability is refused by the first mutation, not before it
   assert.equal(server.signed.operations.length, 1);
 });
 
+test('a 403 on the read a mutation is built on is a read failure, and a 403 on its write refuses storage', async () => {
+  const server = fakeSkrynia();
+  const root = api(server);
+  const initialized = await root.initialize();
+  const stale = { ...initialized.credential, storageCapability: 'b'.repeat(64) };
+
+  const methods = [];
+  let forbidden = false;
+  const reader = api(server, {
+    credential: initialized.credential,
+    trustAnchor: initialized.trustAnchor,
+    rememberedHead: initialized.head,
+    fetch: async (url, init = {}) => {
+      methods.push(init.method ?? 'GET');
+      if (forbidden && (init.method ?? 'GET') === 'GET') return jsonResponse({ error: 'forbidden' }, 403);
+      return server.fetch(url, init);
+    },
+  });
+  assert.equal((await reader.verifyCredential()).canEdit, true);
+
+  forbidden = true;
+  methods.length = 0;
+  await assert.rejects(() => reader.createIssue('Unreadable'), (error) => {
+    assert.equal(error instanceof BoardStorageRejectedError, false);
+    assert.ok(error instanceof SignedBoardStoreError);
+    assert.equal(error.status, 403);
+    assert.match(error.message, /Skrynia GET antonina\/board-v2 failed \(403\)/);
+    return true;
+  });
+  assert.deepEqual(methods, ['GET'], 'the refusal came from a read, before any write');
+  assert.equal(reader.accessState().storageRejected, false);
+  assert.equal(reader.hasWriteAccess(), true, 'a refused read must not cost this client its write access');
+
+  const writer = api(server, {
+    credential: stale,
+    trustAnchor: initialized.trustAnchor,
+    rememberedHead: initialized.head,
+  });
+
+  await assert.rejects(() => writer.createIssue('Refused'), BoardStorageRejectedError);
+  assert.equal(writer.hasWriteAccess(), false);
+  assert.equal(writer.accessState().storageRejected, true);
+  assert.equal(server.signed.operations.length, 1);
+});
+
 test('a deleted board is reported as its own state, not as a read failure', async () => {
   const server = fakeSkrynia();
   const owner = api(server);
@@ -178,6 +223,30 @@ test('a deleted board is reported as its own state, not as a read failure', asyn
   const reader = api(server, { trustAnchor: initialized.trustAnchor });
   await assert.rejects(() => reader.readBoard(), BoardDeletedError);
   await assert.rejects(() => reader.createIssue('Blocked'), BoardDeletedError);
+});
+
+test('an append to a board deleted after the credential was read reports as deleted', async () => {
+  const server = fakeSkrynia();
+  const owner = api(server);
+  const initialized = await owner.initialize();
+
+  const methods = [];
+  const writer = api(server, {
+    credential: initialized.credential,
+    trustAnchor: initialized.trustAnchor,
+    rememberedHead: initialized.head,
+    fetch: async (url, init = {}) => { methods.push(init.method ?? 'GET'); return server.fetch(url, init); },
+  });
+  const access = await writer.verifyCredential();
+  assert.equal(access.canEdit, true);
+
+  const log = server.signed;
+  await owner.deleteBoard();
+  methods.length = 0;
+
+  await assert.rejects(() => writer.createIssue('Too late'), BoardDeletedError);
+  assert.deepEqual(methods, ['GET'], 'a deleted board must be noticed before anything is signed or sent');
+  assert.equal(server.signed.operations.length, log.operations.length + 1);
 });
 
 test('revocation invalidates a delegated credential on its next verification', async () => {

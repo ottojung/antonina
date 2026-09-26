@@ -81,7 +81,7 @@ test('explicit initialization establishes trust, credential, and verified editin
   assert.equal(client.hasWriteAccess(), false);
 
   const initialized = await client.initialize();
-  assert.equal(initialized.board.nextIssueNumber, 1);
+  assert.equal(initialized.state.board.nextIssueNumber, 1);
   assert.equal(initialized.credential.keyId, initialized.trustAnchor.rootKeyId);
   assert.equal(client.hasWriteAccess(), true);
   assert.equal(await client.signedBoardExists(), true);
@@ -101,7 +101,7 @@ test('a trust anchor permits verified read-only replay without a credential', as
 
   const reader = api(server, {
     trustAnchor: initialized.trustAnchor,
-    rememberedHead: initialized.head,
+    rememberedHead: initialized.state.head,
   });
   const board = await reader.loadBoard();
   assert.equal(board.issues[0].title, 'Visible');
@@ -155,7 +155,7 @@ test('a stale storage capability is refused by the first mutation, not before it
   const watched = api(server, {
     credential: stale,
     trustAnchor: initialized.trustAnchor,
-    rememberedHead: initialized.head,
+    rememberedHead: initialized.state.head,
     fetch: async (url, init = {}) => { methods.push(init.method); return server.fetch(url, init); },
   });
 
@@ -189,7 +189,7 @@ test('a 403 on the read a mutation is built on is a read failure, and a 403 on i
   const reader = api(server, {
     credential: initialized.credential,
     trustAnchor: initialized.trustAnchor,
-    rememberedHead: initialized.head,
+    rememberedHead: initialized.state.head,
     fetch: async (url, init = {}) => {
       methods.push(init.method ?? 'GET');
       if (forbidden && (init.method ?? 'GET') === 'GET') return jsonResponse({ error: 'forbidden' }, 403);
@@ -214,7 +214,7 @@ test('a 403 on the read a mutation is built on is a read failure, and a 403 on i
   const writer = api(server, {
     credential: stale,
     trustAnchor: initialized.trustAnchor,
-    rememberedHead: initialized.head,
+    rememberedHead: initialized.state.head,
   });
 
   await assert.rejects(() => writer.createIssue('Refused'), BoardStorageRejectedError);
@@ -242,7 +242,7 @@ test('a credential whose key ID claims a live authority but whose key is not tha
   const client = api(server, {
     credential: impostor,
     trustAnchor: initialized.trustAnchor,
-    rememberedHead: initialized.head,
+    rememberedHead: initialized.state.head,
   });
   assert.equal((await client.readBoard()).issues[0].title, 'Visible');
   assert.equal(client.hasWriteAccess(), false);
@@ -269,7 +269,7 @@ test('a credential holding the live public key with a foreign private key is rea
   const client = api(server, {
     credential: impostor,
     trustAnchor: initialized.trustAnchor,
-    rememberedHead: initialized.head,
+    rememberedHead: initialized.state.head,
   });
   assert.equal((await client.readBoard()).issues[0].title, 'Visible');
   assert.equal(client.hasWriteAccess(), false);
@@ -294,7 +294,7 @@ test('a credential whose key ID is not derived from the live public key is read-
   const client = api(server, {
     credential: impostor,
     trustAnchor: initialized.trustAnchor,
-    rememberedHead: initialized.head,
+    rememberedHead: initialized.state.head,
   });
   assert.equal((await client.readBoard()).issues[0].title, 'Visible');
   assert.equal(client.hasWriteAccess(), false);
@@ -320,7 +320,7 @@ test('a well-formed credential for a key this board never registered is read-onl
       privateKey: foreign.privateKey,
     },
     trustAnchor: initialized.trustAnchor,
-    rememberedHead: initialized.head,
+    rememberedHead: initialized.state.head,
   });
   assert.equal((await client.readBoard()).issues[0].title, 'Visible');
   assert.equal(client.hasWriteAccess(), false);
@@ -351,7 +351,7 @@ test('an append to a board deleted after the credential was read reports as dele
   const writer = api(server, {
     credential: initialized.credential,
     trustAnchor: initialized.trustAnchor,
-    rememberedHead: initialized.head,
+    rememberedHead: initialized.state.head,
     fetch: async (url, init = {}) => { methods.push(init.method ?? 'GET'); return server.fetch(url, init); },
   });
   const access = await writer.verifyCredential();
@@ -409,7 +409,7 @@ test('an existing board is unreadable until a trust anchor is configured', async
   });
 
   const reader = api(server, { trustAnchor: initialized.trustAnchor });
-  assert.deepEqual(await reader.readBoard(), initialized.board);
+  assert.deepEqual(await reader.readBoard(), initialized.state.board);
 });
 
 test('a second initializer is refused before it can replace the trust root', async () => {

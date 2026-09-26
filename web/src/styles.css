@@ -25,6 +25,11 @@ button, input, textarea { outline: none; }
 button:focus-visible, input:focus-visible, textarea:focus-visible { box-shadow: 0 0 0 3px #fff, 0 0 0 6px #398063; }
 h1, h2, h3, p { overflow-wrap: anywhere; }
 
+/* Text that is in the accessibility tree without being seen. It is clipped to a
+   single pixel rather than set to display:none, because a hidden box takes its
+   text out of the tree with it. */
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
 .app-shell { min-height: 100vh; }
 .topbar { height: 72px; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; border-bottom: 1px solid var(--line); background: rgba(250, 251, 248, .96); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(14px); }
 .brand { display: flex; align-items: center; gap: 11px; border: 0; border-radius: 8px; background: none; color: var(--ink); padding: 3px; }
@@ -113,9 +118,10 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .filters button.active { background: #fff; color: var(--green-dark); box-shadow: 0 1px 3px rgba(39, 48, 39, .12); }
 
 .issue-list { border-top: 1px solid var(--line); }
-.issue-row { width: 100%; display: flex; gap: 12px; text-align: left; padding: 17px 24px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); }
+.issue-row { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
 .issue-row:hover { background: #f0f3ed; }
 .issue-row.selected { background: #dcebe1; box-shadow: inset 4px 0 var(--green); }
+.issue-select { flex: 1; min-width: 0; display: flex; gap: 12px; text-align: left; padding: 17px 24px; border: 0; background: transparent; color: var(--ink); }
 .issue-summary { min-width: 0; flex: 1; }
 .issue-line { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: .73rem; }
 .issue-line strong { color: var(--green); }
@@ -126,6 +132,18 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .issue-title { display: block; margin: 7px 0; font-weight: 750; line-height: 1.35; }
 .issue-meta { display: flex; gap: 7px; color: var(--muted); font-size: .77rem; }
 .row-arrow { align-self: center; color: #777d74; font-size: 1.35rem; }
+.queue-position { flex: none; display: grid; place-items: center; min-width: 22px; height: 22px; border-radius: 999px; background: #e7ece5; color: var(--green-dark); font-size: .72rem; font-weight: 800; }
+.queue-controls { flex: none; display: flex; gap: 3px; }
+/* The grip is the element that carries the drag, so the grab cursor is bound to
+   the draggable flag on that element rather than to the row, and the two cannot
+   drift apart. The row is a drop target but not a drag handle, so it keeps the
+   ordinary pointer of a row. */
+.queue-grip { flex: none; display: grid; place-items: center; min-width: 16px; color: #a5a9a1; font-size: .95rem; line-height: 1; }
+.queue-grip[draggable="true"] { cursor: grab; }
+.queue-grip[draggable="true"]:active { cursor: grabbing; }
+.queue-controls button { padding: 4px 7px; border: 1px solid var(--line); background: #fff; color: var(--green-dark); font-size: .68rem; }
+.queue-controls button:disabled { color: #a5a9a1; background: transparent; cursor: default; }
+.queue-controls select { padding: 4px 2px; border: 1px solid var(--line); background: #fff; color: var(--green-dark); font-size: .68rem; }
 .empty-state { padding: 56px 28px; text-align: center; color: var(--muted); }
 .empty-state > span { display: grid; place-items: center; width: 42px; height: 42px; margin: 0 auto 12px; border-radius: 12px; background: #e9ede6; color: var(--green); font-size: 1.2rem; font-weight: 800; }
 .empty-state h2 { margin: 0; color: var(--ink); font-size: 1.05rem; }
@@ -209,7 +227,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 @keyframes pulse { to { opacity: .25; } }
 @media (max-width: 860px) {
   .workspace { grid-template-columns: minmax(310px, 43%) 1fr; }
-  .pane-heading, .issue-row { padding-left: 20px; padding-right: 20px; }
+  .pane-heading, .issue-select { padding-left: 20px; padding-right: 20px; }
   .create-form, .access-callout, .filters { margin-left: 20px; margin-right: 20px; }
   .access-callout { align-items: flex-start; flex-direction: column; }
   .thread-header { flex-direction: column; }
@@ -240,7 +258,12 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
   .brand > span:last-child { display: none; }
   .pane-heading { padding-left: 16px; padding-right: 16px; }
   .create-form, .access-callout, .filters { margin-left: 16px; margin-right: 16px; }
-  .issue-row { padding-left: 16px; padding-right: 16px; }
+  .issue-select { padding-left: 16px; padding-right: 16px; }
+  .queue-controls { flex-wrap: wrap; justify-content: flex-end; }
+  /* The row's narrow layout reasserts the utility rather than inheriting it, so
+     no rule in this block can leave hidden wording showing as an unstyled run of
+     text inside the badge. */
+  .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
   .issue-line { flex-wrap: wrap; }
   .issue-line time { margin-left: 0; width: 100%; }
   .create-form > div, .name-prompt > div { flex-direction: column; }

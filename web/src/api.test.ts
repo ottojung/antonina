@@ -82,6 +82,43 @@ async function initializedBoard(storage: BoardKeyStorage = memoryStorage()) {
 }
 
 describe('browser board session', () => {
+  it('verifies the stored log once per trust and once per initialize', async () => {
+    // The first-run paths are the reason this count matters: each of these two
+    // calls already reads and verifies the whole operation log, and neither
+    // returns the queue that `readState` pairs with the board, so the app makes
+    // one more read for the queue. What must never happen is a second
+    // verification inside either of these calls.
+    const server = fakeSkrynia();
+    const storage = memoryStorage();
+    let gets = 0;
+    const counting = () => new BrowserBoardSession(storage, {
+      fetch: async (input, init) => {
+        if ((init?.method ?? 'GET') === 'GET') gets += 1;
+        return server.fetch(String(input), init);
+      },
+      now: () => new Date(STAMP),
+    });
+    const owner = counting();
+    const initialized = await owner.initialize();
+    // The existence probe and the create's own compare-and-set read; both belong
+    // to the one create, and neither is repeated inside our call.
+    expect(gets).toBe(2);
+    expect(initialized.board.issues).toEqual([]);
+
+    const reader = counting();
+    const board = await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
+    // One read: trusting a known anchor is a single verified pass over the log.
+    expect(gets).toBe(3);
+    expect(board.issues).toEqual([]);
+
+    // One more read, and only one, is what it costs to learn the queue those two
+    // calls did not return.
+    await reader.readState();
+    expect(gets).toBe(4);
+    await reader.readState();
+    expect(gets).toBe(5);
+  });
+
   it('reports a missing board on a plain page load without creating it', async () => {
     const server = fakeSkrynia();
     const methods: Array<string | undefined> = [];
@@ -92,7 +129,7 @@ describe('browser board session', () => {
       },
     });
 
-    await expect(client.read()).resolves.toBeNull();
+    await expect(client.readState()).resolves.toBeNull();
     expect(methods).not.toContain('POST');
     expect(server.signed).toBeNull();
   });
@@ -131,7 +168,7 @@ describe('browser board session', () => {
     const { server, initialized } = await initializedBoard();
     const reader = session(server);
 
-    await expect(reader.read()).rejects.toBeInstanceOf(BoardTrustRequiredError);
+    await expect(reader.readState()).rejects.toBeInstanceOf(BoardTrustRequiredError);
     const board = await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
     expect(board.issues).toEqual([]);
   });
@@ -197,8 +234,8 @@ describe('browser board session', () => {
       now: () => new Date(STAMP),
     });
 
-    await reopened.read();
-    await reopened.read();
+    await reopened.readState();
+    await reopened.readState();
     expect(reopened.hasCredential()).toBe(true);
     expect(reopened.api.hasWriteAccess()).toBe(true);
     expect(reopened.api.accessState().storageRejected).toBe(false);
@@ -252,7 +289,7 @@ describe('browser board session', () => {
     }));
 
     const reopened = session(server, storage);
-    await expect(reopened.read()).resolves.toMatchObject({ issues: [{ title: 'Visible' }] });
+    await expect(reopened.readState()).resolves.toMatchObject({ board: { issues: [{ title: 'Visible' }] } });
     expect(reopened.api.hasWriteAccess()).toBe(false);
     expect(reopened.api.getEffectiveCapabilities()).toEqual([]);
     await expect(reopened.api.createIssue('Impostor')).rejects.toThrow('key ID does not match its public key');
@@ -270,7 +307,7 @@ describe('browser board session', () => {
     }));
 
     const reopened = session(server, storage);
-    await expect(reopened.read()).resolves.toMatchObject({ issues: [{ title: 'Visible' }] });
+    await expect(reopened.readState()).resolves.toMatchObject({ board: { issues: [{ title: 'Visible' }] } });
 
     const access = reopened.api.accessState();
     expect(reopened.hasCredential()).toBe(true);
@@ -289,11 +326,11 @@ describe('browser board session', () => {
     await owner.api.createIssue('Kept');
 
     const reopened = session(server, storage);
-    await expect(reopened.read()).resolves.toMatchObject({ issues: [{ title: 'Kept' }] });
+    await expect(reopened.readState()).resolves.toMatchObject({ board: { issues: [{ title: 'Kept' }] } });
 
     const log = server.signed as { head: string; operations: Array<{ opId: string }> };
     server.signed = { ...log, head: log.operations[0].opId, operations: log.operations.slice(0, 1) };
-    await expect(reopened.read()).rejects.toThrow('previously accepted head');
+    await expect(reopened.readState()).rejects.toThrow('previously accepted head');
   });
 
   it('ignores unreadable stored keys instead of failing the whole page load', () => {
@@ -305,5 +342,77 @@ describe('browser board session', () => {
 
     expect(client.hasCredential()).toBe(false);
     expect(client.api.getTrustAnchor()).toBeNull();
+  });
+});
+
+describe('the shared priority queue through the session', () => {
+  async function boardWithThreeIssues() {
+    const server = fakeSkrynia();
+    const storage = memoryStorage();
+    const owner = session(server, storage);
+    const initialized = await owner.initialize();
+    await owner.api.createIssue('First');
+    await owner.api.createIssue('Second');
+    await owner.api.createIssue('Third');
+    return { server, storage, owner, initialized };
+  }
+
+  it('reads the board and its queue in one pass', async () => {
+    const { server, storage } = await boardWithThreeIssues();
+    const reader = session(server, storage);
+
+    const state = await reader.readState();
+
+    expect(state?.board.issues.map((issue) => issue.number)).toEqual([1, 2, 3]);
+    expect(state?.queue).toEqual([1, 2, 3]);
+  });
+
+  it('seeds the queue oldest-issue first at initialization', async () => {
+    const { server, storage } = await boardWithThreeIssues();
+    await session(server, storage).api.reorderQueue([3, 1, 2]);
+    await session(server, storage).api.createIssue('Fourth');
+
+    expect((await session(server, storage).readState())?.queue).toEqual([3, 1, 2, 4]);
+  });
+
+  it('commits a reorder and shows the same order to a second client that only reads', async () => {
+    const { server, storage, initialized } = await boardWithThreeIssues();
+    const writer = session(server, storage);
+
+    const committed = await writer.api.reorderQueue([2, 3, 1]);
+
+    expect(committed).toEqual([2, 3, 1]);
+    const reader = session(server);
+    await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
+    expect((await reader.readState())?.queue).toEqual([2, 3, 1]);
+    expect(await reader.api.getQueue()).toEqual([2, 3, 1]);
+  });
+
+  it('leaves the stored board untouched when a reorder is refused', async () => {
+    const { server, storage } = await boardWithThreeIssues();
+    const before = server.signed;
+
+    await expect(session(server, storage).api.reorderQueue([1, 2])).rejects.toThrow('every open issue exactly once');
+    expect(server.signed).toBe(before);
+    expect((await session(server, storage).api.getQueue())).toEqual([1, 2, 3]);
+  });
+
+  it('never lets a read-only credential reorder the shared queue', async () => {
+    const { server, initialized } = await boardWithThreeIssues();
+    const reader = session(server);
+    await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
+
+    expect(reader.api.hasWriteAccess()).toBe(false);
+    await expect(reader.api.reorderQueue([3, 2, 1])).rejects.toThrow('credential is required');
+    expect((server.signed as { operations: unknown[] }).operations.length).toBe(4);
+  });
+
+  it('keeps a newly opened issue in the queue a client re-reads after a close', async () => {
+    const { server, storage } = await boardWithThreeIssues();
+    const client = session(server, storage);
+    await client.api.close(2);
+    expect((await client.readState())?.queue).toEqual([1, 3]);
+    await client.api.reopen(2);
+    expect((await client.readState())?.queue).toEqual([1, 3, 2]);
   });
 });

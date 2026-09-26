@@ -37,9 +37,13 @@ case "$1" in
     if [ "$last" = "slow" ]; then
       echo "slow-start"
       sleep 30
-    else
-      echo "FAKE:$last"
+      exit 0
     fi
+    if [ "$last" = "server-error" ]; then
+      echo '{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_e2e"}}'
+      exit 1
+    fi
+    echo "FAKE:$last"
     exit 0
     ;;
   *)
@@ -247,4 +251,21 @@ test('delete tombstone blocks later prompt reservation', (t) => {
   assert.equal(after.pending_prompt, null);
   assert.equal(after.active_runner, false);
   assert.equal(after.prompt_count, 0);
+});
+
+
+test('backend server failure is persisted and sanitized through status', async (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', 'bad1', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'prompt', '--id', 'bad1', '--detach', 'server-error'], env).status, 0);
+  await waitFor(root, 'bad1', (meta) => meta.state === 'failed' && meta.active_runner === false);
+
+  const status = run(['agent', 'status', '--id', 'bad1', '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  const body = JSON.parse(status.stdout);
+  assert.equal(body.state, 'failed');
+  assert.equal(body.backend_error.classification, 'transient_backend_server_error');
+  assert.equal(body.backend_error.reference, 'err_e2e');
+  assert.equal(body.backend_error.automatic_retry_safe, false);
+  assert.equal(body.backend_error.request_boundary, 'fresh_session');
 });

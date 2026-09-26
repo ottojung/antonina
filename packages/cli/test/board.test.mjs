@@ -115,7 +115,14 @@ test('every read command names initialization while the board is missing', async
   const server = fakeSkrynia();
   const missing = 'antonina board: Antonina signed board does not exist; run: antonina board initialize to create it';
 
-  for (const command of [['list'], ['list', '--json'], ['show', '1'], ['queue', 'list'], ['resource', 'list']]) {
+  for (const command of [
+    ['list'],
+    ['list', '--json'],
+    ['show', '1'],
+    ['queue', 'list'],
+    ['resource', 'list'],
+    ['collect', 'list', '--host', 'lubko://host-1'],
+  ]) {
     const { code, err } = await run(command, { createClient: () => client(server) });
     assert.equal(code, 1, command.join(' '));
     assert.equal(err[0], missing, command.join(' '));
@@ -167,7 +174,13 @@ test('every read command names the trust anchor when it cannot verify the board'
   const untrusted = 'antonina board: Antonina signed board exists; this client has no trust anchor for it; '
     + 'set ANTONINA_BOARD_TRUST to the board trust anchor to read it';
 
-  for (const command of [['list'], ['show', '1'], ['queue', 'list'], ['resource', 'list']]) {
+  for (const command of [
+    ['list'],
+    ['show', '1'],
+    ['queue', 'list'],
+    ['resource', 'list'],
+    ['collect', 'list', '--host', 'lubko://host-1'],
+  ]) {
     const { code, err } = await run(command, { createClient: () => client(server) });
     assert.equal(code, 1, command.join(' '));
     assert.equal(err[0], untrusted, command.join(' '));

@@ -24,12 +24,27 @@ import {
   type BoardTrustAnchor,
   type VerifiedAuthority,
 } from '../../core/src/operations.js';
+import {
+  CollectBoardError,
+  CollectRefusedError,
+  collectDelete,
+  collectList,
+  renderRevision,
+  type CollectDeleteReport,
+  type CollectDeleteReportBase,
+  type CollectListEntry,
+} from './collection.js';
 
 export const BOARD_BASE_URL_ENV = 'ANTONINA_BOARD_URL';
 export const BOARD_CREDENTIAL_ENV = 'ANTONINA_BOARD_CREDENTIAL';
 export const BOARD_TRUST_ENV = 'ANTONINA_BOARD_TRUST';
 export const BOARD_HEAD_ENV = 'ANTONINA_BOARD_HEAD';
 export const BOARD_AUTHOR_ENV = 'ANTONINA_BOARD_AUTHOR';
+// The managed collection roots the `collect` commands are configured from. The
+// name is owned by the loader that reads it, in `./collection.js`, so there is
+// one copy of it and no import cycle; it is re-exported here beside the other
+// environment names this command surface owns.
+export { COLLECT_ROOTS_ENV } from './collection.js';
 
 export interface BoardCommandIo {
   stdout(text: string): void;
@@ -53,6 +68,8 @@ type CommandValue =
   | BoardAccessState
   | BoardTrustAnchor
   | VerifiedAuthority[]
+  | CollectListEntry[]
+  | CollectDeleteReportBase
   | number[]
   | null;
 
@@ -144,6 +161,25 @@ function parseCapabilities(args: string[]): BoardCapability[] {
 }
 
 /**
+ * The same advice, for the failure kinds a collection snapshot classifies itself
+ * instead of throwing. `board-missing` and `board-unverifiable` are byte-for-byte
+ * the advice above, so a collector is never taught a different next step for
+ * the same board state.
+ */
+function collectionAdvice(kind: string): string | null {
+  if (kind === 'board-missing') return 'run: antonina board initialize to create it';
+  if (kind === 'board-unverifiable' || kind === 'board-state-rejected') {
+    return 'set ' + BOARD_TRUST_ENV + ' to the board trust anchor to read it';
+  }
+  // A transport failure is the one kind with no established advice, so it is
+  // named as itself rather than flattened into another kind's advice.
+  if (kind === 'board-read-failed') {
+    return kind + ': check ' + BOARD_BASE_URL_ENV + ' and that this host can reach it';
+  }
+  return null;
+}
+
+/**
  * The CLI's advice for the states the shared API reports, so an operator is
  * never told to configure a trust anchor for a board that does not exist, left
  * guessing what to do about one it cannot verify, or left without a next step
@@ -156,6 +192,13 @@ function boardStateAdvice(error: unknown): string | null {
   if (error instanceof BoardStorageRejectedError) {
     return 'set ' + BOARD_CREDENTIAL_ENV + ' to a credential copied after the storage capability was issued';
   }
+  // A collection snapshot classifies its own failures rather than throwing the
+  // board errors above, so it carries the kind across and is advised about
+  // here: `collect list` names initialization while the board is missing and
+  // the trust anchor while it cannot be verified, exactly as every other read
+  // command does.
+  if (error instanceof CollectBoardError) return collectionAdvice(error.kind);
+  if (error instanceof CollectRefusedError) return error.kind === null ? null : collectionAdvice(error.kind);
   return null;
 }
 
@@ -316,6 +359,31 @@ async function execute(
       }
       throw new AntoninaApiError('resource requires list, add, or remove');
     }
+    case 'collect': {
+      const [subcommand, ...args] = parsed.args;
+      if (subcommand === 'list') {
+        const hostOption = option(args, '--host');
+        if (hostOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for collect list');
+        return {
+          mode: 'collect-list',
+          value: (await collectList(client, requireArg(hostOption.value, 'collect list --host'))).value,
+        };
+      }
+      if (subcommand === 'delete') {
+        const hostOption = option(args, '--host');
+        const pathOption = option(hostOption.rest, '--path');
+        const confirmFlag = flag(pathOption.rest, '--confirm');
+        if (confirmFlag.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for collect delete');
+        const collected = await collectDelete(client, {
+          host: requireArg(hostOption.value, 'collect delete --host'),
+          path: requireArg(pathOption.value, 'collect delete --path'),
+          confirm: confirmFlag.value,
+          env,
+        });
+        return { mode: collected.mode, value: collected.value };
+      }
+      throw new AntoninaApiError('collect requires list or delete');
+    }
     default:
       throw new AntoninaApiError('unsupported antonina board command: ' + parsed.command);
   }
@@ -326,6 +394,18 @@ function humanIssue(issue: BoardIssue): string {
   for (const message of issue.messages) lines.push(message.author + ' @ ' + message.createdAt, message.body);
   return lines.join('\n');
 }
+
+/**
+ * Every removal result and the words that report it, as a total mapping over
+ * `CollectDeleteReport['removal']`. The annotation is the exhaustiveness check:
+ * a removal result added to the union without a word here is a type error, so the
+ * reporting cannot quietly fall through to a case that did not happen.
+ */
+const REMOVAL_OUTCOME: { readonly [K in CollectDeleteReport['removal']]: string } = {
+  unlinked: 'deleted',
+  'unlinked-symlink': 'unlinked symlink',
+  absent: 'already absent',
+};
 
 function humanLines(result: CommandResult): string[] {
   if (result.mode === 'initialize') {
@@ -372,6 +452,41 @@ function humanLines(result: CommandResult): string[] {
     return ['Resource added: ' + resource.host + ' ' + resource.path];
   }
   if (result.mode === 'resource-removed') return ['Resource dependency removed.'];
+
+  if (result.mode === 'collect-list') {
+    const entries = result.value as CollectListEntry[];
+    if (entries.length === 0) return ['No path on this host is collectible.'];
+    return entries.map((entry) => {
+      const dependents = entry.closedDependents.length === 0
+        ? ''
+        : '; closed dependents ' + entry.closedDependents.map((number) => '#' + number).join(', ');
+      return 'collectible ' + entry.path + ' on ' + entry.host
+        + '; board ' + entry.boardId + ' rev ' + entry.revision + dependents;
+    });
+  }
+
+  if (result.mode === 'collect-pending') {
+    // The pending value is the *base* report and has no `removal`: nothing has been
+    // removed, so there is no removal to report. The line therefore states the two
+    // shapes the confirmed run could take rather than asserting one of them.
+    const report = result.value as CollectDeleteReportBase;
+    // Exactly one revision is named, and it is the one the re-check verified.
+    return [
+      `would delete ${report.path} on ${report.host} (a symlink would be unlinked as a link, `
+        + `anything else removed recursively); board ${report.boardId} `
+        + `${renderRevision(report.recheckHead)}; re-run with --confirm`,
+    ];
+  }
+  if (result.mode === 'collect-deleted') {
+    const report = result.value as CollectDeleteReport;
+    // A mapping over the removal union rather than a chain of comparisons, so a
+    // fourth removal result is a type error here instead of silently rendering as
+    // the last case: the report must name what actually happened, never a default.
+    return [
+      `${REMOVAL_OUTCOME[report.removal]} ${report.path} on ${report.host}; `
+        + `board ${report.boardId} ${renderRevision(report.recheckHead)}`,
+    ];
+  }
 
   const value = result.value;
   if (!Array.isArray(value)) return [humanIssue(value as BoardIssue)];

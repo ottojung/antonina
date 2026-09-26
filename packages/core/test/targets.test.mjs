@@ -7,6 +7,7 @@ import {
 } from '../dist/api.js';
 import {
   canonicalTargetRequirements,
+  executionTargetDefect,
   parseBoard,
   resourceViews,
   selectExecutionTarget,
@@ -101,8 +102,26 @@ test('execution target records are strict about shape, ordering, and internal co
   // An ephemeral environment has no host filesystem, so it has no address.
   assert.throws(() => boardWith([ephemeralTarget({ address: 'lubko://runner' })]), /execution target/);
   assert.throws(() => boardWith([ephemeralTarget({ capabilities: ['container-isolation', 'ephemeral-lifetime', 'persistent-filesystem'] })]), /execution target/);
-  // GitHub Actions runs workflow runners, not persistent hosts.
-  assert.throws(() => boardWith([ephemeralTarget({ kind: 'persistent-host', address: 'lubko://runner' })]), /execution target/);
+});
+
+test('the github-actions backend runs ephemeral environments only', () => {
+  // Every other property of this record is what a well-formed persistent host
+  // has -- a Lubko address, a durable filesystem, no ephemeral lifetime, sorted
+  // and unique capabilities -- so the backend/kind pairing is the only thing
+  // left that can be refusing it.
+  const runner = persistentTarget({
+    id: 'actions-runner',
+    backend: 'github-actions',
+    address: 'lubko://actions-runner',
+  });
+  assert.equal(
+    executionTargetDefect(runner),
+    'the github-actions backend runs ephemeral environments only',
+  );
+  // The same record on a backend that can host a persistent machine is sound,
+  // so the defect above is the pairing and not the shape of the record.
+  assert.equal(executionTargetDefect({ ...runner, backend: 'lubko' }), null);
+  assert.throws(() => boardWith([runner]), /execution target/);
 });
 
 test('two execution targets may not share one identity or one host address', () => {
@@ -413,6 +432,33 @@ test('a dispatch is recorded on the board with the target that ran and the reaso
   await assert.rejects(() => client.recordDispatch(issue.number, { targetId: 'nowhere' }), TargetSelectionError);
   await client.close(issue.number);
   await assert.rejects(() => client.recordDispatch(issue.number, {}), /open issue/);
+});
+
+test('deleting a dispatched issue removes the dispatch that named it', async () => {
+  const server = fakeSkrynia();
+  const client = api(server);
+  await client.initialize();
+  const dispatched = await client.createIssue('Route me');
+  const kept = await client.createIssue('Keep me');
+  await client.registerTarget({
+    id: 'phoebe-dev',
+    backend: 'lubko',
+    kind: 'persistent-host',
+    capabilities: ['persistent-filesystem'],
+    address: 'lubko://phoebe-dev',
+  });
+  await client.recordDispatch(dispatched.number, { targetId: 'phoebe-dev' });
+  await client.recordDispatch(kept.number, { targetId: 'phoebe-dev' });
+
+  // The delete is a normal board operation, not a refusal: a dispatch record
+  // naming a number the board no longer holds would leave the board
+  // unparseable, so the cascade takes the record with the issue.
+  const board = await client.deleteIssue(dispatched.number);
+  assert.equal(board.issues.length, 1);
+  assert.equal(board.issues[0].number, kept.number);
+  assert.deepEqual(board.dispatches.map((entry) => entry.issueNumber), [kept.number]);
+  // And the committed board is still a board, read back through the parser.
+  assert.deepEqual((await client.loadBoard()).dispatches.map((entry) => entry.issueNumber), [kept.number]);
 });
 
 test('a resource registered on a catalogued host is related to that target', async () => {

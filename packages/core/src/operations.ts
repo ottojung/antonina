@@ -662,6 +662,10 @@ function applyBoardMutation(
         const issueNumbers = resource.issueNumbers.filter((number) => number !== payload.number);
         return issueNumbers.length === 0 ? [] : [{ ...resource, issueNumbers, updatedAt: operation.timestamp }];
       });
+      // A dispatch names an issue, so it goes with the issue it named rather
+      // than surviving as a record the board can no longer hold.
+      candidate.dispatches = candidate.dispatches.filter(
+        (dispatch) => dispatch.issueNumber !== payload.number);
       nextQueue = nextQueue.filter((number) => number !== payload.number);
       break;
     }

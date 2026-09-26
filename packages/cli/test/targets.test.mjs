@@ -249,6 +249,26 @@ test('the new read commands name initialization while the board is missing', asy
   assert.equal(server.signed, null);
 });
 
+test('the CLI refuses to catalog a persistent host on the github-actions backend', async () => {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  await owner.initialize();
+
+  // A well-formed persistent host in every other respect, so the backend/kind
+  // pairing is the only reason this can be refused.
+  const refused = await run([
+    'target', 'add', 'actions-runner',
+    '--backend', 'github-actions',
+    '--kind', 'persistent-host',
+    '--address', 'lubko://actions-runner',
+    '--capability', 'network-egress',
+    '--capability', 'persistent-filesystem',
+  ], owner);
+  assert.equal(refused.code, 1);
+  assert.match(refused.err[0], /github-actions backend runs ephemeral environments only/);
+  assert.equal((await owner.loadBoard()).targets.length, 0);
+});
+
 test('an empty catalog is reported as empty rather than as a failure', async () => {
   const server = fakeSkrynia();
   const owner = client(server);

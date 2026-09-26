@@ -23,3 +23,14 @@ source: issue-3
 kind: requirement
 
 The public command is `antonina`. Alternate historical command names or compatibility launchers are not part of the product contract.
+
+
+$id-5081437296412058
+title: Managed-agent metadata has one authoritative schema
+date: 2026/09/25
+source: issue-8
+kind: constraint
+
+Managed-agent durable metadata uses one exact current schema and version. Version 4 records explicitly contain every lifecycle authority field; missing fields, unknown fields, old versions, partial process identities, malformed reservations, and malformed control/steer authority are errors at the persistence boundary.
+
+Antonina does not silently interpret old or incomplete metadata, does not synthesize legacy defaults, and does not maintain a dual-read compatibility path. A deliberate future schema change must introduce a new version and an explicit migration decision.

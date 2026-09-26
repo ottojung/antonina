@@ -5,6 +5,8 @@ import { DEFAULT_VARIANT, persistedAgentCwd, persistedNativeSessionId, persisted
 
 export const AGENT_MODEL = 'opencode/space-bunny-free';
 export const OPENCODE_TITLE_PREFIX = 'antonina-';
+export const DEFAULT_OPENCODE_BIN = 'opencode';
+export const OPENCODE_BIN_ENV = 'ANTONINA_OPENCODE_BIN';
 const SESSION_LIST_MAX_COUNT = 100;
 const SESSION_LIST_TIMEOUT_MS = 10_000;
 const MODEL_LIST_TIMEOUT_MS = 10_000;
@@ -51,6 +53,26 @@ interface SessionRow {
   created: number;
 }
 
+/**
+ * Resolves the OpenCode executable. Antonina looks the backend up by bare
+ * name on `PATH` by default. `ANTONINA_OPENCODE_BIN` is a supported override
+ * for installations where the executable is not reachable by name (or where
+ * the caller must pin an exact path). It is a first-class configuration
+ * setting, not a test hook: an absolute path is used verbatim and is never
+ * re-resolved against `PATH`.
+ */
+export function resolveOpencode(env: Record<string, string | undefined> = process.env): string {
+  const configured = env[OPENCODE_BIN_ENV];
+  if (configured === undefined) return DEFAULT_OPENCODE_BIN;
+  if (typeof configured !== 'string' || configured.length === 0) {
+    throw new Error(`${OPENCODE_BIN_ENV} must be a non-empty executable path`);
+  }
+  if (configured !== configured.trim() || configured.startsWith('-') || configured.includes('\0')) {
+    throw new Error(`${OPENCODE_BIN_ENV} must be an executable path without surrounding whitespace`);
+  }
+  return configured;
+}
+
 function parseSessionRows(value: unknown): SessionRow[] | null {
   if (!Array.isArray(value)) return null;
   const rows: SessionRow[] = [];
@@ -73,13 +95,14 @@ export function discoverSessionId(
   agentId: string,
   env: Record<string, string | undefined> = process.env,
 ): string | null {
+  const childEnv = { ...process.env, ...env };
   const result = spawnSync(
-    'opencode',
+    resolveOpencode(childEnv),
     ['session', 'list', '--format', 'json', '--max-count', String(SESSION_LIST_MAX_COUNT)],
     {
       encoding: 'utf8',
       timeout: SESSION_LIST_TIMEOUT_MS,
-      env: { ...process.env, ...env },
+      env: childEnv,
       stdio: ['ignore', 'pipe', 'ignore'],
     },
   );
@@ -101,10 +124,11 @@ export function discoverSessionId(
 export function configuredModelAvailable(
   env: Record<string, string | undefined> = process.env,
 ): boolean | null {
-  const result = spawnSync('opencode', ['models'], {
+  const childEnv = { ...process.env, ...env };
+  const result = spawnSync(resolveOpencode(childEnv), ['models'], {
     encoding: 'utf8',
     timeout: MODEL_LIST_TIMEOUT_MS,
-    env: { ...process.env, ...env },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'ignore'],
   });
   if (result.error || result.status !== 0 || typeof result.stdout !== 'string') return null;
@@ -120,12 +144,13 @@ export function buildAgentCommand(
   const agentId = requiredPersistedAgentId(meta);
   const cwd = persistedAgentCwd(meta);
   const variant = persistedVariant(meta) || DEFAULT_VARIANT;
+  const executable = resolveOpencode(env);
   if (isContinue) {
     const recorded = persistedNativeSessionId(meta);
     const sessionId = recorded ?? discoverSessionId(agentId, env);
     if (sessionId === null) return null;
     return [
-      'opencode', 'run', '--auto',
+      executable, 'run', '--auto',
       '--session', sessionId,
       '--model', AGENT_MODEL,
       '--variant', variant,
@@ -135,7 +160,7 @@ export function buildAgentCommand(
     ];
   }
   return [
-    'opencode', 'run', '--auto',
+    executable, 'run', '--auto',
     '--title', `${OPENCODE_TITLE_PREFIX}${agentId}`,
     '--model', AGENT_MODEL,
     '--variant', variant,

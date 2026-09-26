@@ -1,16 +1,22 @@
 import { describe, expect, it } from 'vitest';
+import { BoardDeletedError, BoardTrustRequiredError } from './api';
 import { emptyBoard, type Board, type BoardIssue } from './model';
 import {
+  boardDeleted,
   boardLoadFailed,
   boardLoaded,
+  DELETED_COPY,
   emptyIssueList,
   filterLabel,
   firstRunResolved,
+  firstRunUnresolved,
   formatUpdatedAt,
   groupResources,
   issueCounts,
   loadedBoard,
+  trustRequired,
   visibleIssues,
+  TRUST_COPY,
   READ_ONLY_CALLOUT,
   type BoardLoad,
 } from './ui-state';
@@ -88,9 +94,38 @@ describe('board load state', () => {
   });
 
   it('keeps the first-run state and surfaces the cause while the board is still missing', () => {
-    const resolved = firstRunResolved(boardLoaded(null), new Error('Skrynia POST antonina/board-v1 failed (503)'));
+    const resolved = firstRunResolved(boardLoaded(null), new Error('Skrynia POST antonina/board-v2 failed (503)'));
     expect(resolved.load).toEqual({ status: 'uninitialized' });
-    expect(resolved.error).toBe('Skrynia POST antonina/board-v1 failed (503)');
+    expect(resolved.error).toBe('Skrynia POST antonina/board-v2 failed (503)');
+  });
+
+  it('distinguishes a board that needs its trust anchor from a read failure', () => {
+    expect(trustRequired(new BoardTrustRequiredError('no trust anchor'))).toBe(true);
+    expect(trustRequired(new Error('Skrynia GET antonina/board-v2 failed (503)'))).toBe(false);
+    expect(boardLoadFailed({ status: 'untrusted' }, 'boom')).toEqual({ status: 'failed', message: 'boom' });
+    expect(loadedBoard({ status: 'untrusted' })).toBeUndefined();
+  });
+
+  it('sends a first-run client that lost the initialize race to the trust anchor screen', () => {
+    expect(firstRunUnresolved(new BoardTrustRequiredError('no trust anchor'))).toEqual({ status: 'untrusted' });
+  });
+
+  it('treats a deleted board as terminal instead of retryable', () => {
+    const cause = new BoardDeletedError('Antonina board has been deleted');
+    expect(boardDeleted(cause)).toBe(true);
+    expect(trustRequired(cause)).toBe(false);
+    expect(firstRunUnresolved(cause)).toEqual({ status: 'deleted' });
+    expect(DELETED_COPY.body).toContain('can never be initialized again');
+  });
+
+  it('reports a failed first-run read as the failure it is, not as a missing board', () => {
+    expect(firstRunUnresolved(new Error('Skrynia GET antonina/board-v2 failed (503)')))
+      .toEqual({ status: 'failed', message: 'Skrynia GET antonina/board-v2 failed (503)' });
+  });
+
+  it('explains that the trust anchor is public and only unlocks reading', () => {
+    expect(TRUST_COPY.action).toBe('Trust this board');
+    expect(TRUST_COPY.body).toContain('public trust anchor');
   });
 
   it('keeps the last good board when a later read fails', () => {

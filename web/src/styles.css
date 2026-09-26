@@ -204,6 +204,8 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .first-run h1 { margin: 2px 0 8px; color: var(--ink); font-size: 1.6rem; }
 .first-run p:not(.eyebrow) { line-height: 1.55; }
 .first-run-actions { display: flex; justify-content: center; gap: 8px; margin-top: 10px; }
+.first-run .stacked-form { text-align: left; margin-top: 16px; }
+.first-run textarea { min-height: 88px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; }
 
 @keyframes pulse { to { opacity: .25; } }
 @media (max-width: 860px) {

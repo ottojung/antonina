@@ -15,7 +15,7 @@ The supported command namespaces are:
 
 ## Shared board contract
 
-`packages/core` is the authoritative board/domain implementation consumed by both the CLI and web application. It owns schema validation, resource semantics, Skrynia ETag/CAS behavior, deterministic mutation replay, capability handling, and common errors.
+`packages/core` is the authoritative board/domain implementation consumed by both the CLI and web application. It owns schema validation, resource semantics, the signed board operation log and its Ed25519 verification, credential and trust-anchor handling, Skrynia ETag/CAS behavior, deterministic mutation replay, and common errors.
 
 Important invariants include strict schema version 2 parsing, JavaScript-safe issue counters, chronological messages, canonical resource identities, existing-issue dependency checks, and ETag-based mutation retries after HTTP 412.
 

@@ -143,7 +143,7 @@ export function parseCanonicalBoard(value: unknown): Board {
       || !Array.isArray(value.issues)
       || !value.issues.every(isIssue)
       || !Array.isArray(value.resources)) {
-    throw new Error('Skrynia object antonina/board-v1 contains an incompatible or malformed board');
+    throw new Error('Antonina board object is incompatible or malformed');
   }
 
   const board = value as unknown as Board;

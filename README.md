@@ -30,9 +30,13 @@ This installs the `antonina` executable. Release artifacts should ship the alrea
 
 ## Board
 
-The Antonina board stores issues and durable resources in Skrynia. The CLI is available as `antonina board`; set `ANTONINA_BOARD_CAPABILITY` for writes.
+The Antonina board stores issues and durable resources in Skrynia as a signed operation log under `antonina/board-v2`. The CLI is available as `antonina board`; set `ANTONINA_BOARD_TRUST` to read it and `ANTONINA_BOARD_CREDENTIAL` to write to it.
 
-The board is created deliberately, not by reading it: open the web board and use its first-run **Initialize board** action. That browser becomes the initial editor and holds the one-time editing key, which it can copy from Settings to share with other browsers and agents. No CLI command creates a missing board.
+The board is created deliberately, not by reading it: open the web board and use its first-run **Initialize board** action. That browser becomes the initial editor and keeps the board's root signing credential and its public trust anchor, both copyable from Settings; share the anchor with readers and the credential with editors. No CLI command and no page load creates a missing board, and a second initializer is refused instead of taking the trust root.
+
+`antonina board initialize` prints the same trust anchor and root credential for an agent, and `antonina board credential delegate` mints attenuated credentials.
+
+A credential's Skrynia storage capability can go stale: setup accepts it, the first real mutation is refused, and that client then stays read-only until it is given a freshly copied credential.
 
 ```sh
 antonina board --help

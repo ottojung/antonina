@@ -1,22 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { createBrowserBoardApi } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { boardLoadFailed, boardLoaded, emptyIssueList, filterLabel, firstRunResolved, formatUpdatedAt, groupResources, issueCounts, loadedBoard, visibleIssues, FIRST_RUN_COPY, ISSUE_FORM_HINT, READ_ONLY_CALLOUT, type BoardLoad, type IssueFilter } from './ui-state';
+import { boardDeleted, boardLoadFailed, boardLoaded, DELETED_COPY, emptyIssueList, filterLabel, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, loadedBoard, trustRequired, visibleIssues, FIRST_RUN_COPY, ISSUE_FORM_HINT, READ_ONLY_CALLOUT, TRUST_COPY, type BoardLoad, type IssueFilter } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
 type View = 'issues' | 'resources';
 
 export default function App() {
-  const api = useMemo(() => createBrowserBoardApi(), []);
+  const session = useMemo(() => createBrowserBoardApi(), []);
+  const api = session.api;
   const [load, setLoad] = useState<BoardLoad>({ status: 'loading' });
   const [view, setView] = useState<View>('issues');
   const [selectedNumber, setSelectedNumber] = useState<number>();
   const [filter, setFilter] = useState<IssueFilter>('open');
   const [displayName, setDisplayName] = useState(() => window.localStorage.getItem(DISPLAY_NAME_KEY) ?? '');
-  const [hasWriteAccess, setHasWriteAccess] = useState(api.hasWriteAccess());
+  const [hasWriteAccess, setHasWriteAccess] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [capabilityInput, setCapabilityInput] = useState('');
+  const [credentialInput, setCredentialInput] = useState('');
+  const [anchorInput, setAnchorInput] = useState('');
+  const [trusting, setTrusting] = useState(false);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [initializing, setInitializing] = useState(false);
@@ -24,14 +27,23 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      setLoad(boardLoaded(await api.readBoard()));
+      setLoad(boardLoaded(await session.read()));
+      setHasWriteAccess(session.hasCredential() && api.hasWriteAccess());
       setError(undefined);
     } catch (cause) {
+      if (trustRequired(cause)) {
+        setLoad((current) => (current.status === 'ready' ? current : { status: 'untrusted' }));
+        return;
+      }
+      if (boardDeleted(cause)) {
+        setLoad({ status: 'deleted' });
+        return;
+      }
       const message = cause instanceof Error ? cause.message : 'Could not load Antonina';
       setError(message);
       setLoad((current) => boardLoadFailed(current, message));
     }
-  }, [api]);
+  }, [session, api]);
   const board = loadedBoard(load);
   const hasBoard = board !== undefined;
   useEffect(() => { void refresh(); }, [refresh]);
@@ -50,7 +62,14 @@ export default function App() {
   async function run<T>(action: () => Promise<T>, success: string): Promise<T | null> {
     setError(undefined); setNotice(undefined);
     try { const result = await action(); await refresh(); setNotice(success); return result; }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'The change could not be saved'); return null; }
+    catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'The change could not be saved';
+      // A refused mutation drops this client to read-only, so read access
+      // again instead of leaving a stale edit indicator until the next poll.
+      await refresh();
+      setError(message);
+      return null;
+    }
   }
   async function createIssue(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = event.currentTarget;
@@ -69,19 +88,37 @@ export default function App() {
     event?.preventDefault(); const clean = displayName.trim(); if (!clean) return;
     window.localStorage.setItem(DISPLAY_NAME_KEY, clean); setDisplayName(clean); setNotice('Display name saved in this browser');
   }
-  function saveCapability(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); try { api.setCapability(capabilityInput); setHasWriteAccess(true); setCapabilityInput(''); setNotice('Write access saved in this browser'); void refresh(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'The capability could not be saved'); }
+  async function saveCredential(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setError(undefined);
+    try {
+      const access = await session.enableEditing(credentialInput);
+      setHasWriteAccess(access.canEdit);
+      setCredentialInput('');
+      setNotice('Write access saved in this browser');
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'The credential could not be saved'); }
   }
-  function clearCapability() { api.clearCapability(); setHasWriteAccess(false); setNotice('Write access cleared from this browser'); }
-  async function copyCapability() { const capability = api.getCapability(); if (!capability) return; try { await navigator.clipboard.writeText(capability); setNotice('Write capability copied'); } catch { setError('The browser did not allow access to the clipboard'); } }
+  function clearCredential() { session.clearCredential(); setHasWriteAccess(false); setNotice('Write access cleared from this browser'); }
+  async function copyKey(text: string | null, label: string) {
+    if (!text) return;
+    try { await navigator.clipboard.writeText(text); setNotice(`${label} copied`); }
+    catch { setError('The browser did not allow access to the clipboard'); }
+  }
+  async function trustBoard(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setTrusting(true); setError(undefined);
+    try {
+      const board = await session.trust(anchorInput);
+      setAnchorInput('');
+      setLoad({ status: 'ready', board });
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'The trust anchor could not be accepted'); }
+    finally { setTrusting(false); }
+  }
   async function initializeBoard() {
     setInitializing(true); setError(undefined); setNotice(undefined);
     try {
-      const { board: created } = await api.initializeBoard();
+      const { board: created } = await session.initialize();
       setLoad({ status: 'ready', board: created });
       setHasWriteAccess(true);
-      setNotice('Board initialized; this browser holds the editing key');
+      setNotice('Board initialized; this browser holds the root signing credential');
     } catch (cause) {
       const { load: resolved, error } = firstRunResolved(await resolveFirstRun(), cause);
       setLoad(resolved);
@@ -90,14 +127,16 @@ export default function App() {
     } finally { setInitializing(false); }
   }
   async function resolveFirstRun(): Promise<BoardLoad> {
-    try { return boardLoaded(await api.readBoard()); }
-    catch { return { status: 'uninitialized' }; }
+    try { return boardLoaded(await session.read()); }
+    catch (cause) { return firstRunUnresolved(cause); }
   }
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
   if (load.status === 'loading') return <main className="centered"><div><span className="loading-dot" /> Loading your shared board…</div></main>;
   if (load.status === 'failed') return <main className="centered"><section className="load-error"><p className="eyebrow">Antonina</p><h1>The board could not be loaded</h1><p>{load.message}</p><button className="primary" onClick={() => void refresh()}>Try again</button></section></main>;
   if (load.status === 'uninitialized') return <main className="centered"><FirstRun error={error} initializing={initializing} initialize={() => void initializeBoard()} recheck={() => void refresh()} /></main>;
+  if (load.status === 'untrusted') return <main className="centered"><TrustAnchor error={error} anchorInput={anchorInput} setAnchorInput={setAnchorInput} trusting={trusting} trust={trustBoard} retry={() => void refresh()} /></main>;
+  if (load.status === 'deleted') return <main className="centered"><section className="first-run"><p className="eyebrow">Antonina</p><h1>{DELETED_COPY.title}</h1><p>{DELETED_COPY.body}</p></section></main>;
 
   return <div className="app-shell">
     <header className="topbar">
@@ -120,12 +159,16 @@ export default function App() {
       {view === 'issues' ? selected ? <Thread issue={selected} hasWriteAccess={hasWriteAccess} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.number, body), 'Description updated')} close={() => void run(() => api.close(selected.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.number), 'Issue reopened')} back={() => setSelectedNumber(undefined)} />
         : <section className="thread welcome"><div className="welcome-mark" aria-hidden="true">A</div><p className="eyebrow">Shared issue board</p><h2>Choose an issue to join the conversation.</h2></section> : null}
     </main>
-    {settingsOpen && <SettingsPanel displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} hasWriteAccess={hasWriteAccess} capabilityInput={capabilityInput} setCapabilityInput={setCapabilityInput} saveCapability={saveCapability} clearCapability={clearCapability} copyCapability={copyCapability} close={closeSettings} />}
+    {settingsOpen && <SettingsPanel displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} hasWriteAccess={hasWriteAccess} credentialInput={credentialInput} setCredentialInput={setCredentialInput} saveCredential={saveCredential} clearCredential={clearCredential} credentialText={session.credentialText()} trustAnchorText={session.trustAnchorText()} copyKey={copyKey} close={closeSettings} />}
   </div>;
 }
 
 function FirstRun({ error, initializing, initialize, recheck }: { error: string | undefined; initializing: boolean; initialize: () => void; recheck: () => void }) {
   return <section className="first-run"><p className="eyebrow">Antonina</p><h1>{FIRST_RUN_COPY.title}</h1><p>{FIRST_RUN_COPY.body}</p>{error && <p role="alert">{error}</p>}<div className="first-run-actions"><button className="primary" disabled={initializing} onClick={initialize}>{FIRST_RUN_COPY.action}</button><button className="quiet" disabled={initializing} onClick={recheck}>{FIRST_RUN_COPY.recheck}</button></div></section>;
+}
+
+function TrustAnchor({ error, anchorInput, setAnchorInput, trusting, trust, retry }: { error: string | undefined; anchorInput: string; setAnchorInput: (value: string) => void; trusting: boolean; trust: (event: FormEvent<HTMLFormElement>) => Promise<void>; retry: () => void }) {
+  return <section className="first-run"><p className="eyebrow">Antonina</p><h1>{TRUST_COPY.title}</h1><p>{TRUST_COPY.body}</p><form className="stacked-form" onSubmit={trust}><label htmlFor="trust-anchor">Board trust anchor</label><textarea id="trust-anchor" value={anchorInput} onChange={(event) => setAnchorInput(event.target.value)} required /><small>{TRUST_COPY.hint}</small>{error && <p role="alert">{error}</p>}<div className="first-run-actions"><button className="primary" disabled={trusting || !anchorInput.trim()} type="submit">{TRUST_COPY.action}</button><button className="quiet" disabled={trusting} onClick={retry}>{FIRST_RUN_COPY.recheck}</button></div></form></section>;
 }
 
 function ResourcesView({ board, issues, hasWriteAccess, onOpenIssue, onAdd, onRemove, onEnableEditing }: { board: Board; issues: BoardIssue[]; hasWriteAccess: boolean; onOpenIssue: (number: number) => void; onAdd: (host: string, path: string, number: number) => Promise<unknown>; onRemove: (resource: BoardResource, number: number) => Promise<unknown>; onEnableEditing: () => void }) {
@@ -151,7 +194,7 @@ function Thread({ issue, hasWriteAccess, displayName, setDisplayName, saveDispla
   </article>;
 }
 
-function SettingsPanel({ displayName, setDisplayName, saveDisplayName, hasWriteAccess, capabilityInput, setCapabilityInput, saveCapability, clearCapability, copyCapability, close }: { displayName: string; setDisplayName: (value: string) => void; saveDisplayName: (event: FormEvent<HTMLFormElement>) => void; hasWriteAccess: boolean; capabilityInput: string; setCapabilityInput: (value: string) => void; saveCapability: (event: FormEvent<HTMLFormElement>) => void; clearCapability: () => void; copyCapability: () => Promise<void>; close: () => void }) {
+function SettingsPanel({ displayName, setDisplayName, saveDisplayName, hasWriteAccess, credentialInput, setCredentialInput, saveCredential, clearCredential, credentialText, trustAnchorText, copyKey, close }: { displayName: string; setDisplayName: (value: string) => void; saveDisplayName: (event: FormEvent<HTMLFormElement>) => void; hasWriteAccess: boolean; credentialInput: string; setCredentialInput: (value: string) => void; saveCredential: (event: FormEvent<HTMLFormElement>) => Promise<void>; clearCredential: () => void; credentialText: string | null; trustAnchorText: string | null; copyKey: (text: string | null, label: string) => Promise<void>; close: () => void }) {
   const closeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
@@ -171,5 +214,5 @@ function SettingsPanel({ displayName, setDisplayName, saveDisplayName, hasWriteA
     document.addEventListener('keydown', keydown);
     return () => { document.removeEventListener('keydown', keydown); document.body.style.overflow = overflow; previous?.focus(); };
   }, [close]);
-  return <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><header><h2 id="settings-title">Settings & access</h2><button ref={closeRef} className="dialog-close" onClick={close} aria-label="Close settings">×</button></header><div className="settings-content"><section><h3>Display name</h3><form className="stacked-form" onSubmit={saveDisplayName}><label htmlFor="settings-name">Display name</label><input id="settings-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} /><button type="submit" disabled={!displayName.trim()}>Save name</button></form></section><section><h3>Editing access</h3><p>Write access allows issue, description, dependency, and status changes.</p>{hasWriteAccess ? <><div className="access-state">Editing is enabled</div><div className="technical-actions"><button onClick={() => void copyCapability()}>Copy editing key</button><button className="danger" onClick={clearCapability}>Use read-only mode</button></div></> : <form className="stacked-form" onSubmit={saveCapability}><label htmlFor="capability">Editing key</label><input id="capability" type="password" placeholder="Paste the 64-character editing key" value={capabilityInput} onChange={(event) => setCapabilityInput(event.target.value)} /><small>The key comes from another browser or user with editing access.</small><button type="submit" disabled={!capabilityInput.trim()}>Enable editing</button></form>}</section></div></section></div>;
+  return <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><header><h2 id="settings-title">Settings & access</h2><button ref={closeRef} className="dialog-close" onClick={close} aria-label="Close settings">×</button></header><div className="settings-content"><section><h3>Display name</h3><form className="stacked-form" onSubmit={saveDisplayName}><label htmlFor="settings-name">Display name</label><input id="settings-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} /><button type="submit" disabled={!displayName.trim()}>Save name</button></form></section><section><h3>Editing access</h3><p>Write access allows issue, description, dependency, and status changes.</p>{hasWriteAccess ? <><div className="access-state">Editing is enabled</div><div className="technical-actions"><button onClick={() => void copyKey(credentialText, 'Board credential')}>Copy board credential</button><button onClick={() => void copyKey(trustAnchorText, 'Board trust anchor')}>Copy trust anchor</button><button className="danger" onClick={clearCredential}>Use read-only mode</button></div></> : <form className="stacked-form" onSubmit={saveCredential}><label htmlFor="credential">Board credential</label><textarea id="credential" placeholder="Paste the signed board credential JSON" value={credentialInput} onChange={(event) => setCredentialInput(event.target.value)} required /><small>The credential comes from another browser, user, or agent that can edit the board.</small><button type="submit" disabled={!credentialInput.trim()}>Enable editing</button></form>}</section></div></section></div>;
 }

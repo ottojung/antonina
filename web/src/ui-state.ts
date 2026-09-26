@@ -1,3 +1,4 @@
+import { BoardDeletedError, BoardTrustRequiredError } from './api';
 import type { Board, BoardIssue, BoardResource } from './model';
 
 export type IssueFilter = 'open' | 'closed' | 'all';
@@ -5,15 +6,29 @@ export type IssueFilter = 'open' | 'closed' | 'all';
 export type BoardLoad =
   | { status: 'loading' }
   | { status: 'uninitialized' }
+  | { status: 'untrusted' }
+  | { status: 'deleted' }
   | { status: 'ready'; board: Board }
   | { status: 'failed'; message: string };
 
 export const FIRST_RUN_COPY = {
   title: 'No Antonina board yet',
-  body: 'Initializing the board makes this browser its first editor and stores the board’s editing key in this browser. Copy that key from Settings and share it with the other browsers and agents that need to edit the board.',
+  body: 'Initializing the board makes this browser its first editor and stores the board’s root signing credential in this browser. Copy that credential and the board’s public trust anchor from Settings and share them with the other browsers and agents that need to read or edit the board.',
   action: 'Initialize board',
   recheck: 'Check again',
   raced: 'Another browser initialized the board first; this browser is read-only.',
+} as const;
+
+export const TRUST_COPY = {
+  title: 'This board needs its trust anchor',
+  body: 'The signed board already exists, and this browser cannot verify its history without the board’s public trust anchor. Paste the anchor to read the board read-only; editing still needs a credential.',
+  action: 'Trust this board',
+  hint: 'The trust anchor is public and comes from the browser or agent that initialized the board.',
+} as const;
+
+export const DELETED_COPY = {
+  title: 'This board was deleted',
+  body: 'The board was deleted on purpose, and its key can never be initialized again. Start from a board that still exists, or ask the people who shared this one what to use instead.',
 } as const;
 
 export const ISSUE_FORM_HINT = 'The description holds the task context; the conversation holds updates and questions.';
@@ -50,9 +65,28 @@ export function boardLoadFailed(load: BoardLoad, message: string): BoardLoad {
   return loadedBoard(load) ? load : { status: 'failed', message };
 }
 
+export function trustRequired(cause: unknown): boolean {
+  return cause instanceof BoardTrustRequiredError;
+}
+
+/** A deleted board is terminal: retrying can never bring it back. */
+export function boardDeleted(cause: unknown): boolean {
+  return cause instanceof BoardDeletedError;
+}
 export function firstRunResolved(load: BoardLoad, cause: unknown): { load: BoardLoad; error?: string } {
   if (load.status === 'ready') return { load };
   return { load, error: cause instanceof Error ? cause.message : String(cause) };
+}
+
+/**
+ * Classifies a failed first-run read by cause: a board that appeared under this
+ * browser now needs its trust anchor, and any other failure is reported as the
+ * read failure it is instead of being passed off as a missing board.
+ */
+export function firstRunUnresolved(cause: unknown): BoardLoad {
+  if (trustRequired(cause)) return { status: 'untrusted' };
+  if (boardDeleted(cause)) return { status: 'deleted' };
+  return { status: 'failed', message: cause instanceof Error ? cause.message : String(cause) };
 }
 
 export function visibleIssues(issues: BoardIssue[], filter: IssueFilter): BoardIssue[] {

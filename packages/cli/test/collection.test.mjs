@@ -9,7 +9,7 @@ import test from 'node:test';
 // runs, including the four-argument `recheckCollectionClaim` and the real
 // node-side `gatherCandidatePathFacts`.
 import { BoardApi } from '../dist/packages/core/src/api.js';
-import { runBoardCommand, COLLECT_ROOTS_ENV } from '../dist/packages/cli/src/board.js';
+import { runBoardCommand, MANAGED_ROOTS_ENV } from '../dist/packages/cli/src/board.js';
 import { unlinkCollectedPath } from '../dist/packages/cli/src/collection.js';
 import {
   openCollectionClaim,
@@ -19,7 +19,7 @@ import {
   commitCollectionDeletion,
 } from '../dist/packages/core/src/collection.js';
 import { gatherCandidatePathFacts } from '../dist/packages/agent-runtime/src/candidate-facts.js';
-import { loadManagedRoots } from '../dist/packages/cli/src/collection.js';
+import { loadManagedRoots } from '../dist/packages/agent-runtime/src/managed-roots-config.js';
 import { existsSync, readFileSync } from 'node:fs';
 
 const STAMP = '2026-09-25T12:00:00.000Z';
@@ -273,7 +273,7 @@ test('collect list needs no managed roots configured', async () => {
   await withWorkTree(async (context) => {
     await seededWorkTree(context);
     const { code, out, err } = await run(['collect', 'list', '--host', HOST], {
-      env: { [COLLECT_ROOTS_ENV]: '' },
+      env: { [MANAGED_ROOTS_ENV]: '' },
       createClient: () => context.reader,
     });
     assert.equal(code, 0);
@@ -292,7 +292,7 @@ const deleteArgs = (context, path, extra = []) => [
   ...extra,
 ];
 
-const collectEnv = (context) => ({ [COLLECT_ROOTS_ENV]: context.managed });
+const collectEnv = (context) => ({ [MANAGED_ROOTS_ENV]: context.managed });
 
 /** A reader that lets the board move on exactly once, between two reads. */
 function advancingReader(context, onSecondRead) {
@@ -639,7 +639,7 @@ test('collect delete reports the ManagedRootDefect verbatim and reads no board w
     });
 
     const { code, err } = await run(deleteArgs(context, context.worktree, ['--confirm']), {
-      env: { [COLLECT_ROOTS_ENV]: `${context.managed}:${context.managed}` },
+      env: { [MANAGED_ROOTS_ENV]: `${context.managed}:${context.managed}` },
       createClient: () => reader,
     });
 
@@ -661,7 +661,7 @@ test('collect delete reports the ManagedRootDefect verbatim and reads no board w
     const worklink = join(context.root, 'worklink');
     await symlink('/', worklink);
     const toRoot = await run(deleteArgs(context, context.worktree, ['--confirm']), {
-      env: { [COLLECT_ROOTS_ENV]: worklink },
+      env: { [MANAGED_ROOTS_ENV]: worklink },
       createClient: () => reader,
     });
     assert.equal(toRoot.code, 1);

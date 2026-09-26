@@ -1,4 +1,4 @@
-import { lstat as lstatCall, realpath as realpathCall, rm as rmCall, unlink as unlinkCall } from 'node:fs/promises';
+import { lstat as lstatCall, rm as rmCall, unlink as unlinkCall } from 'node:fs/promises';
 
 import { AntoninaApiError, type BoardApi } from '../../core/src/api.js';
 import {
@@ -19,12 +19,17 @@ import {
 // `Promise<CandidatePathFacts | null>` out, which is exactly
 // `CandidateFactsGatherer`.
 import { gatherCandidatePathFacts } from '../../agent-runtime/src/candidate-facts.js';
-import { validateManagedRoots } from '../../core/src/managed-roots.js';
-import type {
-  ManagedCollectionRoot,
-  ManagedRootDefect,
-  ManagedRoots,
-} from '../../core/src/managed-roots.js';
+// The managed-root loader is not implemented here. It is imported from
+// `packages/agent-runtime`, which owns the one `realpath` of a configured root
+// and is the package a future non-CLI collector (`agent clean`, whose managed
+// root is `agentsDir()`) can also reach. This file owns only what is specific to
+// the `collect` commands: the operator-facing rendering of a refusal.
+import {
+  MANAGED_ROOTS_ENV,
+  loadManagedRoots,
+  type ManagedRootsConfigDefect,
+  type RootsFs,
+} from '../../agent-runtime/src/managed-roots-config.js';
 import { canonicalHost, pathFormDefect } from '../../core/src/model.js';
 
 /**
@@ -100,167 +105,25 @@ export function renderRevision(head: string | null): string {
 }
 
 /**
- * The operator-facing source of the managed collection roots, and the only one.
- *
- * The name sits beside the loader that reads it, and `board.ts` re-exports it
- * with the other `ANTONINA_BOARD_*` names the command surface owns, so the
- * environment block is still where an operator looks for it while there is
- * exactly one copy of the name and no import cycle between the two modules.
- */
-export const COLLECT_ROOTS_ENV = 'ANTONINA_COLLECT_ROOTS';
-
-/** The filesystem surface the roots loader needs, injected as `store.ts` does. */
-export interface RootsFs {
-  realpath: typeof realpathCall;
-}
-
-const DEFAULT_ROOTS_FS: RootsFs = { realpath: realpathCall };
-
-/**
- * Why a configured root set cannot be used for collection. The `ManagedRootDefect`
- * members are core's own and are returned verbatim; the other two are the defects
- * this loader owns, because they need the filesystem fact core's own validator
- * does not compute: whether a spelling resolves, and what it resolves to.
- */
-export type CollectRootsDefect =
-  | { readonly kind: 'unresolvable-root'; readonly path: string; readonly message: string }
-  | { readonly kind: 'root-is-filesystem-root'; readonly path: string }
-  | { readonly kind: 'root-resolves-to-filesystem-root'; readonly path: string; readonly resolved: string }
-  | ManagedRootDefect;
-
-export type LoadManagedRootsResult =
-  | { readonly ok: true; readonly roots: ManagedRoots }
-  | {
-    readonly ok: false;
-    /**
-     * The spelling the defect is reported against: the entry that could not be
-     * resolved, the path a core defect names, or the first configured spelling.
-     * `null` only when nothing was configured at all.
-     */
-    readonly spelling: string | null;
-    readonly defect: CollectRootsDefect;
-  };
-
-/**
- * The spellings the environment names, in order.
- *
- * The separator is `:` (a POSIX path list) and empty entries are dropped after
- * trimming, so an unset variable and one that names only separators mean the
- * same thing: no roots configured, which core then reports as `{ kind: 'empty' }`.
- */
-export function configuredRootSpellings(
-  env: Record<string, string | undefined>,
-  name: string = COLLECT_ROOTS_ENV,
-): string[] {
-  return (env[name] ?? '')
-    .split(':')
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
-}
-
-function defectSpelling(defect: ManagedRootDefect, spellings: readonly string[]): string | null {
-  if ('path' in defect) return defect.path;
-  return spellings[0] ?? null;
-}
-
-/**
- * Turns the configured spellings into the one `ManagedRoots` value core accepts.
- *
- * `spelled` is configuration and `resolved` is this process's own `realpath` of
- * it, and never anything else: `validateManagedRoots` trusts a caller-supplied
- * `resolved` coordinate without re-deriving it
- * (`packages/core/src/managed-roots.ts:135-138`), so a `resolved` that came from
- * configuration would defeat every containment and symlink guarantee below while
- * still producing a genuine branded `ManagedRoots`. There is no way to configure
- * a resolved coordinate here at all: the value is assigned from the `realpath`
- * below and from nowhere else.
- *
- * A root that cannot be resolved is a configuration error reported against its
- * own spelling, not silently dropped and not repaired -- a repaired root would
- * authorise deletions somewhere other than where the operator named.
- *
- * No `ManagedRoots` is ever built by hand and no brand is cast: a failed
- * validation hands core's own `defect` back verbatim, and the command prints it
- * rather than re-deriving it.
- */
-export async function loadManagedRoots(
-  env: Record<string, string | undefined>,
-  name: string = COLLECT_ROOTS_ENV,
-  fs: RootsFs = DEFAULT_ROOTS_FS,
-): Promise<LoadManagedRootsResult> {
-  const spellings = configuredRootSpellings(env, name);
-  const roots: ManagedCollectionRoot[] = [];
-  for (const spelling of spellings) {
-    // A spelling that is not a canonical absolute path is refused in the same
-    // shape, and for the same reason, core refuses it for: it checks both
-    // coordinates' form before anything else (`managed-roots.ts:135-138`). The
-    // form is checked here, before any I/O, so a relative spelling is never
-    // resolved against this process's working directory and reported as some
-    // path the operator never configured.
-    const defect = pathFormDefect(spelling);
-    if (defect !== null) {
-      return { ok: false, spelling, defect: { kind: 'path-form', path: spelling, defect } };
-    }
-    // The filesystem root is refused in the same shape as a bad form, and before
-    // any board read: it is a spelling no operator means, and it would put every
-    // absolute path on the host inside a root.
-    if (spelling === '/') {
-      return { ok: false, spelling, defect: { kind: 'root-is-filesystem-root', path: spelling } };
-    }
-    let resolved: string;
-    try {
-      // The only place a `resolved` coordinate is ever produced in this front.
-      resolved = await fs.realpath(spelling);
-    } catch (error) {
-      return {
-        ok: false,
-        spelling,
-        defect: {
-          kind: 'unresolvable-root',
-          path: spelling,
-          message: `configured managed root ${spelling} cannot be resolved: `
-            + (error instanceof Error ? error.message : String(error)),
-        },
-      };
-    }
-    // The spelling check above is not enough, because the hazard is a property of
-    // the *resolved* coordinate: `isWithin` special-cases `root === '/'`
-    // (`managed-roots.ts:151-152`), so a root whose `realpath` is `/` makes both
-    // containment checks vacuous for every absolute path on the host, whatever the
-    // spelling was. One hop of symlink from the spelling refused above reaches this
-    // state, so it is checked here, after the `realpath` that produces it, and
-    // before the `validateManagedRoots` that would brand the pair. It has its own
-    // kind because the operator's two mistakes are different: one names `/` as a
-    // root, the other points a plausible-looking directory at it.
-    if (resolved === '/') {
-      return {
-        ok: false,
-        spelling,
-        defect: { kind: 'root-resolves-to-filesystem-root', path: spelling, resolved },
-      };
-    }
-    roots.push({ spelled: spelling, resolved });
-  }
-
-  const validated = validateManagedRoots(roots);
-  if (!validated.ok) {
-    return { ok: false, spelling: defectSpelling(validated.defect, spellings), defect: validated.defect };
-  }
-  return { ok: true, roots: validated.roots };
-}
-
-/**
- * How a defect is rendered to an operator: core's own `kind` first, so the
+ * How a defect is rendered to an operator: the loader's own `kind` first, so the
  * vocabulary an operator reads is the vocabulary the judgment used, and the
  * configured spelling after it, so the offending entry is named.
+ *
+ * The judgment itself is not re-derived here: core's `ManagedRootDefect` members
+ * are rendered by their own `kind`, and the loader's own kinds are rendered from
+ * the same fields the loader refused on.
  */
 export function describeRootsDefect(result: {
   readonly spelling: string | null;
-  readonly defect: CollectRootsDefect;
+  readonly defect: ManagedRootsConfigDefect;
 }): string {
   const { spelling, defect } = result;
+  if (defect.kind === 'roots-not-configured') {
+    return `roots-not-configured: no managed collection roots are configured in ${defect.variable}; `
+      + `set it to a ":"-separated list of absolute directories the collector may remove from`;
+  }
   if (defect.kind === 'empty') {
-    return `empty: no managed collection roots are configured in ${COLLECT_ROOTS_ENV}; `
+    return `empty: no managed collection roots are configured in ${MANAGED_ROOTS_ENV}; `
       + 'set it to a ":"-separated list of absolute directories the collector may remove from';
   }
   if (defect.kind === 'malformed-root') {
@@ -511,7 +374,7 @@ export async function collectDelete(
   //    read from the board.
   const managed = options.rootsFs === undefined
     ? await loadManagedRoots(options.env)
-    : await loadManagedRoots(options.env, COLLECT_ROOTS_ENV, options.rootsFs);
+    : await loadManagedRoots(options.env, MANAGED_ROOTS_ENV, options.rootsFs);
   if (!managed.ok) throw new CollectRootsError(describeRootsDefect(managed));
 
   // A path that is not canonical is a usage error, refused before the board is

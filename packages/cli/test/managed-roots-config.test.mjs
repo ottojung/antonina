@@ -4,18 +4,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import { describeRootsDefect } from '../dist/packages/cli/src/collection.js';
 import {
-  COLLECT_ROOTS_ENV,
-  describeRootsDefect,
+  MANAGED_ROOTS_ENV,
   loadManagedRoots,
-} from '../dist/packages/cli/src/collection.js';
+} from '../dist/packages/agent-runtime/src/managed-roots-config.js';
 import { evaluateManagedCandidate } from '../dist/packages/core/src/managed-roots.js';
 
-// The loader is the CLI's only route to a branded `ManagedRoots`, so these cases
-// drive it exactly as the command does: spellings in, either core's own result
-// or a defect, out. Every case owns its tree and its own `XDG_STATE_HOME`, and
-// reaps both before returning -- nothing here reads or mutates ambient Antonina
-// state. Nothing spawns a process, so nothing needs reaping beyond the trees.
+// The loader is the `collect` commands' only route to a branded `ManagedRoots`,
+// so these cases drive it exactly as the command does: spellings in, either
+// core's own result or a defect, out. The loader itself is
+// `packages/agent-runtime/src/managed-roots-config.js` and is imported from
+// there -- this suite is the CLI's view of it, and `describeRootsDefect`, the
+// operator-facing rendering, is the part the CLI owns. Every case owns its tree
+// and its own `XDG_STATE_HOME`, and reaps both before returning -- nothing here
+// reads or mutates ambient Antonina state. Nothing spawns a process, so nothing
+// needs reaping beyond the trees.
 async function withTree(body) {
   const root = await mkdtemp(join(tmpdir(), 'antonina-collect-roots-'));
   const stateHome = join(root, 'state');
@@ -30,14 +34,19 @@ async function withTree(body) {
   }
 }
 
-const load = (env) => loadManagedRoots(env, COLLECT_ROOTS_ENV);
+const load = (env) => loadManagedRoots(env, MANAGED_ROOTS_ENV);
 
-test('no configured roots is reported as the empty defect, not as a usable set', async () => {
+test('no configured roots is refused by name, not as a usable set', async () => {
   await withTree(async () => {
-    for (const env of [{}, { [COLLECT_ROOTS_ENV]: '' }, { [COLLECT_ROOTS_ENV]: '  :  : ' }]) {
+    for (const env of [{}, { [MANAGED_ROOTS_ENV]: '' }, { [MANAGED_ROOTS_ENV]: '  :  : ' }]) {
       const result = await load(env);
       assert.equal(result.ok, false, JSON.stringify(env));
-      assert.deepEqual(result.defect, { kind: 'empty' });
+      // The canonical loader refuses an absent variable with its own kind rather
+      // than core's `empty`, so "you never configured anything" and "you
+      // configured an empty set" do not read as the same condition. The refusal
+      // is still a refusal, still carries no root set, and still names the
+      // variable, which is what the command prints.
+      assert.deepEqual(result.defect, { kind: 'roots-not-configured', variable: 'ANTONINA_COLLECT_ROOTS' });
       assert.equal(result.spelling, null);
       assert.match(describeRootsDefect(result), /ANTONINA_COLLECT_ROOTS/);
     }
@@ -49,7 +58,7 @@ test('a single spelled root resolves and validates without a brand cast', async 
     const spelling = join(root, 'work');
     await mkdir(spelling);
 
-    const result = await load({ [COLLECT_ROOTS_ENV]: spelling });
+    const result = await load({ [MANAGED_ROOTS_ENV]: spelling });
 
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.deepEqual(result.roots.roots, [{ spelled: spelling, resolved: spelling }]);
@@ -71,7 +80,7 @@ test('a root that is a symlink resolves to its target and still validates', asyn
     await mkdir(target);
     await symlink(target, link);
 
-    const result = await load({ [COLLECT_ROOTS_ENV]: link });
+    const result = await load({ [MANAGED_ROOTS_ENV]: link });
 
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.deepEqual(result.roots.roots, [{ spelled: link, resolved: target }]);
@@ -85,7 +94,7 @@ test('a duplicate spelled root is refused with the duplicate defect and the path
     await mkdir(one);
     await mkdir(two);
 
-    const result = await load({ [COLLECT_ROOTS_ENV]: `${one}:${two}:${one}` });
+    const result = await load({ [MANAGED_ROOTS_ENV]: `${one}:${two}:${one}` });
 
     assert.equal(result.ok, false);
     assert.deepEqual(result.defect, { kind: 'duplicate', path: one });
@@ -100,7 +109,7 @@ test('a root nested inside another is refused with path and within', async () =>
     const inner = join(outer, 'inner');
     await mkdir(inner, { recursive: true });
 
-    const result = await load({ [COLLECT_ROOTS_ENV]: `${outer}:${inner}` });
+    const result = await load({ [MANAGED_ROOTS_ENV]: `${outer}:${inner}` });
 
     assert.equal(result.ok, false);
     assert.deepEqual(result.defect, { kind: 'nested', path: inner, within: outer });
@@ -122,7 +131,7 @@ test('a pair that nests only in resolved coordinates is still refused', async ()
     const link = join(right, 'into-left');
     await symlink(nested, link);
 
-    const result = await load({ [COLLECT_ROOTS_ENV]: `${left}:${link}` });
+    const result = await load({ [MANAGED_ROOTS_ENV]: `${left}:${link}` });
 
     assert.equal(result.ok, false);
     assert.deepEqual(result.defect, { kind: 'nested', path: link, within: left });
@@ -134,13 +143,13 @@ test('a relative or parent-traversing root is refused with its path-form defect'
     const real = join(root, 'real');
     await mkdir(real);
 
-    const relative = await load({ [COLLECT_ROOTS_ENV]: 'relative/root' });
+    const relative = await load({ [MANAGED_ROOTS_ENV]: 'relative/root' });
     assert.equal(relative.ok, false);
     assert.deepEqual(relative.defect, { kind: 'path-form', path: 'relative/root', defect: 'relative' });
     assert.equal(relative.spelling, 'relative/root');
     assert.match(describeRootsDefect(relative), /canonical absolute POSIX path/);
 
-    const traversal = await load({ [COLLECT_ROOTS_ENV]: `${root}/../elsewhere` });
+    const traversal = await load({ [MANAGED_ROOTS_ENV]: `${root}/../elsewhere` });
     assert.equal(traversal.ok, false);
     assert.equal(traversal.defect.kind, 'path-form');
     assert.equal(traversal.defect.defect, 'parent-traversal');
@@ -153,7 +162,7 @@ test('a configured root that cannot be resolved is reported against its own spel
     await mkdir(good);
     const missing = join(root, 'missing');
 
-    const result = await load({ [COLLECT_ROOTS_ENV]: `${good}:${missing}` });
+    const result = await load({ [MANAGED_ROOTS_ENV]: `${good}:${missing}` });
 
     assert.equal(result.ok, false);
     assert.equal(result.spelling, missing);
@@ -165,7 +174,7 @@ test('a configured root that cannot be resolved is reported against its own spel
 
 test('the filesystem root is refused as a managed root', async () => {
   await withTree(async () => {
-    const result = await load({ [COLLECT_ROOTS_ENV]: '/' });
+    const result = await load({ [MANAGED_ROOTS_ENV]: '/' });
 
     assert.equal(result.ok, false);
     assert.deepEqual(result.defect, { kind: 'root-is-filesystem-root', path: '/' });
@@ -182,7 +191,7 @@ test('a configured root whose spelling resolves to the filesystem root is refuse
     const worklink = join(root, 'worklink');
     await symlink('/', worklink);
 
-    const result = await load({ [COLLECT_ROOTS_ENV]: worklink });
+    const result = await load({ [MANAGED_ROOTS_ENV]: worklink });
 
     assert.equal(result.ok, false);
     assert.deepEqual(result.defect, {
@@ -210,7 +219,7 @@ test('a root is accepted only when its resolved coordinate is not the filesystem
     const worklink = join(root, 'worklink');
     await symlink(work, worklink);
 
-    const result = await load({ [COLLECT_ROOTS_ENV]: worklink });
+    const result = await load({ [MANAGED_ROOTS_ENV]: worklink });
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.deepEqual(result.roots.roots, [{ spelled: worklink, resolved: work }]);
   });
@@ -228,7 +237,7 @@ test('a resolved coordinate is never taken from configuration', async () => {
     // The configured coordinate is the symlink and it resolves elsewhere, so a
     // `resolved` read from anywhere but this process's own `realpath` would be
     // visibly the wrong value here.
-    const fromProcess = await load({ [COLLECT_ROOTS_ENV]: link });
+    const fromProcess = await load({ [MANAGED_ROOTS_ENV]: link });
     assert.deepEqual(fromProcess.roots.roots, [{ spelled: link, resolved: real }]);
 
     // And the loader asks the filesystem about every spelling itself: with an
@@ -236,8 +245,8 @@ test('a resolved coordinate is never taken from configuration', async () => {
     // that call returns, whatever else the environment happens to contain.
     const asked = [];
     const injected = await loadManagedRoots(
-      { [COLLECT_ROOTS_ENV]: `${link}:${other}`, ANTONINA_COLLECT_ROOTS_RESOLVED: '/etc' },
-      COLLECT_ROOTS_ENV,
+      { [MANAGED_ROOTS_ENV]: `${link}:${other}`, ANTONINA_COLLECT_ROOTS_RESOLVED: '/etc' },
+      MANAGED_ROOTS_ENV,
       {
         realpath: async (spelling) => {
           asked.push(spelling);

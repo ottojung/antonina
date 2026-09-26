@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { closeSync, fstatSync, mkdirSync, openSync } from 'node:fs';
 import { constants } from 'node:os';
 
-import { buildAgentCommand, classifyBackendFailure, discoverSessionId, type BackendError } from './backend.js';
+import { backendRetryDelay, buildAgentCommand, classifyBackendFailure, discoverSessionId, type BackendError } from './backend.js';
 import {
   finalizeTerminal,
   popSteerIntoPending,
@@ -231,58 +231,72 @@ async function runInvocation(
   }
   if (!await claimPendingPrompt(agentId, prompt, options)) return false;
 
-  const invocationId = randomBytes(16).toString('hex');
-  const directory = agentDir(agentId, options);
-  mkdirSync(directory, { recursive: true });
-  const logFile = logPath(agentId, options);
-  const fd = openSync(logFile, 'a', 0o600);
-  const invocationLogStart = fstatSync(fd).size;
-  const env = {
-    ...process.env,
-    ...options.env,
-    ANTONINA_AGENT_ID: agentId,
-    ANTONINA_INVOCATION_ID: invocationId,
-    ANTONINA_PROMPT: prompt,
-    NO_COLOR: '1',
-  };
-  let child: ChildProcess;
-  try {
-    child = spawn(command[0]!, command.slice(1), {
-      cwd: String(meta.cwd),
-      env,
-      detached: true,
-      stdio: ['ignore', fd, fd],
-    });
-  } catch (error) {
+  let attempt = 0;
+  while (true) {
+    const invocationId = randomBytes(16).toString('hex');
+    const directory = agentDir(agentId, options);
+    mkdirSync(directory, { recursive: true });
+    const logFile = logPath(agentId, options);
+    const fd = openSync(logFile, 'a', 0o600);
+    const invocationLogStart = fstatSync(fd).size;
+    const env = {
+      ...process.env,
+      ...options.env,
+      ANTONINA_AGENT_ID: agentId,
+      ANTONINA_INVOCATION_ID: invocationId,
+      ANTONINA_PROMPT: prompt,
+      NO_COLOR: '1',
+    };
+    let child: ChildProcess;
+    try {
+      child = spawn(command[0]!, command.slice(1), {
+        cwd: String(meta.cwd),
+        env,
+        detached: true,
+        stdio: ['ignore', fd, fd],
+      });
+    } catch (error) {
+      closeSync(fd);
+      await updateMeta(agentId, (current) => {
+        finalizeTerminal(current, 'failed', Date.now() / 1000, 127, null, String(error));
+        setActiveRunner(current, false);
+      }, options);
+      return false;
+    }
     closeSync(fd);
-    await updateMeta(agentId, (current) => {
-      finalizeTerminal(current, 'failed', Date.now() / 1000, 127, null, String(error));
-      setActiveRunner(current, false);
-    }, options);
-    return false;
-  }
-  closeSync(fd);
-  const pid = child.pid;
-  if (pid === undefined) {
-    await updateMeta(agentId, (current) => {
-      finalizeTerminal(current, 'failed', Date.now() / 1000, 127, null, 'OpenCode process had no pid');
-      setActiveRunner(current, false);
-    }, options);
-    return false;
-  }
-  const accepted = await recordSpawned(agentId, pid, procStartTicks(pid), invocationId, options);
-  if (!accepted) {
-    try { process.kill(-pid, 'SIGKILL'); } catch {}
-    return false;
-  }
+    const pid = child.pid;
+    if (pid === undefined) {
+      await updateMeta(agentId, (current) => {
+        finalizeTerminal(current, 'failed', Date.now() / 1000, 127, null, 'OpenCode process had no pid');
+        setActiveRunner(current, false);
+      }, options);
+      return false;
+    }
+    const accepted = await recordSpawned(agentId, pid, procStartTicks(pid), invocationId, options);
+    if (!accepted) {
+      try { process.kill(-pid, 'SIGKILL'); } catch {}
+      return false;
+    }
 
-  const result = await childResult(child, agentId, options);
-  if (!isContinue && result.code === 0 && result.signal === null) await rememberFreshSession(agentId, options);
-  const signal = signalNumber(result.signal);
-  const code = result.code ?? (signal === null ? 1 : -signal);
-  const backendError = classifyBackendFailure(logFile, invocationLogStart, code, isContinue);
-  await finalizeInvocation(agentId, result, backendError, options);
-  return true;
+    const result = await childResult(child, agentId, options);
+    const signal = signalNumber(result.signal);
+    const code = result.code ?? (signal === null ? 1 : -signal);
+    const backendError = classifyBackendFailure(logFile, invocationLogStart, code, isContinue);
+    const retryDelay = backendRetryDelay(backendError, attempt);
+    if (retryDelay !== null) {
+      await updateMeta(agentId, (current) => {
+        current.backend_error = backendError;
+        current.last_activity_at = Date.now() / 1000;
+      }, options);
+      await new Promise((resolve) => setTimeout(resolve, retryDelay));
+      attempt += 1;
+      continue;
+    }
+
+    if (!isContinue && result.code === 0 && result.signal === null) await rememberFreshSession(agentId, options);
+    await finalizeInvocation(agentId, result, backendError, options);
+    return true;
+  }
 }
 
 export async function runManagedRunner(

@@ -203,6 +203,37 @@ test('(b) a non-canonical spelling is refused before any I/O', async () => {
   });
 });
 
+test('(b) a later entry\'s form defect is decided after an earlier entry was resolved', async () => {
+  await withTree(async (root) => {
+    const valid = join(root, 'valid');
+    for (const defective of [
+      'workspace/project',
+      '/workspace/../etc',
+      '/workspace/project/',
+    ]) {
+      const { fs, calls } = recordingFs(async (spelling) => spelling);
+      const result = await loadManagedRoots(env(`${valid}:${defective}`), MANAGED_ROOTS_ENV, fs);
+
+      assert.equal(result.ok, false, defective);
+      // The refusal names the *later* spelling, not the first configured one,
+      // so the operator is told which entry to fix.
+      assert.equal(result.defect.kind, 'path-form', defective);
+      assert.equal(result.defect.path, defective, defective);
+      assert.equal(result.spelling, defective, defective);
+      // The load-bearing half. The per-entry rule in the source (`(b)` at
+      // `managed-roots-config.ts:130-140`, enforced by the loop at `:182-225`) says
+      // entry N is judged before entry N is *resolved*, not before any entry is.
+      // Exactly one call, and it is about the earlier entry, is what a per-entry
+      // loader does and what a whole-set-before-any-I/O loader would not do; the
+      // single-spelling cases above cannot tell the two apart, because they make
+      // zero calls either way. This records what the loader does; whether a later
+      // defect *should* be reached after earlier I/O is a product question this
+      // test does not decide, and the caveats above are not widened by it.
+      assert.deepEqual(calls, [valid], defective);
+    }
+  });
+});
+
 test('(c) an unresolvable spelling is refused against that spelling', async () => {
   await withTree(async (root) => {
     const good = join(root, 'good');

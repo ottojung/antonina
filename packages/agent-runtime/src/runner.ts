@@ -1,9 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, mkdirSync, openSync } from 'node:fs';
+import { closeSync, fstatSync, mkdirSync, openSync } from 'node:fs';
 import { constants } from 'node:os';
 
-import { buildAgentCommand, discoverSessionId } from './backend.js';
+import { buildAgentCommand, classifyBackendFailure, discoverSessionId, type BackendError } from './backend.js';
 import {
   finalizeTerminal,
   popSteerIntoPending,
@@ -180,6 +180,7 @@ async function recordSpawned(
 async function finalizeInvocation(
   agentId: string,
   result: ChildResult,
+  backendError: BackendError | null,
   options: RunnerOptions,
 ): Promise<void> {
   await updateMeta(agentId, (meta) => {
@@ -195,6 +196,7 @@ async function finalizeInvocation(
     else if (intent.value === 'steer') state = signal !== null ? 'stopped' : code === 0 ? 'succeeded' : 'failed';
     else state = code === 0 ? 'succeeded' : 'failed';
     meta.stop_reason = intent.value;
+    meta.backend_error = code === 0 ? null : backendError;
     finalizeTerminal(meta, state, Date.now() / 1000, code, signal);
   }, options);
 }
@@ -232,7 +234,9 @@ async function runInvocation(
   const invocationId = randomBytes(16).toString('hex');
   const directory = agentDir(agentId, options);
   mkdirSync(directory, { recursive: true });
-  const fd = openSync(logPath(agentId, options), 'a', 0o600);
+  const logFile = logPath(agentId, options);
+  const fd = openSync(logFile, 'a', 0o600);
+  const invocationLogStart = fstatSync(fd).size;
   const env = {
     ...process.env,
     ...options.env,
@@ -273,8 +277,11 @@ async function runInvocation(
   }
 
   const result = await childResult(child, agentId, options);
-  if (!isContinue) await rememberFreshSession(agentId, options);
-  await finalizeInvocation(agentId, result, options);
+  if (!isContinue && result.code === 0 && result.signal === null) await rememberFreshSession(agentId, options);
+  const signal = signalNumber(result.signal);
+  const code = result.code ?? (signal === null ? 1 : -signal);
+  const backendError = classifyBackendFailure(logFile, invocationLogStart, code, isContinue);
+  await finalizeInvocation(agentId, result, backendError, options);
   return true;
 }
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
@@ -15,6 +15,7 @@ import {
   processPgrp,
   signalGroupChecked,
   signalIdentityChecked,
+  splitProcStatFields,
 } from '../dist/packages/agent-runtime/src/process.js';
 
 function statLine({ state = 'S', ppid = 1, pgrp = 4242, start = 1234 } = {}) {
@@ -33,6 +34,29 @@ function withProc(t, entries) {
   }
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return root;
+}
+
+// Every test isolates both Antonina XDG roots so no test can read or write the
+// operator's real ~/.local/state/antonina or ~/.config/antonina. The two roots are
+// separate directories: the state root and the config root are not the same tree.
+function withIsolatedXdg(t) {
+  const stateRoot = mkdtempSync(join('/tmp', `antonina-xdg-state-${process.pid}-`));
+  const configRoot = mkdtempSync(join('/tmp', `antonina-xdg-config-${process.pid}-`));
+  const previous = {
+    state: process.env.XDG_STATE_HOME,
+    config: process.env.XDG_CONFIG_HOME,
+  };
+  process.env.XDG_STATE_HOME = stateRoot;
+  process.env.XDG_CONFIG_HOME = configRoot;
+  t.after(() => {
+    if (previous.state === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previous.state;
+    if (previous.config === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previous.config;
+    rmSync(stateRoot, { recursive: true, force: true });
+    rmSync(configRoot, { recursive: true, force: true });
+  });
+  return { stateRoot, configRoot };
 }
 
 function recordingSignal(result = true) {
@@ -137,4 +161,86 @@ test('process-group signal verifies leader then uses negative pgid', (t) => {
     { procRoot: root, signal: signal.send },
   ), true);
   assert.deepEqual(signal.calls, [[-4242, 'SIGTERM']]);
+});
+
+test('an identity whose start ticks agree but which carries no agent marker is not ours', (t) => {
+  withIsolatedXdg(t);
+  const iid = 'e'.repeat(32);
+  const noMarker = withProc(t, {
+    4242: { stat: statLine({ start: 1234 }), environ: `ANTONINA_INVOCATION_ID=${iid}\0OTHER=x\0` },
+    4243: { stat: statLine({ start: 1234 }), environ: `ANTONINA_AGENT_ID=ffff\0ANTONINA_INVOCATION_ID=${iid}\0` },
+    4244: { stat: statLine({ start: 1234 }), environ: '' },
+  });
+  const identity = { pid: 4242, startTicks: 1234, agentId: 'ab12' };
+  const withInvocation = { ...identity, invocationId: iid };
+
+  for (const probe of [identity, withInvocation]) {
+    const alive = recordingSignal();
+    assert.equal(isIdentityAlive(probe, { procRoot: noMarker, signal: alive.send }), false);
+    assert.deepEqual(alive.calls, []);
+
+    const signalled = recordingSignal();
+    assert.equal(signalIdentityChecked(probe, 15, { procRoot: noMarker, signal: signalled.send }), false);
+    assert.deepEqual(signalled.calls, []);
+
+    const grouped = recordingSignal();
+    assert.equal(signalGroupChecked(probe, 4242, 15, { procRoot: noMarker, signal: grouped.send }), false);
+    assert.deepEqual(grouped.calls, []);
+  }
+
+  // A different agent id on the same pid is a different owner, and an unreadable
+  // environ is not evidence of ownership either.
+  for (const pid of [4243, 4244]) {
+    const signal = recordingSignal();
+    assert.equal(isIdentityAlive({ pid, startTicks: 1234, agentId: 'ab12' }, { procRoot: noMarker, signal: signal.send }), false);
+    assert.deepEqual(signal.calls, []);
+  }
+});
+
+test('a stat tail shorter than the kernel field count is not a stat record', (t) => {
+  withIsolatedXdg(t);
+  const full = statLine();
+  // The comm field contains its own parentheses, so the stat tail must be cut at
+  // the LAST ')' -- otherwise this would collapse to a single malformed field.
+  const cut = full.lastIndexOf(')');
+  const truncated = `${full.slice(0, cut + 1)} ${full.slice(cut + 1).trim().split(/\s+/).slice(0, 19).join(' ')}`;
+  assert.equal(splitProcStatFields(full).length, 20);
+  // Guard the fixture itself: the tail really is 19 well-formed fields, one short
+  // of the kernel minimum, so the rejection is attributable to the field count.
+  assert.equal(truncated.slice(truncated.lastIndexOf(')') + 1).trim().split(/\s+/).length, 19);
+  assert.equal(splitProcStatFields(truncated), null);
+  assert.equal(parseProcStat(truncated), null);
+  assert.notEqual(parseProcStat(full), null);
+});
+
+test('the state field is exactly one character', (t) => {
+  withIsolatedXdg(t);
+  assert.equal(parseProcStat(statLine({ state: 'SR' })), null);
+  assert.equal(parseProcStat(statLine({ state: 'S' })).state, 'S');
+  assert.equal(parseProcStat(statLine({ state: 'Z' })).state, 'Z');
+});
+
+test('a persisted invocation id is exactly 32 hex characters in either case', (t) => {
+  withIsolatedXdg(t);
+  assert.equal(persistedInvocationId('A1B2C3D4'.repeat(4)), 'A1B2C3D4'.repeat(4));
+  for (const value of ['a'.repeat(31), 'a'.repeat(33), '', 'A1B2C3D4'.repeat(4) + 'a', 123, null]) {
+    assert.equal(persistedInvocationId(value), null);
+  }
+});
+
+test('a non-positive or fractional pgid is never signalled as a process group', (t) => {
+  withIsolatedXdg(t);
+  const iid = 'f'.repeat(32);
+  const root = withProc(t, {
+    4242: { stat: statLine({ start: 1234, pgrp: 4242 }), environ: `ANTONINA_AGENT_ID=ab12\0ANTONINA_INVOCATION_ID=${iid}\0` },
+  });
+  const identity = { pid: 4242, startTicks: 1234, agentId: 'ab12', invocationId: iid };
+  for (const pgid of [0, -1, -4242, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const signal = recordingSignal();
+    assert.equal(signalGroupChecked(identity, pgid, 'SIGTERM', { procRoot: root, signal: signal.send }), false);
+    assert.deepEqual(signal.calls, []);
+  }
+  const ok = recordingSignal();
+  assert.equal(signalGroupChecked(identity, 4242, 'SIGTERM', { procRoot: root, signal: ok.send }), true);
+  assert.deepEqual(ok.calls, [[-4242, 'SIGTERM']]);
 });

@@ -120,3 +120,17 @@ test('continuation command uses persisted session and configured variant', () =>
     'continue work',
   ]);
 });
+
+
+test('agent command rejects malformed durable cwd and variant', () => {
+  for (const cwd of ['', 0, false, null, [], 'relative', './relative', '../relative']) {
+    const meta = idleMeta('a11d', '/tmp', null, 1);
+    meta.cwd = cwd;
+    assert.throws(() => buildAgentCommand(meta, 'work', false, {}), /cwd is malformed/);
+  }
+  for (const variant of [null, '', 0, 123, true, false, 1.5, [], {}]) {
+    const meta = idleMeta('a11d', '/tmp', null, 1);
+    meta.variant = variant;
+    assert.throws(() => buildAgentCommand(meta, 'work', false, {}), /variant is malformed/);
+  }
+});

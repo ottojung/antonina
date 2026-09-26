@@ -49,8 +49,9 @@ import {
  * ever as trustworthy as the reader behind it. The destructive path is not: the
  * re-check builds its own verifying reader from a `BoardApi`, and it obtains the
  * candidate's filesystem facts through a required facts gatherer it calls with
- * `claim.path` and nothing else, so `outcome: 'collect'` cannot be minted from a
- * hand-built state or from facts about some path other than the one deleted.
+ * `claim.path` and nothing else, and it refuses any facts that name another
+ * path, so `outcome: 'collect'` cannot be minted from a hand-built state or
+ * from facts about some path other than the one deleted.
  *
  * This module performs no filesystem I/O of its own. The gatherer is the
  * path-safety front's job, and `CandidatePathFacts` in `managed-roots.ts` is the
@@ -376,7 +377,8 @@ export function collectiblePaths(snapshot: CollectionSnapshot): string[] {
  * A claim is advisory: it is evidence of a past verdict, not the authority for
  * a destructive action. `recheckCollectionClaim` re-derives the board identity,
  * the path, and the protection status of the path from its own fresh
- * authoritative read, and it gathers the path's own filesystem facts, so a
+ * authoritative read, and it gathers the path's own filesystem facts -- asking
+ * only about `path`, and refusing facts that name another path -- so a
  * hand-built claim can produce at most a `withheld` authorization, or one the
  * board actually supports.
  *
@@ -557,8 +559,9 @@ const liveAuthorizations = new WeakSet<AuthorizedCollection>();
  *
  * `gatherFacts` is a required input for the same reason, and is called with
  * `claim.path` and nothing else. It is a *function*, not facts: a caller cannot
- * hand the destructive step a `CandidatePathFacts` value of its own, so it
- * cannot present a judgment about one path while a different path is deleted.
+ * hand the destructive step a `CandidatePathFacts` value of its own, and facts
+ * naming any path but `claim.path` are refused outright, so a judgment about one
+ * path can never stand in for the deletion of another.
  * The only path that can reach `outcome: 'collect'` is the one this re-check
  * named and asked about. A gatherer that returns `null` -- the path or its
  * containing directory could not be read or resolved -- yields a withheld
@@ -628,8 +631,10 @@ export async function recheckCollectionClaim(
   // is rather than as a managed-root refusal. The gatherer is asked about
   // `claim.path` and nothing else, so the judgment below is about the very path
   // the board recorded rather than about whatever facts a caller chose to pass.
+  // Facts naming any other path are refused here, because a judgment is only
+  // ever about the path it was judged from.
   const facts = await gatherFacts(claim.path);
-  if (facts === null) {
+  if (facts === null || facts.path !== claim.path) {
     return issue('withheld', 'candidate-facts-unavailable', 'protected', snapshot.head);
   }
   const candidatePath = evaluateManagedCandidate(managed, facts);

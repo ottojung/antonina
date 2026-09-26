@@ -588,6 +588,35 @@ test('a gatherer is asked about the claimed path and nothing else', async () => 
   assert.equal(authorized.outcome, 'collect');
 });
 
+test('a gatherer that answers about another path is refused', async () => {
+  const { writer, open } = await seeded();
+  await writer.close(open[0].number);
+  await writer.close(open[1].number);
+  const claim = openCollectionClaim(
+    await readCollectionSnapshot(HOST, readerFor(writer)),
+    WORKTREE,
+  );
+
+  // Facts about a different path, and eligible on their own merits. Judged as
+  // they stand they would mint a `collect` for `WORKTREE` without any
+  // managed-root judgment of `WORKTREE` ever having happened, so the re-check
+  // refuses facts that do not name the path it asked about.
+  const gather = factsGatherer({
+    [WORKTREE]: {
+      path: BUILD,
+      resolvedPath: BUILD,
+      finalComponentIsSymlink: false,
+      parentResolvedPath: ROOT,
+    },
+  });
+  const authorized = await recheck(claim, writer, { gatherFacts: gather });
+  assert.deepEqual(gather.asked, [WORKTREE]);
+  assert.equal(authorized.outcome, 'withheld');
+  assert.equal(authorized.reason, 'candidate-facts-unavailable');
+  assert.equal(authorized.status, 'protected');
+  assert.equal(authorized.path, WORKTREE);
+});
+
 test('a re-check against a different board withholds', async () => {
   const { writer, open } = await seeded();
   await writer.close(open[0].number);

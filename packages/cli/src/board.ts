@@ -69,7 +69,6 @@ type CommandValue =
   | BoardTrustAnchor
   | VerifiedAuthority[]
   | CollectListEntry[]
-  | CollectDeleteReport
   | CollectDeleteReportBase
   | number[]
   | null;
@@ -396,6 +395,18 @@ function humanIssue(issue: BoardIssue): string {
   return lines.join('\n');
 }
 
+/**
+ * Every removal result and the words that report it, as a total mapping over
+ * `CollectDeleteReport['removal']`. The annotation is the exhaustiveness check:
+ * a removal result added to the union without a word here is a type error, so the
+ * reporting cannot quietly fall through to a case that did not happen.
+ */
+const REMOVAL_OUTCOME: { readonly [K in CollectDeleteReport['removal']]: string } = {
+  unlinked: 'deleted',
+  'unlinked-symlink': 'unlinked symlink',
+  absent: 'already absent',
+};
+
 function humanLines(result: CommandResult): string[] {
   if (result.mode === 'initialize') {
     const initialized = result.value as BoardInitialization;
@@ -455,21 +466,26 @@ function humanLines(result: CommandResult): string[] {
   }
 
   if (result.mode === 'collect-pending') {
-    const report = result.value as CollectDeleteReport;
+    // The pending value is the *base* report and has no `removal`: nothing has been
+    // removed, so there is no removal to report. The line therefore states the two
+    // shapes the confirmed run could take rather than asserting one of them.
+    const report = result.value as CollectDeleteReportBase;
     // Exactly one revision is named, and it is the one the re-check verified.
     return [
-      `would delete ${report.path} on ${report.host}; board ${report.boardId} `
+      `would delete ${report.path} on ${report.host} (a symlink would be unlinked as a link, `
+        + `anything else removed recursively); board ${report.boardId} `
         + `${renderRevision(report.recheckHead)}; re-run with --confirm`,
     ];
   }
   if (result.mode === 'collect-deleted') {
     const report = result.value as CollectDeleteReport;
-    const outcome = report.removal === 'unlinked'
-      ? 'deleted'
-      : report.removal === 'unlinked-symlink'
-        ? 'unlinked symlink'
-        : 'already absent';
-    return [`${outcome} ${report.path} on ${report.host}; board ${report.boardId} ${renderRevision(report.recheckHead)}`];
+    // A mapping over the removal union rather than a chain of comparisons, so a
+    // fourth removal result is a type error here instead of silently rendering as
+    // the last case: the report must name what actually happened, never a default.
+    return [
+      `${REMOVAL_OUTCOME[report.removal]} ${report.path} on ${report.host}; `
+        + `board ${report.boardId} ${renderRevision(report.recheckHead)}`,
+    ];
   }
 
   const value = result.value;

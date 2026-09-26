@@ -111,9 +111,12 @@ async function withWorkTree(body) {
     const reader = api(server, { trustAnchor: initialized.trustAnchor });
     const contexts = { root, stateHome, managed, worktree, server, writer, reader };
     const outcome = await body(contexts);
-    await rm(root, { recursive: true, force: true });
     if (outcome !== undefined) return outcome;
   } finally {
+    // The tree is reaped in the `finally`, not after `body`: a failing assertion
+    // throws past the `try` and would otherwise leak the temp tree and the test
+    // `XDG_STATE_HOME` it owns.
+    await rm(root, { recursive: true, force: true });
     if (previous === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previous;
   }
@@ -320,12 +323,30 @@ test('collect delete without --confirm reports the pending action and removes no
     assert.equal(code, 0);
     assert.deepEqual(err, []);
     assert.equal(out.length, 1);
+    // The dry run does not assert a single removal shape: it says what a symlink
+    // would get and what anything else would get, because the authorization
+    // carries no removal shape and the confirmed run branches on its own `lstat`.
     assert.equal(
       out[0],
-      `would delete ${context.worktree} on ${HOST}; board ${context.reader.accessState().boardId} `
+      `would delete ${context.worktree} on ${HOST} (a symlink would be unlinked as a link, `
+        + `anything else removed recursively); board ${context.reader.accessState().boardId} `
         + `rev ${before}; re-run with --confirm`,
     );
     assert.equal(existsSync(context.worktree), true, 'nothing was unlinked');
+
+    // The pending report has no `removal` key at all, and that absence is the
+    // pending/deleted discriminator in `--json` (the payload carries no `mode`),
+    // so it is asserted rather than assumed.
+    const json = await run(deleteArgs(context, context.worktree, ['--json']), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+    assert.equal(json.code, 0);
+    const pending = JSON.parse(json.out[0]);
+    assert.equal('removal' in pending, false, Object.keys(pending).join(','));
+    assert.equal(pending.path, context.worktree);
+    assert.equal(pending.recheckHead, before);
+    assert.equal(existsSync(context.worktree), true);
   });
 });
 
@@ -506,22 +527,31 @@ test('collect delete refuses a symlink whose target escapes its managed root and
   });
 });
 
-test('collect delete refuses a path whose containing directory escapes its managed root and leaves it alone', async () => {
+test('collect delete refuses a path whose containing directory escapes its managed root while its own resolved path lands back inside it, and leaves it alone', async () => {
   await withWorkTree(async (context) => {
     await seededWorkTree(context);
-    // The link's target sits outside the managed root, so the candidate's own
-    // name and its resolved path disagree in a way the containment check must
-    // catch through the containing directory rather than the final component.
+    // A double symlink, chosen so that only the containing-directory check can
+    // catch it: the containing directory `link` escapes the managed root, and the
+    // candidate's own resolved path comes back *inside* it, so the
+    // `symlink-escapes-managed-root` check is satisfied and cannot be what fired.
+    // A single symlink cannot do this -- both checks refuse it, so deleting the
+    // containing-directory check would change nothing and the test would
+    // discriminate nothing.
+    const back = join(context.managed, 'back');
+    await mkdir(join(back, 'project'), { recursive: true });
+    await writeFile(join(back, 'project', 'precious.txt'), 'precious');
     const real = join(context.root, 'real');
     await mkdir(real, { recursive: true });
+    // `real/project` is a symlink back into the managed root, so the candidate's
+    // resolved path is `managed/back/project` and the candidate's final component
+    // is a symlink too -- the two shapes the re-check would otherwise follow.
+    await symlink(join(back, 'project'), join(real, 'project'));
     const link = join(context.managed, 'link');
     await symlink(real, link);
     const throughLink = join(link, 'project');
     const issue = await context.writer.createIssue('Issue 1');
     await context.writer.addResourceDependency(HOST, throughLink, issue.number);
     await context.writer.close(issue.number);
-    await mkdir(throughLink, { recursive: true });
-    await writeFile(join(throughLink, 'keep.txt'), 'keep');
 
     const { code, err } = await run(deleteArgs(context, throughLink, ['--confirm']), {
       env: collectEnv(context),
@@ -529,11 +559,14 @@ test('collect delete refuses a path whose containing directory escapes its manag
     });
 
     // Core reports this refusal as `not-managed-collectible` because
-    // `managedReason` folds the three path-safety refusals into one reason.
+    // `managedReason` folds the three path-safety refusals into one reason. The
+    // fold is why the fixture, not the message, has to discriminate: with the
+    // containing-directory check removed this run authorizes and exits 0, so this
+    // assertion fails.
     assert.equal(code, 1);
     assert.match(err[0], /not-managed-collectible/);
-    assert.equal(existsSync(join(real, 'project')), true, 'the real directory is still there');
-    assert.equal(readFileSync(join(real, 'project', 'keep.txt'), 'utf8'), 'keep');
+    assert.equal(existsSync(throughLink), true, 'the link chain is still there');
+    assert.equal(readFileSync(join(back, 'project', 'precious.txt'), 'utf8'), 'precious');
   });
 });
 
@@ -621,6 +654,18 @@ test('collect delete reports the ManagedRootDefect verbatim and reads no board w
     });
     assert.equal(noRoots.code, 1);
     assert.match(noRoots.err[0], /ANTONINA_COLLECT_ROOTS/);
+    assert.deepEqual(methods, []);
+
+    // A root that resolves to `/` is refused on the same boundary, before any
+    // board read, so a symlinked filesystem root cannot reach a judgment.
+    const worklink = join(context.root, 'worklink');
+    await symlink('/', worklink);
+    const toRoot = await run(deleteArgs(context, context.worktree, ['--confirm']), {
+      env: { [COLLECT_ROOTS_ENV]: worklink },
+      createClient: () => reader,
+    });
+    assert.equal(toRoot.code, 1);
+    assert.match(toRoot.err[0], /root-resolves-to-filesystem-root/);
     assert.deepEqual(methods, []);
   });
 });

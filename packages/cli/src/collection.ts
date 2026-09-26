@@ -118,12 +118,14 @@ const DEFAULT_ROOTS_FS: RootsFs = { realpath: realpathCall };
 
 /**
  * Why a configured root set cannot be used for collection. The `ManagedRootDefect`
- * members are core's own and are returned verbatim; `unresolvable-root` is the
- * one defect this loader owns, because only it runs `realpath`.
+ * members are core's own and are returned verbatim; the other two are the defects
+ * this loader owns, because they need the filesystem fact core's own validator
+ * does not compute: whether a spelling resolves, and what it resolves to.
  */
 export type CollectRootsDefect =
   | { readonly kind: 'unresolvable-root'; readonly path: string; readonly message: string }
   | { readonly kind: 'root-is-filesystem-root'; readonly path: string }
+  | { readonly kind: 'root-resolves-to-filesystem-root'; readonly path: string; readonly resolved: string }
   | ManagedRootDefect;
 
 export type LoadManagedRootsResult =
@@ -199,9 +201,9 @@ export async function loadManagedRoots(
     if (defect !== null) {
       return { ok: false, spelling, defect: { kind: 'path-form', path: spelling, defect } };
     }
-    // The filesystem root is refused in the same shape as a bad form: it is a
-    // spelling no operator means, and it would put every absolute path on the
-    // host inside a root, which defeats the containment every later check makes.
+    // The filesystem root is refused in the same shape as a bad form, and before
+    // any board read: it is a spelling no operator means, and it would put every
+    // absolute path on the host inside a root.
     if (spelling === '/') {
       return { ok: false, spelling, defect: { kind: 'root-is-filesystem-root', path: spelling } };
     }
@@ -219,6 +221,22 @@ export async function loadManagedRoots(
           message: `configured managed root ${spelling} cannot be resolved: `
             + (error instanceof Error ? error.message : String(error)),
         },
+      };
+    }
+    // The spelling check above is not enough, because the hazard is a property of
+    // the *resolved* coordinate: `isWithin` special-cases `root === '/'`
+    // (`managed-roots.ts:151-152`), so a root whose `realpath` is `/` makes both
+    // containment checks vacuous for every absolute path on the host, whatever the
+    // spelling was. One hop of symlink from the spelling refused above reaches this
+    // state, so it is checked here, after the `realpath` that produces it, and
+    // before the `validateManagedRoots` that would brand the pair. It has its own
+    // kind because the operator's two mistakes are different: one names `/` as a
+    // root, the other points a plausible-looking directory at it.
+    if (resolved === '/') {
+      return {
+        ok: false,
+        spelling,
+        defect: { kind: 'root-resolves-to-filesystem-root', path: spelling, resolved },
       };
     }
     roots.push({ spelled: spelling, resolved });
@@ -260,6 +278,10 @@ export function describeRootsDefect(result: {
   if (defect.kind === 'root-is-filesystem-root') {
     return `root-is-filesystem-root: configured managed root ${defect.path} is the filesystem root; `
       + 'it would make every absolute path collectible';
+  }
+  if (defect.kind === 'root-resolves-to-filesystem-root') {
+    return `root-resolves-to-filesystem-root: configured managed root ${defect.path} resolves to the `
+      + `filesystem root ${defect.resolved}; it would make every absolute path collectible`;
   }
   return `unresolvable-root: ${defect.message}`;
 }
@@ -346,14 +368,24 @@ export async function collectList(api: BoardApi, host: string): Promise<CollectL
  * I/O shape, not a verdict: nothing here decides whether a path may be touched,
  * and every such decision was made by `recheckCollectionClaim` beforehand.
  *
- * The residual window is real and this function does not close it. The component
- * can change between the gather inside the re-check and this `lstat`, and a swap
- * to a symlink removes the *link* -- the safe direction -- while a swap to a
- * directory recursively removes a directory the re-check never judged. The
- * signed board log has no compare-and-delete or lease primitive, so the protocol
- * can only promise the path was unowed at the last authoritative read. This is
- * one named function so it is greppable if core later grows a removal descriptor
- * on the authorization.
+ * The residual window is real, and this function does not close it -- it cannot.
+ * It is not bounded by the final component. Between the re-check's facts and the
+ * removal, *any* component can change, including the containing directory: if the
+ * directory holding the authorized path is replaced by a symlink, the `rm` below
+ * resolves through it and recursively removes a directory outside the managed
+ * root, one the re-check never judged at any component. Re-listing the parent
+ * immediately before the `rm` would only move the interval, not remove it: there
+ * is no compare-and-remove on a path, so every check is a read followed by a
+ * window. The signed board log has no compare-and-delete or lease primitive
+ * either, so the protocol can only promise the path was unowed at the last
+ * authoritative read. This is one named function so it is greppable if core later
+ * grows a removal descriptor on the authorization, or an `openat`-style handle
+ * that would actually close the interval.
+ *
+ * `rm(..., { recursive: true })` also descends into a mount point inside the
+ * candidate: a bind mount, a devcontainer mount, or an sshfs mount under a
+ * worktree is removed from the mounted side, which is standard `rm -rf`
+ * semantics and not something this function narrows.
  */
 export interface RemovalFs {
   lstat: typeof lstatCall;

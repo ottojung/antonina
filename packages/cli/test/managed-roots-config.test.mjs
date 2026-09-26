@@ -174,6 +174,48 @@ test('the filesystem root is refused as a managed root', async () => {
   });
 });
 
+test('a configured root whose spelling resolves to the filesystem root is refused, with both coordinates', async () => {
+  await withTree(async ({ root }) => {
+    // One hop from the refused spelling `/`: the spelling is an ordinary looking
+    // directory and the resolved coordinate is `/`, which is what `isWithin`
+    // special-cases into vacuous containment (`managed-roots.ts:151-152`).
+    const worklink = join(root, 'worklink');
+    await symlink('/', worklink);
+
+    const result = await load({ [COLLECT_ROOTS_ENV]: worklink });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.defect, {
+      kind: 'root-resolves-to-filesystem-root',
+      path: worklink,
+      resolved: '/',
+    });
+    assert.equal(result.spelling, worklink);
+    assert.match(describeRootsDefect(result), /resolves to the filesystem root \//);
+    assert.equal(
+      describeRootsDefect(result).includes('root-is-filesystem-root:'),
+      false,
+      'the two mistakes read differently',
+    );
+  });
+});
+
+test('a root is accepted only when its resolved coordinate is not the filesystem root', async () => {
+  await withTree(async ({ root }) => {
+    // The positive control for the case above: a symlinked root whose target is a
+    // real directory is accepted, so the refusal above is about the resolved `/`
+    // and not about the symlink.
+    const work = join(root, 'work');
+    await mkdir(work);
+    const worklink = join(root, 'worklink');
+    await symlink(work, worklink);
+
+    const result = await load({ [COLLECT_ROOTS_ENV]: worklink });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(result.roots.roots, [{ spelled: worklink, resolved: work }]);
+  });
+});
+
 test('a resolved coordinate is never taken from configuration', async () => {
   await withTree(async ({ root }) => {
     const real = join(root, 'real');

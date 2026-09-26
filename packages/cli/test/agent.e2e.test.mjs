@@ -403,3 +403,58 @@ test('legacy top-level agent command spellings are not accepted', (t) => {
   assert.equal(result.status, 2);
   assert.match(result.stderr, /expected "agent" or "board"/);
 });
+
+
+test('attached prompt streams output and returns invocation status', (t) => {
+  const { work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', 'ac1d', '--cwd', work], env).status, 0);
+  const prompt = run(['agent', 'prompt', '--id', 'ac1d', 'attached'], env);
+  assert.equal(prompt.status, 0, prompt.stderr);
+  assert.match(prompt.stdout, /FAKE:attached/);
+});
+
+test('graceful stop and wait timeout expose stable lifecycle results', async (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '5a0f', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'prompt', '--id', '5a0f', '--detach', 'slow'], env).status, 0);
+  await waitFor(root, '5a0f', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
+
+  const timed = run(['agent', 'wait', '--id', '5a0f', '--timeout', '1'], env);
+  assert.equal(timed.status, 124);
+  assert.match(timed.stderr, /still running after 1s/);
+
+  const stopped = run(['agent', 'stop', '--id', '5a0f'], env);
+  assert.equal(stopped.status, 0, stopped.stderr);
+  const meta = JSON.parse(readFileSync(metaPath(root, '5a0f'), 'utf8'));
+  assert.equal(meta.state, 'stopped');
+
+  const waited = run(['agent', 'wait', '--id', '5a0f', '--timeout', '1'], env);
+  assert.equal(waited.status, 1);
+});
+
+test('status exposes canonical and malformed steer metadata', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '57ee', '--cwd', work], env).status, 0);
+  const path = metaPath(root, '57ee');
+  let meta = JSON.parse(readFileSync(path, 'utf8'));
+  meta.steer_seq = 2;
+  meta.steer_queue = [{ seq: 2, prompt: 'first line\nsecond line', queued_at: 1.5 }];
+  meta.intent = 'steer';
+  writeFileSync(path, JSON.stringify(meta));
+
+  let status = JSON.parse(run(['agent', 'status', '--id', '57ee', '--json'], env).stdout);
+  assert.equal(status.steers_pending, 1);
+  assert.equal(status.next_steer, 'first line');
+  assert.equal(status.steer_preempting, true);
+  assert.equal(status.steer_metadata_error, null);
+
+  meta = JSON.parse(readFileSync(path, 'utf8'));
+  meta.intent = null;
+  meta.steer_seq = false;
+  meta.steer_queue = [];
+  writeFileSync(path, JSON.stringify(meta));
+  status = JSON.parse(run(['agent', 'status', '--id', '57ee', '--json'], env).stdout);
+  assert.equal(status.steers_pending, null);
+  assert.equal(status.next_steer, null);
+  assert.equal(status.steer_metadata_error, 'malformed persisted steer metadata');
+});

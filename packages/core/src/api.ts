@@ -548,7 +548,34 @@ export class BoardApi {
 
 export { BOARD_CAPABILITIES } from './operations.js';
 export { emptyBoard, parseBoard } from './model.js';
+export {
+  boardApiCollectionReader,
+  collectiblePaths,
+  collectionSnapshot,
+  commitCollectionDeletion,
+  openCollectionClaim,
+  protectionOf,
+  readCollectionSnapshot,
+  recheckCollectionClaim,
+  unverifiedCollectionSnapshot,
+} from './collection.js';
 export type { Board, BoardIssue, BoardResource, IssueState, ResourceView } from './model.js';
+export type {
+  AuthorizedCollection,
+  CollectionClaim,
+  CollectionFailure,
+  CollectionFailureKind,
+  CollectionReader,
+  CollectionResolution,
+  CollectionSnapshot,
+  CompletedCollection,
+  ProtectionDecision,
+  ProtectionStatus,
+  ProtectionVerdict,
+  VerifiedBoardRead,
+  VerifiedCollectionSnapshot,
+  UnverifiedCollectionSnapshot,
+} from './collection.js';
 export type { BoardCredential, CredentialAuthority, CredentialRejection } from './credential.js';
 export type {
   BoardCapability,

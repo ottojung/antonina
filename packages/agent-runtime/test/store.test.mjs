@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import * as nodeFs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -68,11 +69,26 @@ function boundedLockAttempts(options, lockPath, budget) {
       return nodeFs.openSync(path, flags, mode);
     },
     writeFileSync(fd, ...rest) {
-      if (typeof fd === 'number' && rest[0] !== undefined) state.installed.push(String(rest[0]));
+      if (typeof fd === 'number' && typeof rest[0] === 'string') state.installed.push(String(rest[0]));
       return nodeFs.writeFileSync(fd, ...rest);
     },
   });
   return { options: { ...options, fs }, state };
+}
+
+// A child that is spawned and then awaited to its 'exit' event is reaped: its pid
+// is genuinely not running, which is the only honest way to build a lock record
+// whose owner is provably dead. Every child handed out here is also killed and
+// awaited in t.after, so no test leaks a process.
+function deadChild(t) {
+  const child = spawn(process.execPath, ['-e', '0'], { stdio: 'ignore' });
+  t.after(() => {
+    try { child.kill('SIGKILL'); } catch {}
+  });
+  return new Promise((resolve) => {
+    child.once('error', () => resolve(null));
+    child.once('exit', (code, signal) => resolve({ pid: child.pid, code, signal }));
+  });
 }
 
 test('state root follows XDG_STATE_HOME with home fallback', () => {
@@ -516,7 +532,7 @@ test('a lock is reclaimed only when the process it names is provably not this on
   await assert.rejects(
     withAgentLock('d21', () => 'ok', held.options),
     MetadataLockError,
-    'a live owner\'s lock must not be reclaimed on the pid alone',
+    'the takeover did not succeed',
   );
   assert.equal(
     nodeFs.readFileSync(heldPath, 'utf8'),
@@ -524,6 +540,108 @@ test('a lock is reclaimed only when the process it names is provably not this on
     'a refused takeover must leave the owner\'s record byte-identical',
   );
   assert.equal(held.state.attempts > 1, true, 'the waiter must retry rather than steal');
+});
+
+test('the liveness probe alone reclaims a lock naming a reaped process', async (t) => {
+  const options = root(t);
+  const reaped = await deadChild(t);
+  if (reaped === null) {
+    t.skip('could not spawn and reap a child on this host');
+    return;
+  }
+  // The record names a pid that is not running, and carries no start ticks, so
+  // the start-tick comparison cannot decide anything. The only thing that can
+  // reclaim it is the kill(pid, 0) probe; without that probe the record reads as
+  // a live owner and the waiter burns the whole retry budget before failing.
+  const id = 'd22';
+  createAgentDirectory(id, options);
+  writeMeta(id, idleMeta(id, '/tmp', null, 5), options);
+  const lockPath = join(agentDir(id, options), '.lock');
+  const raw = JSON.stringify({ pid: reaped.pid, startTicks: null });
+  nodeFs.writeFileSync(lockPath, raw);
+
+  const bounded = boundedLockAttempts(options, lockPath, 2);
+  const result = await withAgentLock(id, () => 'ok', bounded.options).then(
+    (value) => ({ value }),
+    (error) => ({ error }),
+  );
+  assert.equal(
+    result.error,
+    undefined,
+    `a lock over a reaped pid must be reclaimed promptly, not waited out `
+      + `(attempts=${bounded.state.attempts}): ${result.error}`,
+  );
+  assert.equal(result.value, 'ok');
+  assert.equal(bounded.state.attempts, 2, 'reclaiming costs one observation and one retry');
+  assert.equal(nodeFs.existsSync(lockPath), false, 'the reclaimed lock was released');
+  t.after(() => nodeFs.rmSync(lockPath, { force: true }));
+});
+
+test('a probe failure is not proof of life, so it never wedges the record', async (t) => {
+  // A process owned by another user is unsignalable, so the probe fails with
+  // EPERM. The probe answers only "can this process still be running?"; a probe
+  // that cannot reach the process has not established life, and the record is
+  // stale authority to be reclaimed under the same compare-and-swap as any other
+  // dead owner. Narrowing the probe's catch to ESRCH-only would instead classify
+  // EPERM as life, and every such record would wedge its waiters for the whole
+  // budget on every boot. This host has no process owned by another uid, so the
+  // EPERM outcome is injected at the probe for the one pid the record names, and
+  // the real probe is checked first so the record still names a running process.
+  const options = root(t);
+  const child = spawn(process.execPath, ['-e', 'process.stdout.write("ready\\n"); setInterval(() => {}, 1000)'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  t.after(async () => {
+    const reaped = new Promise((resolve) => child.once('exit', () => resolve(true)));
+    try { child.kill('SIGKILL'); } catch {}
+    await reaped;
+  });
+  const ready = await new Promise((resolve) => {
+    let seen = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { seen += chunk; if (seen.includes('ready')) resolve(true); });
+    child.once('error', () => resolve(false));
+    child.once('exit', () => resolve(false));
+  });
+  if (!ready) {
+    t.skip('could not hold a live child on this host');
+    return;
+  }
+  process.kill(child.pid, 0);
+  const realKill = process.kill;
+  process.kill = (pid, signal) => {
+    if (pid === child.pid) throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+    return realKill(pid, signal);
+  };
+  t.after(() => { process.kill = realKill; });
+
+  const id = 'd23';
+  createAgentDirectory(id, options);
+  writeMeta(id, idleMeta(id, '/tmp', null, 5), options);
+  const lockPath = join(agentDir(id, options), '.lock');
+  const raw = JSON.stringify({ pid: child.pid, startTicks: null });
+  nodeFs.writeFileSync(lockPath, raw);
+  t.after(() => nodeFs.rmSync(lockPath, { force: true }));
+
+  const bounded = boundedLockAttempts(options, lockPath, 2);
+  const result = await withAgentLock(id, () => 'ok', bounded.options).then(
+    (value) => ({ value }),
+    (error) => ({ error }),
+  );
+  // Distinguish "reclaimed after one observation" from "waited out the budget".
+  assert.equal(
+    result.error,
+    undefined,
+    `an unreachable owner must be reclaimed, not waited out (attempts=${bounded.state.attempts}): ${result.error}`,
+  );
+  assert.equal(result.value, 'ok');
+  assert.equal(bounded.state.attempts, 2, 'reclaiming costs one observation and one retry');
+  assert.equal(
+    JSON.parse(bounded.state.installed[0]).pid,
+    process.pid,
+    'the reclaimed record must be replaced by this process\'s own acquisition',
+  );
+  assert.equal(nodeFs.existsSync(lockPath), false, 'the reclaimed lock was released');
 });
 
 test('metadata is published by an exclusive, fsynced sequence that never recreates state', (t) => {
@@ -570,6 +688,16 @@ test('metadata is published by an exclusive, fsynced sequence that never recreat
       nodeFs.existsSync(join(squattedDir, 'meta.json')),
       false,
       'the squatted record must not be renamed over metadata this write never durably produced',
+    );
+    assert.equal(
+      nodeFs.existsSync(squatterPath),
+      true,
+      'a temporary path this write refused to adopt belongs to someone else and must survive the failure',
+    );
+    assert.equal(
+      nodeFs.readFileSync(squatterPath, 'utf8'),
+      squatterContents,
+      'the squatter\'s file must be left exactly as it was found',
     );
   } finally {
     Date.now = realNow;

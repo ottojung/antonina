@@ -7,7 +7,7 @@ import {
 } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { configuredModelAvailable, sanitizeBackendError } from '../../agent-runtime/src/backend.js';
+import { configuredModelAvailable, discoverSessionId, sanitizeBackendError } from '../../agent-runtime/src/backend.js';
 import {
   beginInvocation,
   beginStopLike,
@@ -545,7 +545,21 @@ async function cmdPrompt(args: string[], context: AgentCommandContext): Promise<
       decision.action = 'busy';
       return;
     }
-    const mode = persistedNativeSessionId(meta) === null ? 'new' : 'continue';
+    let mode: 'new' | 'continue';
+    const recordedSession = persistedNativeSessionId(meta);
+    if (recordedSession !== null) {
+      mode = 'continue';
+    } else if (persistedLifecycleState(meta) === 'idle' && meta.prompt_count === 0) {
+      mode = 'new';
+    } else {
+      const recoveredSession = discoverSessionId(agentId, context.env);
+      if (recoveredSession === null) {
+        mode = 'new';
+      } else {
+        meta.native_session_id = recoveredSession;
+        mode = 'continue';
+      }
+    }
     const generation = currentGeneration + 1;
     const now = Date.now() / 1000;
     beginInvocation(meta, prompt, now, promptCount);

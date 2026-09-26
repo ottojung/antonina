@@ -22,7 +22,7 @@ Inspect durable state, existing Antonina agents, worktrees, branches, reviews, a
 
 Do not keep the coordinating invocation alive merely to wait for long-running Antonina agents. In particular, avoid multi-minute sleeps or long `antonina agent wait` calls whose only purpose is to poll later. Leave running agents running and let the next scheduled invocation inspect them afresh. A short wait is fine when a result is expected within seconds and immediately affects the current coordination decision.
 
-The recurring scheduler should be able to start a fresh coordinating invocation at its intended cadence. If an invocation approaches that cadence, prefer recording state and returning over continuing to supervise existing agents.
+The recurring scheduler should be able to start a fresh coordinating invocation at its intended cadence. Aim to finish the coordinating pass and exit before four minutes have elapsed. If that point is approaching, record durable state and return rather than continuing to supervise or starting more coordination work.
 
 ## Startup
 

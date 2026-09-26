@@ -9,6 +9,10 @@ web/node_modules
 web/dist/
 web/build/
 
+# exec-capable fallback root for the fake-opencode fixtures, used only when
+# tmpdir() is mounted noexec; created and pruned by the suites themselves.
+.antonina-test-tmp/
+
 .DS_Store
 .idea/
 .vscode/

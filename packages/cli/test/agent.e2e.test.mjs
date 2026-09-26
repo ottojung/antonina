@@ -1,27 +1,113 @@
 import assert from 'node:assert/strict';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  rmdirSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 const CLI = resolve('packages/cli/dist/packages/cli/src/main.js');
+const OPENCODE_BIN_ENV = 'ANTONINA_OPENCODE_BIN';
+const REPO_FIXTURE_PARENT = resolve('.antonina-test-tmp');
+const PROBE_SENTINEL = 'ANTONINA-FIXTURE-EXEC-OK';
+
+// The fixture must be exec-able: on hosts where tmpdir() is mounted noexec the
+// fake backend would fail to exec, and a bare `opencode` lookup would then
+// fall through to whatever real backend is on PATH. Probe candidate parents
+// and pick the first that can actually exec a script, so a non-exec-able
+// location becomes a loud, named host problem instead of a silent substitution.
+function execProbe(parent, name) {
+  const dir = mkdtempSync(join(parent, name));
+  const probe = join(dir, 'probe.sh');
+  writeFileSync(probe, `#!/bin/sh\nprintf '%s\\n' "${PROBE_SENTINEL}"\n`, { mode: 0o755 });
+  const result = spawnSync(probe, [], { encoding: 'utf8', timeout: 15_000 });
+  rmSync(dir, { recursive: true, force: true });
+  if (result.error) return { ok: false, reason: String(result.error.code ?? result.error.message) };
+  if (result.status !== 0) return { ok: false, reason: `probe exited with status ${result.status}` };
+  if (result.stdout.trim() !== PROBE_SENTINEL) {
+    return { ok: false, reason: `probe produced ${JSON.stringify(result.stdout)}` };
+  }
+  return { ok: true, reason: 'exec ok' };
+}
+
+function candidateParents() {
+  return [tmpdir(), REPO_FIXTURE_PARENT];
+}
+
+// Removing the repo-local fixture parent is best effort, and only ever happens
+// once it is empty: rmdir fails with ENOTEMPTY while a sibling suite's root is
+// still live, which is expected. Any other failure is a real leftover and is
+// reported rather than swallowed. (`rmSync(path, { recursive: false })` cannot
+// be used here: on a directory it fails EISDIR on Node 22+, which is why the
+// earlier bare `catch {}` never removed anything.)
+function pruneFixtureParent(t) {
+  try {
+    rmdirSync(REPO_FIXTURE_PARENT);
+  } catch (error) {
+    if (error.code === 'ENOTEMPTY' || error.code === 'ENOENT') return;
+    t?.diagnostic(`fixture parent ${REPO_FIXTURE_PARENT} left behind: ${error.message}`);
+  }
+}
+
+// The root's cleanup is registered here, inside selectExecRoot, at the moment
+// the directory is created and before the no-exec throw path can be reached:
+// a probe failure, a mid-suite abort or a stray file must not leave a directory
+// in the worktree.
+function selectExecRoot(prefix, parents = candidateParents(), probe = execProbe, t) {
+  const failures = [];
+  for (const parent of parents) {
+    try {
+      mkdirSync(parent, { recursive: true });
+    } catch (error) {
+      failures.push(`${parent}: cannot create fixture parent (${error.message})`);
+      continue;
+    }
+    const outcome = probe(parent, prefix);
+    if (outcome.ok) {
+      const root = mkdtempSync(join(parent, prefix));
+      t?.after(() => {
+        rmSync(root, { recursive: true, force: true });
+        pruneFixtureParent(t);
+      });
+      return root;
+    }
+    failures.push(`${parent}: ${outcome.reason}`);
+  }
+  pruneFixtureParent(t);
+  const error = new Error(
+    `no exec-capable fixture directory for the fake opencode; tried: ${failures.join('; ')}`,
+  );
+  error.code = 'ANTONINA_FIXTURE_NOEXEC';
+  throw error;
+}
 
 function fixture(t) {
-  const root = mkdtempSync(join(tmpdir(), 'antonina-cli-e2e-'));
+  const root = selectExecRoot('antonina-cli-e2e-', undefined, undefined, t);
   const bin = join(root, 'bin');
   const work = join(root, 'work');
   mkdirSync(bin);
   mkdirSync(work);
   const opencode = join(bin, 'opencode');
+  const pathBin = join(root, 'path-bin');
+  mkdirSync(pathBin);
+  const invocations = join(root, 'fixture-invocations.log');
+  const escapes = join(root, 'path-escapes.log');
+  // Bare `opencode` on PATH resolves to this trap, never to a real backend.
+  writeFileSync(join(pathBin, 'opencode'), `#!/bin/sh
+printf '%s %s\\n' "$0" "$*" >>'${escapes}'
+echo "antonina-test: PATH resolved a non-fixture opencode ($0)" >&2
+exit 70
+`, { mode: 0o755 });
   writeFileSync(opencode, `#!/bin/sh
+printf '%s %s\\n' "$0" "$*" >>'${invocations}'
 case "$1" in
   models)
     echo "opencode/space-bunny-free"
@@ -57,12 +143,74 @@ esac
   chmodSync(opencode, 0o755);
   const env = {
     ...process.env,
-    PATH: `${bin}:${process.env.PATH ?? ''}`,
+    PATH: `${pathBin}:${process.env.PATH ?? ''}`,
     XDG_STATE_HOME: join(root, 'state'),
     ANTONINA_TEST_CALLS: join(root, 'opencode-calls.log'),
+    [OPENCODE_BIN_ENV]: opencode,
   };
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  return { root, work, env };
+  // Positive control: the fixture about to be used is exec-able and answers.
+  const direct = spawnSync(opencode, ['models'], { env, encoding: 'utf8', timeout: 15_000 });
+  assert.equal(
+    direct.status,
+    0,
+    `fake opencode fixture ${opencode} is not runnable here: ${direct.error?.code ?? direct.stderr}`,
+  );
+  assert.match(direct.stdout, /opencode\/space-bunny-free/);
+  // Negative control: a bare `opencode` lookup in this environment hits the
+  // trap, so any PATH fall-through is recorded instead of reaching a real host
+  // backend.
+  const trapped = spawnSync('opencode', ['models'], { env, encoding: 'utf8', timeout: 15_000 });
+  assert.equal(trapped.status, 70, 'the PATH trap for bare `opencode` is not armed');
+  // Discard the controls' own records; only test-time invocations are asserted.
+  rmSync(escapes, { force: true });
+  rmSync(invocations, { force: true });
+  t.after(() => {
+    assert.deepEqual(
+      pathEscapes({ escapes }),
+      [],
+      'a non-fixture opencode was executed via PATH during this test',
+    );
+  });
+  return { root, work, env, opencode, escapes, invocations };
+}
+
+function fixtureInvocations(env) {
+  if (!existsSync(env.ANTONINA_TEST_CALLS)) return [];
+  return readFileSync(env.ANTONINA_TEST_CALLS, 'utf8').split('\n').filter(Boolean);
+}
+
+function pathEscapes(fixtureHandle) {
+  const { escapes } = fixtureHandle;
+  if (!existsSync(escapes)) return [];
+  return readFileSync(escapes, 'utf8').split('\n').filter(Boolean);
+}
+
+// Asserts the fake backend, at its exact absolute path, is the program that ran.
+function assertFixtureInvoked(fixtureHandle, expected) {
+  const { env, opencode } = fixtureHandle;
+  const escapes = pathEscapes(fixtureHandle);
+  assert.deepEqual(
+    escapes,
+    [],
+    `a non-fixture opencode was executed via PATH: ${escapes.join(' | ')}`,
+  );
+  assert.ok(isAbsolute(opencode), 'the backend fixture must be addressed by absolute path');
+  const recorded = existsSync(fixtureHandle.invocations)
+    ? readFileSync(fixtureHandle.invocations, 'utf8').split('\n').filter(Boolean)
+    : [];
+  for (const line of recorded) {
+    assert.equal(
+      line.split(' ')[0],
+      opencode,
+      `a program other than the fixture backend was executed as the backend: ${line}`,
+    );
+  }
+  if (expected === undefined) return;
+  const calls = fixtureInvocations(env);
+  assert.ok(
+    calls.some((line) => line.includes(expected)),
+    `expected the fixture backend (${opencode}) to be invoked with ${JSON.stringify(expected)}; saw ${JSON.stringify(calls)}`,
+  );
 }
 
 function run(args, env) {
@@ -87,7 +235,8 @@ async function waitFor(root, id, predicate, timeoutMs = 8_000) {
 }
 
 test('built CLI runs a fresh prompt then continues the discovered OpenCode session', async (t) => {
-  const { root, work, env } = fixture(t);
+  const handle = fixture(t);
+  const { root, work, env } = handle;
   const created = run(['agent', 'new', '--id', 'a11d', '--cwd', work, '--json'], env);
   assert.equal(created.status, 0, created.stderr);
   assert.equal(JSON.parse(created.stdout).state, 'idle');
@@ -105,10 +254,13 @@ test('built CLI runs a fresh prompt then continues the discovered OpenCode sessi
   const log = readFileSync(join(root, 'state', 'antonina', 'agents', 'a11d', 'output.log'), 'utf8');
   assert.match(log, /FAKE:hello/);
   assert.match(log, /FAKE:again/);
+  assertFixtureInvoked(handle, 'hello');
+  assertFixtureInvoked(handle, 'again');
 });
 
 test('hard steer interrupts the running process group and drains redirect FIFO', async (t) => {
-  const { root, work, env } = fixture(t);
+  const handle = fixture(t);
+  const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'beef', '--cwd', work], env).status, 0);
   assert.equal(run(['agent', 'prompt', '--id', 'beef', '--detach', 'slow'], env).status, 0);
   await waitFor(root, 'beef', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
@@ -120,10 +272,13 @@ test('hard steer interrupts the running process group and drains redirect FIFO',
   const log = readFileSync(join(root, 'state', 'antonina', 'agents', 'beef', 'output.log'), 'utf8');
   assert.match(log, /slow-start/);
   assert.match(log, /FAKE:redirect/);
+  assertFixtureInvoked(handle, 'slow');
+  assertFixtureInvoked(handle, 'redirect');
 });
 
 test('ordinary prompt remains busy while an invocation is running', async (t) => {
-  const { root, work, env } = fixture(t);
+  const handle = fixture(t);
+  const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'cafe', '--cwd', work], env).status, 0);
   assert.equal(run(['agent', 'prompt', '--id', 'cafe', '--detach', 'slow'], env).status, 0);
   await waitFor(root, 'cafe', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
@@ -132,11 +287,13 @@ test('ordinary prompt remains busy while an invocation is running', async (t) =>
   assert.match(busy.stderr, /still running/);
   const killed = run(['agent', 'kill', '--id', 'cafe'], env);
   assert.equal(killed.status, 0, killed.stderr);
+  assertFixtureInvoked(handle, 'slow');
 });
 
 
 test('stale reserved work is recovered without overwriting the accepted prompt', async (t) => {
-  const { root, work, env } = fixture(t);
+  const handle = fixture(t);
+  const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'd00d', '--cwd', work], env).status, 0);
   const path = metaPath(root, 'd00d');
   const meta = JSON.parse(readFileSync(path, 'utf8'));
@@ -166,6 +323,7 @@ test('stale reserved work is recovered without overwriting the accepted prompt',
   const log = readFileSync(join(root, 'state', 'antonina', 'agents', 'd00d', 'output.log'), 'utf8');
   assert.match(log, /FAKE:accepted/);
   assert.doesNotMatch(log, /FAKE:replacement/);
+  assertFixtureInvoked(handle, 'accepted');
 });
 
 test('status reconciles abandoned running metadata to an explicit failure', (t) => {
@@ -259,7 +417,8 @@ test('delete tombstone blocks later prompt reservation', (t) => {
 
 
 test('backend server failure is persisted and sanitized through status', async (t) => {
-  const { root, work, env } = fixture(t);
+  const handle = fixture(t);
+  const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'bad1', '--cwd', work], env).status, 0);
   assert.equal(run(['agent', 'prompt', '--id', 'bad1', '--detach', 'server-error'], env).status, 0);
   await waitFor(root, 'bad1', (meta) => meta.state === 'failed' && meta.active_runner === false);
@@ -272,11 +431,13 @@ test('backend server failure is persisted and sanitized through status', async (
   assert.equal(body.backend_error.reference, 'err_e2e');
   assert.equal(body.backend_error.automatic_retry_safe, false);
   assert.equal(body.backend_error.request_boundary, 'fresh_session');
+  assertFixtureInvoked(handle, 'server-error');
 });
 
 
 test('prompt recovers an existing OpenCode session when durable session id was lost', async (t) => {
-  const { root, work, env } = fixture(t);
+  const handle = fixture(t);
+  const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'a11d', '--cwd', work], env).status, 0);
   assert.equal(run(['agent', 'prompt', '--id', 'a11d', '--detach', 'first'], env).status, 0);
   await waitFor(root, 'a11d', (meta) => meta.state === 'succeeded' && meta.active_runner === false);
@@ -296,6 +457,7 @@ test('prompt recovers an existing OpenCode session when durable session id was l
 
   const calls = readFileSync(env.ANTONINA_TEST_CALLS, 'utf8');
   assert.match(calls, /run --auto --session ses_fake .* recovered/);
+  assertFixtureInvoked(handle, 'recovered');
 });
 
 
@@ -384,11 +546,13 @@ test('legacy top-level agent command spellings are not accepted', (t) => {
 
 
 test('attached prompt streams output and returns invocation status', (t) => {
-  const { work, env } = fixture(t);
+  const handle = fixture(t);
+  const { work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'ac1d', '--cwd', work], env).status, 0);
   const prompt = run(['agent', 'prompt', '--id', 'ac1d', 'attached'], env);
   assert.equal(prompt.status, 0, prompt.stderr);
   assert.match(prompt.stdout, /FAKE:attached/);
+  assertFixtureInvoked(handle, 'attached');
 });
 
 test('graceful stop and wait timeout expose stable lifecycle results', async (t) => {
@@ -434,4 +598,46 @@ test('status exposes canonical and malformed steer metadata', (t) => {
   const malformed = run(['agent', 'status', '--id', '57ee', '--json'], env);
   assert.equal(malformed.status, 1);
   assert.match(malformed.stderr, /steer_seq is malformed/);
+});
+
+test('fixture guard: the backend is pinned to an absolute exec-able fixture path', (t) => {
+  const handle = fixture(t);
+  const { env, opencode } = handle;
+  assert.equal(env[OPENCODE_BIN_ENV], opencode);
+  assert.ok(isAbsolute(opencode));
+  assert.equal(execProbe(dirname(opencode), 'probe-').ok, true, 'the fixture directory must be exec-able');
+  assertFixtureInvoked(handle);
+});
+
+test('fixture guard: a non-exec-able fixture location is a named failure, never a substitution', () => {
+  assert.throws(
+    () => selectExecRoot('antonina-cli-e2e-', ['/tmp', '/workspace'], () => ({ ok: false, reason: 'EACCES' })),
+    (error) => {
+      assert.equal(error.code, 'ANTONINA_FIXTURE_NOEXEC');
+      assert.match(error.message, /no exec-capable fixture directory/);
+      assert.match(error.message, /\/tmp: EACCES/);
+      assert.match(error.message, /\/workspace: EACCES/);
+      return true;
+    },
+  );
+});
+
+test('fixture guard: an unpinned backend falls into the PATH trap instead of a real opencode', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env, escapes, invocations } = handle;
+  // Simulate the defect: no exact backend path, so a bare `opencode` lookup is
+  // the only option and must hit the recorded trap rather than a real backend.
+  const unpinned = { ...env };
+  delete unpinned[OPENCODE_BIN_ENV];
+  assert.equal(run(['agent', 'new', '--id', 'b00b', '--cwd', work], unpinned).status, 0);
+  assert.equal(run(['agent', 'prompt', '--id', 'b00b', '--detach', 'unpinned'], unpinned).status, 0);
+  const done = await waitFor(root, 'b00b', (meta) => meta.state !== 'running' && meta.active_runner === false);
+  assert.equal(done.state, 'failed');
+  assert.equal(done.exit_code, 70);
+  const trapped = readFileSync(escapes, 'utf8');
+  assert.match(trapped, /path-bin\/opencode/);
+  assert.equal(existsSync(invocations), false, 'the fixture backend must not have run');
+  // The escape was produced on purpose here; clear it so the shared guard does
+  // not double-report it.
+  rmSync(escapes, { force: true });
 });

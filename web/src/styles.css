@@ -71,6 +71,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .create-form > div { display: flex; gap: 8px; }
 .create-form input { flex: 1; min-width: 0; }
 .create-form textarea { min-height: 76px; resize: vertical; }
+.create-form small { color: var(--muted); font-size: .74rem; line-height: 1.4; }
 .resources-view { border-top: 1px solid var(--line); padding-bottom: 32px; }
 .workspace.resources-view { display: block; background: var(--paper); }
 .workspace.resources-view .issue-pane { border-right: 0; }
@@ -107,7 +108,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .access-callout p { margin: 4px 0 0; color: #765c4c; font-size: .8rem; line-height: 1.45; }
 .access-callout button { flex: none; padding: 8px 11px; font-size: .8rem; }
 .filters { display: flex; gap: 4px; margin: 0 24px 20px; padding: 4px; border-radius: 10px; background: #ecefe9; }
-.filters button { display: flex; align-items: center; justify-content: center; gap: 6px; flex: 1; border: 0; border-radius: 7px; background: transparent; color: #60645c; padding: 8px; text-transform: capitalize; font-size: .81rem; font-weight: 750; }
+.filters button { display: flex; align-items: center; justify-content: center; gap: 6px; flex: 1; border: 0; border-radius: 7px; background: transparent; color: #60645c; padding: 8px; font-size: .81rem; font-weight: 750; }
 .filters button span { display: grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; background: rgba(82, 89, 78, .1); font-size: .7rem; }
 .filters button:hover { color: var(--ink); }
 .filters button.active { background: #fff; color: var(--green-dark); box-shadow: 0 1px 3px rgba(39, 48, 39, .12); }
@@ -199,6 +200,10 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .load-error h1 { margin: 2px 0 8px; color: var(--ink); font-size: 1.6rem; }
 .load-error p:not(.eyebrow) { line-height: 1.55; }
 .load-error button { margin-top: 10px; }
+.first-run { max-width: 480px; text-align: center; }
+.first-run h1 { margin: 2px 0 8px; color: var(--ink); font-size: 1.6rem; }
+.first-run p:not(.eyebrow) { line-height: 1.55; }
+.first-run-actions { display: flex; justify-content: center; gap: 8px; margin-top: 10px; }
 
 @keyframes pulse { to { opacity: .25; } }
 @media (max-width: 860px) {

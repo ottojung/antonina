@@ -35,12 +35,16 @@ export interface BoardApiOptions {
   now?: () => Date;
   newId?: () => string;
   maxAttempts?: number;
-  createIfMissingOnMutation?: boolean;
 }
 
 interface StoredBoard {
   board: Board;
   etag: string;
+}
+
+export interface BoardInitialization {
+  board: Board;
+  capability: string;
 }
 
 type Mutation = (board: Board) => Board;
@@ -65,7 +69,6 @@ export class BoardApi {
   private readonly now: () => Date;
   private readonly newId: () => string;
   private readonly maxAttempts: number;
-  private readonly createIfMissingOnMutation: boolean;
 
   constructor(options: BoardApiOptions = {}) {
     const baseUrl = options.baseUrl ?? '/_skrynia';
@@ -79,7 +82,6 @@ export class BoardApi {
     this.now = options.now ?? (() => new Date());
     this.newId = options.newId ?? defaultId;
     this.maxAttempts = options.maxAttempts ?? MAX_ATTEMPTS;
-    this.createIfMissingOnMutation = options.createIfMissingOnMutation ?? true;
   }
 
   getCapability(): string | null {
@@ -105,25 +107,41 @@ export class BoardApi {
     this.capabilityStorage?.remove(CAPABILITY_STORAGE_KEY);
   }
 
-  async loadBoard(): Promise<Board> {
-    const stored = await this.read();
-    if (!stored) throw new AntoninaApiError('Antonina board does not exist');
-    return stored.board;
+  /** Reads the board without ever creating it; a missing board is `null`. */
+  async readBoard(): Promise<Board | null> {
+    return (await this.read())?.board ?? null;
   }
 
-  async ensureBoard(): Promise<Board> {
-    return (await this.ensureStored()).board;
+  /**
+   * Deliberately creates the board and adopts its one-time editing capability.
+   * The only way to create a board; reading never does.
+   */
+  async initializeBoard(): Promise<BoardInitialization> {
+    if (await this.read()) throw new AntoninaApiError('The Antonina board already exists');
+    const response = await this.fetcher(this.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Skrynia-Mode': 'capability-write' },
+      body: JSON.stringify(emptyBoard()),
+    });
+    if (response.status === 409) throw new AntoninaApiError('The Antonina board already exists');
+    if (response.status !== 201) throw await this.httpError('POST', response);
+    const created = await this.parseJson(response, 'Skrynia POST antonina/board-v1') as { mode?: unknown; capability?: unknown };
+    if (created.mode !== 'capability-write' || typeof created.capability !== 'string') {
+      throw new AntoninaApiError('Skrynia did not return the capability for the Antonina board');
+    }
+    this.setCapability(created.capability);
+    return { board: (await this.requireStored()).board, capability: created.capability };
   }
 
   async listIssues(state?: IssueState): Promise<BoardIssue[]> {
-    const issues = (await this.loadBoard()).issues;
+    const issues = (await this.requireStored()).board.issues;
     return issues
       .filter((issue) => state === undefined || issue.state === state)
       .sort((left, right) => left.number - right.number);
   }
 
   async getIssue(number: number): Promise<BoardIssue> {
-    return this.requireIssue((await this.loadBoard()).issues, number);
+    return this.requireIssue((await this.requireStored()).board.issues, number);
   }
 
   async createIssue(title: string, body = ''): Promise<BoardIssue> {
@@ -162,7 +180,7 @@ export class BoardApi {
   }
 
   async listResources(host?: string, issueNumber?: number): Promise<ResourceView[]> {
-    return resourceViews(await this.loadBoard(), host, issueNumber);
+    return resourceViews((await this.requireStored()).board, host, issueNumber);
   }
 
   async addResourceDependency(host: string, path: string, issueNumber: number): Promise<BoardResource> {
@@ -290,7 +308,7 @@ export class BoardApi {
 
   private async mutate(mutate: Mutation): Promise<Board> {
     const capability = this.requireCapability();
-    let stored = this.createIfMissingOnMutation ? await this.ensureStored() : await this.requireStored();
+    let stored = await this.requireStored();
     for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
       const candidate = mutate(clone(stored.board));
       const response = await this.fetcher(this.url, {
@@ -310,24 +328,6 @@ export class BoardApi {
       return (await this.requireStored()).board;
     }
     throw new AntoninaApiError('Antonina board changed too often; the conditional write was not committed');
-  }
-
-  private async ensureStored(): Promise<StoredBoard> {
-    const existing = await this.read();
-    if (existing) return existing;
-    const response = await this.fetcher(this.url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Skrynia-Mode': 'capability-write' },
-      body: JSON.stringify(emptyBoard()),
-    });
-    if (response.status === 409) return this.requireStored();
-    if (response.status !== 201) throw await this.httpError('POST', response);
-    const created = await this.parseJson(response, 'Skrynia POST antonina/board-v1') as { mode?: unknown; capability?: unknown };
-    if (created.mode !== 'capability-write' || typeof created.capability !== 'string') {
-      throw new AntoninaApiError('Skrynia did not return the capability for the Antonina board');
-    }
-    this.setCapability(created.capability);
-    return this.requireStored();
   }
 
   private async requireStored(): Promise<StoredBoard> {

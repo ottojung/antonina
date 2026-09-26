@@ -24,7 +24,6 @@ function memoryIo() {
 test('board CLI emits deterministic JSON list output', async () => {
   const client = new BoardApi({
     fetch: async () => response(board(), 200, '"v1"'),
-    createIfMissingOnMutation: false,
   });
   const capture = memoryIo();
   const code = await runBoardCommand(['list', '--json'], { env: {}, io: capture.io, createClient: () => client });
@@ -38,7 +37,7 @@ test('board CLI requires author from flag or environment', async () => {
   const code = await runBoardCommand(['comment', '1', 'hello'], {
     env: {},
     io: capture.io,
-    createClient: () => new BoardApi({ capability: CAPABILITY, createIfMissingOnMutation: false }),
+    createClient: () => new BoardApi({ capability: CAPABILITY }),
   });
   assert.equal(code, 1);
   assert.match(capture.err[0], /ANTONINA_BOARD_AUTHOR/);
@@ -58,7 +57,6 @@ test('core retries create against the latest ETag and counter', async () => {
   const requests = [];
   const client = new BoardApi({
     capability: CAPABILITY,
-    createIfMissingOnMutation: false,
     now: () => new Date(stamp),
     fetch: async (_url, init) => {
       requests.push(init);
@@ -73,11 +71,31 @@ test('core retries create against the latest ETag and counter', async () => {
   assert.match(String(requests[3].body), /"number":3/);
 });
 
+test('no board CLI command creates a missing board', async () => {
+  const requests = [];
+  const client = new BoardApi({
+    capability: CAPABILITY,
+    fetch: async (_url, init) => {
+      requests.push(init);
+      return response({ error: 'not_found' }, 404);
+    },
+  });
+
+  for (const command of [['list'], ['create', 'Mine'], ['resource', 'add', '1', 'lubko://server', '/path']]) {
+    const capture = memoryIo();
+    const code = await runBoardCommand(command, { env: {}, io: capture.io, createClient: () => client });
+    assert.equal(code, 1, command.join(' '));
+    assert.match(capture.err[0], /Antonina board does not exist/);
+  }
+
+  assert.equal(requests.length, 3);
+  assert.equal(requests.every((init) => init?.method === undefined), true);
+});
+
 test('core fails capability validation before network', async () => {
   let calls = 0;
   const client = new BoardApi({
     capability: 'bad',
-    createIfMissingOnMutation: false,
     fetch: async () => { calls += 1; return response(board(), 200, '"v1"'); },
   });
   await assert.rejects(() => client.close(1), /64 hexadecimal/);

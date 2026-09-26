@@ -102,7 +102,6 @@ function defaultClient(env: Record<string, string | undefined>): BoardApi {
   return new BoardApi({
     baseUrl: env[BOARD_BASE_URL_ENV] ?? DEFAULT_BOARD_BASE_URL,
     ...(capability === undefined ? {} : { capability }),
-    createIfMissingOnMutation: false,
   });
 }
 

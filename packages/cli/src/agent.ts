@@ -420,9 +420,9 @@ async function cmdWait(args: string[], context: AgentCommandContext): Promise<nu
   const parsed = parse(args);
   if (parsed.positionals.length !== 0) throw new UsageError('wait: unexpected positional arguments');
   const agentId = requireAgentId(parsed.values.get('--id'), 'wait');
-  const timeoutSeconds = positiveInteger(parsed.values.get('--timeout'), '--timeout');
-  const deadline = Date.now() + timeoutSeconds * 1000;
-  while (Date.now() < deadline) {
+  const timeoutSeconds = nonnegativeInteger(parsed.values.get('--timeout'), '--timeout');
+  const deadline = timeoutSeconds === 0 ? null : Date.now() + timeoutSeconds * 1000;
+  while (deadline === null || Date.now() < deadline) {
     await reconcileAgent(agentId, context);
     const meta = requireMeta(agentId, context);
     const state = deriveState(meta);

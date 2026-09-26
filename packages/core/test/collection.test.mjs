@@ -299,6 +299,47 @@ test('a host sees only its own resources, and a host absent from the registry de
   assert.throws(() => openCollectionClaim(stranger, WORKTREE), /protected/);
 });
 
+test('a path registered on two hosts is decided by this host, not by the neighbour that sorts first', async () => {
+  const { writer, open } = await seeded();
+  // The same absolute path registered on both hosts: a resource is identified
+  // by the (host, path) pair, so both registrations are legitimate. The foreign
+  // host sorts before HOST, so a lookup that ignores the host finds the other
+  // host's decision first.
+  await writer.addResourceDependency('lubko://aaa-neighbour', WORKTREE, open[0].number);
+  const reader = readerFor(writer);
+  assert.equal('lubko://aaa-neighbour' < HOST, true);
+
+  await writer.close(open[0].number);
+  await writer.close(open[1].number);
+  await writer.close(open[2].number);
+
+  const mine = await readCollectionSnapshot(HOST, reader);
+  assert.deepEqual(collectiblePaths(mine), [WORKTREE, BUILD].sort());
+  // The other host's copy of the path is still protected, but this host owns the
+  // path, so the answer is this host's verified one and the two agree.
+  assert.deepEqual(protectionOf(mine, WORKTREE), {
+    host: HOST,
+    path: WORKTREE,
+    status: 'collectible',
+    issues: [{ number: open[0].number, state: 'closed' }, { number: open[1].number, state: 'closed' }],
+    basis: 'snapshot-verified',
+  });
+  assert.equal(collectiblePaths(mine).includes(WORKTREE), true);
+  assert.equal(openCollectionClaim(mine, WORKTREE).path, WORKTREE);
+
+  // A path only this host registered is the neighbour's `other-host`, and the
+  // neighbour decides its own copy of the shared path for itself.
+  const theirs = await readCollectionSnapshot('lubko://aaa-neighbour', reader);
+  assert.deepEqual(protectionOf(theirs, WORKTREE).basis, 'snapshot-verified');
+  assert.deepEqual(protectionOf(theirs, BUILD), {
+    host: HOST,
+    path: BUILD,
+    status: 'protected',
+    issues: [{ number: open[2].number, state: 'closed' }],
+    basis: 'other-host',
+  });
+});
+
 test('an unverified snapshot is empty of decisions however it was built', () => {
   // The type of the unverified branch leaves no room for a decision, so this
   // record is only reachable by ignoring the type or by hand-building one. It

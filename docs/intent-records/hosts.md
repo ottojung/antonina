@@ -30,6 +30,8 @@ kind: constraint
 
 Deleting a registered path is permitted only from a protection answer derived from a verified signed board revision, and only for a path on the host running the collector. A path another host registered is not this host's to delete. A protection answer is a property of a board revision, not of a path: it must name the board and revision it came from so a caller can state exactly which board it acted on.
 
+The verification of the revision is the responsibility of the read the caller supplies, not of the collection code. Only a `CollectionReader` that verifies the signed log -- in practice `boardApiCollectionReader` -- can make a revision a verified signed revision; a caller that supplies a reader which does not verify gets no such guarantee. The collection code itself only re-parses the board canonically, so it can refuse state that is not a well-formed board but cannot establish that a revision was signed.
+
 $id-8103472669244713
 title: Protection of a registered path is owed only to open board issues
 date: 2026/09/26

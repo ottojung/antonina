@@ -33,6 +33,11 @@ import { SignedBoardStoreError } from './board-store.js';
  * exist, or against no issue at all, is not a case this module has an
  * opinion about: the canonical board parser rejects both, so such state is
  * unverified state and the snapshot is fail-closed.
+ *
+ * What makes a revision *verified* is the `CollectionReader` the caller
+ * supplies, not this module: only `boardApiCollectionReader` verifies the
+ * signed log. All this module does with a revision is put it back through the
+ * canonical parser, so it can refuse state that is not a well-formed board.
  */
 
 /** One authoritative read: a verified board revision and the board it belongs to. */
@@ -244,9 +249,17 @@ export async function readCollectionSnapshot(
  */
 export function protectionOf(snapshot: CollectionSnapshot, path: string): ProtectionVerdict {
   const target = canonicalPath(path);
-  const decision = snapshot.verified
-    ? snapshot.decisions.find((entry) => entry.path === target)
+  // A resource is identified by the `(host, path)` pair, not by `path` alone, so
+  // this host's decision has to win over any other host's decision for the same
+  // path. Looking up by path alone would let a foreign host's decision that
+  // merely sorts first answer for a path this host also registered.
+  const own = snapshot.verified
+    ? snapshot.decisions.find((entry) => entry.host === snapshot.host && entry.path === target)
     : undefined;
+  const foreign = own !== undefined || !snapshot.verified
+    ? undefined
+    : snapshot.decisions.find((entry) => entry.path === target);
+  const decision = own ?? foreign;
   if (decision === undefined) {
     return {
       host: snapshot.host,
@@ -289,6 +302,12 @@ export function collectiblePaths(snapshot: CollectionSnapshot): string[] {
  * A claim is the first state of the re-check protocol. It exists only for a
  * path one verified snapshot called collectible, and it pins the exact board
  * revision that said so, so a later read can be held against it.
+ *
+ * A claim is advisory: it is evidence of a past verdict, not the authority for
+ * a destructive action. `recheckCollectionClaim` re-derives every one of its
+ * fields -- the board, the revision, and the protection status of the path --
+ * from a fresh authoritative read, so a hand-built claim can produce at most a
+ * `withheld` authorization, or one the board actually supports.
  */
 export interface CollectionClaim {
   state: 'claimed';
@@ -320,20 +339,13 @@ export function openCollectionClaim(snapshot: CollectionSnapshot, path: string):
   };
 }
 
-export interface CollectionResolution {
-  outcome: 'collect' | 'withheld';
-  reason:
-    | 'still-collectible'
-    | 'became-protected'
-    | 'unregistered'
-    | 'board-unverifiable'
-    | 'wrong-board';
-  host: string;
-  path: string;
-  /** The revision the resolution was made from, or `null` when unreadable. */
-  recheckHead: string | null;
-  status: ProtectionStatus;
-}
+/** Why a re-check produced the outcome it did. */
+export type CollectionOutcomeReason =
+  | 'still-collectible'
+  | 'became-protected'
+  | 'unregistered'
+  | 'board-unverifiable'
+  | 'wrong-board';
 
 /** Module-private: not exported, so no caller can construct a seal. */
 const authorizationSeal: unique symbol = Symbol('antonina.collection.authorization');
@@ -350,7 +362,7 @@ export interface AuthorizedCollection {
   readonly [authorizationSeal]: true;
   state: 'authorized';
   outcome: 'collect' | 'withheld';
-  reason: CollectionResolution['reason'];
+  reason: CollectionOutcomeReason;
   host: string;
   path: string;
   boardId: string;
@@ -397,7 +409,7 @@ export async function recheckCollectionClaim(
   const snapshot = await readCollectionSnapshot(claim.host, read);
   const issue = (
     outcome: AuthorizedCollection['outcome'],
-    reason: CollectionResolution['reason'],
+    reason: CollectionOutcomeReason,
     status: ProtectionStatus,
     head: string | null,
   ): AuthorizedCollection => {
@@ -438,7 +450,7 @@ export async function recheckCollectionClaim(
 export interface CompletedCollection {
   state: 'spent';
   outcome: 'collect' | 'withheld';
-  reason: CollectionResolution['reason'];
+  reason: CollectionOutcomeReason;
   host: string;
   path: string;
   recheckHead: string | null;

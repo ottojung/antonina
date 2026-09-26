@@ -293,7 +293,10 @@ async function acquireLock(path: string, fs: StoreFs): Promise<{ fd: number; raw
         // the exact stale acquisition we judged dead may be removed.
         const current = parseLockOwner(path, fs);
         if (current.state === 'missing') continue;
-        if (current.state !== 'valid' || !sameAcquisition(current.owner, observed.owner)) {
+        // Content equality is required in addition to acquisition identity. A
+        // tokenless record's only identity is its content, so pid/startTicks
+        // alone would let a different acquisition sharing them be unlinked.
+        if (current.state !== 'valid' || !sameAcquisition(current.owner, observed.owner) || current.raw !== observed.raw) {
           await sleep(LOCK_RETRY_MS);
           continue;
         }
@@ -323,11 +326,15 @@ async function acquireLock(path: string, fs: StoreFs): Promise<{ fd: number; raw
       return { fd, raw, owner };
     } catch (error) {
       try { fs.closeSync(fd); } catch {}
-      // Only clean up while the path still holds the half-written record this
-      // acquisition produced. A delete/re-create cycle during the failed write
-      // can leave another owner's live lock here, which must survive.
+      // Only clean up while the path still holds the record this acquisition
+      // produced. A delete/re-create cycle during the failed write can leave
+      // another owner's live lock here, and a malformed file at the path may be
+      // a live owner's create-before-write window, which is indistinguishable
+      // from our own partial write. Fail closed on anything but our own
+      // acquisition's record; the leftover file is recoverable, a deleted live
+      // lock is not.
       const partial = parseLockOwner(path, fs);
-      if (partial.state !== 'valid' || sameAcquisition(partial.owner, owner)) {
+      if (partial.state === 'valid' && sameAcquisition(partial.owner, owner)) {
         try { fs.unlinkSync(path); } catch {}
       }
       throw new MetadataLockError(`failed to initialize metadata lock: ${path}`, { cause: error });

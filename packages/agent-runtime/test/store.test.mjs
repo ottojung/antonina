@@ -350,6 +350,74 @@ test('releasing a lock never deletes a replacement lock held by the same process
   t.after(() => nodeFs.rmSync(lockPath, { force: true }));
 });
 
+test('reclaiming a stale lock never unlinks a different tokenless record sharing pid and start ticks', async (t) => {
+  const options = root(t);
+  createAgentDirectory('d14', options);
+  writeMeta('d14', idleMeta('d14', '/tmp', null, 5), options);
+  const lockPath = join(agentDir('d14', options), '.lock');
+
+  // A legacy record carries no acquisition token, so its only identity is its
+  // exact content. pid/startTicks name the process, not the acquisition: another
+  // acquisition can share them while differing in content, and unlinking it on
+  // pid/startTicks alone would remove a lock this process never observed.
+  const staleRaw = JSON.stringify({ pid: 99999999, startTicks: 1 });
+  const otherRaw = JSON.stringify({ pid: 99999999, startTicks: 1, legacy: 'other-acquisition' });
+  nodeFs.writeFileSync(lockPath, staleRaw);
+
+  const unlinked = [];
+  let reads = 0;
+  const swapping = storeFs({
+    readFileSync: (path, ...rest) => {
+      if (String(path).endsWith('.lock')) {
+        reads += 1;
+        // The re-read after the stale observation sees a different acquisition's
+        // record; only the retry after that restores the observed stale content.
+        const raw = reads === 2 ? otherRaw : staleRaw;
+        nodeFs.writeFileSync(path, raw);
+        return raw;
+      }
+      return nodeFs.readFileSync(path, ...rest);
+    },
+    unlinkSync: (path, ...rest) => {
+      if (String(path).endsWith('.lock')) unlinked.push(nodeFs.readFileSync(path, 'utf8'));
+      return nodeFs.unlinkSync(path, ...rest);
+    },
+  });
+
+  const result = await withAgentLock('d14', () => 'ok', { ...options, fs: swapping });
+  assert.equal(result, 'ok');
+  assert.equal(reads >= 3, true);
+  assert.equal(unlinked.includes(otherRaw), false);
+  assert.equal(unlinked.includes(staleRaw), true);
+  t.after(() => nodeFs.rmSync(lockPath, { force: true }));
+});
+
+test('lock initialization failure never unlinks another owner\'s create-before-write window', async (t) => {
+  const options = root(t);
+  createAgentDirectory('a0b', options);
+  writeMeta('a0b', idleMeta('a0b', '/tmp', null, 5), options);
+  const lockPath = join(agentDir('a0b', options), '.lock');
+
+  // A malformed file at the lock path is indistinguishable from another owner's
+  // create-before-write window, so the failed initialization must leave it alone
+  // rather than assume it is its own partial record.
+  const foreignRaw = '{"pid":4242';
+  const failing = {
+    ...options,
+    fs: storeFs({
+      fsyncSync: (fd) => {
+        if (fd === undefined) throw ioError('EIO', 'injected lock fsync failure');
+        nodeFs.writeFileSync(lockPath, foreignRaw);
+        throw ioError('EIO', 'injected lock fsync failure');
+      },
+    }),
+  };
+
+  await assert.rejects(withAgentLock('a0b', () => 'ok', failing), MetadataLockError);
+  assert.equal(nodeFs.readFileSync(lockPath, 'utf8'), foreignRaw);
+  t.after(() => nodeFs.rmSync(lockPath, { force: true }));
+});
+
 test('concurrent in-process updates serialize through the lock file', async (t) => {
   const options = root(t);
   createAgentDirectory('cc', options);

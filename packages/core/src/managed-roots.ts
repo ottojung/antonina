@@ -31,14 +31,6 @@ export interface ManagedCollectionRoot {
   readonly resolved: string;
 }
 
-/** One configured root, as a caller supplies it before validation. */
-export interface ManagedRootInput {
-  /** The root as configured, canonical and absolute. */
-  readonly spelled: string;
-  /** The resolved absolute path of the same directory. */
-  readonly resolved: string;
-}
-
 /** Why a configured root set cannot be used for collection at all. */
 export type ManagedRootDefect =
   | { readonly kind: 'empty' }
@@ -54,15 +46,14 @@ const MANAGED_ROOTS = Symbol('antonina.managedRoots');
  *
  * The unique symbol makes the value opaque: it is not exported, so no other
  * module can name it and only `validateManagedRoots` can produce a
- * `ManagedRoots`. An unusable root configuration therefore cannot reach the
- * decision function as if it were usable.
+ * `ManagedRoots`. In type-checked code an unusable root configuration therefore
+ * cannot reach the decision function as if it were usable; the decision trusts
+ * the caller that hands it a root set.
  */
 export interface ManagedRoots {
   readonly [MANAGED_ROOTS]: true;
   /** The configured roots, in the order they were configured. */
   readonly roots: readonly ManagedCollectionRoot[];
-  /** The spelled root paths, computed once at validation time. */
-  readonly paths: readonly string[];
 }
 
 export type ManagedRootsResult =
@@ -170,7 +161,7 @@ function defectOfPathForm(defect: PathFormDefect): ManagedPathRefusal {
   return { kind: 'candidate-path-form', defect };
 }
 
-function pathsOf(inputs: readonly ManagedRootInput[], key: 'spelled' | 'resolved'): string[] | null {
+function pathsOf(inputs: readonly ManagedCollectionRoot[], key: 'spelled' | 'resolved'): string[] | null {
   const paths: string[] = [];
   for (const input of inputs) {
     if (typeof input?.[key] !== 'string') return null;
@@ -187,7 +178,7 @@ function pathsOf(inputs: readonly ManagedRootInput[], key: 'spelled' | 'resolved
  * nested roots would make "the root this path belongs to" ambiguous, and a
  * collector must not have to guess which configured root authorises a deletion.
  */
-export function validateManagedRoots(inputs: readonly ManagedRootInput[]): ManagedRootsResult {
+export function validateManagedRoots(inputs: readonly ManagedCollectionRoot[]): ManagedRootsResult {
   if (!Array.isArray(inputs) || inputs.length === 0) {
     return { ok: false, defect: { kind: 'empty' } };
   }
@@ -234,7 +225,6 @@ export function validateManagedRoots(inputs: readonly ManagedRootInput[]): Manag
     roots: Object.freeze({
       [MANAGED_ROOTS]: true,
       roots: Object.freeze(roots),
-      paths: Object.freeze([...spelled]),
     }) as ManagedRoots,
   };
 }
@@ -261,12 +251,11 @@ export function evaluateManagedCandidate(
   // The candidate is named the way the board records paths, so it is located in a
   // root by its spelled form; every question about where it really is is answered
   // in the root's resolved coordinates below.
-  const index = roots.paths.findIndex((configured) => isWithin(configured, path));
-  if (index < 0) {
-    const nearMiss = roots.paths.find((configured) => isStringPrefix(configured, path));
-    return refuse(path, nearMiss === undefined ? 'outside-managed-roots' : 'near-miss-root-prefix');
+  const root = roots.roots.find((entry) => isWithin(entry.spelled, path));
+  if (root === undefined) {
+    const nearMiss = roots.roots.some((entry) => isStringPrefix(entry.spelled, path));
+    return refuse(path, nearMiss ? 'near-miss-root-prefix' : 'outside-managed-roots');
   }
-  const root = roots.roots[index] as ManagedCollectionRoot;
 
   // A configured root is not collectible through the roots that define it. A
   // symlink inside the root that points back at the root is not the root: the

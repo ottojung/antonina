@@ -108,6 +108,11 @@ test('an eligible candidate hands back one actionable path and no other', () => 
   });
   // The only path a collector may act on is the spelled board-recorded path.
   assert.deepEqual(Object.keys(result).sort(), ['eligible', 'path', 'root', 'unlinkFinalComponent']);
+  // The root handed back is the very instance the validated set holds, frozen, so a
+  // collector cannot learn a root by identity and then have it changed under it.
+  assert.equal(result.root, roots.roots[0]);
+  assert.equal(Object.isFrozen(result.root), true);
+  assert.equal(Object.isFrozen(roots.roots), true);
 });
 
 test('an eligible symlink is unlinked at the spelled path, never followed', () => {
@@ -301,6 +306,11 @@ test('a candidate whose containing directory resolves out of the managed root is
 
 test('each candidate is judged only against the root it belongs to', () => {
   const roots = rootsOf(['/workspace/a', '/srv/b'].map((path) => input(path)));
+  // The validated set keeps the configured order, frozen, because the first matching
+  // root is the one that authorises a candidate.
+  assert.deepEqual(roots.roots.map((root) => root.spelled), ['/workspace/a', '/srv/b']);
+  assert.equal(Object.isFrozen(roots.roots), true);
+  assert.equal(Object.isFrozen(roots), true);
   assert.equal(decide(roots, '/workspace/a/one').eligible, true);
   assert.equal(decide(roots, '/srv/b/one').eligible, true);
   assert.equal(refusalOf(roots, '/srv/a/one'), 'outside-managed-roots');

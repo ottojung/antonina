@@ -4,7 +4,8 @@ This note is the objective baseline that the scheduled-work completion predicate
 ("repository verification passes on the exact resulting head") refers to. Changing a count in
 this note without a stated reason is a documentation bug, not a routine update.
 
-All counts below were observed on **`45f2236`** in the `issue-20-verify-baseline-4` worktree, with
+All counts below were observed on **`45f2236`** at `/workspace/antonina-issue20-baseline` (the
+worktree of the `issue-20-verify-baseline-4` branch), with
 `XDG_STATE_HOME` pointed at a fresh `mktemp -d` that was deleted afterwards, **under both `TMPDIR`
 accounts**: a pinned executable `TMPDIR=/workspace/tmp-verify`, and `TMPDIR` unset (this host's
 `noexec` `/tmp`). Both accounts were re-run in full on `45f2236`; neither is carried forward.
@@ -31,7 +32,11 @@ touches `docs/verification-baseline.md` and nothing else, so the test surface is
 the commit that results from landing it, and the counts here are the counts for that head too. The
 harness run on the *exact* resulting head is reported in that commit's message and in
 `/workspace/antonina-coordination/logs/verify-<sha>.log`, so it can be checked against this table
-rather than taken on trust.
+rather than taken on trust. That log is written by the coordinator, not by the harness and not by
+the checkout: its absence for a given sha is not a missing measurement and must not be read as one.
+The convention is real — `verify-538e009.log` exists for the previous pin — but it is
+coordinator-owned, so a later pass that finds no log for its head should re-run the harness rather
+than treat the gap as a discrepancy.
 
 **Lineage, and why the numbers are what they are.** This note was first written against `0f60cf9`
 by `9781ecc` and amended by `47784c4`. Both are **docs-only** commits — each touches
@@ -54,12 +59,16 @@ precisely because the two lineages are both real measurements. `114 / 71 / 85 / 
 fixture front's own branch `e2b4d96` measures; `125 / 71 / 88 / 94` is what the merged release head
 measures. Neither number is wrong. They are the counts of two different lineages, and this note is
 pinned to the second. **The extra core and cli tests belong to the loader and authrecord fronts, not
-to the fixture front**, and that attribution is arithmetic, not a story — the whole delta from
-`e2b4d96` to `d896ed8` is five files
-(`git diff --stat e2b4d96 d896ed8`: `packages/core/src/collection.ts`,
-`packages/core/test/collection.test.mjs`, `packages/cli/src/collection.ts`,
-`packages/cli/test/collection.test.mjs`, plus a new
-`packages/cli/test/managed-roots-config.test.mjs`), and counting `^test(` in the test files at each
+to the fixture front**, and that attribution is arithmetic, not a story — the **code-and-test
+portion** of the delta from `e2b4d96` to `d896ed8` is five files.
+`git diff --stat e2b4d96 d896ed8` prints **eight**: those five
+(`packages/core/src/collection.ts`, `packages/core/test/collection.test.mjs`,
+`packages/cli/src/collection.ts`, `packages/cli/test/collection.test.mjs`, and
+`packages/cli/test/managed-roots-config.test.mjs`) plus three documentation files
+(`docs/intent-records/hosts.md`, `docs/skills/resources.md`, and this note), none of which carries
+a test. `managed-roots-config.test.mjs` is not new in this delta — it already exists at `e2b4d96`
+(`git log e2b4d96 -1 -- packages/cli/test/managed-roots-config.test.mjs` = `0f60cf9`) — it grows
+from 7 tests to 9. Counting `^test(` in the test files at each
 side accounts for the difference exactly:
 
 - core: `packages/core/test/collection.test.mjs` 27 → 38, i.e. **+11**, and 114 + 11 = **125**.
@@ -160,7 +169,7 @@ Result: **exit 0**, final line `verify: ok`, in about 13 s.
 | `node --test packages/cli/test/*.test.mjs` | 88 tests, 88 pass, 0 fail |
 | `vitest run --root web` | 5 test files, 94 tests, 94 pass |
 | `tsc -b web` | exit 0, no diagnostics |
-| `vite build web --config web/vite.config.ts` | exit 0, `built in 556ms` |
+| `vite build web --config web/vite.config.ts` | exit 0 (the reported `built in …ms` is a single-run wall clock, not a reproducible measurement, and is deliberately not carried) |
 | the harness end to end | **exit 0**, `verify: ok` |
 
 Under that setting there are **no** known failures. Every count here was measured on this head by the
@@ -201,7 +210,7 @@ exit would have named does not arise on this head.
 | `node --test packages/cli/test/*.test.mjs` | 88 tests, 88 pass, 0 fail |
 | `vitest run --root web` | 5 test files, 94 tests, 94 pass |
 | `tsc -b web` | exit 0, no diagnostics |
-| `vite build web --config web/vite.config.ts` | exit 0, `built in 543ms` |
+| `vite build web --config web/vite.config.ts` | exit 0 (as above: no millisecond figure is carried) |
 | the harness end to end | **exit 0**, `verify: ok` — no step aborted |
 | worktree afterwards | `git status --porcelain` empty; no `.antonina-test-tmp` left behind |
 

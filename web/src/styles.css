@@ -106,7 +106,6 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .access-callout strong { font-size: .9rem; }
 .access-callout p { margin: 4px 0 0; color: #765c4c; font-size: .8rem; line-height: 1.45; }
 .access-callout button { flex: none; padding: 8px 11px; font-size: .8rem; }
-.workspace.resources-view .resources-view > .access-callout { margin-bottom: 0; border-bottom: 1px solid var(--line); }
 .filters { display: flex; gap: 4px; margin: 0 24px 20px; padding: 4px; border-radius: 10px; background: #ecefe9; }
 .filters button { display: flex; align-items: center; justify-content: center; gap: 6px; flex: 1; border: 0; border-radius: 7px; background: transparent; color: #60645c; padding: 8px; font-size: .81rem; font-weight: 750; }
 .filters button span { display: grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; background: rgba(82, 89, 78, .1); font-size: .7rem; }
@@ -223,6 +222,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
   .notice { margin: 10px 12px 0; }
   .workspace { display: block; min-height: 0; }
   .workspace.resources-view .resources-view { padding: 0 20px; }
+  .workspace.resources-view { padding-bottom: 32px; }
   .issue-pane { border-right: 0; }
   .has-selection .issue-pane { display: none; }
   .pane-heading { padding-top: 24px; }

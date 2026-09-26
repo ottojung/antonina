@@ -16,6 +16,7 @@ import {
   type CollectionFailureKind,
   type CollectionOutcomeReason,
   type CollectionSnapshot,
+  type CompletedCollection,
 } from '../../core/src/collection.js';
 // The node-side gatherer `recheckCollectionClaim` requires. It is the
 // implementation core's docstring points at, it is imported rather than
@@ -330,7 +331,19 @@ export interface CollectDeleteOptions {
   env: Record<string, string | undefined>;
   rootsFs?: RootsFs;
   removalFs?: RemovalFs;
+  /**
+   * The spender, overridable only so a test can see the completion record that
+   * lives behind a module-private door. It is core's `commitCollectionDeletion`
+   * in every real call, and nothing here re-implements, wraps or relaxes it.
+   */
+  commit?: CollectionCommit;
 }
+
+/**
+ * What spends an authorization. Core's `commitCollectionDeletion` is the only
+ * spender, and this is its type, not a second one.
+ */
+export type CollectionCommit = (authorized: AuthorizedCollection) => CompletedCollection;
 
 /**
  * The destructive half, in this order and no other: configured roots, then a
@@ -442,9 +455,76 @@ export async function collectDelete(
   //    from this object, so anything written onto the authorization between the
   //    re-check and here is refused before the filesystem is reached -- there is
   //    no step at which a re-pointed shape is acted on and caught afterwards.
-  const removal = await removeAuthorizedPath(authorized, options.removalFs ?? DEFAULT_REMOVAL_FS);
-
-  // 8. The authorization is spent exactly once, after the action it authorized.
-  commitCollectionDeletion(authorized);
+  // 8. The authorization is spent exactly once, and the spend belongs to *this*
+  //    step: `removeAndCommit` below commits on the error path too, because a
+  //    `rm` that takes a prefix of the tree and then fails has already performed
+  //    a removal that no re-run will undo, and an uncommitted one is a second
+  //    removal waiting to happen from the same re-check.
+  const removal = await removeAndCommit(
+    authorized,
+    options.removalFs ?? DEFAULT_REMOVAL_FS,
+    options.commit ?? commitCollectionDeletion,
+  );
   return { mode: 'collect-deleted', value: { ...report, removal } };
+}
+
+/**
+ * One removal followed by the one completion record it is owed, on the error path
+ * as well as the success path.
+ *
+ * The obligation is asymmetric on purpose: a removal that was *not* performed
+ * owes nothing, and a removal that was performed -- even one that failed half way
+ * through, leaving the tree partly gone and no way back -- owes exactly one
+ * commit. So the commit rides a `finally` over the removal, and it is armed by the
+ * filesystem being reached at all, not by the removal succeeding. `rm --recursive`
+ * deletes as it descends, so a failure part way down has already destroyed
+ * something; the boolean is set *before* the call, because "the call was made" is
+ * the point at which the promise is owed, and the failure being on its way out of
+ * the call says nothing about how much of the tree is already gone.
+ *
+ * The commit cannot displace the failure it was owed for. Inside a `finally` a
+ * throwing commit would otherwise replace a real removal error with a bookkeeping
+ * one, and the operator would be told about the wrong failure entirely; so when
+ * the removal threw, the commit's own failure is swallowed and the removal's error
+ * propagates untouched -- the same object, so the same kind and the same message.
+ * When the removal succeeded there is no real failure to protect, and a commit
+ * that cannot be written is itself the failure worth reporting, so it propagates.
+ *
+ * Nothing here relaxes core's single-use guarantee: the spender is core's
+ * `commitCollectionDeletion`, called once with the authorization the re-check
+ * issued, and the refusal and the un-confirmed pending path never arrive here at
+ * all -- the commit belongs to the removal step, not to the function.
+ */
+export async function removeAndCommit(
+  authorized: AuthorizedCollection,
+  removalFs: RemovalFs,
+  commit: CollectionCommit = commitCollectionDeletion,
+): Promise<AuthorizedRemoval> {
+  let reached = false;
+  const observed: RemovalFs = {
+    rm: async (path, options) => {
+      reached = true;
+      return removalFs.rm(path, options);
+    },
+    unlink: async (path) => {
+      reached = true;
+      return removalFs.unlink(path);
+    },
+  };
+  let removal: AuthorizedRemoval;
+  try {
+    removal = await coreRemoveAuthorizedPath(authorized, observed);
+  } catch (error) {
+    if (reached) {
+      try {
+        commit(authorized);
+      } catch {
+        // Swallowed on purpose: the caller is told about the removal failure,
+        // which is the one that describes what happened on disk.
+      }
+    }
+    throw error;
+  }
+  if (reached) commit(authorized);
+  return removal;
 }

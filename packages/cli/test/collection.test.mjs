@@ -11,7 +11,7 @@ import test from 'node:test';
 import { BoardApi } from '../dist/packages/core/src/api.js';
 import { runBoardCommand } from '../dist/packages/cli/src/board.js';
 import { MANAGED_ROOTS_ENV } from '../dist/packages/agent-runtime/src/managed-roots-config.js';
-import { removeAuthorizedPath } from '../dist/packages/cli/src/collection.js';
+import { collectDelete, removeAuthorizedPath } from '../dist/packages/cli/src/collection.js';
 import {
   openCollectionClaim,
   readCollectionSnapshot,
@@ -878,5 +878,125 @@ test('collect delete performs one removal and spends its authorization once', as
     // Committing is local bookkeeping: it never writes to the board, so the
     // board still registers the path it just removed.
     assert.equal(JSON.stringify(context.server.signed), boardBefore);
+  });
+});
+
+/**
+ * `collect delete` driven directly, so the completion record is observable: the
+ * commit is a module-private delete, so the only way to see it from a test is
+ * through the same authorization it spent, which a second commit then refuses.
+ */
+function deleteDirectly(context, path, extra) {
+  return collectDelete(context.reader, {
+    host: HOST,
+    path,
+    confirm: true,
+    env: collectEnv(context),
+    ...extra,
+  });
+}
+
+test('a removal that fails part-way is still owed its one commit', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    const nested = join(context.worktree, 'nested');
+    await mkdir(nested, { recursive: true });
+    await writeFile(join(nested, 'partial'), 'gone before the removal failed');
+
+    let unlinkCalls = 0;
+    let commitCalls = 0;
+    let committed;
+    const failure = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+
+    await assert.rejects(
+      () => deleteDirectly(context, context.worktree, {
+        // A real removal on a real tree that takes a prefix of it and then fails,
+        // which is the part-way case: the removal happened and cannot be undone.
+        removalFs: {
+          rm: async (target) => {
+            await rm(join(target, 'nested'), { recursive: true });
+            throw failure;
+          },
+          unlink: async () => { unlinkCalls += 1; },
+        },
+        commit: (authorized) => {
+          commitCalls += 1;
+          committed = authorized;
+          return commitCollectionDeletion(authorized);
+        },
+      }),
+      // The removal's own failure reaches the caller, unchanged: same object, so
+      // same kind and same message.
+      (error) => error === failure,
+    );
+
+    assert.equal(existsSync(join(nested, 'partial')), false, 'a prefix of the tree was really removed');
+    assert.equal(existsSync(context.worktree), true, 'the removal stopped part-way');
+    assert.equal(unlinkCalls, 0, 'the other branch was not tried as a fallback');
+    assert.equal(commitCalls, 1, 'a removal that was performed is owed exactly one commit');
+    assert.throws(() => commitCollectionDeletion(committed), /not a live authorization/);
+  });
+});
+
+test('a bookkeeping failure cannot replace the removal failure it was owed for', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    await mkdir(context.worktree, { recursive: true });
+    const failure = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+
+    await assert.rejects(
+      () => deleteDirectly(context, context.worktree, {
+        removalFs: {
+          rm: async () => { throw failure; },
+          unlink: async () => {},
+        },
+        commit: () => { throw new Error('the completion record could not be written'); },
+      }),
+      (error) => error === failure,
+    );
+  });
+});
+
+test('a refusal and an un-confirmed pending report are owed no commit at all', async () => {
+  await withWorkTree(async (context) => {
+    const { open } = await seededWorkTree(context);
+    await mkdir(context.worktree, { recursive: true });
+    let commitCalls = 0;
+    const commit = () => { commitCalls += 1; };
+
+    // The un-confirmed gate: a real re-check runs and the claim is dropped, and
+    // nothing is removed, so nothing is owed a commit.
+    const pending = await deleteDirectly(context, context.worktree, { commit, confirm: false });
+    assert.equal(pending.mode, 'collect-pending');
+    assert.equal(commitCalls, 0, 'a pending report spent nothing');
+    assert.equal(existsSync(context.worktree), true);
+
+    // A re-check that withholds, after a claim that did not: the board gains an
+    // open dependent on the worktree between the claim's read and the re-check's.
+    // The second read is the re-check's; the first is the claim's.
+    const reader = {
+      reads: 0,
+      async loadState() {
+        this.reads += 1;
+        if (this.reads === 2) {
+          await context.writer.addResourceDependency(HOST, context.worktree, open[2].number);
+        }
+        return context.reader.loadState();
+      },
+      accessState() {
+        return context.reader.accessState();
+      },
+    };
+    await assert.rejects(
+      () => collectDelete(reader, {
+        host: HOST,
+        path: context.worktree,
+        confirm: true,
+        env: collectEnv(context),
+        commit,
+      }),
+      /refusing to collect/,
+    );
+    assert.equal(commitCalls, 0, 'a refusal spent nothing');
   });
 });

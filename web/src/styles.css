@@ -73,6 +73,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .create-form textarea { min-height: 76px; resize: vertical; }
 .create-form small { color: var(--muted); font-size: .74rem; line-height: 1.4; }
 .resources-view { border-top: 1px solid var(--line); padding-bottom: 32px; }
+.resources-view > .access-callout { margin-top: 20px; }
 .workspace.resources-view { display: block; background: var(--paper); }
 .workspace.resources-view .issue-pane { border-right: 0; }
 .workspace.resources-view .resources-view { max-width: 1100px; margin: 0 auto; padding: 0 32px; }

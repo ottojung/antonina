@@ -1,12 +1,95 @@
 import { realpath as realpathCall } from 'node:fs/promises';
 
+import { AntoninaApiError, type BoardApi } from '../../core/src/api.js';
+import {
+  boardApiCollectionReader,
+  collectiblePaths,
+  openCollectionClaim,
+  protectionOf,
+  readCollectionSnapshot,
+  type CollectionFailureKind,
+  type CollectionOutcomeReason,
+  type CollectionSnapshot,
+} from '../../core/src/collection.js';
 import { validateManagedRoots } from '../../core/src/managed-roots.js';
 import type {
   ManagedCollectionRoot,
   ManagedRootDefect,
   ManagedRoots,
 } from '../../core/src/managed-roots.js';
-import { pathFormDefect } from '../../core/src/model.js';
+import { canonicalHost, pathFormDefect } from '../../core/src/model.js';
+
+/**
+ * Why the `collect` commands are refusing, in core's own vocabulary.
+ *
+ * A board the collector cannot read or cannot verify is reported with the
+ * snapshot's own `CollectionFailureKind` and its own message, never as an empty
+ * list and never as a flattened reason: an operator reading a transport failure
+ * is told the read failed, not that the board was unverifiable. `board.ts` turns
+ * `kind` into the same advice every other board command gives.
+ */
+export class CollectBoardError extends Error {
+  constructor(readonly kind: CollectionFailureKind, message: string) {
+    super(message);
+  }
+}
+
+/**
+ * A re-check that withheld the authorization, or a claim that could not be
+ * opened. `reason` is the `CollectionOutcomeReason` verbatim, and `kind` is the
+ * board-state failure inside it when the reason is one, so a board that cannot
+ * be read is still advised about as a board that cannot be read.
+ */
+export class CollectRefusedError extends Error {
+  constructor(
+    readonly reason: CollectionOutcomeReason,
+    message: string,
+    readonly kind: CollectionFailureKind | null = null,
+  ) {
+    super(message);
+  }
+}
+
+/** A configured root set that cannot be used, reported against its spelling. */
+export class CollectRootsError extends Error {
+  constructor(readonly detail: string) {
+    super(detail);
+  }
+}
+
+const COLLECTION_FAILURE_KINDS: readonly CollectionFailureKind[] = [
+  'board-missing',
+  'board-unverifiable',
+  'board-read-failed',
+  'board-state-rejected',
+  'host-not-canonical',
+];
+
+export function isCollectionFailureKind(reason: string): reason is CollectionFailureKind {
+  return COLLECTION_FAILURE_KINDS.includes(reason as CollectionFailureKind);
+}
+
+/**
+ * The host a collection command is scoped to. It is mandatory and explicit on
+ * both subcommands, and it is checked before any board read: a decision can only
+ * be scoped to a host that is already canonical, so a value that is not one is a
+ * usage error rather than a board failure.
+ */
+export function requireCollectionHost(host: string | undefined, usage: string): string {
+  if (host === undefined) throw new AntoninaApiError(`${usage} requires --host`);
+  try {
+    return canonicalHost(host);
+  } catch {
+    throw new AntoninaApiError(
+      '--host must be a lubko://<non-empty-server-name> host identity, not ' + JSON.stringify(host),
+    );
+  }
+}
+
+/** The revision a report names, rendered so a null revision is still a value. */
+export function renderRevision(head: string | null): string {
+  return head === null ? 'rev unavailable' : 'rev ' + head;
+}
 
 /**
  * The operator-facing source of the managed collection roots, and the only one.
@@ -153,4 +236,75 @@ export function describeRootsDefect(result: {
     return `configured managed root ${defect.path} is inside configured managed root ${defect.within}`;
   }
   return defect.message;
+}
+
+/**
+ * The verified snapshot both subcommands answer from, or the board's own
+ * failure.
+ *
+ * The read is `readCollectionSnapshot` over `boardApiCollectionReader(api)`, the
+ * verifying reader, and never a reader hand-built from `loadState()`: the signed
+ * log is what makes the revision verified, and only this reader verifies it. An
+ * unverified snapshot is reported and the command exits non-zero -- it is never
+ * rendered as an empty registry, which is the one answer that would let an
+ * unreadable board look like a board with nothing to collect.
+ */
+async function verifiedSnapshot(
+  api: BoardApi,
+  host: string,
+): Promise<Extract<CollectionSnapshot, { verified: true }>> {
+  const snapshot = await readCollectionSnapshot(host, boardApiCollectionReader(api));
+  if (!snapshot.verified) throw new CollectBoardError(snapshot.failure.kind, snapshot.failure.message);
+  return snapshot;
+}
+
+/**
+ * One line of `collect list`: a path, the host that owns the decision, and the
+ * board and revision the answer came from. The board identity and the revision
+ * are read off the *same snapshot object* every decision was derived from, so
+ * the printed revision is by construction the revision the printed answers came
+ * from.
+ */
+export interface CollectListEntry {
+  host: string;
+  path: string;
+  boardId: string;
+  revision: string;
+  /** The closed issues that used to owe this path protection, for the human line. */
+  closedDependents: number[];
+}
+
+export interface CollectListResult {
+  mode: 'collect-list';
+  value: CollectListEntry[];
+}
+
+/**
+ * The dry run: every path on this host that one verified board revision calls
+ * collectible, and nothing else.
+ *
+ * It touches no filesystem, needs no credential, and needs no managed roots: it
+ * is the answerable-from-the-board half, deliberately separate from the half that
+ * may remove something. That also means it is *not* a promise any of these paths
+ * can be removed -- the re-check re-reads the board and the managed roots
+ * immediately before a destructive step, and may say no to any of them.
+ */
+export async function collectList(api: BoardApi, host: string): Promise<CollectListResult> {
+  const scoped = requireCollectionHost(host, 'collect list');
+  const snapshot = await verifiedSnapshot(api, scoped);
+  const value = collectiblePaths(snapshot).map((path) => {
+    // The dependent-issue view, for the human line. A collectible path has no
+    // open dependent issue by definition; these are the closed ones that used to
+    // owe it protection, which is what makes the answer surprising enough to be
+    // worth showing.
+    const verdict = protectionOf(snapshot, path);
+    return {
+      host: snapshot.host,
+      path: verdict.path,
+      boardId: snapshot.boardId,
+      revision: snapshot.head,
+      closedDependents: verdict.issues.map((issue) => issue.number),
+    };
+  });
+  return { mode: 'collect-list', value };
 }

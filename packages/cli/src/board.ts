@@ -24,6 +24,12 @@ import {
   type BoardTrustAnchor,
   type VerifiedAuthority,
 } from '../../core/src/operations.js';
+import {
+  CollectBoardError,
+  CollectRefusedError,
+  collectList,
+  type CollectListEntry,
+} from './collection.js';
 
 export const BOARD_BASE_URL_ENV = 'ANTONINA_BOARD_URL';
 export const BOARD_CREDENTIAL_ENV = 'ANTONINA_BOARD_CREDENTIAL';
@@ -58,6 +64,7 @@ type CommandValue =
   | BoardAccessState
   | BoardTrustAnchor
   | VerifiedAuthority[]
+  | CollectListEntry[]
   | number[]
   | null;
 
@@ -154,6 +161,15 @@ function parseCapabilities(args: string[]): BoardCapability[] {
  * guessing what to do about one it cannot verify, or left without a next step
  * for a deleted board or a refused storage capability.
  */
+function collectionAdvice(kind: string): string | null {
+  if (kind === 'board-missing') return 'run: antonina board initialize to create it';
+  if (kind === 'board-unverifiable' || kind === 'board-state-rejected') {
+    return 'set ' + BOARD_TRUST_ENV + ' to the board trust anchor to read it';
+  }
+  if (kind === 'board-read-failed') return 'check ' + BOARD_BASE_URL_ENV + ' and that this host can reach it';
+  return null;
+}
+
 function boardStateAdvice(error: unknown): string | null {
   if (error instanceof BoardMissingError) return 'run: antonina board initialize to create it';
   if (error instanceof BoardTrustRequiredError) return 'set ' + BOARD_TRUST_ENV + ' to the board trust anchor to read it';
@@ -161,6 +177,13 @@ function boardStateAdvice(error: unknown): string | null {
   if (error instanceof BoardStorageRejectedError) {
     return 'set ' + BOARD_CREDENTIAL_ENV + ' to a credential copied after the storage capability was issued';
   }
+  // A collection snapshot classifies its own failures rather than throwing the
+  // board errors above, so it carries the kind across and is advised about
+  // here: `collect list` names initialization while the board is missing and
+  // the trust anchor while it cannot be verified, exactly as every other read
+  // command does.
+  if (error instanceof CollectBoardError) return collectionAdvice(error.kind);
+  if (error instanceof CollectRefusedError) return error.kind === null ? null : collectionAdvice(error.kind);
   return null;
 }
 
@@ -321,6 +344,18 @@ async function execute(
       }
       throw new AntoninaApiError('resource requires list, add, or remove');
     }
+    case 'collect': {
+      const [subcommand, ...args] = parsed.args;
+      if (subcommand === 'list') {
+        const hostOption = option(args, '--host');
+        if (hostOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for collect list');
+        return {
+          mode: 'collect-list',
+          value: (await collectList(client, hostOption.value ?? requireArg(undefined, 'collect list --host'))).value,
+        };
+      }
+      throw new AntoninaApiError('collect requires list or delete');
+    }
     default:
       throw new AntoninaApiError('unsupported antonina board command: ' + parsed.command);
   }
@@ -377,6 +412,18 @@ function humanLines(result: CommandResult): string[] {
     return ['Resource added: ' + resource.host + ' ' + resource.path];
   }
   if (result.mode === 'resource-removed') return ['Resource dependency removed.'];
+
+  if (result.mode === 'collect-list') {
+    const entries = result.value as CollectListEntry[];
+    if (entries.length === 0) return ['No path on this host is collectible.'];
+    return entries.map((entry) => {
+      const dependents = entry.closedDependents.length === 0
+        ? ''
+        : '; closed dependents ' + entry.closedDependents.map((number) => '#' + number).join(', ');
+      return 'collectible ' + entry.path + ' on ' + entry.host
+        + '; board ' + entry.boardId + ' rev ' + entry.revision + dependents;
+    });
+  }
 
   const value = result.value;
   if (!Array.isArray(value)) return [humanIssue(value as BoardIssue)];

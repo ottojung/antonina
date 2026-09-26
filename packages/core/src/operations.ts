@@ -1,5 +1,21 @@
 import { canonicalBytes, keyIdFromPublicKey, sha256Id, signBytes, verifyBytes, type CanonicalValue, type SigningKeyPair } from './canonical.js';
-import { canonicalHost, canonicalPath, parseBoard, type Board, type BoardIssue } from './model.js';
+import {
+  canonicalHost,
+  canonicalPath,
+  canonicalTargetId,
+  executionTargetDefect,
+  parseBoard,
+  parseExecutionTargetBackend,
+  parseExecutionTargetCapability,
+  parseExecutionTargetKind,
+  parseExecutionTargetStatus,
+  type Board,
+  type BoardIssue,
+  type ExecutionTargetBackend,
+  type ExecutionTargetCapability,
+  type ExecutionTargetKind,
+  type ExecutionTargetStatus,
+} from './model.js';
 
 export const OPLOG_SCHEMA_VERSION = 1 as const;
 
@@ -13,6 +29,8 @@ export const BOARD_CAPABILITIES = [
   'queue.reorder',
   'resource.read',
   'resource.modify',
+  'target.read',
+  'target.modify',
   'board.delete',
   'authority.delegate',
   'authority.revoke',
@@ -40,6 +58,9 @@ export const BOARD_OPERATION_KINDS = [
   'issue.delete',
   'resource.add',
   'resource.remove',
+  'target.register',
+  'target.set',
+  'dispatch.record',
   'queue.reorder',
   'board.delete',
 ] as const;
@@ -94,6 +115,29 @@ export interface ResourcePayload {
   path: string;
 }
 
+export interface TargetRegisterPayload {
+  id: string;
+  backend: ExecutionTargetBackend;
+  kind: ExecutionTargetKind;
+  capabilities: ExecutionTargetCapability[];
+  /** The canonical `lubko://` address of a persistent host, else `null`. */
+  address: string | null;
+  description: string;
+}
+
+export interface TargetSetPayload {
+  id: string;
+  status: ExecutionTargetStatus;
+  capabilities: ExecutionTargetCapability[];
+  description: string;
+}
+
+export interface DispatchRecordPayload {
+  number: number;
+  targetId: string;
+  rationale: string;
+}
+
 export interface QueueReorderPayload {
   numbers: number[];
 }
@@ -107,6 +151,9 @@ export type BoardOperationPayload =
   | IssueReferencePayload
   | IssueCommentPayload
   | ResourcePayload
+  | TargetRegisterPayload
+  | TargetSetPayload
+  | DispatchRecordPayload
   | QueueReorderPayload
   | Record<string, never>;
 
@@ -194,6 +241,21 @@ function parseCapabilities(value: unknown): BoardCapability[] {
   return capabilities;
 }
 
+function parseTargetCapabilityList(value: unknown): ExecutionTargetCapability[] {
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string')) {
+    throw new Error('Execution target capabilities are malformed');
+  }
+  const capabilities = (value as string[]).map(parseExecutionTargetCapability);
+  const sorted = [...capabilities].sort();
+  if (capabilities.some((capability, index) => capability !== sorted[index])) {
+    throw new Error('Execution target capabilities must be sorted');
+  }
+  if (new Set(capabilities).size !== capabilities.length) {
+    throw new Error('Execution target capabilities contain duplicates');
+  }
+  return capabilities;
+}
+
 function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationPayload {
   if (!isRecord(value)) throw new Error(`Operation payload for ${kind} is malformed`);
   switch (kind) {
@@ -262,6 +324,51 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
         throw new Error(`${kind} payload is malformed`);
       }
       return { number: value.number, host: value.host, path: value.path };
+    }
+    case 'target.register': {
+      if (!hasExactKeys(value, ['id', 'backend', 'kind', 'capabilities', 'address', 'description'])
+          || !isText(value.id)
+          || !isText(value.backend)
+          || !isText(value.kind)
+          || !(value.address === null || isText(value.address))
+          || typeof value.description !== 'string') {
+        throw new Error('Target-register payload is malformed');
+      }
+      return {
+        id: canonicalTargetId(value.id),
+        backend: parseExecutionTargetBackend(value.backend),
+        kind: parseExecutionTargetKind(value.kind),
+        capabilities: parseTargetCapabilityList(value.capabilities),
+        address: value.address === null ? null : canonicalHost(value.address),
+        description: value.description,
+      };
+    }
+    case 'target.set': {
+      if (!hasExactKeys(value, ['id', 'status', 'capabilities', 'description'])
+          || !isText(value.id)
+          || !isText(value.status)
+          || typeof value.description !== 'string') {
+        throw new Error('Target-set payload is malformed');
+      }
+      return {
+        id: canonicalTargetId(value.id),
+        status: parseExecutionTargetStatus(value.status),
+        capabilities: parseTargetCapabilityList(value.capabilities),
+        description: value.description,
+      };
+    }
+    case 'dispatch.record': {
+      if (!hasExactKeys(value, ['number', 'targetId', 'rationale'])
+          || !isPositiveSafeInteger(value.number)
+          || !isText(value.targetId)
+          || !isText(value.rationale)) {
+        throw new Error('Dispatch-record payload is malformed');
+      }
+      return {
+        number: value.number,
+        targetId: canonicalTargetId(value.targetId),
+        rationale: value.rationale,
+      };
     }
     case 'queue.reorder': {
       if (!hasExactKeys(value, ['numbers'])
@@ -436,6 +543,9 @@ function requiredCapability(kind: BoardOperationKind): BoardCapability | null {
     case 'issue.reopen': return 'issue.state';
     case 'resource.add':
     case 'resource.remove': return 'resource.modify';
+    case 'target.register':
+    case 'target.set':
+    case 'dispatch.record': return 'target.modify';
     case 'queue.reorder': return 'queue.reorder';
     case 'board.delete': return 'board.delete';
   }
@@ -592,6 +702,68 @@ function applyBoardMutation(
       current.issueNumbers = current.issueNumbers.filter((number) => number !== payload.number);
       if (current.issueNumbers.length === 0) candidate.resources.splice(index, 1);
       else current.updatedAt = operation.timestamp;
+      break;
+    }
+    case 'target.register': {
+      const payload = operation.payload as TargetRegisterPayload;
+      if (candidate.targets.some((target) => target.id === payload.id)) {
+        throw new OperationLogVerificationError('Execution target is already registered');
+      }
+      const registered = {
+        id: payload.id,
+        backend: payload.backend,
+        kind: payload.kind,
+        status: 'available' as const,
+        capabilities: [...payload.capabilities],
+        address: payload.address,
+        description: payload.description,
+        createdAt: operation.timestamp,
+        updatedAt: operation.timestamp,
+      };
+      const defect = executionTargetDefect(registered);
+      if (defect !== null) throw new OperationLogVerificationError(defect);
+      if (payload.address !== null && candidate.targets.some((target) => target.address === payload.address)) {
+        throw new OperationLogVerificationError('Another execution target already answers to this Lubko address');
+      }
+      candidate.targets.push(registered);
+      candidate.targets.sort((left, right) => (left.id === right.id ? 0 : left.id < right.id ? -1 : 1));
+      break;
+    }
+    case 'target.set': {
+      const payload = operation.payload as TargetSetPayload;
+      const target = candidate.targets.find((entry) => entry.id === payload.id);
+      if (!target) throw new OperationLogVerificationError('Execution target is not registered');
+      const updated = {
+        ...target,
+        status: payload.status,
+        capabilities: [...payload.capabilities],
+        description: payload.description,
+        updatedAt: operation.timestamp,
+      };
+      const defect = executionTargetDefect(updated);
+      if (defect !== null) throw new OperationLogVerificationError(defect);
+      candidate.targets[candidate.targets.indexOf(target)] = updated;
+      break;
+    }
+    case 'dispatch.record': {
+      const payload = operation.payload as DispatchRecordPayload;
+      const issue = requireIssue(candidate, payload.number);
+      if (issue.state !== 'open') throw new OperationLogVerificationError('Only an open issue can be dispatched');
+      if (!candidate.targets.some((target) => target.id === payload.targetId)) {
+        throw new OperationLogVerificationError('Dispatch names an unregistered execution target');
+      }
+      const index = candidate.dispatches.findIndex((dispatch) => dispatch.issueNumber === payload.number);
+      const record = {
+        issueNumber: payload.number,
+        targetId: payload.targetId,
+        rationale: payload.rationale,
+        recordedAt: operation.timestamp,
+      };
+      // One job per issue: a re-dispatch replaces the record rather than
+      // accumulating several, so "what ran this issue" has one answer.
+      if (index < 0) candidate.dispatches.push(record);
+      else candidate.dispatches[index] = record;
+      candidate.dispatches.sort((left, right) => left.issueNumber - right.issueNumber);
       break;
     }
     case 'queue.reorder': {

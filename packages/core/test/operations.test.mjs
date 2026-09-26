@@ -232,7 +232,7 @@ test('history from another board or root cannot be spliced in', async () => {
 test('initialization attests a non-empty starting board as root-signed state', async () => {
   const { root, anchor, log } = await setup();
   const initial = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     nextIssueNumber: 2,
     issues: [{
       number: 1,
@@ -244,6 +244,8 @@ test('initialization attests a non-empty starting board as root-signed state', a
       messages: [],
     }],
     resources: [],
+    targets: [],
+    dispatches: [],
   };
   await append(log, root, 'board.initialize', { board: initial }, 1);
 

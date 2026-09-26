@@ -26,13 +26,29 @@ import {
   MAX_SAFE_INTEGER,
   canonicalHost,
   canonicalPath,
+  canonicalTargetId,
   emptyBoard,
+  parseExecutionTargetBackend,
+  parseExecutionTargetCapability,
+  parseExecutionTargetKind,
+  parseExecutionTargetStatus,
   resourceViews,
+  selectExecutionTarget,
+  targetViews,
   type Board,
+  type BoardDispatch,
+  type BoardExecutionTarget,
   type BoardIssue,
   type BoardResource,
+  type ExecutionTargetBackend,
+  type ExecutionTargetCapability,
+  type ExecutionTargetKind,
+  type ExecutionTargetStatus,
   type IssueState,
   type ResourceView,
+  type TargetRequest,
+  type TargetSelection,
+  type TargetView,
 } from './model.js';
 import {
   BOARD_CAPABILITIES,
@@ -62,6 +78,7 @@ const MUTATING_CAPABILITIES = new Set<BoardCapability>([
   'issue.state',
   'queue.reorder',
   'resource.modify',
+  'target.modify',
   'board.delete',
   'authority.delegate',
   'authority.revoke',
@@ -80,6 +97,20 @@ export class BoardTrustRequiredError extends AntoninaApiError {}
 export class BoardStorageRejectedError extends AntoninaApiError {
   constructor(cause: unknown) {
     super('Skrynia refused the storage capability in this board credential; copy a fresh credential from a board editor', { cause });
+  }
+}
+
+/**
+ * A selection that named no target. It carries the whole selection so a caller
+ * can see which targets were considered and why each was refused, instead of
+ * reading only the message.
+ */
+export class TargetSelectionError extends AntoninaApiError {
+  readonly selection: TargetSelection;
+
+  constructor(selection: TargetSelection) {
+    super(selection.rationale);
+    this.selection = selection;
   }
 }
 
@@ -383,6 +414,110 @@ export class BoardApi {
     return clone(committed.state.board.resources);
   }
 
+  /**
+   * The canonical catalog of execution targets, each with the durable
+   * resources its host carries and the issues dispatched to it.
+   */
+  async listTargets(): Promise<TargetView[]> {
+    return targetViews(await this.loadBoard());
+  }
+
+  async getTarget(id: string): Promise<BoardExecutionTarget> {
+    const target = (await this.loadBoard()).targets.find((entry) => entry.id === id);
+    if (!target) throw new AntoninaApiError('Antonina execution target ' + id + ' is not registered');
+    return clone(target);
+  }
+
+  /**
+   * Registers a target and refuses before it is signed anything an internally
+   * inconsistent record would state, so the catalog never holds a target whose
+   * kind and capabilities disagree.
+   */
+  async registerTarget(input: {
+    id: string;
+    backend: ExecutionTargetBackend;
+    kind: ExecutionTargetKind;
+    capabilities: readonly ExecutionTargetCapability[];
+    address: string | null;
+    description?: string;
+  }): Promise<BoardExecutionTarget> {
+    const id = canonicalTargetId(input.id);
+    const address = input.address === null ? null : canonicalHost(input.address);
+    const capabilities = [...input.capabilities].sort();
+    const committed = await this.append(
+      'target.register',
+      {
+        id,
+        backend: parseExecutionTargetBackend(input.backend),
+        kind: parseExecutionTargetKind(input.kind),
+        capabilities: capabilities.map(parseExecutionTargetCapability),
+        address,
+        description: input.description ?? '',
+      },
+      'target.modify',
+    );
+    return this.requireTarget(committed.state.board, id);
+  }
+
+  /**
+   * Replaces the mutable part of a target record. Backend, kind, and address
+   * are fixed at registration: a different backend or host is a different
+   * target, not a reconfigured one.
+   */
+  async setTarget(
+    id: string,
+    changes: {
+      status: ExecutionTargetStatus;
+      capabilities: readonly ExecutionTargetCapability[];
+      description: string;
+    },
+  ): Promise<BoardExecutionTarget> {
+    const targetId = canonicalTargetId(id);
+    const committed = await this.append(
+      'target.set',
+      {
+        id: targetId,
+        status: parseExecutionTargetStatus(changes.status),
+        capabilities: [...changes.capabilities].sort().map(parseExecutionTargetCapability),
+        description: changes.description,
+      },
+      'target.modify',
+    );
+    return this.requireTarget(committed.state.board, targetId);
+  }
+
+  /**
+   * Decides where a job runs, without recording anything. The selection is a
+   * pure function of the verified board and the request, so the same request
+   * against the same board answers the same way and says why.
+   */
+  async selectTarget(request: TargetRequest = {}): Promise<TargetSelection> {
+    const selection = selectExecutionTarget(await this.loadBoard(), request);
+    if (selection.outcome !== 'selected') throw new TargetSelectionError(selection);
+    return selection;
+  }
+
+  /**
+   * Records which target a job ran on. The target is chosen by the same
+   * deterministic selection every caller uses, and a request that cannot be
+   * satisfied is refused with the rationale attached rather than resolved to
+   * some other target.
+   */
+  async recordDispatch(issueNumber: number, request: TargetRequest = {}): Promise<BoardDispatch> {
+    const selection = selectExecutionTarget(await this.loadBoard(), { ...request });
+    if (selection.outcome !== 'selected' || selection.target === null) {
+      throw new TargetSelectionError(selection);
+    }
+    const committed = await this.append(
+      'dispatch.record',
+      { number: issueNumber, targetId: selection.target.id, rationale: selection.rationale },
+      'target.modify',
+    );
+    const dispatch = committed.state.board.dispatches.find((entry) => entry.issueNumber === issueNumber);
+    if (!dispatch) throw new AntoninaApiError('Antonina dispatch record disappeared after mutation');
+    return clone(dispatch);
+  }
+
   async comment(number: number, author: string, body: string): Promise<BoardIssue> {
     const cleanAuthor = author.trim();
     const cleanBody = body.trim();
@@ -467,6 +602,12 @@ export class BoardApi {
     const issue = issues.find((candidate) => candidate.number === number);
     if (!issue) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
     return issue;
+  }
+
+  private requireTarget(board: Board, id: string): BoardExecutionTarget {
+    const target = board.targets.find((candidate) => candidate.id === id);
+    if (!target) throw new AntoninaApiError('Antonina execution target disappeared after mutation');
+    return clone(target);
   }
 
   private requireActiveAuthority(state: VerifiedBoardState, credential: BoardCredential): VerifiedAuthority {
@@ -556,6 +697,21 @@ export class BoardApi {
 export { BOARD_CAPABILITIES } from './operations.js';
 export { emptyBoard, parseBoard } from './model.js';
 export {
+  EXECUTION_TARGET_BACKENDS,
+  EXECUTION_TARGET_CAPABILITIES,
+  EXECUTION_TARGET_KINDS,
+  EXECUTION_TARGET_STATUSES,
+  canonicalTargetId,
+  canonicalTargetRequirements,
+  parseExecutionTargetBackend,
+  parseExecutionTargetCapability,
+  parseExecutionTargetKind,
+  parseExecutionTargetStatus,
+  selectExecutionTarget,
+  targetIdForHost,
+  targetViews,
+} from './model.js';
+export {
   boardApiCollectionReader,
   collectiblePaths,
   commitCollectionDeletion,
@@ -566,6 +722,21 @@ export {
   unverifiedCollectionSnapshot,
 } from './collection.js';
 export type { Board, BoardIssue, BoardResource, IssueState, ResourceView } from './model.js';
+export type {
+  BoardDispatch,
+  BoardExecutionTarget,
+  ExecutionTargetBackend,
+  ExecutionTargetCapability,
+  ExecutionTargetKind,
+  ExecutionTargetStatus,
+  TargetConsideration,
+  TargetRequest,
+  TargetRequirementMiss,
+  TargetRequirements,
+  TargetSelection,
+  TargetSelectionOutcome,
+  TargetView,
+} from './model.js';
 export type {
   AuthorizedCollection,
   CandidateFactsGatherer,

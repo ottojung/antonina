@@ -105,11 +105,15 @@ export interface BoardAccessState {
   canEdit: boolean;
 }
 
+/**
+ * The whole verified state the create read, beside the one-time keys. It is
+ * the same `VerifiedBoardState` a read hands back, so a caller never has to
+ * read the log a second time to learn the queue beside the board.
+ */
 export interface BoardInitialization {
-  board: Board;
+  state: VerifiedBoardState;
   credential: BoardCredential;
   trustAnchor: BoardTrustAnchor;
-  head: string;
 }
 
 function clone<T>(value: T): T {
@@ -221,21 +225,24 @@ export class BoardApi {
     await this.acceptStored(initialized);
     this.storageRejected = false;
     return {
-      board: clone(initialized.state.board),
+      state: clone(initialized.state),
       credential: clone(initialized.credential),
       trustAnchor: clone(this.anchor),
-      head: initialized.state.head,
     };
   }
 
-  async trustBoard(anchorValue: BoardTrustAnchor): Promise<Board> {
+  /**
+   * Adopts a trust anchor and returns the whole state that read verified, queue
+   * beside board, so adopting a board never costs a second read of the log.
+   */
+  async trustBoard(anchorValue: BoardTrustAnchor): Promise<VerifiedBoardState> {
     const anchor = await verifyBoardTrustAnchor(anchorValue);
     if (this.anchor !== null && !sameAnchor(this.anchor, anchor)) {
       throw new AntoninaApiError('Refusing to replace the trusted Antonina board root implicitly');
     }
     const stored = await this.readStored(anchor);
     this.anchor = anchor;
-    return clone(stored.state.board);
+    return clone(stored.state);
   }
 
   /**

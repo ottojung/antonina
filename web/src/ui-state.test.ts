@@ -7,10 +7,13 @@ import {
   boardDeleted,
   boardLoadFailed,
   boardLoaded,
+  boardReadOutcome,
   COMPOSER_READ_ONLY_CALLOUT,
   DELETED_COPY,
   emptyIssueList,
   filterLabel,
+  firstRunOutcome,
+  FIRST_RUN_COPY,
   firstRunResolved,
   firstRunUnresolved,
   formatUpdatedAt,
@@ -260,6 +263,58 @@ describe('board load state', () => {
 
   it('sends a first-run client that lost the initialize race to the trust anchor screen', () => {
     expect(firstRunUnresolved(new BoardTrustRequiredError('no trust anchor'))).toEqual({ status: 'untrusted' });
+  });
+
+  it('reports a board this browser created as ready, with the queue that create verified', () => {
+    const outcome = firstRunOutcome({ state: verified });
+    expect(outcome.load).toEqual({ status: 'ready', board, queue: [1] });
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.notice).toBe(FIRST_RUN_COPY.initialized);
+  });
+
+  it('reports a lost first-run race as read-only, with no error', () => {
+    const outcome = firstRunOutcome(
+      { failure: new Error('The Antonina signed board already exists') },
+      { state: verified },
+    );
+    expect(outcome.load).toEqual({ status: 'ready', board, queue: [1] });
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.notice).toBe(FIRST_RUN_COPY.raced);
+  });
+
+  it('reports a create that failed for its own reason as itself, not as a race', () => {
+    const outcome = firstRunOutcome(
+      { failure: new Error('Skrynia POST antonina/board-v2 failed (503)') },
+      { state: null },
+    );
+    expect(outcome.load).toEqual({ status: 'uninitialized' });
+    expect(outcome.error).toBe('Skrynia POST antonina/board-v2 failed (503)');
+    expect(outcome.notice).toBeUndefined();
+  });
+
+  it('classifies a read that threw after the create by its own cause, keeping the real reason', () => {
+    const outcome = firstRunOutcome(
+      { failure: new Error('Skrynia POST antonina/board-v2 failed (503)') },
+      { failure: new BoardTrustRequiredError('no trust anchor') },
+    );
+    expect(outcome.load).toEqual({ status: 'untrusted' });
+    expect(outcome.error).toBe('Skrynia POST antonina/board-v2 failed (503)');
+    expect(outcome.notice).toBeUndefined();
+  });
+
+  it('never reports a read that found no board after a create as a success', () => {
+    const outcome = firstRunOutcome({ state: null });
+    expect(outcome.load).toEqual({ status: 'failed', message: FIRST_RUN_COPY.readFailed });
+    expect(outcome.error).toBe(FIRST_RUN_COPY.readFailed);
+    expect(outcome.notice).toBeUndefined();
+  });
+
+  it('applies the same no-board rule to the trust path', () => {
+    expect(boardReadOutcome(verified)).toEqual({ load: { status: 'ready', board, queue: [1] } });
+    expect(boardReadOutcome(null)).toEqual({
+      load: { status: 'failed', message: FIRST_RUN_COPY.readFailed },
+      error: FIRST_RUN_COPY.readFailed,
+    });
   });
 
   it('treats a deleted board as terminal instead of retryable', () => {

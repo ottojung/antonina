@@ -121,6 +121,16 @@ export function boardLoaded(state: VerifiedBoardState | null): BoardLoad {
   return state ? { status: 'ready', board: state.board, queue: state.queue } : { status: 'uninitialized' };
 }
 
+/**
+ * One verified read, one outcome, for every path that turns a verified state
+ * into a load. A read that found no board has not loaded one, so it is a
+ * failure and not a success with nothing behind it: the trust path and the
+ * first-run path both say so here, so neither has an inline check of its own.
+ */
+export function boardReadOutcome(state: VerifiedBoardState | null): { load: BoardLoad; error?: string } {
+  return state ? { load: boardLoaded(state) } : { load: { status: 'failed', message: FIRST_RUN_COPY.readFailed }, error: FIRST_RUN_COPY.readFailed };
+}
+
 export function boardLoadFailed(load: BoardLoad, message: string): BoardLoad {
   return loadedBoard(load) ? load : { status: 'failed', message };
 }
@@ -147,6 +157,39 @@ export function firstRunUnresolved(cause: unknown): BoardLoad {
   if (trustRequired(cause)) return { status: 'untrusted' };
   if (boardDeleted(cause)) return { status: 'deleted' };
   return { status: 'failed', message: cause instanceof Error ? cause.message : String(cause) };
+}
+
+/** What a verified read of the board is: the state it read, or the reason it failed. */
+export type BoardRead = { state: VerifiedBoardState | null } | { failure: unknown };
+
+/** What a first run leaves on screen: one load, and at most one outcome. */
+export interface FirstRunOutcome {
+  load: BoardLoad;
+  error?: string;
+  notice?: string;
+}
+
+/**
+ * The whole first-run decision in one place, so its four outcomes cannot drift
+ * apart.
+ *
+ * A board this browser created is the state the create itself verified: the
+ * load is that state and only that, so a create that yields no state is the
+ * read failure it is, never a success with nothing behind it. A create that
+ * delivered no state — it was refused, or the read that settles it threw — is
+ * reported by the read that follows: a board that is there now was created by
+ * someone else, so this browser is read-only with no error, and anything else
+ * is reported as itself with its own reason.
+ */
+export function firstRunOutcome(created: BoardRead, afterRefusal?: BoardRead): FirstRunOutcome {
+  if ('state' in created) {
+    const read = boardReadOutcome(created.state);
+    return read.error ? read : { ...read, notice: FIRST_RUN_COPY.initialized };
+  }
+  const read = afterRefusal ?? { failure: created.failure };
+  const load = 'state' in read ? boardLoaded(read.state) : firstRunUnresolved(read.failure);
+  const resolved = firstRunResolved(load, created.failure);
+  return resolved.error ? resolved : { load: resolved.load, notice: FIRST_RUN_COPY.raced };
 }
 
 /**

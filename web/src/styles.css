@@ -72,7 +72,6 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .create-form input { flex: 1; min-width: 0; }
 .create-form textarea { min-height: 76px; resize: vertical; }
 .create-form small { color: var(--muted); font-size: .74rem; line-height: 1.4; }
-.resources-view { border-top: 1px solid var(--line); padding-bottom: 32px; }
 .workspace.resources-view { display: block; background: var(--paper); }
 .workspace.resources-view .issue-pane { border-right: 0; }
 .workspace.resources-view .resources-view { max-width: 1100px; margin: 0 auto; padding: 0 32px; }
@@ -223,6 +222,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
   .notice { margin: 10px 12px 0; }
   .workspace { display: block; min-height: 0; }
   .workspace.resources-view .resources-view { padding: 0 20px; }
+  .workspace.resources-view { padding-bottom: 32px; }
   .issue-pane { border-right: 0; }
   .has-selection .issue-pane { display: none; }
   .pane-heading { padding-top: 24px; }

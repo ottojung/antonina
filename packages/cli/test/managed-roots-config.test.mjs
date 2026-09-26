@@ -163,6 +163,17 @@ test('a configured root that cannot be resolved is reported against its own spel
   });
 });
 
+test('the filesystem root is refused as a managed root', async () => {
+  await withTree(async () => {
+    const result = await load({ [COLLECT_ROOTS_ENV]: '/' });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.defect, { kind: 'root-is-filesystem-root', path: '/' });
+    assert.equal(result.spelling, '/');
+    assert.match(describeRootsDefect(result), /filesystem root/);
+  });
+});
+
 test('a resolved coordinate is never taken from configuration', async () => {
   await withTree(async ({ root }) => {
     const real = join(root, 'real');

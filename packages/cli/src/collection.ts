@@ -123,6 +123,7 @@ const DEFAULT_ROOTS_FS: RootsFs = { realpath: realpathCall };
  */
 export type CollectRootsDefect =
   | { readonly kind: 'unresolvable-root'; readonly path: string; readonly message: string }
+  | { readonly kind: 'root-is-filesystem-root'; readonly path: string }
   | ManagedRootDefect;
 
 export type LoadManagedRootsResult =
@@ -198,6 +199,12 @@ export async function loadManagedRoots(
     if (defect !== null) {
       return { ok: false, spelling, defect: { kind: 'path-form', path: spelling, defect } };
     }
+    // The filesystem root is refused in the same shape as a bad form: it is a
+    // spelling no operator means, and it would put every absolute path on the
+    // host inside a root, which defeats the containment every later check makes.
+    if (spelling === '/') {
+      return { ok: false, spelling, defect: { kind: 'root-is-filesystem-root', path: spelling } };
+    }
     let resolved: string;
     try {
       // The only place a `resolved` coordinate is ever produced in this front.
@@ -249,6 +256,10 @@ export function describeRootsDefect(result: {
   }
   if (defect.kind === 'nested') {
     return `nested: configured managed root ${defect.path} is inside configured managed root ${defect.within}`;
+  }
+  if (defect.kind === 'root-is-filesystem-root') {
+    return `root-is-filesystem-root: configured managed root ${defect.path} is the filesystem root; `
+      + 'it would make every absolute path collectible';
   }
   return `unresolvable-root: ${defect.message}`;
 }
@@ -402,7 +413,7 @@ export async function unlinkCollectedPath(
  * key names are distinct on purpose, so a script cannot read `snapshotHead` as
  * authority; only `recheckHead` is one.
  */
-export interface CollectDeleteReport {
+export interface CollectDeleteReportBase {
   host: string;
   boardId: string;
   path: string;
@@ -412,8 +423,21 @@ export interface CollectDeleteReport {
   snapshotHead: string | null;
 }
 
+export interface CollectDeleteReport extends CollectDeleteReportBase {
+  /**
+   * Which of `unlinkCollectedPath`'s three results the command is reporting: the
+   * path itself was removed, a symlink was unlinked as a link, or the path was
+   * already absent and nothing was removed. It is absent from the pending
+   * report, where no removal has been attempted.
+   */
+  readonly removal: 'unlinked' | 'unlinked-symlink' | 'absent';
+}
+
 export type CollectDeleteResult = {
-  mode: 'collect-pending' | 'collect-deleted';
+  mode: 'collect-pending';
+  value: CollectDeleteReportBase;
+} | {
+  mode: 'collect-deleted';
   value: CollectDeleteReport;
 };
 
@@ -505,7 +529,7 @@ export async function collectDelete(
     gatherCandidatePathFacts,
   );
 
-  const report: CollectDeleteReport = {
+  const report: CollectDeleteReportBase = {
     host: authorized.host,
     boardId: authorized.boardId,
     path: authorized.path,
@@ -530,9 +554,9 @@ export async function collectDelete(
 
   // 7. The removal, at the board-recorded spelling: the authorization names one
   //    path and the CLI acts on that path and no other.
-  await unlinkCollectedPath(authorized.path, options.removalFs ?? DEFAULT_REMOVAL_FS);
+  const removal = await unlinkCollectedPath(authorized.path, options.removalFs ?? DEFAULT_REMOVAL_FS);
 
   // 8. The authorization is spent exactly once, after the action it authorized.
   commitCollectionDeletion(authorized);
-  return { mode: 'collect-deleted', value: report };
+  return { mode: 'collect-deleted', value: { ...report, removal } };
 }

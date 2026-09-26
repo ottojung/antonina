@@ -351,6 +351,7 @@ test('collect delete with --confirm removes the path and reports the re-read rev
       reason: 'still-collectible',
       recheckHead: revision,
       snapshotHead: revision,
+      removal: 'unlinked',
     });
     assert.equal(existsSync(context.worktree), false);
   });
@@ -505,6 +506,37 @@ test('collect delete refuses a symlink whose target escapes its managed root and
   });
 });
 
+test('collect delete refuses a path whose containing directory escapes its managed root and leaves it alone', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    // The link's target sits outside the managed root, so the candidate's own
+    // name and its resolved path disagree in a way the containment check must
+    // catch through the containing directory rather than the final component.
+    const real = join(context.root, 'real');
+    await mkdir(real, { recursive: true });
+    const link = join(context.managed, 'link');
+    await symlink(real, link);
+    const throughLink = join(link, 'project');
+    const issue = await context.writer.createIssue('Issue 1');
+    await context.writer.addResourceDependency(HOST, throughLink, issue.number);
+    await context.writer.close(issue.number);
+    await mkdir(throughLink, { recursive: true });
+    await writeFile(join(throughLink, 'keep.txt'), 'keep');
+
+    const { code, err } = await run(deleteArgs(context, throughLink, ['--confirm']), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+
+    // Core reports this refusal as `not-managed-collectible` because
+    // `managedReason` folds the three path-safety refusals into one reason.
+    assert.equal(code, 1);
+    assert.match(err[0], /not-managed-collectible/);
+    assert.equal(existsSync(join(real, 'project')), true, 'the real directory is still there');
+    assert.equal(readFileSync(join(real, 'project', 'keep.txt'), 'utf8'), 'keep');
+  });
+});
+
 test('collect delete unlinks an in-root symlink as a link and never recurses into its target', async () => {
   await withWorkTree(async (context) => {
     await seededWorkTree(context);
@@ -520,6 +552,7 @@ test('collect delete unlinks an in-root symlink as a link and never recurses int
 
     assert.equal(code, 0, err.join('\n'));
     assert.equal(out.length, 1);
+    assert.match(out[0], /^unlinked symlink /);
     assert.equal(existsSync(context.worktree), false, 'the link is gone');
     assert.equal(existsSync(target), true, 'the target was not followed');
     assert.equal(readFileSync(join(target, 'keep.txt'), 'utf8'), 'keep');
@@ -542,7 +575,7 @@ test('collect delete removes a non-empty directory recursively', async () => {
   });
 });
 
-test('collect delete reports candidate-facts-unavailable when the containing directory is gone and touches nothing', async () => {
+test('collect delete reports candidate-facts-unavailable when neither the path nor its parent exists and touches nothing', async () => {
   await withWorkTree(async (context) => {
     const issue = await context.writer.createIssue('Issue 1');
     const orphan = join(context.managed, 'vanished', 'child');
@@ -556,7 +589,7 @@ test('collect delete reports candidate-facts-unavailable when the containing dir
 
     assert.equal(code, 1);
     assert.match(err[0], /candidate-facts-unavailable/);
-    assert.equal(existsSync(join(context.managed, 'vanished')), false);
+    assert.equal(existsSync(context.managed), true, 'the managed root itself is still present');
   });
 });
 
@@ -651,12 +684,12 @@ test('collect delete treats an already-absent path as success', async () => {
     });
 
     assert.equal(code, 0, err.join('\n'));
-    assert.match(out[0], /^deleted /);
+    assert.match(out[0], /^already absent /);
     assert.equal(existsSync(context.worktree), false);
   });
 });
 
-test('collect delete reports a hard error and commits nothing when the removal shape cannot be classified', async () => {
+test('unlinkCollectedPath refuses to remove anything when the removal shape cannot be classified', async () => {
   await withWorkTree(async (context) => {
     await seededWorkTree(context);
     await mkdir(context.worktree, { recursive: true });
@@ -679,7 +712,7 @@ test('collect delete reports a hard error and commits nothing when the removal s
   });
 });
 
-test('collect delete commits the authorization exactly once', async () => {
+test('collect delete performs one removal and spends its authorization once', async () => {
   await withWorkTree(async (context) => {
     await seededWorkTree(context);
     await mkdir(context.worktree, { recursive: true });

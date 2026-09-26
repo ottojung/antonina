@@ -31,6 +31,7 @@ import {
   collectList,
   renderRevision,
   type CollectDeleteReport,
+  type CollectDeleteReportBase,
   type CollectListEntry,
 } from './collection.js';
 
@@ -69,6 +70,7 @@ type CommandValue =
   | VerifiedAuthority[]
   | CollectListEntry[]
   | CollectDeleteReport
+  | CollectDeleteReportBase
   | number[]
   | null;
 
@@ -462,7 +464,12 @@ function humanLines(result: CommandResult): string[] {
   }
   if (result.mode === 'collect-deleted') {
     const report = result.value as CollectDeleteReport;
-    return [`deleted ${report.path} on ${report.host}; board ${report.boardId} ${renderRevision(report.recheckHead)}`];
+    const outcome = report.removal === 'unlinked'
+      ? 'deleted'
+      : report.removal === 'unlinked-symlink'
+        ? 'unlinked symlink'
+        : 'already absent';
+    return [`${outcome} ${report.path} on ${report.host}; board ${report.boardId} ${renderRevision(report.recheckHead)}`];
   }
 
   const value = result.value;

@@ -227,13 +227,15 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
   const parsed = parse(args, ['--json', '--running', '--finished', '--succeeded', '--failed', '--stopped', '--killed']);
   if (parsed.positionals.length !== 0) throw new UsageError('list: unexpected positional arguments');
   const limit = parsed.values.has('--limit') ? positiveInteger(parsed.values.get('--limit'), '--limit') : null;
-  const entries = agentIds(context)
-    .map((agentId) => {
-      const meta = readMeta(agentId, paths(context)) ?? { id: agentId };
-      return { agentId, meta, state: deriveState(meta), summary: summary(meta) };
-    })
-    .filter((entry) => matchesFilters(parsed, entry.state))
-    .sort((left, right) => (right.summary.created_at ?? 0) - (left.summary.created_at ?? 0));
+  const entries: Array<{ agentId: string; meta: AgentMetadata; state: string; summary: ReturnType<typeof summary> }> = [];
+  for (const agentId of agentIds(context)) {
+    await reconcileAgent(agentId, context);
+    const meta = readMeta(agentId, paths(context)) ?? { id: agentId };
+    const state = deriveState(meta);
+    if (!matchesFilters(parsed, state)) continue;
+    entries.push({ agentId, meta, state, summary: summary(meta) });
+  }
+  entries.sort((left, right) => (right.summary.created_at ?? 0) - (left.summary.created_at ?? 0));
   const selected = limit === null ? entries : entries.slice(0, limit);
   if (parsed.flags.has('--json')) {
     context.io.stdout(stableJson({
@@ -590,8 +592,25 @@ async function stopLike(
   const agentId = requireAgentId(parsed.values.get('--id'), command);
   let meta = requireMeta(agentId, context);
   if (!invocationAlive(meta)) {
+    let acceptedPending: string | null;
+    try {
+      acceptedPending = pendingPrompt(meta);
+    } catch {
+      throw new Error(`agent ${agentId} has malformed pending prompt authority`);
+    }
+    const ownsWork = activeRunnerFlag(meta) === true || acceptedPending !== null || reservationInFlight(meta);
+    if (!ownsWork) {
+      context.io.stdout(
+        command === 'stop'
+          ? `antonina: agent ${agentId} is already stopped (state ${deriveState(meta)})`
+          : `antonina: agent ${agentId} is already dead (state ${deriveState(meta)})`,
+      );
+      return EXIT_OK;
+    }
     await updateMeta(agentId, (current) => {
-      beginStopLike(current, command, Date.now() / 1000);
+      if (!beginStopLike(current, command, Date.now() / 1000)) {
+        throw new Error('durable execution authority is malformed');
+      }
       current.pending_prompt = null;
       current.steer_queue = [];
       current.active_runner = false;
@@ -599,7 +618,7 @@ async function stopLike(
       finalizeTerminal(current, command === 'stop' ? 'stopped' : 'killed', Date.now() / 1000, null, null);
       current.stop_reason = command;
     }, paths(context));
-    context.io.stdout(`${command === 'stop' ? 'stopped' : 'killed'} agent ${agentId}`);
+    context.io.stdout(`${command === 'stop' ? 'stopped' : 'killed'} agent ${agentId} (cancelled reserved runner work)`);
     return EXIT_OK;
   }
 

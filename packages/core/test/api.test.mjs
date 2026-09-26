@@ -31,10 +31,6 @@ function fakeSkrynia() {
     capability,
     get signed() { return signed; },
     set beforePut(value) { beforePut = value; },
-    bump(value) {
-      signed = structuredClone(value);
-      revision += 1;
-    },
     async fetch(url, init = {}) {
       const method = init.method ?? 'GET';
       if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });

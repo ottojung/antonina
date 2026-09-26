@@ -30,9 +30,12 @@ import {
   idleMeta,
   nextPromptCount,
   pendingPrompt,
+  persistedAgentCwd,
   persistedLifecycleState,
   persistedNativeSessionId,
   persistedTimestamp,
+  persistedVariant,
+  requiredPersistedAgentId,
   runnerGeneration,
   runnerReservationMode,
   runnerReservationState,
@@ -499,6 +502,12 @@ async function cmdPrompt(args: string[], context: AgentCommandContext): Promise<
   const prompt = parsed.values.get('--prompt') ?? parsed.positionals[0];
   if (!prompt) throw new UsageError('prompt: a prompt is required');
   const observed = requireMeta(agentId, context);
+  // Durable execution configuration must be canonical before this prompt can
+  // acquire runner or invocation authority.
+  requiredPersistedAgentId(observed);
+  persistedAgentCwd(observed);
+  persistedVariant(observed);
+  persistedNativeSessionId(observed);
   if (
     deriveState(observed) === 'running'
     && !parsed.flags.has('--steer')

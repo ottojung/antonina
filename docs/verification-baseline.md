@@ -4,21 +4,32 @@ This note is the objective baseline that the scheduled-work completion predicate
 ("repository verification passes on the exact resulting head") refers to. Changing a count in
 this note without a stated reason is a documentation bug, not a routine update.
 
-All counts below were observed on **`d896ed8`** in the `issue-20-verify-baseline-3` worktree, with
+All counts below were observed on **`45f2236`** in the `issue-20-verify-baseline-4` worktree, with
 `XDG_STATE_HOME` pointed at a fresh `mktemp -d` that was deleted afterwards, **under both `TMPDIR`
 accounts**: a pinned executable `TMPDIR=/workspace/tmp-verify`, and `TMPDIR` unset (this host's
-`noexec` `/tmp`). On this head both accounts are green and the counts agree; the two accounts are
+`noexec` `/tmp`). Both accounts were re-run in full on `45f2236`; neither is carried forward.
+**No count changed at this re-pin**: `45f2236` measures 125 / 71 / 88 / 94, the same as the
+`d896ed8` measurement this note previously carried, because every commit between the two heads
+changes documentation and comments only (see "Which head this table is pinned to" below). No
+count, no failing name and no known-passing name moved, so nothing else in this note needed a
+stated reason. On this head both accounts are green and the counts agree; the two accounts are
 still kept apart, because the mechanism that used to make them differ is new, and a later pass must
 be able to tell "fixed" from "not reached". A *count* change is not in itself a failure — tests get
 added and removed — but a *new failing test name* is, and so is a *known failing name that starts
 passing*. Both directions are changes needing a stated reason, so that a later pass never has to
 choose between "the note is stale" and "it was fixed".
 
-**Which head this table is pinned to.** The tables below are measured on `d896ed8`, the release head
-(`release/2026-09-26`). The commit that carries this note touches `docs/verification-baseline.md`
-and nothing else, so the test surface is byte-identical on the commit that results from landing it,
-and the counts here are the counts for that head too. The harness run on the *exact* resulting head
-is reported in that commit's message and in
+**Which head this table is pinned to.** The tables below are measured on `45f2236`, the release head
+(`release/2026-09-26`). `45f2236` is `d896ed8` plus the fronts merged since: intent-record and skill
+prose, and comment-only edits to `packages/core/src/collection.ts` and
+`packages/agent-runtime/src/managed-roots-config.ts` (`git diff --stat d896ed8 45f2236`: those two
+source files, `docs/intent-records/agent.md`, `docs/intent-records/board.md`,
+`docs/intent-records/hosts.md`, `docs/skills/resources.md`, and this note). No test file and no
+executable statement changed, so the test surface is the same one `d896ed8` had, and the counts
+below are re-measured on `45f2236` rather than inferred from that. The commit that carries this note
+touches `docs/verification-baseline.md` and nothing else, so the test surface is byte-identical on
+the commit that results from landing it, and the counts here are the counts for that head too. The
+harness run on the *exact* resulting head is reported in that commit's message and in
 `/workspace/antonina-coordination/logs/verify-<sha>.log`, so it can be checked against this table
 rather than taken on trust.
 
@@ -27,14 +38,16 @@ by `9781ecc` and amended by `47784c4`. Both are **docs-only** commits — each t
 `docs/verification-baseline.md` and nothing else (`git show --stat 9781ecc 47784c4`) — so no
 test-affecting commit is covered by them. The counts they recorded were 114 / 67 / 82 / 94.
 
-Two test-affecting lineages have landed since, and **`d896ed8` is their union**:
+Two test-affecting lineages have landed since `0f60cf9`, and **`d896ed8` is their union**; the head
+this note is pinned to is that union plus documentation- and comment-only work:
 
 | Head | core | agent-runtime | cli | web | what it adds |
 | --- | --- | --- | --- | --- | --- |
 | `0f60cf9` | 114 | 67 | 82 | 94 | the base both lineages branch from |
 | `e2b4d96` | 114 | 71 | 85 | 94 | the fixture-path-guard front: `e1de211` + `e2b4d96` |
 | `868b5ec` | — | — | — | — | the loader / authrecord front, merged into the release head as `c2cd88a` |
-| **`d896ed8`** | **125** | **71** | **88** | **94** | the merge of the two: `d896ed8` = merge(`868b5ec`, `e2b4d96`) |
+| `d896ed8` | 125 | 71 | 88 | 94 | the merge of the two: `d896ed8` = merge(`868b5ec`, `e2b4d96`) |
+| **`45f2236`** | **125** | **71** | **88** | **94** | **the head this note is pinned to**: `d896ed8` plus documentation and comments only |
 
 This is the point the `e2b4d96`-pinned draft of this note got wrong, and it is worth stating
 precisely because the two lineages are both real measurements. `114 / 71 / 85 / 94` is what the
@@ -42,7 +55,7 @@ fixture front's own branch `e2b4d96` measures; `125 / 71 / 88 / 94` is what the 
 measures. Neither number is wrong. They are the counts of two different lineages, and this note is
 pinned to the second. **The extra core and cli tests belong to the loader and authrecord fronts, not
 to the fixture front**, and that attribution is arithmetic, not a story — the whole delta from
-`e2b4d96` to `d896ed8` is four files
+`e2b4d96` to `d896ed8` is five files
 (`git diff --stat e2b4d96 d896ed8`: `packages/core/src/collection.ts`,
 `packages/core/test/collection.test.mjs`, `packages/cli/src/collection.ts`,
 `packages/cli/test/collection.test.mjs`, plus a new
@@ -131,12 +144,12 @@ Command run (2026-09-26, this worktree; `web/node_modules` symlinked in from
 
 ```sh
 TMPDIR=/workspace/tmp-verify XDG_STATE_HOME="$(mktemp -d)" \
-  sh /workspace/antonina-coordination/verify-antonina.sh /workspace/antonina-issue20-baseline3
+  sh /workspace/antonina-coordination/verify-antonina.sh /workspace/antonina-issue20-baseline
 ```
 
-Result: **exit 0**, final line `verify: ok`, in about 20 s.
+Result: **exit 0**, final line `verify: ok`, in about 13 s.
 
-| Command | Observed on `d896ed8` |
+| Command | Observed on `45f2236` |
 | --- | --- |
 | `tsc -p packages/core/tsconfig.json` | exit 0, no diagnostics (`typecheck: ok`) |
 | `tsc -p packages/agent-runtime/tsconfig.json` | exit 0, no diagnostics |
@@ -147,11 +160,13 @@ Result: **exit 0**, final line `verify: ok`, in about 20 s.
 | `node --test packages/cli/test/*.test.mjs` | 88 tests, 88 pass, 0 fail |
 | `vitest run --root web` | 5 test files, 94 tests, 94 pass |
 | `tsc -b web` | exit 0, no diagnostics |
-| `vite build web --config web/vite.config.ts` | exit 0, `built in 543ms` |
+| `vite build web --config web/vite.config.ts` | exit 0, `built in 556ms` |
 | the harness end to end | **exit 0**, `verify: ok` |
 
 Under that setting there are **no** known failures. Every count here was measured on this head by the
-run above; none is carried forward from the previous note, and none is carried over from `e2b4d96`.
+run above; none is carried forward from the previous note — including the ones that are unchanged
+since `d896ed8`, which are unchanged because the run above re-measured them, not because it skipped
+them — and none is carried over from `e2b4d96`.
 For the per-row reasons that the counts differ from the `0f60cf9` table, see "Lineage" above: the
 agent-runtime 67 → 71 and (on the fixture branch) cli 82 → 85 are test additions in the two fixture
 files from `e1de211` and `e2b4d96`, and the further cli 85 → 88 and core 114 → 125 are the
@@ -165,20 +180,20 @@ one variable: the pinned run is green end to end, the unpinned run (table below)
 agent-runtime suite, and the set of tests failing in the unpinned run is precisely the set of tests
 whose fake `opencode` is written under `tmpdir()`. A variable that is the only difference between a
 run and its counterfactual, and whose mechanism is directly observable, is the cause. That
-reasoning applied to `0f60cf9`; it no longer has anything to explain on `d896ed8`, because both
+reasoning applied to `0f60cf9`; it no longer has anything to explain on `45f2236`, because both
 accounts are green.
 
 ## The other account: `TMPDIR` unset (this host's `noexec` `/tmp`)
 
 ```sh
 env -u TMPDIR XDG_STATE_HOME="$(mktemp -d)" \
-  sh /workspace/antonina-coordination/verify-antonina.sh /workspace/antonina-issue20-baseline3
+  sh /workspace/antonina-coordination/verify-antonina.sh /workspace/antonina-issue20-baseline
 ```
 
 Result: **exit 0**, final line `verify: ok`. Nothing aborted; the question of which step a non-zero
 exit would have named does not arise on this head.
 
-| Command | Observed on `d896ed8` |
+| Command | Observed on `45f2236` |
 | --- | --- |
 | the four `tsc -p` steps | exit 0, no diagnostics (`typecheck: ok`) |
 | `node --test packages/core/test/*.test.mjs` | 125 tests, 125 pass, 0 fail |
@@ -186,13 +201,13 @@ exit would have named does not arise on this head.
 | `node --test packages/cli/test/*.test.mjs` | 88 tests, 88 pass, 0 fail |
 | `vitest run --root web` | 5 test files, 94 tests, 94 pass |
 | `tsc -b web` | exit 0, no diagnostics |
-| `vite build web --config web/vite.config.ts` | exit 0, `built in 549ms` |
+| `vite build web --config web/vite.config.ts` | exit 0, `built in 543ms` |
 | the harness end to end | **exit 0**, `verify: ok` — no step aborted |
 | worktree afterwards | `git status --porcelain` empty; no `.antonina-test-tmp` left behind |
 
 This table is the change of record, and it is **the claim this front exists to make**: the account
 that was 7 failures is 0 failures. On `0f60cf9` the same unpinned account was agent-runtime 66/67 and
-cli 76/82 with the harness exiting 1 at the agent-runtime suite; on `d896ed8` it is 71/71 and 88/88
+cli 76/82 with the harness exiting 1 at the agent-runtime suite; on `45f2236` it is 71/71 and 88/88
 with the harness exiting 0. Reason: `selectExecRoot` probes `os.tmpdir()`, gets `EACCES` on this
 `noexec` tmpfs, and falls through to the repo-local `.antonina-test-tmp` on the executable
 `/workspace` btrfs mount, which execs. The seven known failures recorded at `0f60cf9` are therefore
@@ -203,15 +218,16 @@ that heading per the symmetric rule at the top of this note — not deleted.
 
 At `0f60cf9`, under the unpinned noexec account, 7 tests failed: 1 in
 `packages/agent-runtime/test/backend.test.mjs` and 6 in `packages/cli/test/agent.e2e.test.mjs`. All 7
-pass on `d896ed8` under that same account, and the whole harness is green. The names are kept so a
+pass on `45f2236` under that same account, and the whole harness is green. The names are kept so a
 later pass can recognise them.
 
-**The line anchors below are re-derived against `d896ed8`**, not carried forward. The
+**The line anchors below are re-derived against `45f2236`**, not carried forward: both test files
+are unchanged between `d896ed8` and `45f2236`, and every anchor was read again on `45f2236`. The
 `0f60cf9` anchors were `backend.test.mjs:92` and `agent.e2e.test.mjs:89 / :110 / :138 / :261 / :278
 / :386`; both files have since shifted, and the current line for each name is given. (A prior
 draft of this refresh moved the `backend.test.mjs` anchor only as far as `:96`, which is also stale.)
 
-| Test name | File | line at `0f60cf9` | **line at `d896ed8`** |
+| Test name | File | line at `0f60cf9` | **line at `45f2236`** |
 | --- | --- | --- | --- |
 | `configured model catalog distinguishes absence from transport failure` | `packages/agent-runtime/test/backend.test.mjs` | `:92` | **`:162`** |
 | `built CLI runs a fresh prompt then continues the discovered OpenCode session` | `packages/cli/test/agent.e2e.test.mjs` | `:89` | **`:237`** |
@@ -291,9 +307,13 @@ because `/workspace` is btrfs and exec-able. **A repository checked out on a `no
 neither candidate, and the suites now fail loudly and immediately** instead of quietly using the
 host's real `opencode`.
 
-Verified here, not assumed, and re-established on this head rather than copied. Copying this
-checkout's `packages/` and `web/` trees to a directory under `/tmp` (which is that same `noexec`
-tmpfs) and running the suites there with `TMPDIR` unset:
+Verified by measurement, not assumed, and re-established on the release head rather than copied.
+This copy-out was measured at `d896ed8` and was **not** re-run at this re-pin to `45f2236`: the
+guard's candidate list, the throw and both test files are byte-identical across the two heads
+(`git diff --stat d896ed8 45f2236` touches neither), so a re-measurement would exercise the same
+bytes and the numbers below stand for `45f2236` as a carry-forward of unchanged code, not as a fresh
+run. Copying this checkout's `packages/` and `web/` trees to a directory under `/tmp` (which is that
+same `noexec` tmpfs) and running the suites there with `TMPDIR` unset:
 
 ```sh
 mkdir -p /tmp/noexec-repo && cp -r packages /tmp/noexec-repo/ && cp -r web /tmp/noexec-repo/
@@ -309,8 +329,9 @@ Error: no exec-capable fixture directory for the fake opencode; tried: /tmp: EAC
   code: 'ANTONINA_FIXTURE_NOEXEC'
 ```
 
-That reproduces exactly. The four names, with lines re-derived on `d896ed8`, are every test in that
-file that asks for a fixture:
+That reproduces exactly. The four names, with lines re-derived on `d896ed8` and unchanged at `45f2236`
+(the guard and both test files are byte-identical across the two heads, and this copy-out experiment
+was not re-run at this re-pin), are every test in that file that asks for a fixture:
 
 - `recognized OpenCode server failure becomes bounded structured diagnostics` (`:95`)
 - `ordinary task failure is not misclassified and continuation stays explicit` (`:114`)

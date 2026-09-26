@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import * as nodeFs from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -7,6 +8,7 @@ import { persistedAgentId, procStartTicks } from './process.js';
 
 const LOCK_RETRY_MS = 25;
 const LOCK_ATTEMPTS = 400;
+const LOCK_TOKEN = /^[0-9a-f]{32}$/;
 
 export interface StoreFs {
   closeSync: typeof nodeFs.closeSync;
@@ -202,6 +204,12 @@ export function writeMeta(agentId: string, meta: AgentMetadata, options: StatePa
 interface LockOwner {
   pid: number;
   startTicks: number | null;
+  // Identifies one acquisition, not one process. pid/startTicks are process
+  // identity, so a still-live process that re-acquires after a delete/re-create
+  // cycle would otherwise produce a byte-identical record; the token keeps every
+  // acquisition distinguishable. Absent in records written before tokens existed,
+  // which are then distinguished by raw content.
+  token: string | null;
 }
 
 type LockOwnerRecord =
@@ -236,11 +244,22 @@ function parseLockOwner(path: string, fs: StoreFs): LockOwnerRecord {
   ) {
     return { state: 'malformed' };
   }
+  if (record.token !== undefined && (typeof record.token !== 'string' || !LOCK_TOKEN.test(record.token))) {
+    return { state: 'malformed' };
+  }
   return {
     state: 'valid',
-    owner: { pid: record.pid, startTicks: record.startTicks as number | null },
+    owner: { pid: record.pid, startTicks: record.startTicks as number | null, token: (record.token as string) ?? null },
     raw,
   };
+}
+
+// Two records name the same acquisition only when they share a token. Records
+// without a token predate acquisition tokens, so they fall back to exact-content
+// identity, which is all that can be established about them.
+function sameAcquisition(left: LockOwner, right: LockOwner): boolean {
+  if (left.token !== null && right.token !== null) return left.token === right.token;
+  return `${left.pid}/${left.startTicks}` === `${right.pid}/${right.startTicks}`;
 }
 
 function lockOwnerAlive(owner: LockOwner): boolean {
@@ -253,7 +272,7 @@ function lockOwnerAlive(owner: LockOwner): boolean {
   return procStartTicks(owner.pid) === owner.startTicks;
 }
 
-async function acquireLock(path: string, fs: StoreFs): Promise<{ fd: number; raw: string }> {
+async function acquireLock(path: string, fs: StoreFs): Promise<{ fd: number; raw: string; owner: LockOwner }> {
   for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
     let fd: number;
     try {
@@ -271,10 +290,10 @@ async function acquireLock(path: string, fs: StoreFs): Promise<{ fd: number; raw
       if (observed.state === 'valid' && !lockOwnerAlive(observed.owner)) {
         // Re-read before unlinking: between the observation and this point another
         // owner may have reclaimed the same stale lock and installed its own. Only
-        // the exact stale record we judged dead may be removed.
+        // the exact stale acquisition we judged dead may be removed.
         const current = parseLockOwner(path, fs);
         if (current.state === 'missing') continue;
-        if (current.state !== 'valid' || current.raw !== observed.raw) {
+        if (current.state !== 'valid' || !sameAcquisition(current.owner, observed.owner)) {
           await sleep(LOCK_RETRY_MS);
           continue;
         }
@@ -292,35 +311,46 @@ async function acquireLock(path: string, fs: StoreFs): Promise<{ fd: number; raw
       continue;
     }
 
-    const owner: LockOwner = { pid: process.pid, startTicks: procStartTicks(process.pid) };
+    const owner: LockOwner = {
+      pid: process.pid,
+      startTicks: procStartTicks(process.pid),
+      token: randomBytes(16).toString('hex'),
+    };
     const raw = JSON.stringify(owner);
     try {
       fs.writeFileSync(fd, raw, 'utf8');
       fs.fsyncSync(fd);
-      return { fd, raw };
+      return { fd, raw, owner };
     } catch (error) {
       try { fs.closeSync(fd); } catch {}
-      try { fs.unlinkSync(path); } catch {}
+      // Only clean up while the path still holds the half-written record this
+      // acquisition produced. A delete/re-create cycle during the failed write
+      // can leave another owner's live lock here, which must survive.
+      const partial = parseLockOwner(path, fs);
+      if (partial.state !== 'valid' || sameAcquisition(partial.owner, owner)) {
+        try { fs.unlinkSync(path); } catch {}
+      }
       throw new MetadataLockError(`failed to initialize metadata lock: ${path}`, { cause: error });
     }
   }
   throw new MetadataLockError(`timed out acquiring Antonina metadata lock: ${path}`);
 }
 
-function releaseLock(path: string, fd: number, raw: string, fs: StoreFs): void {
+function releaseLock(path: string, fd: number, held: LockOwner, raw: string, fs: StoreFs): void {
   try {
     fs.closeSync(fd);
   } catch (error) {
     throw new MetadataLockError(`failed to close metadata lock: ${path}`, { cause: error });
   }
-  // Unlink by path is only safe while the path still names the lock this owner
-  // created. Deleting and re-creating an agent directory, or any other owner
-  // reclaiming, can replace the file at this path while we are still inside the
-  // critical section; unlinking then deletes a live lock we do not own. Re-read
-  // and remove only the exact record we wrote, mirroring the reclaim's re-read.
+  // Unlink by path is only safe while the path still names this acquisition. The
+  // agent directory being deleted and re-created, or another owner reclaiming,
+  // can replace the file at this path while we are still inside the critical
+  // section; if the replacement belongs to the same still-live process, pid and
+  // startTicks alone cannot tell the two acquisitions apart, so compare the
+  // acquisition token too and leave a lock we no longer hold in place.
   const current = parseLockOwner(path, fs);
   if (current.state === 'missing') return;
-  if (current.state !== 'valid' || current.raw !== raw) return;
+  if (current.state !== 'valid' || !sameAcquisition(current.owner, held) || current.raw !== raw) return;
   try {
     fs.unlinkSync(path);
   } catch (error) {
@@ -340,7 +370,7 @@ export async function withAgentLock<T>(
   try {
     return await fn();
   } finally {
-    releaseLock(path, held.fd, held.raw, fs);
+    releaseLock(path, held.fd, held.owner, held.raw, fs);
   }
 }
 

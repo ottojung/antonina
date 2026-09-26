@@ -309,6 +309,47 @@ test('releasing a lock never deletes a lock another owner installed at the same 
   t.after(() => nodeFs.rmSync(lockPath, { force: true }));
 });
 
+test('releasing a lock never deletes a replacement lock held by the same process', async (t) => {
+  const options = root(t);
+  createAgentDirectory('d13', options);
+  writeMeta('d13', idleMeta('d13', '/tmp', null, 5), options);
+  const lockPath = join(agentDir('d13', options), '.lock');
+
+  // A second acquisition by this same still-live process replaces the lock while
+  // this owner is still inside the critical section. Releasing must not unlink it.
+  let replacementRaw = null;
+  const unlinked = [];
+  const replacing = storeFs({
+    closeSync: (fd) => {
+      const mine = JSON.parse(nodeFs.readFileSync(lockPath, 'utf8'));
+      // The replacement is a second acquisition by this same still-live process:
+      // same pid, same start ticks, and a different acquisition identity. The
+      // only field allowed to differ is the one naming the acquisition itself, so
+      // if that field is missing the replacement is byte-identical -- exactly the
+      // case the release path must still refuse to unlink.
+      const replacement = { ...mine };
+      for (const key of Object.keys(replacement)) {
+        if (key !== 'pid' && key !== 'startTicks') replacement[key] = 'b'.repeat(32);
+      }
+      replacementRaw = JSON.stringify(replacement);
+      assert.equal(replacement.pid, mine.pid);
+      assert.equal(replacement.startTicks, mine.startTicks);
+      nodeFs.writeFileSync(lockPath, replacementRaw);
+      return nodeFs.closeSync(fd);
+    },
+    unlinkSync: (path, ...rest) => {
+      if (String(path).endsWith('.lock')) unlinked.push(nodeFs.readFileSync(path, 'utf8'));
+      return nodeFs.unlinkSync(path, ...rest);
+    },
+  });
+
+  const result = await withAgentLock('d13', () => 'ok', { ...options, fs: replacing });
+  assert.equal(result, 'ok');
+  assert.deepEqual(unlinked, []);
+  assert.equal(nodeFs.readFileSync(lockPath, 'utf8'), replacementRaw);
+  t.after(() => nodeFs.rmSync(lockPath, { force: true }));
+});
+
 test('concurrent in-process updates serialize through the lock file', async (t) => {
   const options = root(t);
   createAgentDirectory('cc', options);

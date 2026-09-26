@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, fstatSync, mkdirSync, openSync } from 'node:fs';
+import { closeSync, fstatSync, openSync } from 'node:fs';
 import { constants } from 'node:os';
 
 import { backendRetryDelay, buildAgentCommand, classifyBackendFailure, discoverSessionId, type BackendError } from './backend.js';
@@ -235,7 +235,6 @@ async function runInvocation(
   while (true) {
     const invocationId = randomBytes(16).toString('hex');
     const directory = agentDir(agentId, options);
-    mkdirSync(directory, { recursive: true });
     const logFile = logPath(agentId, options);
     const fd = openSync(logFile, 'a', 0o600);
     const invocationLogStart = fstatSync(fd).size;
@@ -272,19 +271,57 @@ async function runInvocation(
       }, options);
       return false;
     }
-    let accepted: boolean;
-    try {
-      accepted = await recordSpawned(agentId, pid, procStartTicks(pid), invocationId, options);
-    } catch (error) {
-      try { process.kill(-pid, 'SIGKILL'); } catch {}
-      throw error;
-    }
-    if (!accepted) {
-      try { process.kill(-pid, 'SIGKILL'); } catch {}
-      return false;
+    const resultPromise = childResult(child, agentId, options);
+    const startTicks = procStartTicks(pid);
+
+    let result: ChildResult;
+    if (startTicks === null) {
+      const quick = await Promise.race([
+        resultPromise.then((value) => ({ done: true as const, value })),
+        new Promise<{ done: false }>((resolve) => setTimeout(() => resolve({ done: false }), 25)),
+      ]);
+      if (quick.done) {
+        // The backend finished before /proc identity could be captured. There
+        // is no live process left to control, so finalize the observed result
+        // without persisting a partial identity.
+        result = quick.value;
+      } else {
+        // A still-running process without durable identity cannot safely be
+        // managed. Kill the process group and fail this accepted invocation.
+        try { process.kill(-pid, 'SIGKILL'); } catch {}
+        result = await resultPromise;
+        const signal = signalNumber(result.signal);
+        const code = result.code ?? (signal === null ? 1 : -signal);
+        await updateMeta(agentId, (current) => {
+          finalizeTerminal(
+            current,
+            'failed',
+            Date.now() / 1000,
+            code,
+            signal,
+            'could not establish canonical OpenCode process identity',
+          );
+          setActiveRunner(current, false);
+        }, options);
+        return false;
+      }
+    } else {
+      let accepted: boolean;
+      try {
+        accepted = await recordSpawned(agentId, pid, startTicks, invocationId, options);
+      } catch (error) {
+        try { process.kill(-pid, 'SIGKILL'); } catch {}
+        await resultPromise.catch(() => undefined);
+        throw error;
+      }
+      if (!accepted) {
+        try { process.kill(-pid, 'SIGKILL'); } catch {}
+        await resultPromise.catch(() => undefined);
+        return false;
+      }
+      result = await resultPromise;
     }
 
-    const result = await childResult(child, agentId, options);
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);
     const backendError = classifyBackendFailure(logFile, invocationLogStart, code, isContinue);

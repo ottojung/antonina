@@ -19,6 +19,7 @@ import {
   queueSteer,
   reconcileDeadMeta,
   reservationInFlight,
+  setActiveRunner,
   signalInvocation,
   waitForInvocationGone,
 } from '../../agent-runtime/src/lifecycle.js';

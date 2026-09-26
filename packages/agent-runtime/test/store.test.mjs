@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
+import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import {
   MetadataLockError,
   MetadataReadError,
@@ -274,6 +275,38 @@ test('reclaiming a stale lock never deletes a lock installed by another owner', 
   assert.equal(result, 'ok');
   assert.equal(hijacked, true);
   assert.equal(unlinked.includes(foreignRaw), false);
+});
+
+test('releasing a lock never deletes a lock another owner installed at the same path', async (t) => {
+  const options = root(t);
+  createAgentDirectory('d12', options);
+  writeMeta('d12', idleMeta('d12', '/tmp', null, 5), options);
+  const lockPath = join(agentDir('d12', options), '.lock');
+  const foreignRaw = JSON.stringify({ pid: process.pid, startTicks: (procStartTicks(process.pid) ?? 0) + 1 });
+
+  // The agent directory is deleted and re-created (a supported delete/new cycle)
+  // while this owner is inside the critical section, and the new directory's
+  // lock belongs to another live owner. Releasing must not unlink it.
+  const unlinked = [];
+  const replacing = storeFs({
+    closeSync: (fd) => {
+      // The agent directory was deleted and re-created by another owner while
+      // this owner was inside the critical section; the file at the path is now
+      // the new owner's live lock, not the one this descriptor was opened on.
+      nodeFs.writeFileSync(lockPath, foreignRaw);
+      return nodeFs.closeSync(fd);
+    },
+    unlinkSync: (path, ...rest) => {
+      if (String(path).endsWith('.lock')) unlinked.push(nodeFs.readFileSync(path, 'utf8'));
+      return nodeFs.unlinkSync(path, ...rest);
+    },
+  });
+
+  const result = await withAgentLock('d12', () => 'ok', { ...options, fs: replacing });
+  assert.equal(result, 'ok');
+  assert.deepEqual(unlinked, []);
+  assert.equal(nodeFs.readFileSync(lockPath, 'utf8'), foreignRaw);
+  t.after(() => nodeFs.rmSync(lockPath, { force: true }));
 });
 
 test('concurrent in-process updates serialize through the lock file', async (t) => {

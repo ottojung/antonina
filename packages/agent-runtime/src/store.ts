@@ -253,7 +253,7 @@ function lockOwnerAlive(owner: LockOwner): boolean {
   return procStartTicks(owner.pid) === owner.startTicks;
 }
 
-async function acquireLock(path: string, fs: StoreFs): Promise<number> {
+async function acquireLock(path: string, fs: StoreFs): Promise<{ fd: number; raw: string }> {
   for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
     let fd: number;
     try {
@@ -293,10 +293,11 @@ async function acquireLock(path: string, fs: StoreFs): Promise<number> {
     }
 
     const owner: LockOwner = { pid: process.pid, startTicks: procStartTicks(process.pid) };
+    const raw = JSON.stringify(owner);
     try {
-      fs.writeFileSync(fd, JSON.stringify(owner), 'utf8');
+      fs.writeFileSync(fd, raw, 'utf8');
       fs.fsyncSync(fd);
-      return fd;
+      return { fd, raw };
     } catch (error) {
       try { fs.closeSync(fd); } catch {}
       try { fs.unlinkSync(path); } catch {}
@@ -306,12 +307,20 @@ async function acquireLock(path: string, fs: StoreFs): Promise<number> {
   throw new MetadataLockError(`timed out acquiring Antonina metadata lock: ${path}`);
 }
 
-function releaseLock(path: string, fd: number, fs: StoreFs): void {
+function releaseLock(path: string, fd: number, raw: string, fs: StoreFs): void {
   try {
     fs.closeSync(fd);
   } catch (error) {
     throw new MetadataLockError(`failed to close metadata lock: ${path}`, { cause: error });
   }
+  // Unlink by path is only safe while the path still names the lock this owner
+  // created. Deleting and re-creating an agent directory, or any other owner
+  // reclaiming, can replace the file at this path while we are still inside the
+  // critical section; unlinking then deletes a live lock we do not own. Re-read
+  // and remove only the exact record we wrote, mirroring the reclaim's re-read.
+  const current = parseLockOwner(path, fs);
+  if (current.state === 'missing') return;
+  if (current.state !== 'valid' || current.raw !== raw) return;
   try {
     fs.unlinkSync(path);
   } catch (error) {
@@ -327,11 +336,11 @@ export async function withAgentLock<T>(
 ): Promise<T> {
   const fs = filesystem(options);
   const path = join(agentDir(agentId, options), '.lock');
-  const fd = await acquireLock(path, fs);
+  const held = await acquireLock(path, fs);
   try {
     return await fn();
   } finally {
-    releaseLock(path, fd, fs);
+    releaseLock(path, held.fd, held.raw, fs);
   }
 }
 

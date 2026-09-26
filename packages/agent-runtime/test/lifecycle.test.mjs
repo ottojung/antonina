@@ -119,3 +119,19 @@ test('dead running metadata reconciles to failed once no runner or reservation c
   assert.equal(meta.active_runner, false);
   assert.match(String(meta.error), /disappeared/);
 });
+
+
+test('partial legacy invocation identity never authorizes signalling', (t) => {
+  const root = procRoot(t);
+  const calls = [];
+  const legacy = {
+    id: 'a11d',
+    pid: 4242,
+    start_time: 1234,
+  };
+  assert.equal(signalInvocation(legacy, 'SIGTERM', {
+    procRoot: root,
+    signal: (pid, signal) => { calls.push([pid, signal]); return true; },
+  }), false);
+  assert.deepEqual(calls, []);
+});

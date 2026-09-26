@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 
 import { DEFAULT_VARIANT, persistedAgentCwd, persistedNativeSessionId, persistedVariant, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
 
@@ -55,20 +56,37 @@ interface SessionRow {
 
 /**
  * Resolves the OpenCode executable. Antonina looks the backend up by bare
- * name on `PATH` by default. `ANTONINA_OPENCODE_BIN` is a supported override
- * for installations where the executable is not reachable by name (or where
- * the caller must pin an exact path). It is a first-class configuration
- * setting, not a test hook: an absolute path is used verbatim and is never
- * re-resolved against `PATH`.
+ * name on `PATH` by default, which is the production behaviour.
+ *
+ * `ANTONINA_OPENCODE_BIN` is a test seam, not a supported user setting: it is
+ * how the test suites inject the absolute path of their own fake backend so
+ * the backend spawn site can be pinned to a known program. It exists as a
+ * production parameter because there is exactly one backend spawn seam
+ * (`buildAgentCommand` and the two `spawnSync` probes) and it cannot be
+ * reached from a test without it. There is no user-facing documentation of
+ * this variable and none is intended; a configuration setting would be a
+ * separate front with a README and an intent record.
+ *
+ * For that reason the value is *required* to be absolute. A bare name or a
+ * relative path would be handed to `spawn`, which would then resolve it
+ * against `PATH` (or against the cwd) — the exact silent fall-through to a
+ * real host backend that this seam exists to rule out — so such a value is
+ * refused rather than honoured. The absolute value is used verbatim and is
+ * never re-resolved against `PATH`.
  */
 export function resolveOpencode(env: Record<string, string | undefined> = process.env): string {
   const configured = env[OPENCODE_BIN_ENV];
   if (configured === undefined) return DEFAULT_OPENCODE_BIN;
-  if (typeof configured !== 'string' || configured.length === 0) {
-    throw new Error(`${OPENCODE_BIN_ENV} must be a non-empty executable path`);
+  if (configured.length === 0) {
+    throw new Error(`${OPENCODE_BIN_ENV} must be a non-empty absolute executable path`);
   }
   if (configured !== configured.trim() || configured.startsWith('-') || configured.includes('\0')) {
     throw new Error(`${OPENCODE_BIN_ENV} must be an executable path without surrounding whitespace`);
+  }
+  if (!isAbsolute(configured)) {
+    throw new Error(
+      `${OPENCODE_BIN_ENV} must be an absolute path; a relative value would be resolved against PATH or the cwd instead of pinning the executable`,
+    );
   }
   return configured;
 }

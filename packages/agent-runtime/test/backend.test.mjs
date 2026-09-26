@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -41,7 +41,26 @@ function execProbe(parent, name) {
   return { ok: true, reason: 'exec ok' };
 }
 
-function selectExecRoot(prefix, parents = [tmpdir(), REPO_FIXTURE_PARENT], probe = execProbe) {
+// Removing the repo-local fixture parent is best effort, and only ever happens
+// once it is empty: rmdir fails with ENOTEMPTY while a sibling suite's root is
+// still live, which is expected. Any other failure is a real leftover and is
+// reported rather than swallowed. (`rmSync(path, { recursive: false })` cannot
+// be used here: on a directory it fails EISDIR on Node 22+, which is why the
+// earlier bare `catch {}` never removed anything.)
+function pruneFixtureParent(t) {
+  try {
+    rmdirSync(REPO_FIXTURE_PARENT);
+  } catch (error) {
+    if (error.code === 'ENOTEMPTY' || error.code === 'ENOENT') return;
+    t?.diagnostic(`fixture parent ${REPO_FIXTURE_PARENT} left behind: ${error.message}`);
+  }
+}
+
+// The root's cleanup is registered here, inside selectExecRoot, at the moment
+// the directory is created and before the no-exec throw path can be reached:
+// a probe failure, a mid-suite abort or a stray file must not leave a directory
+// in the worktree.
+function selectExecRoot(prefix, parents = [tmpdir(), REPO_FIXTURE_PARENT], probe = execProbe, t) {
   const failures = [];
   for (const parent of parents) {
     try {
@@ -51,9 +70,17 @@ function selectExecRoot(prefix, parents = [tmpdir(), REPO_FIXTURE_PARENT], probe
       continue;
     }
     const outcome = probe(parent, prefix);
-    if (outcome.ok) return mkdtempSync(join(parent, prefix));
+    if (outcome.ok) {
+      const root = mkdtempSync(join(parent, prefix));
+      t?.after(() => {
+        rmSync(root, { recursive: true, force: true });
+        pruneFixtureParent(t);
+      });
+      return root;
+    }
     failures.push(`${parent}: ${outcome.reason}`);
   }
+  pruneFixtureParent(t);
   const error = new Error(
     `no exec-capable fixture directory for the fake opencode; tried: ${failures.join('; ')}`,
   );
@@ -62,12 +89,7 @@ function selectExecRoot(prefix, parents = [tmpdir(), REPO_FIXTURE_PARENT], probe
 }
 
 function fixture(t) {
-  const root = selectExecRoot('antonina-backend-');
-  t.after(() => {
-    rmSync(root, { recursive: true, force: true });
-    try { rmSync(REPO_FIXTURE_PARENT, { recursive: false }); } catch {}
-  });
-  return root;
+  return selectExecRoot('antonina-backend-', undefined, undefined, t);
 }
 
 test('recognized OpenCode server failure becomes bounded structured diagnostics', (t) => {
@@ -223,6 +245,19 @@ test('a malformed backend override is rejected instead of silently ignored', () 
       `expected ${JSON.stringify(value)} to be rejected`,
     );
   }
+});
+
+test('a non-absolute backend override is refused, so it cannot fall back to PATH', () => {
+  // spawn() would resolve these against PATH (or the cwd) and could run a real
+  // host backend, which is the defect the override exists to prevent.
+  for (const value of ['opencode', './bin/opencode', '../bin/opencode', 'bin/opencode']) {
+    assert.throws(
+      () => resolveOpencode({ [OPENCODE_BIN_ENV]: value }),
+      new RegExp(`${OPENCODE_BIN_ENV} must be an absolute path`),
+      `expected ${JSON.stringify(value)} to be rejected`,
+    );
+  }
+  assert.equal(resolveOpencode({ [OPENCODE_BIN_ENV]: '/opt/opencode/bin/opencode' }), '/opt/opencode/bin/opencode');
 });
 
 test('fixture guard: a non-exec-able fixture location is a named failure, never a substitution', () => {

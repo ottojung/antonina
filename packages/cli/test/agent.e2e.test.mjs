@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  rmdirSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -41,7 +42,26 @@ function candidateParents() {
   return [tmpdir(), REPO_FIXTURE_PARENT];
 }
 
-function selectExecRoot(prefix, parents = candidateParents(), probe = execProbe) {
+// Removing the repo-local fixture parent is best effort, and only ever happens
+// once it is empty: rmdir fails with ENOTEMPTY while a sibling suite's root is
+// still live, which is expected. Any other failure is a real leftover and is
+// reported rather than swallowed. (`rmSync(path, { recursive: false })` cannot
+// be used here: on a directory it fails EISDIR on Node 22+, which is why the
+// earlier bare `catch {}` never removed anything.)
+function pruneFixtureParent(t) {
+  try {
+    rmdirSync(REPO_FIXTURE_PARENT);
+  } catch (error) {
+    if (error.code === 'ENOTEMPTY' || error.code === 'ENOENT') return;
+    t?.diagnostic(`fixture parent ${REPO_FIXTURE_PARENT} left behind: ${error.message}`);
+  }
+}
+
+// The root's cleanup is registered here, inside selectExecRoot, at the moment
+// the directory is created and before the no-exec throw path can be reached:
+// a probe failure, a mid-suite abort or a stray file must not leave a directory
+// in the worktree.
+function selectExecRoot(prefix, parents = candidateParents(), probe = execProbe, t) {
   const failures = [];
   for (const parent of parents) {
     try {
@@ -51,9 +71,17 @@ function selectExecRoot(prefix, parents = candidateParents(), probe = execProbe)
       continue;
     }
     const outcome = probe(parent, prefix);
-    if (outcome.ok) return mkdtempSync(join(parent, prefix));
+    if (outcome.ok) {
+      const root = mkdtempSync(join(parent, prefix));
+      t?.after(() => {
+        rmSync(root, { recursive: true, force: true });
+        pruneFixtureParent(t);
+      });
+      return root;
+    }
     failures.push(`${parent}: ${outcome.reason}`);
   }
+  pruneFixtureParent(t);
   const error = new Error(
     `no exec-capable fixture directory for the fake opencode; tried: ${failures.join('; ')}`,
   );
@@ -62,14 +90,7 @@ function selectExecRoot(prefix, parents = candidateParents(), probe = execProbe)
 }
 
 function fixture(t) {
-  const root = selectExecRoot('antonina-cli-e2e-');
-  // Registered before anything can fail, so a broken fixture never leaks a
-  // directory into the worktree.
-  t.after(() => {
-    rmSync(root, { recursive: true, force: true });
-    // Best effort: drop the repo-local fixture parent again once it is empty.
-    try { rmSync(REPO_FIXTURE_PARENT, { recursive: false }); } catch {}
-  });
+  const root = selectExecRoot('antonina-cli-e2e-', undefined, undefined, t);
   const bin = join(root, 'bin');
   const work = join(root, 'work');
   mkdirSync(bin);

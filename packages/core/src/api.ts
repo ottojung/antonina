@@ -590,3 +590,4 @@ export type {
   VerifiedAuthority,
   VerifiedBoardState,
 } from './operations.js';
+export type { CandidatePathFacts } from './managed-roots.js';

@@ -7,7 +7,7 @@
   },
   "scripts": {
     "bootstrap": "npm ci --prefix web",
-    "typecheck": "./web/node_modules/.bin/tsc -p packages/core/tsconfig.json && ./web/node_modules/.bin/tsc -p packages/agent-runtime/tsconfig.json && ./web/node_modules/.bin/tsc -p packages/cli/tsconfig.json",
+    "typecheck": "./web/node_modules/.bin/tsc -p packages/core/tsconfig.json && ./web/node_modules/.bin/tsc -p packages/agent-runtime/tsconfig.json && ./web/node_modules/.bin/tsc -p packages/agent-runtime/tsconfig.conformance.json && ./web/node_modules/.bin/tsc -p packages/cli/tsconfig.json",
     "test:core": "node --test packages/core/test/*.test.mjs",
     "test:runtime": "node --test packages/agent-runtime/test/*.test.mjs",
     "test:cli": "node --test packages/cli/test/*.test.mjs",

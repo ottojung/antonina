@@ -12,6 +12,15 @@ import { basename, dirname, join } from 'node:path';
  * names no `node:` module; this is the node-side implementation of the recipe
  * `CandidatePathFacts` documents, and it is what a collector passes as the
  * required facts gatherer to `recheckCollectionClaim`.
+ *
+ * The duplication is compiler-checked, not merely described: the two
+ * declarations are asserted mutually assignable in
+ * `../conformance/candidate-path-facts.conformance.ts`, which `npm run
+ * typecheck` builds. A field added, removed, or retyped on either side fails
+ * that check. What the compiler does *not* enforce is that this remains a
+ * faithful restatement of the recipe: only the shape is checked, so the comments
+ * above and in core's `managed-roots.ts` remain the only account of how the
+ * facts are gathered.
  */
 export interface CandidatePathFacts {
   /** The candidate path, exactly as the board recorded it. */

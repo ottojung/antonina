@@ -42,6 +42,8 @@ antonina agent log --id <agent-id>
 antonina agent wait --id <agent-id> --timeout <seconds>
 ```
 
+Exploit parallelism whenever useful. If several investigations, implementations, reviews, or other work items are materially independent, prefer running multiple Antonina agents concurrently in separate worktrees rather than serializing them without reason. Look for opportunities to split work into independent fronts, but avoid spawning agents that would merely duplicate the same work or contend on the same files.
+
 Use direct shell only for tiny deterministic observations or coordination glue. Record the Antonina agent ID before invocation, retain durable logs, and poll or inspect status and logs while work is nonterminal. Never treat a progress message or green test as completion by itself.
 
 Before relying on a durable host path, follow [resources.md](resources.md): register it with `antonina board resource add`, verify it, and preserve open dependencies until handoff or completion.

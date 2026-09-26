@@ -297,3 +297,75 @@ test('prompt recovers an existing OpenCode session when durable session id was l
   const calls = readFileSync(env.ANTONINA_TEST_CALLS, 'utf8');
   assert.match(calls, /run --auto --session ses_fake .* recovered/);
 });
+
+
+test('agent ids canonicalize at every CLI boundary and preserve exit-code distinctions', (t) => {
+  const { root, work, env } = fixture(t);
+  const created = run(['agent', 'new', '--id', 'A11CE', '--cwd', work], env);
+  assert.equal(created.status, 0, created.stderr);
+  assert.doesNotThrow(() => readFileSync(metaPath(root, 'a11ce'), 'utf8'));
+
+  for (const id of ['a11ce', 'A11CE', 'a11Ce']) {
+    const status = run(['agent', 'status', '--id', id, '--json'], env);
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(JSON.parse(status.stdout).id, 'a11ce');
+  }
+
+  assert.equal(run(['agent', 'status', '--id', 'not-hex', '--json'], env).status, 2);
+  assert.equal(run(['agent', 'status', '--id', 'deadbeef', '--json'], env).status, 3);
+});
+
+test('list and status sanitize malformed persisted summary metadata', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', 'cab1e', '--cwd', work], env).status, 0);
+  const path = metaPath(root, 'cab1e');
+  const meta = JSON.parse(readFileSync(path, 'utf8'));
+  Object.assign(meta, {
+    created_at: {},
+    started_at: 'bad',
+    finished_at: false,
+    last_activity_at: -1,
+    prompt_count: false,
+    cwd: 0,
+    title: {},
+    exit_code: '7',
+    exit_signal: 0,
+    variant: '',
+  });
+  writeFileSync(path, JSON.stringify(meta));
+
+  const status = run(['agent', 'status', '--id', 'cab1e', '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  const body = JSON.parse(status.stdout);
+  for (const field of [
+    'created_at', 'started_at', 'finished_at', 'last_activity_at',
+    'prompt_count', 'cwd', 'title', 'exit_code', 'exit_signal', 'variant',
+  ]) {
+    assert.ok(body.metadata_errors.includes(field), `missing metadata error for ${field}`);
+  }
+  assert.equal(body.created_at, null);
+  assert.equal(body.started_at, null);
+  assert.equal(body.finished_at, null);
+  assert.equal(body.last_activity_at, null);
+  assert.equal(body.prompts, null);
+  assert.equal(body.cwd, null);
+  assert.equal(body.title, null);
+  assert.equal(body.exit_code, null);
+  assert.equal(body.exit_signal, null);
+  assert.equal(body.variant, null);
+
+  const textStatus = run(['agent', 'status', '--id', 'cab1e'], env);
+  assert.equal(textStatus.status, 0, textStatus.stderr);
+  assert.match(textStatus.stdout, /<invalid>/);
+  assert.match(textStatus.stdout, /malformed persisted summary metadata/);
+
+  const listed = run(['agent', 'list', '--json'], env);
+  assert.equal(listed.status, 0, listed.stderr);
+  const entry = JSON.parse(listed.stdout).agents.find((value) => value.id === 'cab1e');
+  assert.equal(entry.created_at, null);
+  assert.equal(entry.prompts, null);
+  assert.equal(entry.cwd, null);
+  assert.equal(entry.title, null);
+  assert.equal(entry.finished_at, null);
+  assert.equal(entry.last_activity_at, null);
+});

@@ -10,8 +10,10 @@ import {
 // answers only "may this path be touched", and it answers purely. These tests
 // name the filesystem facts directly instead of creating directories, so every
 // refusal rule is exercised without touching a real tree.
-const rootsOf = (paths) => {
-  const result = validateManagedRoots(paths);
+const input = (spelled, resolved = spelled) => ({ spelled, resolved });
+
+const rootsOf = (inputs) => {
+  const result = validateManagedRoots(inputs);
   assert.equal(result.ok, true, JSON.stringify(result));
   return result.roots;
 };
@@ -37,55 +39,112 @@ const refusalOf = (roots, path, overrides) => {
 
 test('a root set refuses a non-canonical root and says which rule it broke', () => {
   assert.deepEqual(validateManagedRoots([]).defect, { kind: 'empty' });
-  assert.deepEqual(validateManagedRoots(['workspace']).defect, {
+  assert.deepEqual(validateManagedRoots([input('workspace')]).defect, {
     kind: 'path-form', path: 'workspace', defect: 'relative',
   });
-  assert.deepEqual(validateManagedRoots(['/workspace/../etc']).defect, {
+  assert.deepEqual(validateManagedRoots([input('/workspace/../etc')]).defect, {
     kind: 'path-form', path: '/workspace/../etc', defect: 'parent-traversal',
   });
-  assert.deepEqual(validateManagedRoots(['/workspace/antonina/']).defect, {
+  assert.deepEqual(validateManagedRoots([input('/workspace/antonina/')]).defect, {
     kind: 'path-form', path: '/workspace/antonina/', defect: 'non-canonical',
   });
-  assert.deepEqual(validateManagedRoots(['']).defect, {
+  assert.deepEqual(validateManagedRoots([input('')]).defect, {
     kind: 'path-form', path: '', defect: 'empty',
   });
 });
 
+test('a root set refuses a root whose resolved form is not canonical', () => {
+  assert.deepEqual(validateManagedRoots([input('/workspace', 'data/work')]).defect, {
+    kind: 'path-form', path: 'data/work', defect: 'relative',
+  });
+  assert.deepEqual(validateManagedRoots([input('/workspace', '/workspace/../data')]).defect, {
+    kind: 'path-form', path: '/workspace/../data', defect: 'parent-traversal',
+  });
+  assert.deepEqual(validateManagedRoots([{ spelled: '/workspace' }]).defect, { kind: 'malformed-root' });
+});
+
 test('a root set refuses a root nested inside another configured root', () => {
-  const result = validateManagedRoots(['/workspace/antonina', '/workspace/antonina/inner']);
+  const result = validateManagedRoots([input('/workspace/antonina'), input('/workspace/antonina/inner')]);
   assert.equal(result.ok, false);
   assert.deepEqual(result.defect, {
     kind: 'nested', path: '/workspace/antonina/inner', within: '/workspace/antonina',
   });
   // A parent of another root is the same ambiguity, not a separate case.
-  const reversed = validateManagedRoots(['/workspace/antonina/inner', '/workspace/antonina']);
+  const reversed = validateManagedRoots([input('/workspace/antonina/inner'), input('/workspace/antonina')]);
   assert.deepEqual(reversed.defect, {
     kind: 'nested', path: '/workspace/antonina/inner', within: '/workspace/antonina',
+  });
+  // Two roots that are siblings once resolved are still ambiguous for a collector
+  // that acts in resolved coordinates, so nesting is refused there too.
+  const crossed = validateManagedRoots([
+    input('/workspace/antonina', '/data/work'),
+    input('/workspace/other', '/data/work/inner'),
+  ]);
+  assert.deepEqual(crossed.defect, {
+    kind: 'nested', path: '/workspace/other', within: '/workspace/antonina',
   });
 });
 
 test('a root set refuses the same root configured twice', () => {
-  const result = validateManagedRoots(['/workspace/antonina', '/workspace/antonina']);
+  const result = validateManagedRoots([input('/workspace/antonina'), input('/workspace/antonina')]);
   assert.deepEqual(result.defect, { kind: 'duplicate', path: '/workspace/antonina' });
+  // Two spelled roots that are different names for one directory are the same
+  // ambiguity in resolved coordinates.
+  const aliases = validateManagedRoots([
+    input('/workspace/antonina', '/data/work'),
+    input('/workspace/antonina-link', '/data/work'),
+  ]);
+  assert.deepEqual(aliases.defect, { kind: 'duplicate', path: '/data/work' });
 });
 
-test('a candidate inside a managed root is eligible and reports the resolved path', () => {
-  const roots = rootsOf(['/workspace/antonina']);
+test('an eligible candidate hands back one actionable path and no other', () => {
+  const roots = rootsOf(['/workspace/antonina'].map((path) => input(path)));
   const result = decide(roots, '/workspace/antonina/session-1');
   assert.deepEqual(result, {
     eligible: true,
     path: '/workspace/antonina/session-1',
-    root: { path: '/workspace/antonina' },
-    resolvedPath: '/workspace/antonina/session-1',
-    finalComponentIsSymlink: false,
+    root: { spelled: '/workspace/antonina', resolved: '/workspace/antonina' },
+    unlinkFinalComponent: false,
   });
+  // The only path a collector may act on is the spelled board-recorded path.
+  assert.deepEqual(Object.keys(result).sort(), ['eligible', 'path', 'root', 'unlinkFinalComponent']);
+});
+
+test('an eligible symlink is unlinked at the spelled path, never followed', () => {
+  const roots = rootsOf(['/workspace/antonina'].map((path) => input(path)));
+  const link = candidate('/workspace/antonina/link', {
+    finalComponentIsSymlink: true,
+    resolvedPath: '/workspace/antonina/session-1',
+  });
+  assert.deepEqual(evaluateManagedCandidate(roots, link), {
+    eligible: true,
+    path: '/workspace/antonina/link',
+    root: { spelled: '/workspace/antonina', resolved: '/workspace/antonina' },
+    unlinkFinalComponent: true,
+  });
+  // Even a link pointing at its own root stays eligible: the link is the
+  // target, and unlinking it leaves the root in place.
+  const linkToRoot = candidate('/workspace/antonina/link', {
+    finalComponentIsSymlink: true,
+    resolvedPath: '/workspace/antonina',
+  });
+  assert.equal(evaluateManagedCandidate(roots, linkToRoot).eligible, true);
 });
 
 test('a configured root is not collectible through the roots that define it', () => {
-  const roots = rootsOf(['/workspace/antonina']);
+  const roots = rootsOf(['/workspace/antonina'].map((path) => input(path)));
   assert.equal(refusalOf(roots, '/workspace/antonina'), 'candidate-is-managed-root');
+  // Resolving a candidate onto its own root is not the same thing as naming it:
+  // a symlink that points back at the root is unlinked, and the root survives.
+  assert.equal(
+    evaluateManagedCandidate(roots, candidate('/workspace/antonina/link', {
+      finalComponentIsSymlink: true,
+      resolvedPath: '/workspace/antonina',
+    })).eligible,
+    true,
+  );
 
-  const filesystemRoot = rootsOf(['/']);
+  const filesystemRoot = rootsOf(['/'].map((path) => input(path)));
   assert.equal(decide(filesystemRoot, '/workspace/antonina').eligible, true);
   assert.equal(refusalOf(filesystemRoot, '/'), 'candidate-is-managed-root');
   assert.equal(decide(filesystemRoot, '/workspace/foobar').eligible, true);
@@ -96,13 +155,13 @@ test('a configured root is not collectible through the roots that define it', ()
 });
 
 test('a candidate in no managed root is refused as unmanaged', () => {
-  const roots = rootsOf(['/workspace/antonina']);
+  const roots = rootsOf(['/workspace/antonina'].map((path) => input(path)));
   assert.equal(refusalOf(roots, '/etc/antonina'), 'outside-managed-roots');
   assert.equal(refusalOf(roots, '/home/dev/antonina'), 'outside-managed-roots');
 });
 
 test('a candidate that only shares a string prefix with a root is refused as a near miss', () => {
-  const roots = rootsOf(['/workspace/foo']);
+  const roots = rootsOf(['/workspace/foo'].map((path) => input(path)));
   assert.equal(refusalOf(roots, '/workspace/foobar'), 'near-miss-root-prefix');
   assert.equal(refusalOf(roots, '/workspace/foobar/nested'), 'near-miss-root-prefix');
   // One more separator is a real containment, not a near miss.
@@ -110,7 +169,7 @@ test('a candidate that only shares a string prefix with a root is refused as a n
 });
 
 test('an empty or relative candidate is refused before any containment is considered', () => {
-  const roots = rootsOf(['/workspace/antonina']);
+  const roots = rootsOf(['/workspace/antonina'].map((path) => input(path)));
   assert.deepEqual(refusalOf(roots, ''), { kind: 'candidate-path-form', defect: 'empty' });
   assert.deepEqual(refusalOf(roots, 'workspace/antonina/session-1'), {
     kind: 'candidate-path-form', defect: 'relative',
@@ -121,7 +180,7 @@ test('an empty or relative candidate is refused before any containment is consid
 });
 
 test('a candidate that walks up with `..` is refused even when it spells back into a root', () => {
-  const roots = rootsOf(['/workspace/antonina']);
+  const roots = rootsOf(['/workspace/antonina'].map((path) => input(path)));
   assert.deepEqual(refusalOf(roots, '/workspace/antonina/../etc'), {
     kind: 'candidate-path-form', defect: 'parent-traversal',
   });
@@ -133,7 +192,7 @@ test('a candidate that walks up with `..` is refused even when it spells back in
 });
 
 test('a non-canonical candidate spelling is refused', () => {
-  const roots = rootsOf(['/workspace/antonina']);
+  const roots = rootsOf(['/workspace/antonina'].map((path) => input(path)));
   assert.deepEqual(refusalOf(roots, '/workspace/antonina/./session-1'), {
     kind: 'candidate-path-form', defect: 'non-canonical',
   });
@@ -146,7 +205,7 @@ test('a non-canonical candidate spelling is refused', () => {
 });
 
 test('a candidate that resolves through a symlink out of its managed root is refused', () => {
-  const roots = rootsOf(['/workspace/antonina']);
+  const roots = rootsOf(['/workspace/antonina'].map((path) => input(path)));
   const escaping = candidate('/workspace/antonina/session-1', {
     resolvedPath: '/etc/antonina',
   });
@@ -160,11 +219,6 @@ test('a candidate that resolves through a symlink out of its managed root is ref
     finalComponentIsSymlink: true,
   });
   assert.equal(evaluateManagedCandidate(roots, quietLink).eligible, true);
-  const linkToParent = candidate('/workspace/antonina/session-1', {
-    finalComponentIsSymlink: true,
-    resolvedPath: '/workspace/antonina',
-  });
-  assert.equal(evaluateManagedCandidate(roots, linkToParent).eligible, true);
   const linkOut = candidate('/workspace/antonina/session-1', {
     finalComponentIsSymlink: true,
     resolvedPath: '/workspace/antonina-elsewhere/session-1',
@@ -175,23 +229,58 @@ test('a candidate that resolves through a symlink out of its managed root is ref
   );
 });
 
-test('a symlink that stays inside its managed root is eligible and hands back the target', () => {
-  const roots = rootsOf(['/workspace/antonina']);
-  const link = candidate('/workspace/antonina/link', {
-    finalComponentIsSymlink: true,
-    resolvedPath: '/workspace/antonina/session-1',
+test('a root under a symlinked ancestor is judged in resolved coordinates', () => {
+  // `/workspace` is a symlink to `/data/work`, so the root is reached by a name
+  // that shares no prefix with anything a candidate resolves to.
+  const roots = rootsOf([input('/workspace/antonina', '/data/work/antonina')]);
+  const inside = candidate('/workspace/antonina/session-1', {
+    resolvedPath: '/data/work/antonina/session-1',
+    parentResolvedPath: '/data/work/antonina',
   });
-  assert.deepEqual(evaluateManagedCandidate(roots, link), {
+  assert.deepEqual(evaluateManagedCandidate(roots, inside), {
     eligible: true,
-    path: '/workspace/antonina/link',
-    root: { path: '/workspace/antonina' },
-    resolvedPath: '/workspace/antonina/session-1',
-    finalComponentIsSymlink: true,
+    path: '/workspace/antonina/session-1',
+    root: { spelled: '/workspace/antonina', resolved: '/data/work/antonina' },
+    unlinkFinalComponent: false,
   });
+  // The root itself is still not collectible through the roots that define it.
+  assert.equal(
+    refusalOf(roots, '/workspace/antonina'),
+    'candidate-is-managed-root',
+  );
+  // A sibling directory under the same symlinked ancestor is genuinely outside.
+  assert.equal(
+    refusalOf(roots, '/workspace/other/session-1'),
+    'outside-managed-roots',
+  );
+  // A candidate that really does resolve out of the resolved root is still refused.
+  const escaping = candidate('/workspace/antonina/session-1', {
+    resolvedPath: '/data/work/elsewhere/session-1',
+    parentResolvedPath: '/data/work/antonina',
+  });
+  assert.equal(evaluateManagedCandidate(roots, escaping).refusal, 'symlink-escapes-managed-root');
+  // And a directory symlinked out from under the root is refused as an escape.
+  const reparented = candidate('/workspace/antonina/session-1', {
+    resolvedPath: '/data/work/antonina/session-1',
+    parentResolvedPath: '/var/elsewhere',
+  });
+  assert.equal(
+    evaluateManagedCandidate(roots, reparented).refusal,
+    'containing-directory-escapes-managed-root',
+  );
+  // Per-component containment still holds against a resolved root.
+  const nearMiss = rootsOf([input('/workspace/foo', '/data/work/foo')]);
+  assert.equal(
+    refusalOf(nearMiss, '/workspace/foobar', {
+      resolvedPath: '/data/work/foobar',
+      parentResolvedPath: '/data/work',
+    }),
+    'near-miss-root-prefix',
+  );
 });
 
 test('a candidate whose containing directory resolves out of the managed root is refused', () => {
-  const roots = rootsOf(['/workspace/antonina']);
+  const roots = rootsOf(['/workspace/antonina'].map((path) => input(path)));
   // The candidate resolves inside the root, but the directory holding it is
   // elsewhere, so the spelled path is not the location it claims to be.
   const reparented = candidate('/workspace/antonina/session-1', {
@@ -207,22 +296,11 @@ test('a candidate whose containing directory resolves out of the managed root is
     resolvedPath: '/workspace/antonina/link/session-1',
     parentResolvedPath: '/workspace/antonina/session-1',
   });
-  assert.equal(decide(roots, '/workspace/antonina/link/session-1', {
-    parentResolvedPath: '/workspace/antonina/session-1',
-  }).eligible, true);
   assert.equal(evaluateManagedCandidate(roots, reparentedIn).eligible, true);
 });
 
-test('with no managed root configured nothing is eligible, whatever the facts', () => {
-  const empty = { roots: [] };
-  assert.equal(
-    evaluateManagedCandidate(empty, candidate('/workspace/antonina/session-1')).refusal,
-    'no-managed-roots',
-  );
-});
-
 test('each candidate is judged only against the root it belongs to', () => {
-  const roots = rootsOf(['/workspace/a', '/srv/b']);
+  const roots = rootsOf(['/workspace/a', '/srv/b'].map((path) => input(path)));
   assert.equal(decide(roots, '/workspace/a/one').eligible, true);
   assert.equal(decide(roots, '/srv/b/one').eligible, true);
   assert.equal(refusalOf(roots, '/srv/a/one'), 'outside-managed-roots');

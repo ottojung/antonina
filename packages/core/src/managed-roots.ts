@@ -14,25 +14,55 @@ import { pathFormDefect, type PathFormDefect } from './model.js';
  * `CandidatePathFacts` for the facts a caller must gather first.
  */
 
-/** A managed collection root: an absolute canonical POSIX path Antonina manages. */
+/**
+ * A managed collection root, in both coordinate systems it needs.
+ *
+ * `spelled` is the path exactly as the host configured it and as the board
+ * records paths, so a candidate can be located inside it by name. `resolved` is
+ * that same directory after every symlink on the way to it has been followed;
+ * containment and escape questions are only answerable here, because a root
+ * reached through a symlinked ancestor (`/workspace` -> `/data/work`) shares no
+ * prefix with anything a candidate resolves to.
+ */
 export interface ManagedCollectionRoot {
-  readonly path: string;
+  /** The canonical absolute path as configured. */
+  readonly spelled: string;
+  /** The resolved absolute path of the same directory. */
+  readonly resolved: string;
+}
+
+/** One configured root, as a caller supplies it before validation. */
+export interface ManagedRootInput {
+  /** The root as configured, canonical and absolute. */
+  readonly spelled: string;
+  /** The resolved absolute path of the same directory. */
+  readonly resolved: string;
 }
 
 /** Why a configured root set cannot be used for collection at all. */
 export type ManagedRootDefect =
   | { readonly kind: 'empty' }
+  | { readonly kind: 'malformed-root' }
   | { readonly kind: 'path-form'; readonly path: string; readonly defect: PathFormDefect }
   | { readonly kind: 'duplicate'; readonly path: string }
   | { readonly kind: 'nested'; readonly path: string; readonly within: string };
 
+const MANAGED_ROOTS = Symbol('antonina.managedRoots');
+
 /**
- * A validated, frozen set of managed collection roots. A caller can only hold one
- * by passing `validateManagedRoots`, so an unusable root configuration cannot
- * reach the decision function as if it were usable.
+ * A validated, frozen set of managed collection roots.
+ *
+ * The unique symbol makes the value opaque: it is not exported, so no other
+ * module can name it and only `validateManagedRoots` can produce a
+ * `ManagedRoots`. An unusable root configuration therefore cannot reach the
+ * decision function as if it were usable.
  */
 export interface ManagedRoots {
+  readonly [MANAGED_ROOTS]: true;
+  /** The configured roots, in the order they were configured. */
   readonly roots: readonly ManagedCollectionRoot[];
+  /** The spelled root paths, computed once at validation time. */
+  readonly paths: readonly string[];
 }
 
 export type ManagedRootsResult =
@@ -41,8 +71,6 @@ export type ManagedRootsResult =
 
 /** Why a candidate path may not be touched. */
 export type ManagedPathRefusal =
-  /** No managed collection root is configured, so nothing is Antonina's to touch. */
-  | 'no-managed-roots'
   /** The candidate is empty, relative, contains `..`, or is otherwise not canonical. */
   | { readonly kind: 'candidate-path-form'; readonly defect: PathFormDefect }
   /** The candidate is canonical but lives in no managed collection root. */
@@ -74,23 +102,22 @@ export type ManagedPathRefusal =
 export type ManagedPathResult =
   | {
       readonly eligible: true;
-      /** The canonical path, unchanged. */
+      /**
+       * The only path a collector may act on: the candidate exactly as the board
+       * recorded it, unchanged. A collector is never handed a path spelled
+       * differently from the board-recorded one, so a name can never quietly
+       * come to mean some other directory.
+       */
       readonly path: string;
       /** The root the candidate was found in. */
       readonly root: ManagedCollectionRoot;
       /**
-       * The candidate's resolved path, which may differ from `path` when the
-       * candidate is itself a symlink pointing inside the managed root. The
-       * caller must remove the resolved path, never the spelled one, unless
-       * `finalComponentIsSymlink` says the candidate is the link.
+       * Whether the final component of the candidate is itself a symlink. An
+       * eligible symlink is unlinked at `path`, never followed and never recursed
+       * into: its target is inside the managed root, but recursing into it is not
+       * this decision's permission.
        */
-      readonly resolvedPath: string;
-      /**
-       * Whether the candidate is itself a symlink. An eligible symlink is
-       * unlinked, not followed: its target is inside the managed root, but
-       * recursing into it is not this decision's permission.
-       */
-      readonly finalComponentIsSymlink: boolean;
+      readonly unlinkFinalComponent: boolean;
     }
   | { readonly eligible: false; readonly path: string; readonly refusal: ManagedPathRefusal };
 
@@ -115,7 +142,9 @@ export type ManagedPathResult =
  * ```
  *
  * The decision trusts these facts. It does not re-check them, so a caller that
- * guesses instead of gathering them has opted out of the guarantees below.
+ * guesses instead of gathering them has opted out of the guarantees below. The
+ * same gathering answers a root's `resolved` path, so roots and candidates are
+ * always compared in the same coordinate system.
  */
 export interface CandidatePathFacts {
   /** The candidate path, exactly as the caller intends to name it. */
@@ -141,40 +170,73 @@ function defectOfPathForm(defect: PathFormDefect): ManagedPathRefusal {
   return { kind: 'candidate-path-form', defect };
 }
 
+function pathsOf(inputs: readonly ManagedRootInput[], key: 'spelled' | 'resolved'): string[] | null {
+  const paths: string[] = [];
+  for (const input of inputs) {
+    if (typeof input?.[key] !== 'string') return null;
+    paths.push(input[key]);
+  }
+  return paths;
+}
+
 /**
  * Validates a set of explicitly configured managed collection roots. A root set
- * is refused when a root is not absolute and canonical, when a root repeats, or
- * when one root sits inside another: nested roots would make "the root this path
- * belongs to" ambiguous, and a collector must not have to guess which configured
- * root authorises a deletion.
+ * is refused when an entry is not a spelled/resolved pair, when either form of
+ * a root is not absolute and canonical, when a root repeats in either coordinate
+ * system, or when one root sits inside another in either coordinate system:
+ * nested roots would make "the root this path belongs to" ambiguous, and a
+ * collector must not have to guess which configured root authorises a deletion.
  */
-export function validateManagedRoots(paths: readonly string[]): ManagedRootsResult {
-  if (!Array.isArray(paths) || paths.length === 0) {
+export function validateManagedRoots(inputs: readonly ManagedRootInput[]): ManagedRootsResult {
+  if (!Array.isArray(inputs) || inputs.length === 0) {
     return { ok: false, defect: { kind: 'empty' } };
   }
 
+  const spelled = pathsOf(inputs, 'spelled');
+  const resolved = pathsOf(inputs, 'resolved');
+  if (spelled === null || resolved === null) {
+    return { ok: false, defect: { kind: 'malformed-root' } };
+  }
+
   const roots: ManagedCollectionRoot[] = [];
-  for (const path of paths) {
-    const defect = pathFormDefect(path);
-    if (defect !== null) return { ok: false, defect: { kind: 'path-form', path, defect } };
-    roots.push(Object.freeze({ path }));
+  for (let index = 0; index < inputs.length; index += 1) {
+    const rootPath = spelled[index] as string;
+    const rootResolved = resolved[index] as string;
+    for (const path of [rootPath, rootResolved]) {
+      const defect = pathFormDefect(path);
+      if (defect !== null) return { ok: false, defect: { kind: 'path-form', path, defect } };
+    }
+    roots.push(Object.freeze({ spelled: rootPath, resolved: rootResolved }));
   }
 
-  const seen = new Set<string>();
-  for (const root of roots) {
-    if (seen.has(root.path)) return { ok: false, defect: { kind: 'duplicate', path: root.path } };
-    seen.add(root.path);
+  for (const coordinates of [spelled, resolved]) {
+    const seen = new Set<string>();
+    for (const path of coordinates) {
+      if (seen.has(path)) return { ok: false, defect: { kind: 'duplicate', path } };
+      seen.add(path);
+    }
   }
 
-  for (const root of roots) {
-    for (const other of roots) {
-      if (root !== other && isWithin(other.path, root.path)) {
-        return { ok: false, defect: { kind: 'nested', path: root.path, within: other.path } };
+  for (const [index, root] of roots.entries()) {
+    for (const [otherIndex, other] of roots.entries()) {
+      if (index === otherIndex) continue;
+      if (isWithin(other.spelled, root.spelled)) {
+        return { ok: false, defect: { kind: 'nested', path: root.spelled, within: other.spelled } };
+      }
+      if (isWithin(other.resolved, root.resolved)) {
+        return { ok: false, defect: { kind: 'nested', path: root.spelled, within: other.spelled } };
       }
     }
   }
 
-  return { ok: true, roots: Object.freeze({ roots: Object.freeze(roots) }) };
+  return {
+    ok: true,
+    roots: Object.freeze({
+      [MANAGED_ROOTS]: true,
+      roots: Object.freeze(roots),
+      paths: Object.freeze([...spelled]),
+    }) as ManagedRoots,
+  };
 }
 
 function refuse(path: string, refusal: ManagedPathRefusal): ManagedPathResult {
@@ -192,40 +254,38 @@ export function evaluateManagedCandidate(
   candidate: CandidatePathFacts,
 ): ManagedPathResult {
   const { path, resolvedPath, finalComponentIsSymlink, parentResolvedPath } = candidate;
-  const rootPaths = roots.roots.map((root) => root.path);
-  if (rootPaths.length === 0) return refuse(path, 'no-managed-roots');
 
   const defect = pathFormDefect(path);
   if (defect !== null) return refuse(path, defectOfPathForm(defect));
 
-  const root = rootPaths.find((configured) => isWithin(configured, path));
-  if (root === undefined) {
-    const nearMiss = rootPaths.find((configured) => isStringPrefix(configured, path));
+  // The candidate is named the way the board records paths, so it is located in a
+  // root by its spelled form; every question about where it really is is answered
+  // in the root's resolved coordinates below.
+  const index = roots.paths.findIndex((configured) => isWithin(configured, path));
+  if (index < 0) {
+    const nearMiss = roots.paths.find((configured) => isStringPrefix(configured, path));
     return refuse(path, nearMiss === undefined ? 'outside-managed-roots' : 'near-miss-root-prefix');
   }
+  const root = roots.roots[index] as ManagedCollectionRoot;
 
-  // A configured root is not collectible through the roots that define it.
-  if (path === root) return refuse(path, 'candidate-is-managed-root');
+  // A configured root is not collectible through the roots that define it. A
+  // symlink inside the root that points back at the root is not the root: the
+  // link is the collector's target and unlinking it removes nothing but the link.
+  if (path === root.spelled) return refuse(path, 'candidate-is-managed-root');
 
-  // The candidate's own location and the location of the directory holding it
-  // must both be inside the same root. Either can escape through a symlink, and
-  // only one of the two can be checked from a spelled path alone.
-  if (!isWithin(root, parentResolvedPath)) {
+  // The candidate's own location and the location of the directory holding it must
+  // both be inside the same root. Either can escape through a symlink, and only
+  // one of the two can be checked from a spelled path alone.
+  if (!isWithin(root.resolved, parentResolvedPath)) {
     return refuse(path, 'containing-directory-escapes-managed-root');
   }
   // A spelled path that agrees with its resolved path has been checked already.
   // A disagreement means a symlink was crossed: either the final component was
   // one, or a directory above it was, and the resolved path must land back
-  // inside the root that authorised the candidate.
-  if (resolvedPath !== path && !isWithin(root, resolvedPath)) {
+  // inside the resolved root that authorised the candidate.
+  if (resolvedPath !== path && !isWithin(root.resolved, resolvedPath)) {
     return refuse(path, 'symlink-escapes-managed-root');
   }
 
-  return {
-    eligible: true,
-    path,
-    root: Object.freeze({ path: root }),
-    resolvedPath,
-    finalComponentIsSymlink,
-  };
+  return { eligible: true, path, root, unlinkFinalComponent: finalComponentIsSymlink };
 }

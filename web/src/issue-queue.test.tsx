@@ -232,12 +232,16 @@ describe('issue queue wiring', () => {
     expect(positions).toHaveLength(3);
     expect(positions.map((node) => node.props['aria-label'])).toEqual(['Priority 1', 'Priority 2', 'Priority 3']);
     // A closed row would be a drop the queue cannot hold, so it is not a drop
-    // target at all: the browser is never offered an accepted-drop cursor.
+    // target at all: the browser is never offered an accepted-drop cursor, and
+    // it is not draggable either, so no drag can start that could only fail.
     const closed = mixed[3];
     expect(closed.props['data-issue']).toBe(4);
     expect(closed.props.onDragOver).toBeUndefined();
     expect(closed.props.onDrop).toBeUndefined();
+    expect(closed.props.draggable).toBe(false);
+    expect(closed.props.onDragStart).toBeUndefined();
     expect(mixed.slice(0, 3).every((row) => row.props.onDragOver === allowIssueDrop)).toBe(true);
+    expect(mixed.slice(0, 3).every((row) => row.props.draggable === true && row.props.onDragStart === issueDragStarted)).toBe(true);
     // A closed issue is not in the shared order, so it is never the selected
     // row that carries the move-to control.
     expect(moveToControls({ issues: all, queue: [2, 1, 3] })).toHaveLength(0);

@@ -303,9 +303,10 @@ function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSel
 }) {
   // Only a queued row is a drop target: the board's queue holds open issues
   // only, so accepting a drop on a closed row would offer a cursor for a move
-  // the board cannot commit.
+  // the board cannot commit. The drag affordance is gated on the same thing, so
+  // a row the board could never accept a move from is not draggable at all.
   const queued = hasWriteAccess && position > 0;
-  return <div className={`issue-row ${selected ? 'selected' : ''}`} data-issue={issue.number} draggable={hasWriteAccess} onDragStart={hasWriteAccess ? issueDragStarted : undefined} onDragOver={queued ? allowIssueDrop : undefined} onDrop={queued ? (event) => { void onReorder(issueDropped(event, order, issue.number)); } : undefined}>
+  return <div className={`issue-row ${selected ? 'selected' : ''}`} data-issue={issue.number} draggable={queued} onDragStart={queued ? issueDragStarted : undefined} onDragOver={queued ? allowIssueDrop : undefined} onDrop={queued ? (event) => { void onReorder(issueDropped(event, order, issue.number)); } : undefined}>
     <button className="issue-select" onClick={() => onSelect(issue.number)} aria-current={selected ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{issue.messages.length} messages{issue.body ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>
     {position > 0 && <span className="queue-position" aria-label={priorityLabel(position)}>{position}</span>}
     {queued && <span className="queue-controls">

@@ -63,12 +63,6 @@ export class BrowserBoardSession {
     return this.api.getCredential() !== null;
   }
 
-  /** Reads the board, or `null` while it does not exist. Never creates it. */
-  async read(): Promise<Board | null> {
-    const state = await this.readState();
-    return state === null ? null : state.board;
-  }
-
   /**
    * One read of the whole verified board state, so a refresh learns the shared
    * priority order in the same pass that learns the issues. Every render reads

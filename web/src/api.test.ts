@@ -92,7 +92,7 @@ describe('browser board session', () => {
       },
     });
 
-    await expect(client.read()).resolves.toBeNull();
+    await expect(client.readState()).resolves.toBeNull();
     expect(methods).not.toContain('POST');
     expect(server.signed).toBeNull();
   });
@@ -131,7 +131,7 @@ describe('browser board session', () => {
     const { server, initialized } = await initializedBoard();
     const reader = session(server);
 
-    await expect(reader.read()).rejects.toBeInstanceOf(BoardTrustRequiredError);
+    await expect(reader.readState()).rejects.toBeInstanceOf(BoardTrustRequiredError);
     const board = await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
     expect(board.issues).toEqual([]);
   });
@@ -197,8 +197,8 @@ describe('browser board session', () => {
       now: () => new Date(STAMP),
     });
 
-    await reopened.read();
-    await reopened.read();
+    await reopened.readState();
+    await reopened.readState();
     expect(reopened.hasCredential()).toBe(true);
     expect(reopened.api.hasWriteAccess()).toBe(true);
     expect(reopened.api.accessState().storageRejected).toBe(false);
@@ -252,7 +252,7 @@ describe('browser board session', () => {
     }));
 
     const reopened = session(server, storage);
-    await expect(reopened.read()).resolves.toMatchObject({ issues: [{ title: 'Visible' }] });
+    await expect(reopened.readState()).resolves.toMatchObject({ board: { issues: [{ title: 'Visible' }] } });
     expect(reopened.api.hasWriteAccess()).toBe(false);
     expect(reopened.api.getEffectiveCapabilities()).toEqual([]);
     await expect(reopened.api.createIssue('Impostor')).rejects.toThrow('key ID does not match its public key');
@@ -270,7 +270,7 @@ describe('browser board session', () => {
     }));
 
     const reopened = session(server, storage);
-    await expect(reopened.read()).resolves.toMatchObject({ issues: [{ title: 'Visible' }] });
+    await expect(reopened.readState()).resolves.toMatchObject({ board: { issues: [{ title: 'Visible' }] } });
 
     const access = reopened.api.accessState();
     expect(reopened.hasCredential()).toBe(true);
@@ -289,11 +289,11 @@ describe('browser board session', () => {
     await owner.api.createIssue('Kept');
 
     const reopened = session(server, storage);
-    await expect(reopened.read()).resolves.toMatchObject({ issues: [{ title: 'Kept' }] });
+    await expect(reopened.readState()).resolves.toMatchObject({ board: { issues: [{ title: 'Kept' }] } });
 
     const log = server.signed as { head: string; operations: Array<{ opId: string }> };
     server.signed = { ...log, head: log.operations[0].opId, operations: log.operations.slice(0, 1) };
-    await expect(reopened.read()).rejects.toThrow('previously accepted head');
+    await expect(reopened.readState()).rejects.toThrow('previously accepted head');
   });
 
   it('ignores unreadable stored keys instead of failing the whole page load', () => {

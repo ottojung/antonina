@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { createBrowserBoardApi } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { COMPOSER_READ_ONLY_CALLOUT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, DELETED_COPY, emptyIssueList, filterLabel, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, loadedBoard, trustRequired, visibleIssues, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type IssueFilter, type ReadOnlyAccess } from './ui-state';
+import { COMPOSER_READ_ONLY_CALLOUT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, filterLabel, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, openQueueOrder, priorityLabel, queuePosition, trustRequired, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -26,15 +26,15 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const board = await session.read();
-      setLoad(boardLoaded(board));
-      if (board === null) {
+      const verified = await session.readState();
+      setLoad(boardLoaded(verified));
+      if (verified === null) {
         setAccess('read-only');
         setError(undefined);
         return;
       }
-      const state = api.accessState();
-      setAccess(session.hasCredential() ? boardAccess(state.canEdit, state.credentialRejection !== null) : 'read-only');
+      const access = api.accessState();
+      setAccess(session.hasCredential() ? boardAccess(access.canEdit, access.credentialRejection !== null) : 'read-only');
       setError(undefined);
     } catch (cause) {
       if (trustRequired(cause)) {
@@ -50,7 +50,11 @@ export default function App() {
       setLoad((current) => boardLoadFailed(current, message));
     }
   }, [session, api]);
-  const board = loadedBoard(load);
+  // One snapshot decides the whole list: a ready load always carries the queue
+  // the board reported with its issues, and the same snapshot orders every
+  // render. There is no other order to fall back to, and no other read.
+  const ready = load.status === 'ready' ? load : undefined;
+  const board = ready?.board;
   const hasBoard = board !== undefined;
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
@@ -59,7 +63,7 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [hasBoard, refresh]);
 
-  const visible = board ? visibleIssues(board.issues, filter) : [];
+  const visible = ready ? visibleIssues(ready.board.issues, ready.queue, filter) : [];
   const counts = issueCounts(board?.issues ?? []);
   const hasWriteAccess = access === 'editable';
   const empty = emptyIssueList(filter, hasWriteAccess);
@@ -113,18 +117,18 @@ export default function App() {
   async function trustBoard(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setTrusting(true); setError(undefined);
     try {
-      const board = await session.trust(anchorInput);
+      await session.trust(anchorInput);
       setAnchorInput('');
-      setLoad({ status: 'ready', board });
+      setLoad(boardLoaded(await session.readState()));
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'The trust anchor could not be accepted'); }
     finally { setTrusting(false); }
   }
   async function initializeBoard() {
     setInitializing(true); setError(undefined); setNotice(undefined);
     try {
-      const { board: created } = await session.initialize();
-      setLoad({ status: 'ready', board: created });
+      await session.initialize();
       setAccess('editable');
+      setLoad(boardLoaded(await session.readState()));
       setNotice('Board initialized; this browser holds the root signing credential');
     } catch (cause) {
       const { load: resolved, error } = firstRunResolved(await resolveFirstRun(), cause);
@@ -134,9 +138,17 @@ export default function App() {
     } finally { setInitializing(false); }
   }
   async function resolveFirstRun(): Promise<BoardLoad> {
-    try { return boardLoaded(await session.read()); }
+    try { return boardLoaded(await session.readState()); }
     catch (cause) { return firstRunUnresolved(cause); }
   }
+  /** The one write path for priority: it commits a whole queue or changes nothing. */
+  const queueCommit: QueueCommit = {
+    reorder: (numbers) => api.reorderQueue(numbers),
+    reload: refresh,
+    notice: setNotice,
+    failure: setError,
+  };
+  const reorderQueue = useCallback((numbers: number[] | null) => commitQueueOrder(numbers, queueCommit), [api]);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
   if (load.status === 'loading') return <main className="centered"><div><span className="loading-dot" /> Loading your shared board…</div></main>;
@@ -155,12 +167,12 @@ export default function App() {
     {notice && <div className="notice success" role="status"><span>{notice}</span><button onClick={() => setNotice(undefined)} aria-label="Dismiss message">Dismiss</button></div>}
     <main className={`workspace ${view}-view ${selected ? 'has-selection' : ''}`}>
       <aside className="issue-pane" aria-label={view === 'issues' ? 'Shared issue list' : 'Registered resources'}>
-        <div className="pane-heading"><div><p className="eyebrow">One board, everyone’s work</p><h1>{view === 'issues' ? 'Issues' : 'Resources'}</h1><p>{view === 'issues' ? 'Track what needs attention and discuss the details together.' : 'Registered paths are protected while at least one dependent Antonina issue remains open.'}</p></div></div>
+        <div className="pane-heading"><div><p className="eyebrow">One board, everyone’s work</p><h1>{view === 'issues' ? 'Issues' : 'Resources'}</h1><p>{view === 'issues' ? <>{QUEUE_HINT} Track what needs attention and discuss the details together.</> : 'Registered paths are protected while at least one dependent Antonina issue remains open.'}</p></div></div>
         {view === 'issues' ? <>
           {hasWriteAccess ? <CreateIssueForm onSubmit={createIssue} />
             : <AccessNotice access={access} className="access-callout" onAction={() => setSettingsOpen(true)} />}
           <nav className="filters" aria-label="Filter issues">{(['open', 'closed', 'all'] as const).map((value) => <button key={value} className={filter === value ? 'active' : ''} aria-pressed={filter === value} onClick={() => setFilter(value)}>{filterLabel(value)}<span>{counts[value]}</span></button>)}</nav>
-          <div className="issue-list" aria-label="Issues">{visible.map((issue) => <button key={issue.number} className={`issue-row ${issue.number === selectedNumber ? 'selected' : ''}`} onClick={() => setSelectedNumber(issue.number)} aria-current={issue.number === selectedNumber ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{issue.messages.length} messages{issue.body ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>)}{!visible.length && <div className="empty-state"><h2>{empty.title}</h2><p>{empty.body}</p></div>}</div>
+          <div className="issue-list" aria-label="Issues"><IssueQueue issues={visible} queue={load.queue} hasWriteAccess={hasWriteAccess} selectedNumber={selectedNumber} onSelect={setSelectedNumber} onReorder={reorderQueue} empty={empty} /></div>
         </> : <ResourcesView board={board!} issues={board!.issues} access={access} onOpenIssue={openIssue} onAdd={(host, path, number) => run(() => api.addResourceDependency(host, path, number), 'Resource dependency added')} onRemove={(resource, number) => run(() => api.removeResourceDependency(resource.host, resource.path, number), resource.issueNumbers.length === 1 ? 'Dependency removed; resource unregistered' : 'Resource dependency removed')} onEnableEditing={() => setSettingsOpen(true)} />}
       </aside>
       {view === 'issues' ? selected ? <Thread issue={selected} access={access} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.number, body), 'Description updated')} close={() => void run(() => api.close(selected.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.number), 'Issue reopened')} back={() => setSelectedNumber(undefined)} />
@@ -171,6 +183,137 @@ export default function App() {
 }
 
 export type IssueFormKey = Pick<ReactKeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey' | 'repeat'>;
+
+/** What a drag or a move control reports: the whole reordered open queue. */
+export type QueueTarget = number[] | null;
+
+export interface QueueCommit {
+  reorder(numbers: number[]): Promise<number[]>;
+  reload(): Promise<void>;
+  notice(message: string): void;
+  failure(message: string): void;
+}
+
+/**
+ * The single write path for priority, shared by the drag target and the
+ * move-earlier/move-later controls.
+ *
+ * A refused reorder — no `queue.reorder` capability, a concurrent writer that
+ * moved the board on, a storage conflict — must not read as success and must not
+ * leave the list showing an order the board never accepted, so the failure path
+ * re-reads the board (and with it the queue) and surfaces the board's own
+ * reason. A `null` target is the deliberate no-op of a boundary move: nothing is
+ * sent, and no error is invented for a queue that would not have changed.
+ */
+export async function commitQueueOrder(target: QueueTarget, commit: QueueCommit): Promise<number[] | null> {
+  if (target === null) return null;
+  try {
+    const committed = await commit.reorder(target);
+    await commit.reload();
+    commit.notice(QUEUE_REORDERED_NOTICE);
+    return committed;
+  } catch (cause) {
+    await commit.reload();
+    commit.failure(cause instanceof Error ? cause.message : QUEUE_REORDER_FAILED);
+    return null;
+  }
+}
+
+/** The issue row a pointer-less test event stands in for, and its shared queue. */
+export type QueueRowTarget = { dataset: { issue?: string; queue?: string; direction?: string } };
+
+export function queueOfTarget(target: QueueRowTarget): number[] {
+  const raw = target.dataset.queue;
+  if (raw === undefined) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(Number) : [];
+  } catch {
+    return [];
+  }
+}
+
+export type IssueDragStart = { currentTarget: QueueRowTarget; dataTransfer: { setData(type: string, value: string): void } | null };
+
+/** A drag carries the issue number, so a drop does not have to trust the row. */
+export function issueDragStarted(event: IssueDragStart): void {
+  const number = event.currentTarget.dataset.issue;
+  if (number === undefined) return;
+  event.dataTransfer?.setData(QUEUE_DRAG_TYPE, number);
+}
+
+export type IssueDrop = {
+  currentTarget: QueueRowTarget;
+  dataTransfer: { getData(type: string): string } | null;
+  preventDefault(): void;
+};
+
+export function allowIssueDrop(event: { preventDefault(): void }): void {
+  event.preventDefault();
+}
+
+/**
+ * A drop reorders the queue the row was rendered with, so a drag commits the
+ * same complete permutation the move controls commit — never the dragged pair.
+ */
+export function issueDropped(event: IssueDrop): QueueTarget {
+  event.preventDefault();
+  const dragged = Number(event.dataTransfer?.getData(QUEUE_DRAG_TYPE));
+  const order = queueOfTarget(event.currentTarget);
+  const over = Number(event.currentTarget.dataset.issue);
+  return moveQueueIssue(order, dragged, order.indexOf(over));
+}
+
+export type IssueMoveClick = { currentTarget: QueueRowTarget; preventDefault(): void };
+
+/**
+ * The keyboard-reachable alternative to dragging: the same whole-queue
+ * permutation, computed from the direction the control names.
+ */
+export function issueMoveRequested(event: IssueMoveClick): QueueTarget {
+  event.preventDefault();
+  const order = queueOfTarget(event.currentTarget);
+  const number = Number(event.currentTarget.dataset.issue);
+  return event.currentTarget.dataset.direction === 'later' ? moveQueueLater(order, number) : moveQueueEarlier(order, number);
+}
+
+export function IssueQueue({ issues, queue, hasWriteAccess, selectedNumber, onSelect, onReorder, empty }: {
+  issues: BoardIssue[];
+  queue: number[];
+  hasWriteAccess: boolean;
+  selectedNumber: number | undefined;
+  onSelect: (number: number) => void;
+  onReorder: (target: QueueTarget) => Promise<number[] | null>;
+  empty: { title: string; body: string };
+}) {
+  // One order for the whole list: the shared queue, then any open issue it has
+  // not caught up with. It is written onto every row so a drag or a move control
+  // recomputes the full permutation from the same snapshot that was rendered.
+  const order = openQueueOrder(issues, queue);
+  const attribute = JSON.stringify(order);
+  return <>
+    {issues.map((issue) => <IssueQueueRow key={issue.number} issue={issue} order={order} queueAttribute={attribute} position={queuePosition(order, issue.number)} hasWriteAccess={hasWriteAccess} selected={issue.number === selectedNumber} onSelect={onSelect} onReorder={onReorder} />)}
+    {!issues.length && <div className="empty-state"><h2>{empty.title}</h2><p>{empty.body}</p></div>}
+  </>;
+}
+
+function IssueQueueRow({ issue, order, queueAttribute, position, hasWriteAccess, selected, onSelect, onReorder }: {
+  issue: BoardIssue;
+  order: number[];
+  queueAttribute: string;
+  position: number;
+  hasWriteAccess: boolean;
+  selected: boolean;
+  onSelect: (number: number) => void;
+  onReorder: (target: QueueTarget) => Promise<number[] | null>;
+}) {
+  return <div className={`issue-row ${selected ? 'selected' : ''}`} data-issue={issue.number} data-queue={queueAttribute} draggable={hasWriteAccess} onDragStart={hasWriteAccess ? issueDragStarted : undefined} onDragOver={hasWriteAccess ? allowIssueDrop : undefined} onDrop={hasWriteAccess ? (event) => { void onReorder(issueDropped(event)); } : undefined}>
+    <button className="issue-select" onClick={() => onSelect(issue.number)} aria-current={selected ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{issue.messages.length} messages{issue.body ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>
+    {position > 0 && <span className="queue-position" aria-label={priorityLabel(position)}>{position}</span>}
+    {hasWriteAccess && position > 0 && <span className="queue-controls">{(['earlier', 'later'] as QueueDirection[]).map((direction) => <button key={direction} data-issue={issue.number} data-direction={direction} aria-label={`${QUEUE_MOVE_LABELS[direction]} (#${issue.number})`} disabled={!canMoveInQueue(order, issue.number, direction)} onClick={(event) => { void onReorder(issueMoveRequested(event)); }}>{direction === 'earlier' ? '▲' : '▼'}</button>)}</span>}
+  </div>;
+}
+
 
 /** The keydown the description hands the rule: the keystroke plus its two browser effects. */
 export type IssueFormKeydown = IssueFormKey & {
@@ -259,5 +402,5 @@ function SettingsPanel({ displayName, setDisplayName, saveDisplayName, access, c
     document.addEventListener('keydown', keydown);
     return () => { document.removeEventListener('keydown', keydown); document.body.style.overflow = overflow; previous?.focus(); };
   }, [close]);
-  return <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><header><h2 id="settings-title">Settings & access</h2><button ref={closeRef} className="dialog-close" onClick={close} aria-label="Close settings">×</button></header><div className="settings-content"><section><h3>Display name</h3><form className="stacked-form" onSubmit={saveDisplayName}><label htmlFor="settings-name">Display name</label><input id="settings-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} /><button type="submit" disabled={!displayName.trim()}>Save name</button></form></section><section><h3>Editing access</h3><p>Write access allows issue, description, dependency, and status changes.</p>{access === 'rejected' && <div className="access-state"><strong>{REJECTED_CREDENTIAL_COPY.title}</strong><p>{REJECTED_CREDENTIAL_COPY.body}</p></div>}{access === 'editable' ? <><div className="access-state">Editing is enabled</div><div className="technical-actions"><button onClick={() => void copyKey(credentialText, 'Board credential')}>Copy board credential</button><button onClick={() => void copyKey(trustAnchorText, 'Board trust anchor')}>Copy trust anchor</button><button className="danger" onClick={clearCredential}>Use read-only mode</button></div></> : <form className="stacked-form" onSubmit={saveCredential}><label htmlFor="credential">Board credential</label><textarea id="credential" placeholder="Paste the signed board credential JSON" value={credentialInput} onChange={(event) => setCredentialInput(event.target.value)} required /><small>The credential comes from another browser, user, or agent that can edit the board.</small><button type="submit" disabled={!credentialInput.trim()}>Enable editing</button></form>}</section></div></section></div>;
+  return <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><header><h2 id="settings-title">Settings & access</h2><button ref={closeRef} className="dialog-close" onClick={close} aria-label="Close settings">×</button></header><div className="settings-content"><section><h3>Display name</h3><form className="stacked-form" onSubmit={saveDisplayName}><label htmlFor="settings-name">Display name</label><input id="settings-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} /><button type="submit" disabled={!displayName.trim()}>Save name</button></form></section><section><h3>Editing access</h3><p>{WRITE_ACCESS_SUMMARY}</p>{access === 'rejected' && <div className="access-state"><strong>{REJECTED_CREDENTIAL_COPY.title}</strong><p>{REJECTED_CREDENTIAL_COPY.body}</p></div>}{access === 'editable' ? <><div className="access-state">Editing is enabled</div><div className="technical-actions"><button onClick={() => void copyKey(credentialText, 'Board credential')}>Copy board credential</button><button onClick={() => void copyKey(trustAnchorText, 'Board trust anchor')}>Copy trust anchor</button><button className="danger" onClick={clearCredential}>Use read-only mode</button></div></> : <form className="stacked-form" onSubmit={saveCredential}><label htmlFor="credential">Board credential</label><textarea id="credential" placeholder="Paste the signed board credential JSON" value={credentialInput} onChange={(event) => setCredentialInput(event.target.value)} required /><small>The credential comes from another browser, user, or agent that can edit the board.</small><button type="submit" disabled={!credentialInput.trim()}>Enable editing</button></form>}</section></div></section></div>;
 }

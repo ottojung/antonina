@@ -1,14 +1,19 @@
 import { BoardDeletedError, BoardTrustRequiredError } from './api';
-import type { Board, BoardIssue, BoardResource } from './model';
+import type { Board, BoardIssue, BoardResource, VerifiedBoardState } from './model';
 
 export type IssueFilter = 'open' | 'closed' | 'all';
 
+/**
+ * A loaded board carries its shared priority order beside it. There is no
+ * status here without a queue: a board whose order has not been read is a
+ * `failed` load, never a list quietly sorted some other way.
+ */
 export type BoardLoad =
   | { status: 'loading' }
   | { status: 'uninitialized' }
   | { status: 'untrusted' }
   | { status: 'deleted' }
-  | { status: 'ready'; board: Board }
+  | { status: 'ready'; board: Board; queue: number[] }
   | { status: 'failed'; message: string };
 
 export const FIRST_RUN_COPY = {
@@ -59,6 +64,22 @@ export const ISSUE_FORM_HINT = 'The description holds the task context; the conv
 
 export const ISSUE_FORM_SUBMIT_HINT = 'Ctrl+Enter creates the issue from the description.';
 
+export const WRITE_ACCESS_SUMMARY = 'Write access allows issue, description, dependency, status, and priority order changes.';
+
+export const QUEUE_HINT = 'Issues are listed in the board’s shared priority order.';
+
+export const QUEUE_MOVE_LABELS: Record<QueueDirection, string> = {
+  earlier: 'Move earlier in the priority queue',
+  later: 'Move later in the priority queue',
+};
+
+export const QUEUE_REORDERED_NOTICE = 'Priority order saved for everyone on this board';
+
+export const QUEUE_REORDER_FAILED = 'The priority order could not be saved';
+
+/** The drag payload the issue rows carry between themselves. */
+export const QUEUE_DRAG_TYPE = 'text/plain';
+
 /** A stored credential the board refused is its own state, not a browser holding none. */
 export function boardAccess(hasWriteAccess: boolean, credentialRejected: boolean): BoardAccess {
   if (hasWriteAccess) return 'editable';
@@ -91,8 +112,8 @@ export function loadedBoard(load: BoardLoad): Board | undefined {
   return load.status === 'ready' ? load.board : undefined;
 }
 
-export function boardLoaded(board: Board | null): BoardLoad {
-  return board ? { status: 'ready', board } : { status: 'uninitialized' };
+export function boardLoaded(state: VerifiedBoardState | null): BoardLoad {
+  return state ? { status: 'ready', board: state.board, queue: state.queue } : { status: 'uninitialized' };
 }
 
 export function boardLoadFailed(load: BoardLoad, message: string): BoardLoad {
@@ -123,10 +144,90 @@ export function firstRunUnresolved(cause: unknown): BoardLoad {
   return { status: 'failed', message: cause instanceof Error ? cause.message : String(cause) };
 }
 
-export function visibleIssues(issues: BoardIssue[], filter: IssueFilter): BoardIssue[] {
-  return issues
-    .filter((issue) => filter === 'all' || issue.state === filter)
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.number - left.number);
+/**
+ * The open issues' numbers in the board's shared priority order.
+ *
+ * The queue is the only ordering concept in this app. It is walked entry by
+ * entry, and a committed queue is exactly the open issues once each, so the
+ * entries this cannot use — a number with no open issue behind it, or the same
+ * number twice — are dropped rather than given a position. An open issue the
+ * queue has not caught up with yet (a board read mid-mutation, an entry missing
+ * from a hand-built queue) follows the queue in board order, so the result is
+ * always a complete permutation of the open issues and never an empty list.
+ */
+export function openQueueOrder(issues: BoardIssue[], queue: number[]): number[] {
+  const open = new Set(issues.filter((issue) => issue.state === 'open').map((issue) => issue.number));
+  const order: number[] = [];
+  for (const number of queue) if (open.has(number) && !order.includes(number)) order.push(number);
+  for (const issue of issues) if (issue.state === 'open' && !order.includes(issue.number)) order.push(issue.number);
+  return order;
+}
+
+/**
+ * Closed issues. The queue holds open issues by construction, so a closed
+ * issue has no priority position to take and is listed in ascending issue
+ * number: oldest closed work first, a stable order that does not shuffle as
+ * timestamps move.
+ */
+export function closedIssueOrder(issues: BoardIssue[]): number[] {
+  return issues.filter((issue) => issue.state === 'closed').map((issue) => issue.number).sort((left, right) => left - right);
+}
+
+/**
+ * The issues a filter shows. `open` is the shared queue, `closed` is the
+ * unqueued tail, and `all` is the queue first with the closed tail after it, so
+ * the open work a reader came for is always at the top in priority order.
+ */
+export function visibleIssues(issues: BoardIssue[], queue: number[], filter: IssueFilter): BoardIssue[] {
+  const byNumber = new Map(issues.map((issue) => [issue.number, issue]));
+  const open = openQueueOrder(issues, queue).map((number) => byNumber.get(number)!);
+  if (filter === 'open') return open;
+  const closed = closedIssueOrder(issues).map((number) => byNumber.get(number)!);
+  return filter === 'closed' ? closed : [...open, ...closed];
+}
+
+/**
+ * Moves one queued issue to another slot, returning the whole reordered queue.
+ * A commit is only accepted when it names every open issue exactly once, so a
+ * move sends the entire list, never the pair it swapped. `null` means the board
+ * would not change: an issue that is not queued, a slot outside the queue, or a
+ * move to the position the issue already holds — which is how "earlier" at the
+ * head and "later" at the tail become no-ops instead of rejected writes.
+ */
+export function moveQueueIssue(order: number[], number: number, to: number): number[] | null {
+  const from = order.indexOf(number);
+  if (from === -1 || !Number.isInteger(to) || to < 0 || to >= order.length || to === from) return null;
+  const next = [...order];
+  next.splice(from, 1);
+  next.splice(to, 0, number);
+  return next;
+}
+
+export type QueueDirection = 'earlier' | 'later';
+
+export function moveQueueEarlier(order: number[], number: number): number[] | null {
+  const from = order.indexOf(number);
+  return from > 0 ? moveQueueIssue(order, number, from - 1) : null;
+}
+
+export function moveQueueLater(order: number[], number: number): number[] | null {
+  const from = order.indexOf(number);
+  return from !== -1 ? moveQueueIssue(order, number, from + 1) : null;
+}
+
+/** Whether a move control has anywhere to move to, so a boundary press is offered as a no-op. */
+export function canMoveInQueue(order: number[], number: number, direction: QueueDirection): boolean {
+  return (direction === 'earlier' ? moveQueueEarlier(order, number) : moveQueueLater(order, number)) !== null;
+}
+
+/** The one-based position an issue holds in the shared queue, or 0 when unqueued. */
+export function queuePosition(order: number[], number: number): number {
+  const index = order.indexOf(number);
+  return index === -1 ? 0 : index + 1;
+}
+
+export function priorityLabel(position: number): string {
+  return position > 0 ? `Priority ${position}` : 'Not in the queue';
 }
 
 export function issueCounts(issues: BoardIssue[]): Record<IssueFilter, number> {

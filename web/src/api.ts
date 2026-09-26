@@ -1,5 +1,6 @@
 import {
   BoardApi,
+  BoardMissingError,
   type BoardAccessState,
   type BoardApiOptions,
   type BoardInitialization,
@@ -14,7 +15,7 @@ import {
   serializeBoardTrustAnchor,
   type BoardCredential,
 } from '../../packages/core/src/credential';
-import type { BoardTrustAnchor } from '../../packages/core/src/operations';
+import type { BoardTrustAnchor, VerifiedBoardState } from '../../packages/core/src/operations';
 import type { Board } from '../../packages/core/src/model';
 
 export {
@@ -64,9 +65,24 @@ export class BrowserBoardSession {
 
   /** Reads the board, or `null` while it does not exist. Never creates it. */
   async read(): Promise<Board | null> {
-    const board = await this.api.readBoard();
-    this.rememberHead();
-    return board;
+    const state = await this.readState();
+    return state === null ? null : state.board;
+  }
+
+  /**
+   * One read of the whole verified board state, so a refresh learns the shared
+   * priority order in the same pass that learns the issues. Every render reads
+   * this one snapshot; nothing here re-reads or caches a queue of its own.
+   */
+  async readState(): Promise<VerifiedBoardState | null> {
+    try {
+      const state = await this.api.loadState();
+      this.rememberHead();
+      return state;
+    } catch (error) {
+      if (error instanceof BoardMissingError) return null;
+      throw error;
+    }
   }
 
   /** Adopts a board trust anchor so this browser can read it. */

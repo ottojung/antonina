@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BoardDeletedError, BoardTrustRequiredError } from './api';
-import { emptyBoard, type Board, type BoardIssue } from './model';
+import { emptyBoard, type Board, type BoardIssue, type VerifiedBoardState } from './model';
 import {
   accessCallout,
   boardAccess,
@@ -19,6 +19,18 @@ import {
   ISSUE_FORM_SUBMIT_HINT,
   issueCounts,
   loadedBoard,
+  moveQueueEarlier,
+  moveQueueIssue,
+  moveQueueLater,
+  canMoveInQueue,
+  closedIssueOrder,
+  openQueueOrder,
+  priorityLabel,
+  QUEUE_HINT,
+  QUEUE_MOVE_LABELS,
+  QUEUE_REORDERED_NOTICE,
+  WRITE_ACCESS_SUMMARY,
+  queuePosition,
   REJECTED_CREDENTIAL_COPY,
   trustRequired,
   visibleIssues,
@@ -31,13 +43,42 @@ const timestamp = '2026-09-24T12:00:00.000Z';
 function issue(number: number, state: 'open' | 'closed', updatedAt = timestamp): BoardIssue {
   return { number, title: `Issue ${number}`, body: '', state, createdAt: updatedAt, updatedAt, messages: [] };
 }
+function state(overrides: Partial<VerifiedBoardState> = {}): VerifiedBoardState {
+  return { board: emptyBoard(), queue: [], authorities: [], deleted: false, head: 'head', ...overrides };
+}
 
 describe('issue UI state', () => {
-  it('filters and sorts issues by most recently updated', () => {
-    const issues = [issue(1, 'open', '2026-09-24T10:00:00.000Z'), issue(2, 'closed'), issue(3, 'open')];
-    expect(visibleIssues(issues, 'open').map((entry) => entry.number)).toEqual([3, 1]);
-    expect(visibleIssues(issues, 'closed').map((entry) => entry.number)).toEqual([2]);
-    expect(visibleIssues(issues, 'all').map((entry) => entry.number)).toEqual([3, 2, 1]);
+  // Issue #19 replaced the previous "most recently updated first" presentation
+  // sort, so that test is gone rather than kept as a fallback: a timestamp sort
+  // is exactly the browser-local priority the shared queue forbids. These are
+  // its replacements, and they are deliberately stronger than it was — the
+  // queue decides the order even when a timestamp says otherwise.
+  it('shows open issues in the shared queue order, not by recency', () => {
+    const issues = [issue(1, 'open', '2026-09-24T23:00:00.000Z'), issue(2, 'open', '2026-09-24T01:00:00.000Z'), issue(3, 'open')];
+    expect(visibleIssues(issues, [2, 3, 1], 'open').map((entry) => entry.number)).toEqual([2, 3, 1]);
+    expect(visibleIssues(issues, [1, 2, 3], 'open').map((entry) => entry.number)).toEqual([1, 2, 3]);
+  });
+
+  it('keeps every open issue exactly once whatever the queue contains', () => {
+    const issues = [issue(1, 'open'), issue(2, 'open'), issue(3, 'open')];
+    for (const queue of [[], [1], [3, 1], [1, 1, 2, 2, 3], [2, 2], [9, 1], [1, 2, 3, 3, 4]]) {
+      const order = openQueueOrder(issues, queue);
+      expect([...order].sort((left, right) => left - right)).toEqual([1, 2, 3]);
+    }
+  });
+
+  it('drops queue entries with no open issue and appends ones the queue missed', () => {
+    const issues = [issue(1, 'open'), issue(2, 'open'), issue(3, 'closed')];
+    expect(openQueueOrder(issues, [3, 2, 1])).toEqual([2, 1]);
+    expect(openQueueOrder(issues, [2])).toEqual([2, 1]);
+    expect(openQueueOrder(issues, [])).toEqual([1, 2]);
+  });
+
+  it('lists closed issues outside the queue, oldest first, under every filter', () => {
+    const issues = [issue(1, 'open'), issue(4, 'closed', '2026-09-24T23:00:00.000Z'), issue(2, 'open'), issue(3, 'closed')];
+    expect(visibleIssues(issues, [2, 1], 'closed').map((entry) => entry.number)).toEqual([3, 4]);
+    expect(visibleIssues(issues, [2, 1], 'all').map((entry) => entry.number)).toEqual([2, 1, 3, 4]);
+    expect(visibleIssues(issues, [2, 1], 'open').map((entry) => entry.number)).toEqual([2, 1]);
   });
 
   it('counts every issue view', () => {
@@ -65,6 +106,52 @@ describe('issue UI state', () => {
   });
 });
 
+describe('priority queue moves', () => {
+  const order = [4, 2, 9, 1];
+
+  it('sends a whole-list permutation for a single move, not the pair it swapped', () => {
+    expect(moveQueueEarlier(order, 9)).toEqual([4, 9, 2, 1]);
+    expect(moveQueueLater(order, 4)).toEqual([2, 4, 9, 1]);
+    expect(moveQueueIssue(order, 1, 0)).toEqual([1, 4, 2, 9]);
+    for (const next of [moveQueueEarlier(order, 9), moveQueueLater(order, 4), moveQueueIssue(order, 1, 0)]) {
+      expect(next).not.toBeNull();
+      expect([...(next as number[])].sort((left, right) => left - right)).toEqual([...order].sort((left, right) => left - right));
+      expect(next).toHaveLength(order.length);
+    }
+  });
+
+  it('refuses a boundary move instead of sending a queue the board would reject', () => {
+    expect(moveQueueEarlier(order, 4)).toBeNull();
+    expect(moveQueueLater(order, 1)).toBeNull();
+    expect(canMoveInQueue(order, 4, 'earlier')).toBe(false);
+    expect(canMoveInQueue(order, 4, 'later')).toBe(true);
+    expect(canMoveInQueue(order, 1, 'earlier')).toBe(true);
+    expect(canMoveInQueue(order, 1, 'later')).toBe(false);
+  });
+
+  it('refuses an unqueued issue, an out-of-range slot, and a move onto itself', () => {    expect(moveQueueEarlier(order, 77)).toBeNull();
+    expect(moveQueueLater(order, 77)).toBeNull();
+    expect(moveQueueIssue(order, 2, 0)).toEqual([2, 4, 9, 1]);
+    expect(moveQueueIssue(order, 2, 1)).toBeNull();
+    expect(moveQueueIssue(order, 2, order.length)).toBeNull();
+    expect(moveQueueIssue(order, 2, -1)).toBeNull();
+    expect(canMoveInQueue(order, 77, 'earlier')).toBe(false);
+  });
+
+  it('moves a middle issue in both directions and leaves the order untouched', () => {
+    expect(moveQueueEarlier(order, 2)).toEqual([2, 4, 9, 1]);
+    expect(moveQueueLater(order, 2)).toEqual([4, 9, 2, 1]);
+    expect(order).toEqual([4, 2, 9, 1]);
+  });
+
+  it('reports the one-based position of a queued issue and none for an unqueued one', () => {
+    expect(queuePosition(order, 4)).toBe(1);
+    expect(queuePosition(order, 1)).toBe(4);
+    expect(queuePosition(order, 77)).toBe(0);
+    expect(priorityLabel(queuePosition(order, 9))).toBe('Priority 3');
+  });
+});
+
 describe('board copy', () => {
   it('title-cases filter labels in the DOM instead of relying on CSS', () => {
     expect(filterLabel('open')).toBe('Open');
@@ -77,6 +164,18 @@ describe('board copy', () => {
     expect(emptyIssueList('all', true).title).toBe('No issues');
     expect(emptyIssueList('open', true).body).toBe('Create an issue to give the work a shared record.');
     expect(emptyIssueList('open', false)).toEqual({ title: 'No open issues', body: 'No issues match this filter yet.' });
+  });
+
+  it('names priority as part of what write access allows, and says the order is shared', () => {
+    expect(WRITE_ACCESS_SUMMARY).toContain('priority order');
+    expect(WRITE_ACCESS_SUMMARY).toContain('status');
+    expect(QUEUE_HINT).toContain('shared priority order');
+  });
+
+  it('names both move directions for the accessible, non-drag controls', () => {
+    expect(QUEUE_MOVE_LABELS.earlier).toBe('Move earlier in the priority queue');
+    expect(QUEUE_MOVE_LABELS.later).toBe('Move later in the priority queue');
+    expect(QUEUE_REORDERED_NOTICE).toContain('everyone');
   });
 
   it('explains the create form and advertises its shortcut without a second hint', () => {
@@ -111,15 +210,16 @@ describe('board copy', () => {
 
 describe('board load state', () => {
   const board: Board = { ...emptyBoard(), nextIssueNumber: 2, issues: [issue(1, 'open')] };
+  const verified = state({ board, queue: [1] });
 
   it('resolves a read to the first-run state while the board is missing', () => {
     expect(boardLoaded(null)).toEqual({ status: 'uninitialized' });
-    expect(boardLoaded(board)).toEqual({ status: 'ready', board });
+    expect(boardLoaded(verified)).toEqual({ status: 'ready', board, queue: [1] });
   });
 
   it('turns a failed initialization whose board now exists into a read-only board', () => {
-    const resolved = firstRunResolved(boardLoaded(board), new Error('The Antonina board already exists'));
-    expect(resolved.load).toEqual({ status: 'ready', board });
+    const resolved = firstRunResolved(boardLoaded(verified), new Error('The Antonina board already exists'));
+    expect(resolved.load).toEqual({ status: 'ready', board, queue: [1] });
     expect(resolved.error).toBeUndefined();
   });
 
@@ -159,7 +259,7 @@ describe('board load state', () => {
   });
 
   it('keeps the last good board when a later read fails', () => {
-    const ready: BoardLoad = { status: 'ready', board };
+    const ready: BoardLoad = { status: 'ready', board, queue: [1] };
     expect(boardLoadFailed(ready, 'Skrynia GET failed (503)')).toBe(ready);
     expect(loadedBoard(boardLoadFailed(ready, 'Skrynia GET failed (503)'))).toBe(board);
   });

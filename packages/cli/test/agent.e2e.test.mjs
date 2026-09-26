@@ -183,3 +183,33 @@ test('status reconciles abandoned running metadata to an explicit failure', (t) 
   assert.equal(JSON.parse(status.stdout).state, 'failed');
   assert.match(readFileSync(path, 'utf8'), /disappeared without a captured exit status/);
 });
+
+
+test('stop on idle is a no-op and preserves idle state', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', 'fade', '--cwd', work], env).status, 0);
+  const stopped = run(['agent', 'stop', '--id', 'fade'], env);
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.match(stopped.stdout, /already stopped/);
+  const meta = JSON.parse(readFileSync(metaPath(root, 'fade'), 'utf8'));
+  assert.equal(meta.state, 'idle');
+});
+
+test('clean dry-run observes and clean removes old terminal agents', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', 'f00d', '--cwd', work], env).status, 0);
+  const path = metaPath(root, 'f00d');
+  const meta = JSON.parse(readFileSync(path, 'utf8'));
+  Object.assign(meta, { state: 'succeeded', finished_at: 1, active_runner: false });
+  writeFileSync(path, JSON.stringify(meta));
+
+  const dry = run(['agent', 'clean', '--days', '1', '--dry-run'], env);
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, /f00d/);
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).state, 'succeeded');
+
+  const clean = run(['agent', 'clean', '--days', '1'], env);
+  assert.equal(clean.status, 0, clean.stderr);
+  assert.match(clean.stdout, /deleted agent f00d/);
+  assert.throws(() => readFileSync(path, 'utf8'));
+});

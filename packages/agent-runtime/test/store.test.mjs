@@ -227,6 +227,55 @@ test('stale lock files are reclaimed without native flock support', async (t) =>
   assert.equal(result, 'ok');
 });
 
+test('reclaiming a stale lock never deletes a lock installed by another owner', async (t) => {
+  const options = root(t);
+  createAgentDirectory('d11', options);
+  writeMeta('d11', idleMeta('d11', '/tmp', null, 5), options);
+  const lockPath = join(agentDir('d11', options), '.lock');
+  nodeFs.writeFileSync(lockPath, JSON.stringify({ pid: 99999999, startTicks: 1 }));
+
+  const staleRaw = JSON.stringify({ pid: 99999999, startTicks: 1 });
+  const foreignRaw = JSON.stringify({ pid: process.pid, startTicks: null });
+  // A competing owner reclaims the same stale lock and installs its own live lock
+  // after this process observes the stale owner but before it unlinks.
+  let reads = 0;
+  let hijackOn = 0;
+  let hijacked = false;
+  let seenForeign = false;
+  const unlinked = [];
+  const hijacking = storeFs({
+    readFileSync: (path, ...rest) => {
+      if (String(path).endsWith('.lock')) {
+        const raw = nodeFs.readFileSync(path, 'utf8');
+        if (hijackOn === reads) {
+          // The other owner installs its own lock as this process reads the stale one.
+          nodeFs.writeFileSync(path, foreignRaw);
+          hijacked = true;
+          hijackOn = -1;
+        } else if (hijacked && seenForeign) {
+          // This re-read sees the foreign lock; retire it so the reclaimer can finish.
+          seenForeign = false;
+          nodeFs.writeFileSync(path, staleRaw);
+        } else if (hijacked) {
+          seenForeign = true;
+        }
+        reads += 1;
+        return raw;
+      }
+      return nodeFs.readFileSync(path, ...rest);
+    },
+    unlinkSync: (path) => {
+      if (String(path).endsWith('.lock')) unlinked.push(nodeFs.readFileSync(path, 'utf8'));
+      return nodeFs.unlinkSync(path);
+    },
+  });
+
+  const result = await withAgentLock('d11', () => 'ok', { ...options, fs: hijacking });
+  assert.equal(result, 'ok');
+  assert.equal(hijacked, true);
+  assert.equal(unlinked.includes(foreignRaw), false);
+});
+
 test('concurrent in-process updates serialize through the lock file', async (t) => {
   const options = root(t);
   createAgentDirectory('cc', options);

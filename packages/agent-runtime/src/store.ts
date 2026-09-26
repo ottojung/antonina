@@ -207,7 +207,7 @@ interface LockOwner {
 type LockOwnerRecord =
   | { state: 'missing' }
   | { state: 'malformed' }
-  | { state: 'valid'; owner: LockOwner };
+  | { state: 'valid'; owner: LockOwner; raw: string };
 
 function parseLockOwner(path: string, fs: StoreFs): LockOwnerRecord {
   let raw: string;
@@ -239,6 +239,7 @@ function parseLockOwner(path: string, fs: StoreFs): LockOwnerRecord {
   return {
     state: 'valid',
     owner: { pid: record.pid, startTicks: record.startTicks as number | null },
+    raw,
   };
 }
 
@@ -268,6 +269,15 @@ async function acquireLock(path: string, fs: StoreFs): Promise<number> {
       const observed = parseLockOwner(path, fs);
       if (observed.state === 'missing') continue;
       if (observed.state === 'valid' && !lockOwnerAlive(observed.owner)) {
+        // Re-read before unlinking: between the observation and this point another
+        // owner may have reclaimed the same stale lock and installed its own. Only
+        // the exact stale record we judged dead may be removed.
+        const current = parseLockOwner(path, fs);
+        if (current.state === 'missing') continue;
+        if (current.state !== 'valid' || current.raw !== observed.raw) {
+          await sleep(LOCK_RETRY_MS);
+          continue;
+        }
         try {
           fs.unlinkSync(path);
           continue;

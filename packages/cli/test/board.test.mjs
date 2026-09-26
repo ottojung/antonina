@@ -320,3 +320,132 @@ test('board CLI refuses environment credentials it cannot parse or reconcile', a
   assert.equal(mismatched.code, 1);
   assert.match(mismatched.err[0], /does not match the configured board trust anchor/);
 });
+
+async function queuedBoard() {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  const initialized = await owner.initialize();
+  for (const title of ['One', 'Two', 'Three']) await owner.createIssue(title);
+  return { server, initialized, client: client(server, { credential: initialized.credential, trustAnchor: initialized.trustAnchor }) };
+}
+
+test('board CLI queue reorder prints the committed order on one line', async () => {
+  const board = await queuedBoard();
+  const { code, out, err } = await run(['queue', 'reorder', '3', '1', '2'], { createClient: () => board.client });
+
+  assert.equal(code, 0);
+  assert.deepEqual(err, []);
+  assert.deepEqual(out, ['#3 #1 #2']);
+  assert.equal(board.server.signed.operations.at(-1).kind, 'queue.reorder');
+});
+
+test('board CLI queue list prints the reordered order in human and JSON form', async () => {
+  const board = await queuedBoard();
+  await run(['queue', 'reorder', '3', '1', '2'], { createClient: () => board.client });
+
+  const human = await run(['queue', 'list'], { createClient: () => board.client });
+  assert.equal(human.code, 0);
+  assert.deepEqual(human.out, ['#3 #1 #2']);
+
+  const json = await run(['queue', 'list', '--json'], { createClient: () => board.client });
+  assert.equal(json.code, 0);
+  assert.deepEqual(json.out, ['[3,1,2]']);
+  assert.deepEqual(JSON.parse(json.out[0]), [3, 1, 2]);
+});
+
+test('board CLI queue reorder refuses a permutation that is not the open issues and changes nothing', async () => {
+  const board = await queuedBoard();
+  await board.client.reorderQueue([2, 1, 3]);
+  const stored = board.server.signed;
+
+  for (const argv of [
+    ['queue', 'reorder', '1', '2'],
+    ['queue', 'reorder', '2', '3', '99'],
+  ]) {
+    const { code, out, err } = await run(argv, { createClient: () => board.client });
+    assert.equal(code, 1, argv.join(' '));
+    assert.deepEqual(out, [], argv.join(' '));
+    assert.match(err[0], /^antonina board: /, argv.join(' '));
+    assert.match(err[0], /every open issue exactly once/, argv.join(' '));
+    assert.equal(board.server.signed, stored, argv.join(' '));
+  }
+});
+
+test('board CLI queue reorder refuses a closed issue and changes nothing', async () => {
+  const board = await queuedBoard();
+  await board.client.close(3);
+  const stored = board.server.signed;
+
+  const { code, out, err } = await run(['queue', 'reorder', '1', '2', '3'], { createClient: () => board.client });
+
+  assert.equal(code, 1);
+  assert.deepEqual(out, []);
+  assert.match(err[0], /every open issue exactly once/);
+  assert.equal(board.server.signed, stored);
+  assert.deepEqual(await board.client.getQueue(), [1, 2]);
+});
+
+test('board CLI rejects a queue reorder argument that is not a positive integer before any write', async () => {
+  const board = await queuedBoard();
+  const methods = [];
+  const watched = client(board.server, {
+    credential: board.initialized.credential,
+    trustAnchor: board.initialized.trustAnchor,
+    fetch: async (url, init = {}) => { methods.push(init.method ?? 'GET'); return board.server.fetch(url, init); },
+  });
+
+  for (const argv of [['queue', 'reorder', '0'], ['queue', 'reorder', '-1'], ['queue', 'reorder', '01']]) {
+    const { code, out, err } = await run(argv, { createClient: () => watched });
+    assert.equal(code, 1, argv.join(' '));
+    assert.deepEqual(out, [], argv.join(' '));
+    assert.match(err[0], /ISSUE must be a positive integer/, argv.join(' '));
+  }
+
+  assert.deepEqual(methods, [], 'a malformed argument never reaches the store');
+  assert.equal(board.server.signed.operations.length, 4);
+});
+
+test('board CLI refuses a duplicated queue reorder without writing it', async () => {
+  const board = await queuedBoard();
+  const stored = board.server.signed;
+  const methods = [];
+  const watched = client(board.server, {
+    credential: board.initialized.credential,
+    trustAnchor: board.initialized.trustAnchor,
+    fetch: async (url, init = {}) => { methods.push(init.method ?? 'GET'); return board.server.fetch(url, init); },
+  });
+
+  const { code, out, err } = await run(['queue', 'reorder', '1', '1'], { createClient: () => watched });
+
+  assert.equal(code, 1);
+  assert.deepEqual(out, []);
+  assert.match(err[0], /^antonina board: /);
+  assert.match(err[0], /Queue-reorder payload is malformed/);
+  assert.equal(methods.includes('PUT'), false);
+  assert.equal(board.server.signed, stored);
+  assert.deepEqual(await board.client.getQueue(), [1, 2, 3]);
+});
+
+test('board CLI queue reorder without issue numbers is a usage error', async () => {
+  const board = await queuedBoard();
+  const stored = board.server.signed;
+
+  const { code, out, err } = await run(['queue', 'reorder'], { createClient: () => board.client });
+
+  assert.equal(code, 1);
+  assert.deepEqual(out, []);
+  assert.equal(err[0], 'antonina board: queue reorder requires issue numbers');
+  assert.equal(board.server.signed, stored);
+});
+
+test('board CLI queue reorder requires a credential and leaves the board alone', async () => {
+  const board = await queuedBoard();
+  const reader = client(board.server, { trustAnchor: board.initialized.trustAnchor });
+  const stored = board.server.signed;
+
+  const { code, err } = await run(['queue', 'reorder', '3', '2', '1'], { createClient: () => reader });
+
+  assert.equal(code, 1);
+  assert.equal(err[0], 'antonina board: Antonina board credential is required');
+  assert.equal(board.server.signed, stored);
+});

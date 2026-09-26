@@ -7,6 +7,7 @@ import {
   emptyIssueList,
   filterLabel,
   firstRunResolved,
+  firstRunUnresolved,
   formatUpdatedAt,
   groupResources,
   issueCounts,
@@ -101,6 +102,15 @@ describe('board load state', () => {
     expect(trustRequired(new Error('Skrynia GET antonina/board-v2 failed (503)'))).toBe(false);
     expect(boardLoadFailed({ status: 'untrusted' }, 'boom')).toEqual({ status: 'failed', message: 'boom' });
     expect(loadedBoard({ status: 'untrusted' })).toBeUndefined();
+  });
+
+  it('sends a first-run client that lost the initialize race to the trust anchor screen', () => {
+    expect(firstRunUnresolved(new BoardTrustRequiredError('no trust anchor'))).toEqual({ status: 'untrusted' });
+  });
+
+  it('reports a failed first-run read as the failure it is, not as a missing board', () => {
+    expect(firstRunUnresolved(new Error('Skrynia GET antonina/board-v2 failed (503)')))
+      .toEqual({ status: 'failed', message: 'Skrynia GET antonina/board-v2 failed (503)' });
   });
 
   it('explains that the trust anchor is public and only unlocks reading', () => {

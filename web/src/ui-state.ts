@@ -67,6 +67,16 @@ export function firstRunResolved(load: BoardLoad, cause: unknown): { load: Board
   return { load, error: cause instanceof Error ? cause.message : String(cause) };
 }
 
+/**
+ * Classifies a failed first-run read by cause: a board that appeared under this
+ * browser now needs its trust anchor, and any other failure is reported as the
+ * read failure it is instead of being passed off as a missing board.
+ */
+export function firstRunUnresolved(cause: unknown): BoardLoad {
+  if (trustRequired(cause)) return { status: 'untrusted' };
+  return { status: 'failed', message: cause instanceof Error ? cause.message : String(cause) };
+}
+
 export function visibleIssues(issues: BoardIssue[], filter: IssueFilter): BoardIssue[] {
   return issues
     .filter((issue) => filter === 'all' || issue.state === filter)

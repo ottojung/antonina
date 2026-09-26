@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { createBrowserBoardApi } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { boardLoadFailed, boardLoaded, emptyIssueList, filterLabel, firstRunResolved, formatUpdatedAt, groupResources, issueCounts, loadedBoard, trustRequired, visibleIssues, FIRST_RUN_COPY, ISSUE_FORM_HINT, READ_ONLY_CALLOUT, TRUST_COPY, type BoardLoad, type IssueFilter } from './ui-state';
+import { boardLoadFailed, boardLoaded, emptyIssueList, filterLabel, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, loadedBoard, trustRequired, visibleIssues, FIRST_RUN_COPY, ISSUE_FORM_HINT, READ_ONLY_CALLOUT, TRUST_COPY, type BoardLoad, type IssueFilter } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -28,6 +28,7 @@ export default function App() {
   const refresh = useCallback(async () => {
     try {
       setLoad(boardLoaded(await session.read()));
+      setHasWriteAccess(session.hasCredential() && api.hasWriteAccess());
       setError(undefined);
     } catch (cause) {
       if (trustRequired(cause)) {
@@ -38,14 +39,7 @@ export default function App() {
       setError(message);
       setLoad((current) => boardLoadFailed(current, message));
     }
-    if (session.hasCredential() && !api.hasWriteAccess()) {
-      try {
-        setHasWriteAccess((await session.api.verifyCredential()).canEdit);
-      } catch {
-        setHasWriteAccess(false);
-      }
-    }
-  }, [session]);
+  }, [session, api]);
   const board = loadedBoard(load);
   const hasBoard = board !== undefined;
   useEffect(() => { void refresh(); }, [refresh]);
@@ -123,7 +117,7 @@ export default function App() {
   }
   async function resolveFirstRun(): Promise<BoardLoad> {
     try { return boardLoaded(await session.read()); }
-    catch { return { status: 'uninitialized' }; }
+    catch (cause) { return firstRunUnresolved(cause); }
   }
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
 

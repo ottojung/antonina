@@ -71,11 +71,6 @@ export class BrowserBoardSession {
     return board;
   }
 
-  async needsTrustAnchor(): Promise<boolean> {
-    if (this.api.getTrustAnchor() !== null) return false;
-    return this.api.signedBoardExists();
-  }
-
   /** Adopts a board trust anchor so this browser can read it. */
   async trust(anchorText: string): Promise<Board> {
     const anchor = await parseBoardTrustAnchorText(anchorText);

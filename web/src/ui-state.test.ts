@@ -9,6 +9,7 @@ import {
   boardLoaded,
   boardReadOutcome,
   COMPOSER_READ_ONLY_CALLOUT,
+  COMPOSER_SUBMIT_HINT,
   DELETED_COPY,
   emptyIssueList,
   filterLabel,
@@ -206,7 +207,11 @@ describe('board copy', () => {
   it('explains the create form and advertises its shortcut without a second hint', () => {
     expect(ISSUE_FORM_HINT).toBe('The description holds the task context; the conversation holds updates and questions.');
     expect(ISSUE_FORM_HINT).not.toContain('Ctrl');
-    expect(ISSUE_FORM_SUBMIT_HINT).toBe('Ctrl+Enter creates the issue from the description.');
+    expect(ISSUE_FORM_SUBMIT_HINT).toBe('Ctrl+Enter or Cmd+Enter creates the issue from the description.');
+  });
+
+  it('advertises the composer shortcut next to the button it stands in for', () => {
+    expect(COMPOSER_SUBMIT_HINT).toBe('Ctrl+Enter or Cmd+Enter posts this message.');
   });
 
   it('keeps empty-state copy distinct from the read-only access callout', () => {

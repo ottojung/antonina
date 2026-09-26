@@ -1,5 +1,5 @@
-import { canonicalBytes, keyIdFromPublicKey, sha256Id, signBytes, type CanonicalValue, type SigningKeyPair } from './canonical.js';
-import { parseBoard, type Board } from './model.js';
+import { canonicalBytes, keyIdFromPublicKey, sha256Id, signBytes, verifyBytes, type CanonicalValue, type SigningKeyPair } from './canonical.js';
+import { canonicalHost, canonicalPath, parseBoard, type Board, type BoardIssue } from './model.js';
 
 export const OPLOG_SCHEMA_VERSION = 1 as const;
 
@@ -7,6 +7,7 @@ export const BOARD_CAPABILITIES = [
   'board.read',
   'issue.create',
   'issue.edit',
+  'issue.delete',
   'issue.comment',
   'issue.state',
   'queue.reorder',
@@ -379,5 +380,371 @@ export async function signBoardOperation(input: SignOperationInput, signer: Sign
     ...unsigned,
     opId: await sha256Id('sha256', bytes),
     signature: await signBytes(signer.privateKey, bytes),
+  };
+}
+
+
+export interface VerifiedAuthority {
+  keyId: string;
+  publicKey: string;
+  parentKeyId: string | null;
+  capabilities: BoardCapability[];
+  revoked: boolean;
+}
+
+export interface VerifiedBoardState {
+  board: Board;
+  queue: number[];
+  authorities: VerifiedAuthority[];
+  deleted: boolean;
+  head: string;
+}
+
+export interface VerifyOperationLogOptions {
+  previouslyAcceptedHead?: string | null;
+}
+
+export class OperationLogVerificationError extends Error {}
+
+function unsignedFromSigned(operation: SignedBoardOperation): UnsignedBoardOperation {
+  return {
+    schemaVersion: operation.schemaVersion,
+    boardId: operation.boardId,
+    previous: operation.previous,
+    signerKeyId: operation.signerKeyId,
+    timestamp: operation.timestamp,
+    nonce: operation.nonce,
+    kind: operation.kind,
+    payload: operation.payload,
+  };
+}
+
+function requiredCapability(kind: BoardOperationKind): BoardCapability | null {
+  switch (kind) {
+    case 'board.initialize': return null;
+    case 'authority.delegate': return 'authority.delegate';
+    case 'authority.revoke': return 'authority.revoke';
+    case 'issue.create': return 'issue.create';
+    case 'issue.edit': return 'issue.edit';
+    case 'issue.delete': return 'issue.delete';
+    case 'issue.comment': return 'issue.comment';
+    case 'issue.close':
+    case 'issue.reopen': return 'issue.state';
+    case 'resource.add':
+    case 'resource.remove': return 'resource.modify';
+    case 'queue.reorder': return 'queue.reorder';
+    case 'board.delete': return 'board.delete';
+  }
+}
+
+function requireIssue(board: Board, number: number): BoardIssue {
+  const issue = board.issues.find((candidate) => candidate.number === number);
+  if (!issue) throw new OperationLogVerificationError(`Operation references missing issue ${number}`);
+  return issue;
+}
+
+function exactOpenIssueQueue(board: Board, numbers: number[]): void {
+  const expected = board.issues.filter((issue) => issue.state === 'open').map((issue) => issue.number).sort((a, b) => a - b);
+  const actual = [...numbers].sort((a, b) => a - b);
+  if (expected.length !== actual.length || expected.some((number, index) => number !== actual[index])) {
+    throw new OperationLogVerificationError('Queue reorder must contain every open issue exactly once');
+  }
+}
+
+function descendantsOf(authorities: Map<string, VerifiedAuthority>, root: string): Set<string> {
+  const result = new Set<string>([root]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const authority of authorities.values()) {
+      if (authority.parentKeyId !== null && result.has(authority.parentKeyId) && !result.has(authority.keyId)) {
+        result.add(authority.keyId);
+        changed = true;
+      }
+    }
+  }
+  return result;
+}
+
+function cloneBoard(board: Board): Board {
+  return structuredClone(board);
+}
+
+function applyBoardMutation(
+  operation: SignedBoardOperation,
+  board: Board,
+  queue: number[],
+): { board: Board; queue: number[]; deleted: boolean } {
+  const candidate = cloneBoard(board);
+  let nextQueue = [...queue];
+  switch (operation.kind) {
+    case 'board.initialize':
+    case 'authority.delegate':
+    case 'authority.revoke':
+      return { board: candidate, queue: nextQueue, deleted: false };
+    case 'issue.create': {
+      const payload = operation.payload as IssueCreatePayload;
+      if (payload.number !== candidate.nextIssueNumber) {
+        throw new OperationLogVerificationError('Issue-create number must equal the next issue number');
+      }
+      if (candidate.nextIssueNumber >= Number.MAX_SAFE_INTEGER) {
+        throw new OperationLogVerificationError('Issue number space is exhausted');
+      }
+      candidate.issues.push({
+        number: payload.number,
+        title: payload.title,
+        body: payload.body,
+        state: 'open',
+        createdAt: operation.timestamp,
+        updatedAt: operation.timestamp,
+        messages: [],
+      });
+      candidate.nextIssueNumber += 1;
+      nextQueue.push(payload.number);
+      break;
+    }
+    case 'issue.edit': {
+      const payload = operation.payload as IssueEditPayload;
+      const issue = requireIssue(candidate, payload.number);
+      if (issue.state === 'closed') throw new OperationLogVerificationError('Closed issue descriptions cannot be edited');
+      if (payload.title !== null) issue.title = payload.title;
+      if (payload.body !== null) issue.body = payload.body;
+      issue.updatedAt = operation.timestamp;
+      break;
+    }
+    case 'issue.comment': {
+      const payload = operation.payload as IssueCommentPayload;
+      const issue = requireIssue(candidate, payload.number);
+      issue.messages.push({
+        id: operation.opId,
+        author: payload.author,
+        body: payload.body,
+        createdAt: operation.timestamp,
+      });
+      issue.updatedAt = operation.timestamp;
+      break;
+    }
+    case 'issue.close': {
+      const payload = operation.payload as IssueReferencePayload;
+      const issue = requireIssue(candidate, payload.number);
+      issue.state = 'closed';
+      issue.updatedAt = operation.timestamp;
+      nextQueue = nextQueue.filter((number) => number !== payload.number);
+      break;
+    }
+    case 'issue.reopen': {
+      const payload = operation.payload as IssueReferencePayload;
+      const issue = requireIssue(candidate, payload.number);
+      issue.state = 'open';
+      issue.updatedAt = operation.timestamp;
+      if (!nextQueue.includes(payload.number)) nextQueue.push(payload.number);
+      break;
+    }
+    case 'issue.delete': {
+      const payload = operation.payload as IssueReferencePayload;
+      requireIssue(candidate, payload.number);
+      candidate.issues = candidate.issues.filter((issue) => issue.number !== payload.number);
+      candidate.resources = candidate.resources.flatMap((resource) => {
+        const issueNumbers = resource.issueNumbers.filter((number) => number !== payload.number);
+        return issueNumbers.length === 0 ? [] : [{ ...resource, issueNumbers, updatedAt: operation.timestamp }];
+      });
+      nextQueue = nextQueue.filter((number) => number !== payload.number);
+      break;
+    }
+    case 'resource.add': {
+      const payload = operation.payload as ResourcePayload;
+      const issue = requireIssue(candidate, payload.number);
+      if (issue.state !== 'open') throw new OperationLogVerificationError('A resource dependency requires an open issue');
+      const host = canonicalHost(payload.host);
+      const path = canonicalPath(payload.path);
+      const current = candidate.resources.find((resource) => resource.host === host && resource.path === path);
+      if (current) {
+        if (current.issueNumbers.includes(payload.number)) {
+          throw new OperationLogVerificationError('Resource dependency already exists');
+        }
+        current.issueNumbers.push(payload.number);
+        current.issueNumbers.sort((a, b) => a - b);
+        current.updatedAt = operation.timestamp;
+      } else {
+        candidate.resources.push({
+          host,
+          path,
+          issueNumbers: [payload.number],
+          createdAt: operation.timestamp,
+          updatedAt: operation.timestamp,
+        });
+      }
+      candidate.resources.sort((left, right) => left.host.localeCompare(right.host) || left.path.localeCompare(right.path));
+      break;
+    }
+    case 'resource.remove': {
+      const payload = operation.payload as ResourcePayload;
+      const host = canonicalHost(payload.host);
+      const path = canonicalPath(payload.path);
+      const index = candidate.resources.findIndex((resource) => resource.host === host && resource.path === path);
+      const current = index < 0 ? undefined : candidate.resources[index];
+      if (!current || !current.issueNumbers.includes(payload.number)) {
+        throw new OperationLogVerificationError('Resource dependency does not exist');
+      }
+      current.issueNumbers = current.issueNumbers.filter((number) => number !== payload.number);
+      if (current.issueNumbers.length === 0) candidate.resources.splice(index, 1);
+      else current.updatedAt = operation.timestamp;
+      break;
+    }
+    case 'queue.reorder': {
+      const payload = operation.payload as QueueReorderPayload;
+      exactOpenIssueQueue(candidate, payload.numbers);
+      nextQueue = [...payload.numbers];
+      break;
+    }
+    case 'board.delete':
+      return { board: candidate, queue: nextQueue, deleted: true };
+  }
+  return { board: parseBoard(candidate), queue: nextQueue, deleted: false };
+}
+
+function publicAuthorities(authorities: Map<string, VerifiedAuthority>): VerifiedAuthority[] {
+  return [...authorities.values()]
+    .map((authority) => ({ ...authority, capabilities: [...authority.capabilities] }))
+    .sort((left, right) => left.keyId.localeCompare(right.keyId));
+}
+
+export async function verifyAndReplayOperationLog(
+  value: unknown,
+  anchor: BoardTrustAnchor,
+  options: VerifyOperationLogOptions = {},
+): Promise<VerifiedBoardState> {
+  const derivedRootKeyId = await keyIdFromPublicKey(anchor.rootPublicKey);
+  if (derivedRootKeyId !== anchor.rootKeyId) {
+    throw new OperationLogVerificationError('Root trust anchor key ID does not match its public key');
+  }
+
+  const log = parseOperationLog(value);
+  if (log.boardId !== anchor.boardId || log.rootKeyId !== anchor.rootKeyId) {
+    throw new OperationLogVerificationError('Operation log does not match the configured board trust anchor');
+  }
+  if (log.operations.length === 0) {
+    throw new OperationLogVerificationError('Operation log has not been initialized');
+  }
+
+  const authorities = new Map<string, VerifiedAuthority>();
+  authorities.set(anchor.rootKeyId, {
+    keyId: anchor.rootKeyId,
+    publicKey: anchor.rootPublicKey,
+    parentKeyId: null,
+    capabilities: [...BOARD_CAPABILITIES],
+    revoked: false,
+  });
+
+  let previous: string | null = null;
+  let board: Board | undefined;
+  let queue: number[] = [];
+  let deleted = false;
+  const seen = new Set<string>();
+
+  for (let index = 0; index < log.operations.length; index += 1) {
+    const operation = log.operations[index]!;
+    if (operation.boardId !== anchor.boardId) {
+      throw new OperationLogVerificationError('Operation belongs to a different board');
+    }
+    if (operation.previous !== previous) {
+      throw new OperationLogVerificationError('Operation history predecessor chain is invalid');
+    }
+
+    const unsigned = unsignedFromSigned(operation);
+    const bytes = canonicalBytes(unsignedOperationValue(unsigned));
+    const expectedId = await sha256Id('sha256', bytes);
+    if (operation.opId !== expectedId) throw new OperationLogVerificationError('Operation identity hash is invalid');
+    if (seen.has(operation.opId)) throw new OperationLogVerificationError('Operation history contains a duplicate operation');
+    seen.add(operation.opId);
+
+    const authority = authorities.get(operation.signerKeyId);
+    if (!authority || authority.revoked) {
+      throw new OperationLogVerificationError('Operation signer is unknown or revoked');
+    }
+    if (!await verifyBytes(authority.publicKey, operation.signature, bytes)) {
+      throw new OperationLogVerificationError('Operation signature is invalid');
+    }
+
+    if (index === 0) {
+      if (operation.kind !== 'board.initialize'
+          || operation.signerKeyId !== anchor.rootKeyId
+          || operation.previous !== null) {
+        throw new OperationLogVerificationError('First operation must initialize the board under the root authority');
+      }
+      board = cloneBoard((operation.payload as InitializePayload).board);
+      queue = board.issues.filter((issue) => issue.state === 'open').map((issue) => issue.number);
+      previous = operation.opId;
+      continue;
+    }
+    if (operation.kind === 'board.initialize') {
+      throw new OperationLogVerificationError('Board initialization may only appear as the first operation');
+    }
+    if (!board) throw new OperationLogVerificationError('Board state is not initialized');
+    if (deleted) throw new OperationLogVerificationError('Operations may not follow board deletion');
+
+    const capability = requiredCapability(operation.kind);
+    if (capability !== null && !authority.capabilities.includes(capability)) {
+      throw new OperationLogVerificationError(`Signer lacks required capability ${capability}`);
+    }
+
+    if (operation.kind === 'authority.delegate') {
+      const payload = operation.payload as DelegatePayload;
+      if (authorities.has(payload.childKeyId)) {
+        throw new OperationLogVerificationError('Delegated key ID has already appeared in this board history');
+      }
+      const childKeyId = await keyIdFromPublicKey(payload.childPublicKey);
+      if (childKeyId !== payload.childKeyId) {
+        throw new OperationLogVerificationError('Delegated key ID does not match its public key');
+      }
+      for (const childCapability of payload.capabilities) {
+        if (!authority.capabilities.includes(childCapability)) {
+          throw new OperationLogVerificationError('Delegation attempts capability escalation');
+        }
+      }
+      authorities.set(payload.childKeyId, {
+        keyId: payload.childKeyId,
+        publicKey: payload.childPublicKey,
+        parentKeyId: authority.keyId,
+        capabilities: [...payload.capabilities],
+        revoked: false,
+      });
+    } else if (operation.kind === 'authority.revoke') {
+      const payload = operation.payload as RevokePayload;
+      if (payload.keyId === anchor.rootKeyId) {
+        throw new OperationLogVerificationError('Root authority cannot be revoked through the board log');
+      }
+      const target = authorities.get(payload.keyId);
+      if (!target || target.revoked) {
+        throw new OperationLogVerificationError('Revocation target is unknown or already revoked');
+      }
+      for (const keyId of descendantsOf(authorities, payload.keyId)) {
+        const descendant = authorities.get(keyId);
+        if (descendant) descendant.revoked = true;
+      }
+    } else {
+      const applied = applyBoardMutation(operation, board, queue);
+      board = applied.board;
+      queue = applied.queue;
+      deleted = applied.deleted;
+    }
+
+    previous = operation.opId;
+  }
+
+  if (!board || previous === null) throw new OperationLogVerificationError('Operation log has no initialized board state');
+  if (log.head !== previous) throw new OperationLogVerificationError('Operation log head does not match its signed history');
+
+  const remembered = options.previouslyAcceptedHead;
+  if (remembered !== undefined && remembered !== null && !seen.has(remembered)) {
+    throw new OperationLogVerificationError('Operation log does not contain the previously accepted head; refusing rollback or divergent replacement');
+  }
+
+  return {
+    board: parseBoard(board),
+    queue: [...queue],
+    authorities: publicAuthorities(authorities),
+    deleted,
+    head: previous,
   };
 }

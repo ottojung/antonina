@@ -17,6 +17,7 @@ import {
   queueSteer,
   reconcileDeadMeta,
   reservationInFlight,
+  runnerAlive,
   setActiveRunner,
   signalInvocation,
   steerQueue,
@@ -244,6 +245,124 @@ test('a running record is never reconciled to failed while a live runner or an i
     state: 'reserved', gen: 1, mode: 'wat', reserved_at: 1, owner_pid: 99999999, owner_start_ticks: 1,
   };
   assert.equal(reservationInFlight(badMode, 80), true, 'a bad reservation mode is not proof the reservation is dead');
+});
+
+// A different, equally well-formed agent id. Used to prove liveness is decided
+// on the ANTONINA_AGENT_ID marker and not on the pid alone.
+const OTHER_AGENT_ID = 'c33f';
+
+// The live-runner term of `reservationInFlight` is reached only when
+// active_runner is true. Every earlier test either sets it false or supplies no
+// live runner, so the rung below is reachable from no existing case.
+test('the live-runner rung keeps a reservation in flight ahead of every reservation term', (t) => {
+  isolatedXdg(t);
+  if (!requireProc(t)) return;
+
+  const child = liveRunnerChild(t);
+  const startTicks = procStartTicks(child.pid);
+  assert.notEqual(startTicks, null, 'the spawned runner must have readable start ticks');
+
+  // active_runner is true, and the runner is genuinely live: the reservation is
+  // claimed and its owner is long gone, so every ladder term below the live-runner
+  // rung would return false. Only the live runner can hold this in flight.
+  const meta = idleMeta(AGENT_ID, '/tmp', null, 1);
+  beginInvocation(meta, 'work', 10, 1);
+  meta.active_runner = true;
+  meta.runner_pid = child.pid;
+  meta.runner_start_time = startTicks;
+  meta.runner_reservation = {
+    state: 'claimed', gen: 1, mode: 'new', reserved_at: 1, owner_pid: 99999999, owner_start_ticks: 1,
+  };
+
+  assert.equal(runnerAlive(meta), true, 'the pinned pid + start ticks + marker triple must read as live');
+  assert.equal(
+    reservationInFlight(meta, 80),
+    true,
+    'a live runner must hold its reservation in flight even once the reservation is claimed and its owner is gone',
+  );
+});
+
+// The inverse direction: a pid that is alive but no longer the runner we recorded
+// must NOT veto the transition to failed. Both terms of the identity check are
+// pinned separately, because a same-pid-recycled process is the defect class that
+// leaves a running record stuck forever.
+test('a live pid is not a live runner when the start ticks or the agent marker disagree', (t) => {
+  isolatedXdg(t);
+  if (!requireProc(t)) return;
+
+  const child = liveRunnerChild(t);
+  const startTicks = procStartTicks(child.pid);
+  assert.notEqual(startTicks, null, 'the spawned runner must have readable start ticks');
+
+  // 1. Right pid, wrong runner_start_time: the pid was recycled, or the record
+  //    points at some other incarnation of it. The marker is still ours.
+  const recycled = idleMeta(AGENT_ID, '/tmp', null, 1);
+  beginInvocation(recycled, 'work', 10, 1);
+  recycled.active_runner = false;
+  recycled.runner_pid = child.pid;
+  recycled.runner_start_time = startTicks + 1;
+  assert.equal(
+    runnerAlive(recycled),
+    false,
+    'a mismatched /proc start-ticks term must fail the identity even though the pid is alive and the marker is ours',
+  );
+  // Launched at 10 and reconciled at 80, so the pid-less startup window is long
+  // closed and only the identity check stands between this and a terminal state.
+  assert.equal(reconcileDeadMeta(recycled, 80), true, 'a recycled runner pid must still reconcile to failed');
+  assert.equal(recycled.state, 'failed');
+  assert.match(String(recycled.error), /disappeared/);
+
+  // 2. Right pid, right start ticks, wrong agent id: the pid is genuinely alive
+  //    with the exact start time we recorded, but it belongs to a different
+  //    agent, so we must not treat it as our runner.
+  const otherAgent = idleMeta(AGENT_ID, '/tmp', null, 1);
+  beginInvocation(otherAgent, 'work', 10, 1);
+  otherAgent.active_runner = false;
+  otherAgent.id = OTHER_AGENT_ID;
+  otherAgent.runner_pid = child.pid;
+  otherAgent.runner_start_time = startTicks;
+  assert.equal(
+    runnerAlive(otherAgent),
+    false,
+    'an ANTONINA_AGENT_ID marker for a different agent must fail the identity even though pid and start ticks match',
+  );
+  assert.equal(reconcileDeadMeta(otherAgent, 80), true, 'another agent\'s process must still reconcile to failed');
+  assert.equal(otherAgent.state, 'failed');
+  assert.equal(otherAgent.active_runner, false);
+  assert.match(String(otherAgent.error), /disappeared/);
+});
+
+// The grace window that reconcileDeadMeta applies before writing the terminal
+// failed state. deriveState already pins its own copy; this pins the copy that
+// actually transitions the durable record.
+test('reconcileDeadMeta withholds the terminal failed state inside the pid-less startup window', (t) => {
+  isolatedXdg(t);
+
+  // No pid, active_runner false, no reservation: only the startup window can hold it.
+  const inside = idleMeta(AGENT_ID, '/tmp', null, 1);
+  beginInvocation(inside, 'work', 100, 1);
+  assert.equal(inside.pid, null);
+  assert.equal(
+    reconcileDeadMeta(inside, 110),
+    false,
+    'a pid-less record whose launch time is inside the startup window must not be failed yet',
+  );
+  assert.equal(inside.state, 'running');
+  assert.equal(inside.finished_at, null);
+  assert.equal(inside.error, null);
+
+  // The same launch timestamp, a whole window later, does reconcile.
+  const outside = idleMeta(AGENT_ID, '/tmp', null, 1);
+  beginInvocation(outside, 'work', 100, 1);
+  assert.equal(reconcileDeadMeta(outside, 160), true);
+  assert.equal(outside.state, 'failed');
+
+  // A launch timestamp still in the future is not a reached launch time, so the
+  // window is not open and the record is reconcilable.
+  const future = idleMeta(AGENT_ID, '/tmp', null, 1);
+  beginInvocation(future, 'work', 100, 1);
+  assert.equal(reconcileDeadMeta(future, 99), true);
+  assert.equal(future.state, 'failed');
 });
 
 // ---------------------------------------------------------------- GAP-RT-4 ----

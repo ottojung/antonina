@@ -64,7 +64,13 @@ export const REJECTED_CREDENTIAL_COPY = {
 
 export const ISSUE_FORM_HINT = 'The description holds the task context; the conversation holds updates and questions.';
 
-export const ISSUE_FORM_SUBMIT_HINT = 'Ctrl+Enter creates the issue from the description.';
+export const ISSUE_FORM_SUBMIT_HINT = 'Ctrl+Enter or Cmd+Enter creates the issue from the description.';
+
+/**
+ * Advertised next to the composer's own submit button, so the shortcut is
+ * discoverable where the alternative to it sits.
+ */
+export const COMPOSER_SUBMIT_HINT = 'Ctrl+Enter or Cmd+Enter posts this message.';
 
 export const WRITE_ACCESS_SUMMARY = 'Write access allows issue, description, dependency, status, and priority order changes.';
 

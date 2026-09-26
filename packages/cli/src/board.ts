@@ -10,8 +10,6 @@ import {
   type BoardInitialization,
 } from '../../core/src/api.js';
 import {
-  parseBoardCredential,
-  parseBoardTrustAnchor,
   serializeBoardCredential,
   serializeBoardTrustAnchor,
   type BoardCredential,
@@ -32,12 +30,14 @@ import {
   renderRevision,
   type CollectDeleteReport,
   type CollectDeleteReportBase,
-  type CollectListEntry,
+  type   CollectListEntry,
 } from './collection.js';
+import {
+  configuredValue,
+  loadBoardConfigFiles,
+} from './board-config.js';
 
 export const BOARD_BASE_URL_ENV = 'ANTONINA_BOARD_URL';
-export const BOARD_CREDENTIAL_ENV = 'ANTONINA_BOARD_CREDENTIAL';
-export const BOARD_TRUST_ENV = 'ANTONINA_BOARD_TRUST';
 export const BOARD_HEAD_ENV = 'ANTONINA_BOARD_HEAD';
 export const BOARD_AUTHOR_ENV = 'ANTONINA_BOARD_AUTHOR';
 // `ANTONINA_COLLECT_ROOTS`, the managed collection roots the `collect` commands
@@ -56,6 +56,11 @@ export interface BoardCommandContext {
   env: Record<string, string | undefined>;
   io: BoardCommandIo;
   createClient?: () => BoardApi;
+  /**
+   * The home directory the configuration root is resolved against. Injected by
+   * tests so that no command can reach the ambient `$HOME/.config/antonina`.
+   */
+  home?: string;
 }
 
 type CommandValue =
@@ -130,29 +135,37 @@ function flag(args: string[], name: string): { value: boolean; rest: string[] } 
   return { value: true, rest: [...args.slice(0, index), ...args.slice(index + 1)] };
 }
 
-function parseJsonEnv(raw: string, name: string): unknown {
-  try {
-    return JSON.parse(raw);
-  } catch (error) {
-    throw new AntoninaApiError(name + ' must contain valid JSON', { cause: error });
-  }
+/**
+ * The trust anchor and credential a normal board command runs as.
+ *
+ * The trust anchor and credential come from `trust.json` and `credential.json`
+ * in the Antonina configuration directory and from nowhere else. There is
+ * deliberately no environment override for either: a credential is a secret
+ * with a long lifetime, and a value that can arrive two different ways is a
+ * value whose source an operator can no longer state with confidence. The files
+ * are therefore the one normal source, and a shell needs nothing exported.
+ */
+export function configuredIdentity(
+  context: BoardCommandContext,
+): { credential: BoardCredential | null; trustAnchor: BoardTrustAnchor | null } {
+  // The injected home has to reach the loader, not merely be accepted by the
+  // context: it is what keeps a test's `XDG_CONFIG_HOME`-less run off the
+  // ambient `~/.config/antonina`, and what makes the documented home fallback
+  // resolvable without reading `homedir()`.
+  const files = context.home === undefined
+    ? loadBoardConfigFiles({ env: context.env })
+    : loadBoardConfigFiles({ env: context.env, home: context.home });
+  return {
+    credential: configuredValue(files.credential),
+    trustAnchor: configuredValue(files.trust),
+  };
 }
 
-function defaultClient(env: Record<string, string | undefined>): BoardApi {
-  const rawCredential = env[BOARD_CREDENTIAL_ENV];
-  const rawTrust = env[BOARD_TRUST_ENV];
-  const credential = rawCredential === undefined
-    ? null
-    : parseBoardCredential(parseJsonEnv(rawCredential, BOARD_CREDENTIAL_ENV));
-  const trustAnchor = rawTrust === undefined
-    ? null
-    : parseBoardTrustAnchor(parseJsonEnv(rawTrust, BOARD_TRUST_ENV));
-  const rememberedHead = env[BOARD_HEAD_ENV] ?? null;
+function defaultClient(context: BoardCommandContext): BoardApi {
   return new BoardApi({
-    baseUrl: env[BOARD_BASE_URL_ENV] ?? DEFAULT_BOARD_BASE_URL,
-    credential,
-    trustAnchor,
-    rememberedHead,
+    baseUrl: context.env[BOARD_BASE_URL_ENV] ?? DEFAULT_BOARD_BASE_URL,
+    rememberedHead: context.env[BOARD_HEAD_ENV] ?? null,
+    ...configuredIdentity(context),
   });
 }
 
@@ -160,6 +173,20 @@ function parseCapabilities(args: string[]): BoardCapability[] {
   if (args.length === 0) throw new AntoninaApiError('credential delegate requires at least one capability');
   return args.map(parseBoardCapability);
 }
+
+/**
+ * The normal place to put a value, and the one place it comes from.
+ *
+ * The advice is written in terms of the XDG variables rather than the resolved
+ * path because it must be identical for every command and every operator, and
+ * because the resolved path is exactly the thing the shell will not resolve for
+ * them. Naming a single file rather than also naming an environment variable is
+ * deliberate: the CLI reads the file, so the file is the advice.
+ */
+const TRUST_ADVICE = 'save the board trust anchor as $XDG_CONFIG_HOME/antonina/trust.json to read it';
+
+const CREDENTIAL_ADVICE = 'save a credential copied after the storage capability was issued as'
+  + ' $XDG_CONFIG_HOME/antonina/credential.json';
 
 /**
  * The same advice, for the failure kinds a collection snapshot classifies itself
@@ -170,7 +197,7 @@ function parseCapabilities(args: string[]): BoardCapability[] {
 function collectionAdvice(kind: string): string | null {
   if (kind === 'board-missing') return 'run: antonina board initialize to create it';
   if (kind === 'board-unverifiable' || kind === 'board-state-rejected') {
-    return 'set ' + BOARD_TRUST_ENV + ' to the board trust anchor to read it';
+    return TRUST_ADVICE;
   }
   // A transport failure is the one kind with no established advice, so it is
   // named as itself rather than flattened into another kind's advice.
@@ -188,11 +215,9 @@ function collectionAdvice(kind: string): string | null {
  */
 function boardStateAdvice(error: unknown): string | null {
   if (error instanceof BoardMissingError) return 'run: antonina board initialize to create it';
-  if (error instanceof BoardTrustRequiredError) return 'set ' + BOARD_TRUST_ENV + ' to the board trust anchor to read it';
+  if (error instanceof BoardTrustRequiredError) return TRUST_ADVICE;
   if (error instanceof BoardDeletedError) return 'start a new board instead; this key is permanently occupied';
-  if (error instanceof BoardStorageRejectedError) {
-    return 'set ' + BOARD_CREDENTIAL_ENV + ' to a credential copied after the storage capability was issued';
-  }
+  if (error instanceof BoardStorageRejectedError) return CREDENTIAL_ADVICE;
   // A collection snapshot classifies its own failures rather than throwing the
   // board errors above, so it carries the kind across and is advised about
   // here: `collect list` names initialization while the board is missing and
@@ -510,7 +535,7 @@ function humanLines(result: CommandResult): string[] {
 export async function runBoardCommand(argv: string[], context: BoardCommandContext): Promise<number> {
   try {
     const parsed = parseCommand(argv);
-    const client = context.createClient?.() ?? defaultClient(context.env);
+    const client = context.createClient?.() ?? defaultClient(context);
     const result = await execute(parsed, client, context.env);
     if (parsed.json) {
       context.io.stdout(canonicalJson(result.value as unknown as CanonicalValue));

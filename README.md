@@ -30,16 +30,33 @@ This installs the `antonina` executable. Release artifacts should ship the alrea
 
 ## Board
 
-The Antonina board stores issues and durable resources in Skrynia as a signed operation log under `antonina/board-v2`. The CLI is available as `antonina board`; set `ANTONINA_BOARD_TRUST` to read it and `ANTONINA_BOARD_CREDENTIAL` to write to it.
+The Antonina board stores issues and durable resources in Skrynia as a signed operation log under `antonina/board-v2`. The CLI is available as `antonina board`. It reads its trust anchor from `$XDG_CONFIG_HOME/antonina/trust.json` and its credential from `$XDG_CONFIG_HOME/antonina/credential.json`, falling back to `$HOME/.config/antonina` when `XDG_CONFIG_HOME` is unset. Those two files are the only source: there is no environment override for either, so a fresh shell needs nothing exported. Unrelated settings — `ANTONINA_BOARD_URL`, `ANTONINA_BOARD_HEAD`, `ANTONINA_BOARD_AUTHOR` — remain environment variables.
 
 Reading the board never creates it. Creation is deliberate and has a single path, `BoardApi.initialize()`, reached either from the web board's first-run **Initialize board** action or from `antonina board initialize`; there is no second or fallback creation path, and a second initializer is refused with a non-zero exit instead of taking the trust root. The initializer keeps the board's root signing credential and its public trust anchor, both copyable from the web board's Settings; share the anchor with readers and the credential with editors.
 
-`antonina board initialize` prints both values for a human, and `--credential` or `--trust-anchor` prints exactly one serialized value on stdout for a script. Pass at most one of them:
+`antonina board initialize` creates the board and prints both values for a human: the trust anchor under `Trust anchor (public):` and the root credential under `Root credential (secret; store securely):`. Run it once and save each printed value into its own file:
 
 ```sh
-antonina board initialize --credential > .antonina-credential
-antonina board initialize --trust-anchor > .antonina-trust
+config="${XDG_CONFIG_HOME:-$HOME/.config}/antonina"
+mkdir -p "$config" && chmod 700 "$config"
+antonina board initialize     # copy the anchor into trust.json, the credential into credential.json
+chmod 600 "$config/"*.json
 ```
+
+Initialization is single-use, so this is a one-time setup: a second `initialize` is refused with a non-zero exit and prints nothing. A script that must not involve copying values by hand can capture both from that one run and split them:
+
+```sh
+config="${XDG_CONFIG_HOME:-$HOME/.config}/antonina"
+mkdir -p "$config" && chmod 700 "$config"
+initialized=$(antonina board initialize --json)
+jq -r .trustAnchor <<<"$initialized" > "$config/trust.json"
+jq -r .credential  <<<"$initialized" > "$config/credential.json"
+chmod 600 "$config/"*.json
+```
+
+`--credential` and `--trust-anchor` exist for the cases where you already hold the other value from somewhere else and want exactly one serialized value on stdout; each is a separate invocation of `initialize`, so neither is a second step after initializing.
+
+`credential.json` holds a private key, so the directory is not readable by other users. A file that is present but unparseable is reported by path with a non-zero exit rather than ignored; a file that is absent simply configures nothing, so a reader needs only `trust.json` and an editor needs only `credential.json`.
 
 `antonina board credential delegate` mints attenuated credentials.
 
@@ -72,7 +89,7 @@ antonina agent log --id a13f09c2
 antonina agent wait --id a13f09c2 --timeout 3600
 ```
 
-Lifecycle controls are available through `stop`, `kill`, `delete`, and `clean`. Local runtime state is stored under `$XDG_STATE_HOME/antonina`, defaulting to `$HOME/.local/state/antonina`.
+Lifecycle controls are available through `stop`, `kill`, `delete`, and `clean`. Local runtime state is stored under `$XDG_STATE_HOME/antonina`, defaulting to `$HOME/.local/state/antonina`. That is a different tree from the board configuration above: `clean` sweeps runtime state and never touches your board trust anchor or credential.
 
 ## Development
 

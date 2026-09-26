@@ -1,7 +1,7 @@
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { CreateIssueForm, submitCreateFormOnShortcut, submitsIssueForm, type IssueFormKeydown } from './App';
+import { CreateIssueForm, submitFormOnShortcut, submitsFormOnShortcut, type ShortcutKeydown } from './App';
 import { ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT } from './ui-state';
 
 // The web suite runs in a node environment, so nothing here can dispatch a real
@@ -19,15 +19,15 @@ function renderedForm(): ReactElement<{ children: ReactNode }> {
   return form;
 }
 
-function descriptionKeydown(): (event: IssueFormKeydown) => void {
+function descriptionKeydown(): (event: ShortcutKeydown) => void {
   const form = renderedForm();
   if (typeof form.type !== 'string' || form.type !== 'form') throw new Error('the create form is not a <form>');
   const children = form.props.children as ReactNode[];
   const description = children.find((child) => isValidElement<{ onKeyDown?: unknown }>(child) && child.type === 'textarea') as ReactElement<{ onKeyDown?: unknown }> | undefined;
   const onKeyDown = description?.props.onKeyDown;
   if (typeof onKeyDown !== 'function') throw new Error('the description has no keydown handler');
-  if (onKeyDown !== submitCreateFormOnShortcut) throw new Error('the description does not use the named shortcut handler');
-  return onKeyDown as (event: IssueFormKeydown) => void;
+  if (onKeyDown !== submitFormOnShortcut) throw new Error('the description does not use the named shortcut handler');
+  return onKeyDown as (event: ShortcutKeydown) => void;
 }
 
 /** A fake keydown whose effects are counted, so a double submit would show. */
@@ -36,7 +36,7 @@ function fakeKeydown(
   modifiers: Partial<Record<'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey' | 'repeat', boolean>> = {},
 ) {
   const state = { preventDefault: 0, requestSubmit: 0 };
-  const event: IssueFormKeydown = {
+  const event: ShortcutKeydown = {
     key,
     ctrlKey: false,
     metaKey: false,
@@ -77,7 +77,7 @@ describe('create issue form', () => {
 describe('create-issue keyboard shortcut', () => {
   it('routes Ctrl+Enter in the description to the form once, through its own requestSubmit', () => {
     const { state, event } = fakeKeydown('Enter', { ctrlKey: true });
-    expect(submitsIssueForm(event)).toBe(true);
+    expect(submitsFormOnShortcut(event)).toBe(true);
 
     descriptionKeydown()(event);
     expect(state.requestSubmit).toBe(1);
@@ -90,14 +90,27 @@ describe('create-issue keyboard shortcut', () => {
 
   it('claims no other key or modifier combination as the submit shortcut', () => {
     for (const key of ['Tab', ' ', 'a']) expect(press(key, { ctrlKey: true })).toEqual({ preventDefault: 0, requestSubmit: 0 });
-    for (const modifiers of [{ shiftKey: true }, { altKey: true }, { metaKey: true }]) {
+    for (const modifiers of [{ shiftKey: true }, { altKey: true }]) {
       expect(press('Enter', { ctrlKey: true, ...modifiers })).toEqual({ preventDefault: 0, requestSubmit: 0 });
     }
   });
 
+  it('treats Ctrl+Meta+Enter as one gesture rather than two, so it cannot submit twice', () => {
+    expect(press('Enter', { ctrlKey: true, metaKey: true })).toEqual({ preventDefault: 0, requestSubmit: 0 });
+  });
+
+  it('claims Meta+Enter as the same shortcut, so a Mac keyboard is not a second-class input', () => {
+    const { state, event } = fakeKeydown('Enter', { metaKey: true });
+    expect(submitsFormOnShortcut(event)).toBe(true);
+
+    descriptionKeydown()(event);
+    expect(state.requestSubmit).toBe(1);
+    expect(state.preventDefault).toBe(1);
+  });
+
   it('ignores the auto-repeat of a held Ctrl+Enter instead of submitting again', () => {
     const { state, event } = fakeKeydown('Enter', { ctrlKey: true, repeat: true });
-    expect(submitsIssueForm(event)).toBe(false);
+    expect(submitsFormOnShortcut(event)).toBe(false);
 
     descriptionKeydown()(event);
     expect(state.requestSubmit).toBe(0);

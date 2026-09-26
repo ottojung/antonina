@@ -30,8 +30,14 @@ h1, h2, h3, p { overflow-wrap: anywhere; }
    text out of the tree with it. */
 .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 
-.app-shell { min-height: 100vh; }
-.topbar { height: 72px; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; border-bottom: 1px solid var(--line); background: rgba(250, 251, 248, .96); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(14px); }
+/* Desktop shell. The application is exactly one viewport tall and never scrolls
+   as a document: the topbar holds its place and the two panes scroll their own
+   contents independently, the issue list on the left and the whole selected
+   thread on the right. The mobile block near the end of this file puts all of
+   that back and returns to ordinary document scrolling, which is what a
+   single-column phone layout wants. */
+.app-shell { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+.topbar { height: 72px; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; border-bottom: 1px solid var(--line); background: rgba(250, 251, 248, .96); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(14px); }
 .brand { display: flex; align-items: center; gap: 11px; border: 0; border-radius: 8px; background: none; color: var(--ink); padding: 3px; }
 .brand-mark { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 9px; color: #fff; background: var(--green); font-size: 1.1rem; font-weight: 800; }
 .brand > span:last-child { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.2; }
@@ -49,13 +55,23 @@ h1, h2, h3, p { overflow-wrap: anywhere; }
 .access-pill.writable { color: var(--green-dark); background: var(--green-soft); }
 .access-pill.writable > span { background: #33805f; }
 
-.notice { margin: 12px 24px 0; border: 1px solid; border-radius: 9px; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; font-size: .88rem; }
+/* A banner is a fixed-height notice above the panes, never a scrolling one, so
+   the workspace below it keeps the remaining height rather than pushing the
+   shell past the viewport. */
+.notice { flex: none; margin: 12px 24px 0; border: 1px solid; border-radius: 9px; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; font-size: .88rem; }
 .notice.error { border-color: #e3b7aa; background: #fceae5; color: #762e23; }
 .notice.success { border-color: #b9d4c3; background: #e8f2eb; color: var(--green-dark); }
 .notice button { border: 0; border-radius: 5px; background: none; color: inherit; font-weight: 750; padding: 3px 6px; }
 
-.workspace { display: grid; grid-template-columns: minmax(350px, 39%) minmax(0, 1fr); min-height: calc(100vh - 72px); }
-.issue-pane { border-right: 1px solid var(--line); background: var(--paper); min-width: 0; }
+/* `grid-template-rows: minmax(0, 1fr)` is what actually bounds the split. An
+   auto row is sized by its content, so a long issue list or a long thread would
+   grow the grid past the viewport no matter what the panes were told; pinning
+   the row to the remaining height is what lets each pane scroll on its own. */
+.workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(350px, 39%) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+/* `min-height: 0` on a grid or flex item overrides the `auto` minimum, which
+   would otherwise be the item's content height and defeat the pane's own
+   `overflow-y: auto` by making the item grow instead of scroll. */
+.issue-pane { min-height: 0; overflow-y: auto; border-right: 1px solid var(--line); background: var(--paper); min-width: 0; }
 .pane-heading { padding: 30px 28px 20px; }
 .eyebrow { margin: 0 0 5px; color: var(--orange); text-transform: uppercase; letter-spacing: .11em; font-size: .68rem; font-weight: 800; }
 .pane-heading h1 { margin: 0; font-size: 2rem; letter-spacing: -.04em; line-height: 1.15; }
@@ -150,7 +166,14 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .empty-state p { max-width: 330px; margin: 8px auto 16px; font-size: .86rem; line-height: 1.55; }
 .empty-action-hint { display: block; color: var(--green-dark); font-size: .82rem; font-weight: 700; }
 
-.thread { min-width: 0; display: flex; flex-direction: column; background: #f6f7f3; }
+/* The thread pane is itself the scroll container. The whole thread -- header,
+   description, conversation, and composer -- scrolls together as one
+   continuous column, because a thread that pins its own title and composer
+   while only the middle moves reads as three separate strips rather than one
+   conversation. The composer is an ordinary block here, not a sticky overlay;
+   the mobile block gives `position: sticky` back, where the document is what
+   scrolls. */
+.thread { min-width: 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; background: #f6f7f3; }
 .thread.welcome { justify-content: center; align-items: center; padding: 40px; text-align: center; color: var(--muted); }
 .welcome-mark { display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: 18px; border-radius: 13px; color: #fff; background: var(--green); font-size: 1.25rem; font-weight: 800; }
 .thread.welcome h2 { max-width: 520px; margin: 3px 0 10px; color: var(--ink); font-size: clamp(1.5rem, 3vw, 2.1rem); letter-spacing: -.035em; line-height: 1.2; }
@@ -176,7 +199,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .conversation-empty > span { display: grid; place-items: center; width: 42px; height: 42px; margin: 0 auto 12px; border-radius: 50%; background: #e4e9e2; color: var(--green); }
 .conversation-empty h2 { margin: 0; color: var(--ink); font-size: 1.05rem; }
 .conversation-empty p { margin: 7px 0 0; font-size: .88rem; line-height: 1.55; }
-.composer-area { position: sticky; bottom: 0; border-top: 1px solid var(--line); background: rgba(246, 247, 243, .97); backdrop-filter: blur(10px); }
+.composer-area { border-top: 1px solid var(--line); background: rgba(246, 247, 243, .97); backdrop-filter: blur(10px); }
 .composer, .name-prompt, .composer-access { padding: 18px clamp(26px, 5vw, 68px) 22px; }
 .composer-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .composer-heading span { color: var(--muted); font-size: .78rem; }
@@ -238,13 +261,22 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
   .top-actions { gap: 3px; }
   .top-actions .quiet { padding: 8px; font-size: .78rem; }
   .notice { margin: 10px 12px 0; }
-  .workspace { display: block; min-height: 0; }
+  /* One column, one document. The desktop shell pins the app to the viewport so
+     the two panes can scroll independently; on a phone there is only one pane,
+     and a scroll region inside a phone's page competes with the page for the
+     gesture. Every desktop clipping rule is undone here: the shell grows, the
+     panes overflow visibly, the thread stops being a scroll container, and the
+     composer sticks to the bottom of the window again. */
+  .app-shell { height: auto; min-height: 100vh; display: block; overflow: visible; }
+  .workspace { display: block; min-height: 0; grid-template-rows: none; }
+  .issue-pane { min-height: 0; overflow-y: visible; }
+  .thread { min-height: calc(100vh - 66px); overflow-y: visible; }
+  .composer-area { position: sticky; bottom: 0; }
   .workspace.resources-view .resources-view { padding: 0 20px; }
   .workspace.resources-view { padding-bottom: 32px; }
   .issue-pane { border-right: 0; }
   .has-selection .issue-pane { display: none; }
   .pane-heading { padding-top: 24px; }
-  .thread { min-height: calc(100vh - 66px); }
   .back-button { display: block; }
   .thread-header { padding: 18px 20px 20px; }
   .messages, .composer, .name-prompt, .composer-access { padding-left: 20px; padding-right: 20px; }

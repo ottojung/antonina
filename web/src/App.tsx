@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createBrowserBoardApi } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { COMPOSER_READ_ONLY_CALLOUT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, boardReadOutcome, canMoveInQueue, DELETED_COPY, emptyIssueList, filterLabel, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, formatUpdatedAt, groupResources, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, trustRequired, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
+import { COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, boardReadOutcome, canMoveInQueue, DELETED_COPY, emptyIssueList, filterLabel, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, formatUpdatedAt, groupResources, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, trustRequired, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -186,8 +186,6 @@ export default function App() {
     {settingsOpen && <SettingsPanel displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} access={access} credentialInput={credentialInput} setCredentialInput={setCredentialInput} saveCredential={saveCredential} clearCredential={clearCredential} credentialText={session.credentialText()} trustAnchorText={session.trustAnchorText()} copyKey={copyKey} close={closeSettings} />}
   </div>;
 }
-
-export type IssueFormKey = Pick<ReactKeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey' | 'repeat'>;
 
 /** What a drag or a move control reports: the whole reordered open queue. */
 export type QueueTarget = number[] | null;
@@ -383,34 +381,58 @@ function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSel
 }
 
 
-/** The keydown the description hands the rule: the keystroke plus its two browser effects. */
-export type IssueFormKeydown = IssueFormKey & {
+/** The keystroke a submit shortcut is decided from, and nothing else about the event. */
+export type ShortcutKey = Pick<ReactKeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey' | 'repeat'>;
+
+/** The keydown a textarea hands the rule: the keystroke plus its two browser effects. */
+export type ShortcutKeydown = ShortcutKey & {
   preventDefault(): void;
   currentTarget: { form: { requestSubmit(): void } | null };
 };
 
 /**
- * Ctrl+Enter in the description is routed to the form's own `requestSubmit()`,
- * so it submits exactly the way the Create issue button does and runs the same
- * native `required` validation before `onSubmit`. Plain Enter is left alone so
- * it keeps inserting a newline, no other modifier combination is claimed, and
- * an auto-repeat is ignored: a held key would otherwise re-enter `createIssue`
- * while the first call is still in flight and create a second issue from one
- * deliberate press.
+ * Ctrl+Enter or Meta+Enter in a textarea is routed to the owning form's own
+ * `requestSubmit()`, so it submits exactly the way the form's submit button
+ * does and runs the same native `required` validation before `onSubmit`. Both
+ * modifiers are claimed because the same gesture is Cmd+Return on a Mac, and
+ * teaching one platform the shortcut while the other must reach for the mouse
+ * would be an arbitrary split.
+ *
+ * Plain Enter is left alone so it keeps inserting a newline. No other modifier
+ * is claimed, and holding both Ctrl and Meta is not a shortcut either: that
+ * combination is one gesture, so it must not be able to submit twice. An
+ * auto-repeat is ignored too, because a held key would otherwise re-enter the
+ * submit handler while the first call is still in flight and post a second
+ * message from one deliberate press.
  */
-export function submitsIssueForm(event: IssueFormKey): boolean {
-  return event.key === 'Enter' && event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && !event.repeat;
+export function submitsFormOnShortcut(event: ShortcutKey): boolean {
+  if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.repeat) return false;
+  return event.ctrlKey !== event.metaKey;
 }
 
-/** The description's keydown handler, named so the shortcut is exercised directly. */
-export function submitCreateFormOnShortcut(event: IssueFormKeydown) {
-  if (!submitsIssueForm(event)) return;
+/** A textarea's keydown handler, named so the shortcut is exercised directly. */
+export function submitFormOnShortcut(event: ShortcutKeydown) {
+  if (!submitsFormOnShortcut(event)) return;
   event.preventDefault();
   event.currentTarget.form?.requestSubmit();
 }
 
 export function CreateIssueForm({ onSubmit }: { onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
-  return <form className="create-form" onSubmit={onSubmit}><label htmlFor="new-issue">Create an issue</label><input id="new-issue" name="title" placeholder="What needs doing?" maxLength={200} required /><label htmlFor="new-issue-body">Description</label><textarea id="new-issue-body" name="body" placeholder="Describe the goal, context, or acceptance criteria…" maxLength={10_000} onKeyDown={submitCreateFormOnShortcut} /><small>{ISSUE_FORM_HINT}</small><div><button type="submit">Create issue</button><small>{ISSUE_FORM_SUBMIT_HINT}</small></div></form>;
+  return <form className="create-form" onSubmit={onSubmit}><label htmlFor="new-issue">Create an issue</label><input id="new-issue" name="title" placeholder="What needs doing?" maxLength={200} required /><label htmlFor="new-issue-body">Description</label><textarea id="new-issue-body" name="body" placeholder="Describe the goal, context, or acceptance criteria…" maxLength={10_000} onKeyDown={submitFormOnShortcut} /><small>{ISSUE_FORM_HINT}</small><div><button type="submit">Create issue</button><small>{ISSUE_FORM_SUBMIT_HINT}</small></div></form>;
+}
+
+/**
+ * The comment composer, extracted from `Thread` so its keyboard wiring is
+ * reachable without rendering a whole issue thread.
+ *
+ * Ctrl+Enter and Meta+Enter go through the form's own `requestSubmit()`, which
+ * is the *same* path the Post message button takes: the native `required`
+ * check runs first, and `onSubmit` receives the same event either way. A
+ * shortcut that called `comment` directly would bypass `required` and be a
+ * second submit path, which is the thing a double-submit bug would live in.
+ */
+export function CommentComposer({ displayName, comment }: { displayName: string; comment: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <form className="composer" onSubmit={comment}><div className="composer-heading"><label htmlFor="comment-body">Add a message</label><span>Posting as <strong>{displayName}</strong></span></div><textarea id="comment-body" name="body" maxLength={10_000} required onKeyDown={submitFormOnShortcut} /><div><span>Keep it useful and concise. {COMPOSER_SUBMIT_HINT}</span><button type="submit">Post message</button></div></form>;
 }
 
 function FirstRun({ error, initializing, initialize, recheck }: { error: string | undefined; initializing: boolean; initialize: () => void; recheck: () => void }) {
@@ -446,7 +468,7 @@ function Thread({ issue, access, displayName, setDisplayName, saveDisplayName, o
   return <article className="thread"><button className="back-button" onClick={back}><span aria-hidden="true">←</span> All issues</button><header className="thread-header"><div className="thread-title"><p className="eyebrow">Issue #{issue.number} <span className={`state-label ${issue.state}`}>{issue.state}</span></p><h1>{issue.title}</h1><p>Updated {formatUpdatedAt(issue.updatedAt)} · {issue.messages.length} messages</p></div>{access === 'editable' ? <button className={`state-action ${issue.state}`} onClick={issue.state === 'open' ? close : reopen}>{issue.state === 'open' ? 'Close issue' : 'Reopen issue'}</button> : <span className="read-only-label">Read-only view</span>}</header>
     <section className="issue-description"><div className="description-heading"><h2>Description</h2>{access === 'editable' && issue.state === 'open' && !editing && <button onClick={() => setEditing(true)}>Edit description</button>}</div>{editing ? <form onSubmit={async (event) => { event.preventDefault(); const result = await editBody(body); if (result) setEditing(false); }}><textarea value={body} onChange={(event) => setBody(event.target.value)} maxLength={10_000} aria-label="Issue description" /><div><button type="submit">Save description</button><button type="button" onClick={() => { setBody(issue.body); setEditing(false); }}>Cancel</button></div></form> : issue.body ? <p>{issue.body}</p> : <p className="empty-description">No description was provided.</p>}</section>
     <section className="messages" aria-label="Issue conversation"><h2>Conversation</h2>{issue.messages.length ? issue.messages.map((message) => <article className="message" key={message.id}><div className="message-meta"><span className="avatar" aria-hidden="true">{message.author.slice(0, 1).toUpperCase()}</span><div><strong>{message.author}</strong><time dateTime={message.createdAt}>{date.format(new Date(message.createdAt))}</time></div></div><p>{message.body}</p></article>) : <div className="conversation-empty"><h2>No conversation yet</h2><p>Add the first message to share context or ask a question.</p></div>}</section>
-    <div className="composer-area">{access !== 'editable' ? <AccessNotice access={access} readOnly={COMPOSER_READ_ONLY_CALLOUT} className="composer-access" onAction={openSettings} /> : !displayName.trim() ? <form className="name-prompt" onSubmit={saveDisplayName}><label htmlFor="composer-name">Before you post, tell everyone who you are</label><div><input id="composer-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} required /><button type="submit">Save name</button></div></form> : <form className="composer" onSubmit={comment}><div className="composer-heading"><label htmlFor="comment-body">Add a message</label><span>Posting as <strong>{displayName}</strong></span></div><textarea id="comment-body" name="body" maxLength={10_000} required /><div><span>Keep it useful and concise.</span><button type="submit">Post message</button></div></form>}</div>
+    <div className="composer-area">{access !== 'editable' ? <AccessNotice access={access} readOnly={COMPOSER_READ_ONLY_CALLOUT} className="composer-access" onAction={openSettings} /> : !displayName.trim() ? <form className="name-prompt" onSubmit={saveDisplayName}><label htmlFor="composer-name">Before you post, tell everyone who you are</label><div><input id="composer-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} required /><button type="submit">Save name</button></div></form> : <CommentComposer displayName={displayName} comment={comment} />}</div>
   </article>;
 }
 

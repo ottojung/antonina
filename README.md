@@ -32,6 +32,8 @@ This installs the `antonina` executable. Release artifacts should ship the alrea
 
 The Antonina board stores issues and durable resources in Skrynia. The CLI is available as `antonina board`; set `ANTONINA_BOARD_CAPABILITY` for writes.
 
+The board is created deliberately, not by reading it: open the web board and use its first-run **Initialize board** action. That browser becomes the initial editor and holds the one-time editing key, which it can copy from Settings to share with other browsers and agents. No CLI command creates a missing board.
+
 ```sh
 antonina board --help
 ```

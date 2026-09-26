@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { createBrowserBoardApi } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { formatUpdatedAt, groupResources, issueCounts, visibleIssues, type IssueFilter } from './ui-state';
+import { boardLoadFailed, boardLoaded, emptyIssueList, filterLabel, firstRunResolved, formatUpdatedAt, groupResources, issueCounts, loadedBoard, visibleIssues, FIRST_RUN_COPY, ISSUE_FORM_HINT, READ_ONLY_CALLOUT, type BoardLoad, type IssueFilter } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -9,7 +9,7 @@ type View = 'issues' | 'resources';
 
 export default function App() {
   const api = useMemo(() => createBrowserBoardApi(), []);
-  const [board, setBoard] = useState<Board>();
+  const [load, setLoad] = useState<BoardLoad>({ status: 'loading' });
   const [view, setView] = useState<View>('issues');
   const [selectedNumber, setSelectedNumber] = useState<number>();
   const [filter, setFilter] = useState<IssueFilter>('open');
@@ -17,20 +17,33 @@ export default function App() {
   const [hasWriteAccess, setHasWriteAccess] = useState(api.hasWriteAccess());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [capabilityInput, setCapabilityInput] = useState('');
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  const [initializing, setInitializing] = useState(false);
   const createInputRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
-    try { setBoard(await api.ensureBoard()); setHasWriteAccess(api.hasWriteAccess()); setError(undefined); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not load Antonina'); }
-    finally { setLoading(false); }
+    try {
+      setLoad(boardLoaded(await api.readBoard()));
+      setError(undefined);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Could not load Antonina';
+      setError(message);
+      setLoad((current) => boardLoadFailed(current, message));
+    }
   }, [api]);
-  useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(), REFRESH_INTERVAL); return () => window.clearInterval(timer); }, [refresh]);
+  const board = loadedBoard(load);
+  const hasBoard = board !== undefined;
+  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!hasBoard) return;
+    const timer = window.setInterval(() => void refresh(), REFRESH_INTERVAL);
+    return () => window.clearInterval(timer);
+  }, [hasBoard, refresh]);
 
   const visible = board ? visibleIssues(board.issues, filter) : [];
   const counts = issueCounts(board?.issues ?? []);
+  const empty = emptyIssueList(filter, hasWriteAccess);
   const selected = board?.issues.find((issue) => issue.number === selectedNumber);
   useEffect(() => { if (selected && !visible.some((issue) => issue.number === selected.number)) setSelectedNumber(undefined); }, [selected, visible]);
 
@@ -62,10 +75,29 @@ export default function App() {
   }
   function clearCapability() { api.clearCapability(); setHasWriteAccess(false); setNotice('Write access cleared from this browser'); }
   async function copyCapability() { const capability = api.getCapability(); if (!capability) return; try { await navigator.clipboard.writeText(capability); setNotice('Write capability copied'); } catch { setError('The browser did not allow access to the clipboard'); } }
+  async function initializeBoard() {
+    setInitializing(true); setError(undefined); setNotice(undefined);
+    try {
+      const { board: created } = await api.initializeBoard();
+      setLoad({ status: 'ready', board: created });
+      setHasWriteAccess(true);
+      setNotice('Board initialized; this browser holds the editing key');
+    } catch (cause) {
+      const { load: resolved, error } = firstRunResolved(await resolveFirstRun(), cause);
+      setLoad(resolved);
+      if (error) setError(error);
+      else setNotice(FIRST_RUN_COPY.raced);
+    } finally { setInitializing(false); }
+  }
+  async function resolveFirstRun(): Promise<BoardLoad> {
+    try { return boardLoaded(await api.readBoard()); }
+    catch { return { status: 'uninitialized' }; }
+  }
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
-  if (loading) return <main className="centered"><div><span className="loading-dot" /> Loading your shared board…</div></main>;
-  if (error && !board) return <main className="centered"><section className="load-error"><p className="eyebrow">Antonina</p><h1>The board could not be loaded</h1><p>{error}</p><button className="primary" onClick={() => void refresh()}>Try again</button></section></main>;
+  if (load.status === 'loading') return <main className="centered"><div><span className="loading-dot" /> Loading your shared board…</div></main>;
+  if (load.status === 'failed') return <main className="centered"><section className="load-error"><p className="eyebrow">Antonina</p><h1>The board could not be loaded</h1><p>{load.message}</p><button className="primary" onClick={() => void refresh()}>Try again</button></section></main>;
+  if (load.status === 'uninitialized') return <main className="centered"><FirstRun error={error} initializing={initializing} initialize={() => void initializeBoard()} recheck={() => void refresh()} /></main>;
 
   return <div className="app-shell">
     <header className="topbar">
@@ -79,17 +111,21 @@ export default function App() {
       <aside className="issue-pane" aria-label={view === 'issues' ? 'Shared issue list' : 'Registered resources'}>
         <div className="pane-heading"><div><p className="eyebrow">One board, everyone’s work</p><h1>{view === 'issues' ? 'Issues' : 'Resources'}</h1><p>{view === 'issues' ? 'Track what needs attention and discuss the details together.' : 'Registered paths are protected while at least one dependent Antonina issue remains open.'}</p></div></div>
         {view === 'issues' ? <>
-          {hasWriteAccess ? <form className="create-form" onSubmit={createIssue}><label htmlFor="new-issue">Create an issue</label><input ref={createInputRef} id="new-issue" name="title" placeholder="What needs doing?" maxLength={200} required /><label htmlFor="new-issue-body">Description</label><textarea id="new-issue-body" name="body" placeholder="Describe the goal, context, or acceptance criteria…" maxLength={10_000} /><button type="submit">Create issue</button></form>
-            : <div className="access-callout"><div><strong>Viewing a shared board</strong><p>You can read every issue and resource. Enable editing to make changes.</p></div><button onClick={() => setSettingsOpen(true)}>Enable editing</button></div>}
-          <nav className="filters" aria-label="Filter issues">{(['open', 'closed', 'all'] as const).map((value) => <button key={value} className={filter === value ? 'active' : ''} aria-pressed={filter === value} onClick={() => setFilter(value)}>{value}<span>{counts[value]}</span></button>)}</nav>
-          <div className="issue-list" aria-label="Issues">{visible.map((issue) => <button key={issue.number} className={`issue-row ${issue.number === selectedNumber ? 'selected' : ''}`} onClick={() => setSelectedNumber(issue.number)} aria-current={issue.number === selectedNumber ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{issue.messages.length} messages{issue.body ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>)}{!visible.length && <div className="empty-state"><h2>No {filter === 'all' ? '' : filter} issues</h2><p>{hasWriteAccess ? 'Create an issue to begin.' : 'Enable editing to create one.'}</p></div>}</div>
+          {hasWriteAccess ? <form className="create-form" onSubmit={createIssue}><label htmlFor="new-issue">Create an issue</label><input ref={createInputRef} id="new-issue" name="title" placeholder="What needs doing?" maxLength={200} required /><label htmlFor="new-issue-body">Description</label><textarea id="new-issue-body" name="body" placeholder="Describe the goal, context, or acceptance criteria…" maxLength={10_000} /><small>{ISSUE_FORM_HINT}</small><button type="submit">Create issue</button></form>
+            : <div className="access-callout"><div><strong>{READ_ONLY_CALLOUT.title}</strong><p>{READ_ONLY_CALLOUT.body}</p></div><button onClick={() => setSettingsOpen(true)}>Enable editing</button></div>}
+          <nav className="filters" aria-label="Filter issues">{(['open', 'closed', 'all'] as const).map((value) => <button key={value} className={filter === value ? 'active' : ''} aria-pressed={filter === value} onClick={() => setFilter(value)}>{filterLabel(value)}<span>{counts[value]}</span></button>)}</nav>
+          <div className="issue-list" aria-label="Issues">{visible.map((issue) => <button key={issue.number} className={`issue-row ${issue.number === selectedNumber ? 'selected' : ''}`} onClick={() => setSelectedNumber(issue.number)} aria-current={issue.number === selectedNumber ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{issue.messages.length} messages{issue.body ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>)}{!visible.length && <div className="empty-state"><h2>{empty.title}</h2><p>{empty.body}</p></div>}</div>
         </> : <ResourcesView board={board!} issues={board!.issues} hasWriteAccess={hasWriteAccess} onOpenIssue={openIssue} onAdd={(host, path, number) => run(() => api.addResourceDependency(host, path, number), 'Resource dependency added')} onRemove={(resource, number) => run(() => api.removeResourceDependency(resource.host, resource.path, number), resource.issueNumbers.length === 1 ? 'Dependency removed; resource unregistered' : 'Resource dependency removed')} onEnableEditing={() => setSettingsOpen(true)} />}
       </aside>
       {view === 'issues' ? selected ? <Thread issue={selected} hasWriteAccess={hasWriteAccess} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.number, body), 'Description updated')} close={() => void run(() => api.close(selected.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.number), 'Issue reopened')} back={() => setSelectedNumber(undefined)} />
-        : <section className="thread welcome"><div className="welcome-mark" aria-hidden="true">A</div><p className="eyebrow">Shared issue board</p><h2>{board!.issues.length ? 'Choose an issue to join the conversation.' : 'Start a shared record of the work.'}</h2><p>Issue descriptions hold the task context; conversation holds updates and questions.</p></section> : null}
+        : <section className="thread welcome"><div className="welcome-mark" aria-hidden="true">A</div><p className="eyebrow">Shared issue board</p><h2>Choose an issue to join the conversation.</h2></section> : null}
     </main>
     {settingsOpen && <SettingsPanel displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} hasWriteAccess={hasWriteAccess} capabilityInput={capabilityInput} setCapabilityInput={setCapabilityInput} saveCapability={saveCapability} clearCapability={clearCapability} copyCapability={copyCapability} close={closeSettings} />}
   </div>;
+}
+
+function FirstRun({ error, initializing, initialize, recheck }: { error: string | undefined; initializing: boolean; initialize: () => void; recheck: () => void }) {
+  return <section className="first-run"><p className="eyebrow">Antonina</p><h1>{FIRST_RUN_COPY.title}</h1><p>{FIRST_RUN_COPY.body}</p>{error && <p role="alert">{error}</p>}<div className="first-run-actions"><button className="primary" disabled={initializing} onClick={initialize}>{FIRST_RUN_COPY.action}</button><button className="quiet" disabled={initializing} onClick={recheck}>{FIRST_RUN_COPY.recheck}</button></div></section>;
 }
 
 function ResourcesView({ board, issues, hasWriteAccess, onOpenIssue, onAdd, onRemove, onEnableEditing }: { board: Board; issues: BoardIssue[]; hasWriteAccess: boolean; onOpenIssue: (number: number) => void; onAdd: (host: string, path: string, number: number) => Promise<unknown>; onRemove: (resource: BoardResource, number: number) => Promise<unknown>; onEnableEditing: () => void }) {
@@ -97,7 +133,7 @@ function ResourcesView({ board, issues, hasWriteAccess, onOpenIssue, onAdd, onRe
   async function add(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await onAdd(String(data.get('host')), String(data.get('path')), Number(data.get('issue'))); if (result) form.reset(); }
   return <div className="resources-view">
     {hasWriteAccess && <form className="resource-form" onSubmit={add}><h2>Register a resource</h2><p>Add a host and path, protected by at least one open issue.</p><label htmlFor="resource-host">Lubko host</label><input id="resource-host" name="host" placeholder="lubko://server-name" required /><label htmlFor="resource-path">Absolute path</label><input id="resource-path" name="path" placeholder="/registered/path" required /><label htmlFor="resource-issue">Open issue</label><select id="resource-issue" name="issue" required><option value="">Choose an issue</option>{issues.filter((issue) => issue.state === 'open').map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add dependency</button></form>}
-    {!hasWriteAccess && <div className="access-callout"><div><strong>Read-only resources</strong><p>All dependencies and protection states remain visible.</p></div><button onClick={onEnableEditing}>Enable editing</button></div>}
+    {!hasWriteAccess && <div className="access-callout"><div><strong>{READ_ONLY_CALLOUT.title}</strong><p>{READ_ONLY_CALLOUT.body}</p></div><button onClick={onEnableEditing}>Enable editing</button></div>}
     {grouped.map(([host, resources]) => <section className="resource-host" key={host}><h2>{host}</h2>{resources.map((resource) => <article className="resource-card" key={resource.path}><header><code>{resource.path}</code><span className={`resource-state ${resourceState(resource, issues)}`}>{resourceState(resource, issues)}</span></header><div className="dependency-chips">{resource.issueNumbers.map((number) => { const issue = issues.find((entry) => entry.number === number)!; return <span className="dependency-chip" key={number}><button onClick={() => onOpenIssue(number)}>#{number} {issue.title}</button><span className={`state-label ${issue.state}`}>{issue.state}</span>{hasWriteAccess && <button aria-label={`Remove issue ${number}`} onClick={() => void onRemove(resource, number)}>×</button>}</span>; })}</div>{hasWriteAccess && <AddDependency resource={resource} issues={issues} add={onAdd} />}</article>)}</section>)}
     {!board.resources.length && <div className="empty-state"><h2>No resources registered</h2><p>Registered paths appear here grouped by Lubko host.</p></div>}
   </div>;

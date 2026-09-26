@@ -1,6 +1,59 @@
-import type { BoardIssue, BoardResource } from './model';
+import type { Board, BoardIssue, BoardResource } from './model';
 
 export type IssueFilter = 'open' | 'closed' | 'all';
+
+export type BoardLoad =
+  | { status: 'loading' }
+  | { status: 'uninitialized' }
+  | { status: 'ready'; board: Board }
+  | { status: 'failed'; message: string };
+
+export const FIRST_RUN_COPY = {
+  title: 'No Antonina board yet',
+  body: 'Initializing the board makes this browser its first editor and stores the board’s editing key in this browser. Copy that key from Settings and share it with the other browsers and agents that need to edit the board.',
+  action: 'Initialize board',
+  recheck: 'Check again',
+  raced: 'Another browser initialized the board first; this browser is read-only.',
+} as const;
+
+export const ISSUE_FORM_HINT = 'The description holds the task context; the conversation holds updates and questions.';
+
+export const READ_ONLY_CALLOUT = {
+  title: 'Read-only board',
+  body: 'You can read every issue and resource. Enable editing in this browser to make changes.',
+} as const;
+
+const FILTER_LABELS: Record<IssueFilter, string> = { open: 'Open', closed: 'Closed', all: 'All' };
+
+export function filterLabel(filter: IssueFilter): string {
+  return FILTER_LABELS[filter];
+}
+
+export function emptyIssueList(filter: IssueFilter, hasWriteAccess: boolean): { title: string; body: string } {
+  return {
+    title: filter === 'all' ? 'No issues' : `No ${FILTER_LABELS[filter].toLowerCase()} issues`,
+    body: hasWriteAccess
+      ? 'Create an issue to give the work a shared record.'
+      : 'No issues match this filter yet.',
+  };
+}
+
+export function loadedBoard(load: BoardLoad): Board | undefined {
+  return load.status === 'ready' ? load.board : undefined;
+}
+
+export function boardLoaded(board: Board | null): BoardLoad {
+  return board ? { status: 'ready', board } : { status: 'uninitialized' };
+}
+
+export function boardLoadFailed(load: BoardLoad, message: string): BoardLoad {
+  return loadedBoard(load) ? load : { status: 'failed', message };
+}
+
+export function firstRunResolved(load: BoardLoad, cause: unknown): { load: BoardLoad; error?: string } {
+  if (load.status === 'ready') return { load };
+  return { load, error: cause instanceof Error ? cause.message : String(cause) };
+}
 
 export function visibleIssues(issues: BoardIssue[], filter: IssueFilter): BoardIssue[] {
   return issues

@@ -63,7 +63,7 @@ describe('BoardApi', () => {
     });
     vi.stubGlobal('fetch', receiverSensitiveFetch);
 
-    await expect(new BoardApi().loadBoard()).resolves.toEqual(board());
+    await expect(new BoardApi().readBoard()).resolves.toEqual(board());
     expect(receiverSensitiveFetch).toHaveBeenCalledOnce();
   });
 
@@ -102,7 +102,23 @@ describe('BoardApi', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it('creates a capability-write board and persists its capability', async () => {
+  it('reports a missing board without creating it', async () => {
+    const fetcher = vi.fn().mockResolvedValue(response({ error: 'not_found' }, 404));
+    const client = new BoardApi({ fetch: fetcher, capabilityStorage: storage() });
+
+    await expect(client.readBoard()).resolves.toBeNull();
+    expect(fetcher.mock.calls.every(([, init]) => init?.method !== 'POST')).toBe(true);
+  });
+
+  it('refuses every mutation while the board is missing instead of creating it', async () => {
+    const fetcher = vi.fn().mockResolvedValue(response({ error: 'not_found' }, 404));
+    const client = api(fetcher);
+
+    await expect(client.createIssue('Next')).rejects.toThrow('Antonina board does not exist');
+    expect(fetcher.mock.calls.every(([, init]) => init?.method !== 'POST')).toBe(true);
+  });
+
+  it('initializes a capability-write board, returns its capability, and persists it', async () => {
     const persisted = storage();
     const created = emptyBoard();
     const fetcher = vi.fn()
@@ -110,21 +126,32 @@ describe('BoardApi', () => {
       .mockResolvedValueOnce(response({ ok: true, mode: 'capability-write', capability: CAPABILITY }, 201))
       .mockResolvedValueOnce(response(created, 200, '"created"'));
 
-    await expect(new BoardApi({ fetch: fetcher, capability: null, capabilityStorage: persisted }).ensureBoard()).resolves.toEqual(created);
+    await expect(new BoardApi({ fetch: fetcher, capability: null, capabilityStorage: persisted }).initializeBoard())
+      .resolves.toEqual({ board: created, capability: CAPABILITY });
     expect(fetcher.mock.calls[1][1].headers['X-Skrynia-Mode']).toBe('capability-write');
     expect(persisted.get('antonina:skrynia:capability:board-v1')).toBe(CAPABILITY);
   });
 
-  it('loads the winner and remains read-only when creation races without a capability', async () => {
+  it('refuses to initialize an existing board, so a second visitor cannot take the key', async () => {
+    const persisted = storage();
     const winner = board([issue()]);
+    const fetcher = vi.fn().mockResolvedValue(response(winner, 200, '"winner"'));
+    const client = new BoardApi({ fetch: fetcher, capability: null, capabilityStorage: persisted });
+
+    await expect(client.initializeBoard()).rejects.toThrow('The Antonina board already exists');
+    expect(fetcher.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
+    expect(persisted.get('antonina:skrynia:capability:board-v1')).toBeNull();
+    await expect(client.createIssue('Blocked')).rejects.toThrow('write capability is required');
+  });
+
+  it('reports a lost initialization race instead of adopting a foreign capability', async () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ error: 'not_found' }, 404))
-      .mockResolvedValueOnce(response({ error: 'already_exists' }, 409))
-      .mockResolvedValueOnce(response(winner, 200, '"winner"'));
-    const client = new BoardApi({ fetch: fetcher });
+      .mockResolvedValueOnce(response({ error: 'already_exists' }, 409));
+    const client = new BoardApi({ fetch: fetcher, capability: null, capabilityStorage: storage() });
 
-    await expect(client.ensureBoard()).resolves.toEqual(winner);
-    await expect(client.createIssue('Blocked')).rejects.toThrow('write capability is required');
+    await expect(client.initializeBoard()).rejects.toThrow('The Antonina board already exists');
+    expect(client.hasWriteAccess()).toBe(false);
   });
 
   it('uses conditional PUT and succeeds on the current ETag', async () => {

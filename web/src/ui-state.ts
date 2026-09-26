@@ -31,3 +31,18 @@ export function formatUpdatedAt(timestamp: string, now = new Date()): string {
   if (elapsed >= 0 && elapsed < 604_800_000) return `${Math.floor(elapsed / 86_400_000)}d ago`;
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(date);
 }
+
+
+export interface CreateIssueShortcutEvent {
+  key: string;
+  ctrlKey: boolean;
+  preventDefault(): void;
+  currentTarget: { form: { requestSubmit(): void } | null };
+}
+
+export function submitCreateIssueShortcut(event: CreateIssueShortcutEvent): boolean {
+  if (!event.ctrlKey || event.key !== 'Enter') return false;
+  event.preventDefault();
+  event.currentTarget.form?.requestSubmit();
+  return true;
+}

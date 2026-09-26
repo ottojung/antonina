@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { BoardIssue } from './model';
-import { formatUpdatedAt, groupResources, issueCounts, visibleIssues } from './ui-state';
+import { formatUpdatedAt, groupResources, issueCounts, submitCreateIssueShortcut, visibleIssues } from './ui-state';
 
 const timestamp = '2026-09-24T12:00:00.000Z';
 function issue(number: number, state: 'open' | 'closed', updatedAt = timestamp): BoardIssue {
@@ -37,5 +37,36 @@ describe('issue UI state', () => {
     expect(formatUpdatedAt('2026-09-24T12:29:30.000Z', now)).toBe('just now');
     expect(formatUpdatedAt('2026-09-24T11:45:00.000Z', now)).toBe('45m ago');
     expect(formatUpdatedAt('2026-09-24T09:00:00.000Z', now)).toBe('3h ago');
+  });
+});
+
+
+describe('create issue keyboard shortcut', () => {
+  it('submits exactly once through native form submission for Ctrl+Enter', () => {
+    let prevented = 0;
+    let submitted = 0;
+    const handled = submitCreateIssueShortcut({
+      key: 'Enter',
+      ctrlKey: true,
+      preventDefault: () => { prevented += 1; },
+      currentTarget: { form: { requestSubmit: () => { submitted += 1; } } },
+    });
+    expect(handled).toBe(true);
+    expect(prevented).toBe(1);
+    expect(submitted).toBe(1);
+  });
+
+  it('leaves ordinary Enter untouched so the textarea keeps its newline behavior', () => {
+    let prevented = 0;
+    let submitted = 0;
+    const handled = submitCreateIssueShortcut({
+      key: 'Enter',
+      ctrlKey: false,
+      preventDefault: () => { prevented += 1; },
+      currentTarget: { form: { requestSubmit: () => { submitted += 1; } } },
+    });
+    expect(handled).toBe(false);
+    expect(prevented).toBe(0);
+    expect(submitted).toBe(0);
   });
 });

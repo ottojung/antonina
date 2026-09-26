@@ -125,3 +125,61 @@ test('ordinary prompt remains busy while an invocation is running', async (t) =>
   const killed = run(['agent', 'kill', '--id', 'cafe'], env);
   assert.equal(killed.status, 0, killed.stderr);
 });
+
+
+test('stale reserved work is recovered without overwriting the accepted prompt', async (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', 'd00d', '--cwd', work], env).status, 0);
+  const path = metaPath(root, 'd00d');
+  const meta = JSON.parse(readFileSync(path, 'utf8'));
+  Object.assign(meta, {
+    state: 'running',
+    active_runner: true,
+    pending_prompt: 'accepted',
+    prompt_count: 1,
+    runner_gen: 1,
+    runner_reservation: {
+      state: 'reserved',
+      gen: 1,
+      mode: 'new',
+      owner_pid: 99999999,
+      owner_start_ticks: 1,
+      reserved_at: 1,
+    },
+    started_at: 1,
+  });
+  writeFileSync(path, JSON.stringify(meta));
+
+  const recovery = run(['agent', 'prompt', '--id', 'd00d', '--detach', 'replacement'], env);
+  assert.equal(recovery.status, 1);
+  assert.match(recovery.stderr, /recovering an already accepted prompt/);
+  const done = await waitFor(root, 'd00d', (value) => value.state === 'succeeded' && value.active_runner === false);
+  assert.equal(done.prompt_count, 1);
+  const log = readFileSync(join(root, 'state', 'antonina', 'agents', 'd00d', 'output.log'), 'utf8');
+  assert.match(log, /FAKE:accepted/);
+  assert.doesNotMatch(log, /FAKE:replacement/);
+});
+
+test('status reconciles abandoned running metadata to an explicit failure', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', 'dead', '--cwd', work], env).status, 0);
+  const path = metaPath(root, 'dead');
+  const meta = JSON.parse(readFileSync(path, 'utf8'));
+  Object.assign(meta, {
+    state: 'running',
+    active_runner: false,
+    pending_prompt: null,
+    runner_reservation: null,
+    pid: 99999999,
+    pgid: 99999999,
+    start_time: 1,
+    invocation_id: 'a'.repeat(32),
+    started_at: 1,
+  });
+  writeFileSync(path, JSON.stringify(meta));
+
+  const status = run(['agent', 'status', '--id', 'dead', '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(JSON.parse(status.stdout).state, 'failed');
+  assert.match(readFileSync(path, 'utf8'), /disappeared without a captured exit status/);
+});

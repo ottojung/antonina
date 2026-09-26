@@ -159,6 +159,14 @@ export class BoardApi {
     this.effectiveCapabilities = [];
   }
 
+  clearTrust(): void {
+    this.credential = null;
+    this.anchor = null;
+    this.rememberedHead = null;
+    this.storageVerified = false;
+    this.effectiveCapabilities = [];
+  }
+
   async signedBoardExists(): Promise<boolean> {
     return this.store.signedBoardExists();
   }

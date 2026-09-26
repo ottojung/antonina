@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createBrowserBoardApi } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { COMPOSER_READ_ONLY_CALLOUT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, DELETED_COPY, emptyIssueList, filterLabel, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, loadedBoard, trustRequired, visibleIssues, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type IssueFilter, type ReadOnlyAccess } from './ui-state';
+import { COMPOSER_READ_ONLY_CALLOUT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, DELETED_COPY, emptyIssueList, filterLabel, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, loadedBoard, trustRequired, visibleIssues, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type IssueFilter, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -23,7 +23,6 @@ export default function App() {
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [initializing, setInitializing] = useState(false);
-  const createInputRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -158,7 +157,7 @@ export default function App() {
       <aside className="issue-pane" aria-label={view === 'issues' ? 'Shared issue list' : 'Registered resources'}>
         <div className="pane-heading"><div><p className="eyebrow">One board, everyone’s work</p><h1>{view === 'issues' ? 'Issues' : 'Resources'}</h1><p>{view === 'issues' ? 'Track what needs attention and discuss the details together.' : 'Registered paths are protected while at least one dependent Antonina issue remains open.'}</p></div></div>
         {view === 'issues' ? <>
-          {hasWriteAccess ? <CreateIssueForm onSubmit={createIssue} titleRef={createInputRef} />
+          {hasWriteAccess ? <CreateIssueForm onSubmit={createIssue} />
             : <AccessNotice access={access} className="access-callout" onAction={() => setSettingsOpen(true)} />}
           <nav className="filters" aria-label="Filter issues">{(['open', 'closed', 'all'] as const).map((value) => <button key={value} className={filter === value ? 'active' : ''} aria-pressed={filter === value} onClick={() => setFilter(value)}>{filterLabel(value)}<span>{counts[value]}</span></button>)}</nav>
           <div className="issue-list" aria-label="Issues">{visible.map((issue) => <button key={issue.number} className={`issue-row ${issue.number === selectedNumber ? 'selected' : ''}`} onClick={() => setSelectedNumber(issue.number)} aria-current={issue.number === selectedNumber ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{issue.messages.length} messages{issue.body ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>)}{!visible.length && <div className="empty-state"><h2>{empty.title}</h2><p>{empty.body}</p></div>}</div>
@@ -171,24 +170,36 @@ export default function App() {
   </div>;
 }
 
-export const ISSUE_FORM_HINT = 'The description holds the task context; the conversation holds updates and questions.';
+export type IssueFormKey = Pick<ReactKeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey' | 'repeat'>;
 
-export const ISSUE_FORM_SUBMIT_HINT = 'Ctrl+Enter creates the issue from the description.';
-
-export type IssueFormKey = Pick<ReactKeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey'>;
+/** The keydown the description hands the rule: the keystroke plus its two browser effects. */
+export type IssueFormKeydown = IssueFormKey & {
+  preventDefault(): void;
+  currentTarget: { form: { requestSubmit(): void } | null };
+};
 
 /**
- * Ctrl+Enter in the description is the only keystroke that submits the create
- * form. Plain Enter is left alone so it keeps inserting a newline, and no
- * other modifier combination is a shortcut, so the submit button stays the
- * one obvious control.
+ * Ctrl+Enter in the description is routed to the form's own `requestSubmit()`,
+ * so it submits exactly the way the Create issue button does and runs the same
+ * native `required` validation before `onSubmit`. Plain Enter is left alone so
+ * it keeps inserting a newline, no other modifier combination is claimed, and
+ * an auto-repeat is ignored: a held key would otherwise re-enter `createIssue`
+ * while the first call is still in flight and create a second issue from one
+ * deliberate press.
  */
 export function submitsIssueForm(event: IssueFormKey): boolean {
-  return event.key === 'Enter' && event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey;
+  return event.key === 'Enter' && event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && !event.repeat;
 }
 
-export function CreateIssueForm({ onSubmit, titleRef }: { onSubmit: (event: FormEvent<HTMLFormElement>) => void; titleRef: RefObject<HTMLInputElement | null> }) {
-  return <form className="create-form" onSubmit={onSubmit}><label htmlFor="new-issue">Create an issue</label><input ref={titleRef} id="new-issue" name="title" placeholder="What needs doing?" maxLength={200} required /><label htmlFor="new-issue-body">Description</label><textarea id="new-issue-body" name="body" placeholder="Describe the goal, context, or acceptance criteria…" maxLength={10_000} onKeyDown={(event) => { if (!submitsIssueForm(event)) return; event.preventDefault(); event.currentTarget.form?.requestSubmit(); }} /><small>{ISSUE_FORM_HINT}</small><div><button type="submit">Create issue</button><small>{ISSUE_FORM_SUBMIT_HINT}</small></div></form>;
+/** The description's keydown handler, named so the shortcut is exercised directly. */
+export function submitCreateFormOnShortcut(event: IssueFormKeydown) {
+  if (!submitsIssueForm(event)) return;
+  event.preventDefault();
+  event.currentTarget.form?.requestSubmit();
+}
+
+export function CreateIssueForm({ onSubmit }: { onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <form className="create-form" onSubmit={onSubmit}><label htmlFor="new-issue">Create an issue</label><input id="new-issue" name="title" placeholder="What needs doing?" maxLength={200} required /><label htmlFor="new-issue-body">Description</label><textarea id="new-issue-body" name="body" placeholder="Describe the goal, context, or acceptance criteria…" maxLength={10_000} onKeyDown={submitCreateFormOnShortcut} /><small>{ISSUE_FORM_HINT}</small><div><button type="submit">Create issue</button><small>{ISSUE_FORM_SUBMIT_HINT}</small></div></form>;
 }
 
 function FirstRun({ error, initializing, initialize, recheck }: { error: string | undefined; initializing: boolean; initialize: () => void; recheck: () => void }) {

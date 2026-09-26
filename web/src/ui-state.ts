@@ -55,6 +55,10 @@ export const REJECTED_CREDENTIAL_COPY = {
   action: 'Paste a fresh credential',
 } as const;
 
+export const ISSUE_FORM_HINT = 'The description holds the task context; the conversation holds updates and questions.';
+
+export const ISSUE_FORM_SUBMIT_HINT = 'Ctrl+Enter creates the issue from the description.';
+
 /** A stored credential the board refused is its own state, not a browser holding none. */
 export function boardAccess(hasWriteAccess: boolean, credentialRejected: boolean): BoardAccess {
   if (hasWriteAccess) return 'editable';

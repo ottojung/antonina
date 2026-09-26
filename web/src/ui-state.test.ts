@@ -15,6 +15,8 @@ import {
   firstRunUnresolved,
   formatUpdatedAt,
   groupResources,
+  ISSUE_FORM_HINT,
+  ISSUE_FORM_SUBMIT_HINT,
   issueCounts,
   loadedBoard,
   REJECTED_CREDENTIAL_COPY,
@@ -75,6 +77,12 @@ describe('board copy', () => {
     expect(emptyIssueList('all', true).title).toBe('No issues');
     expect(emptyIssueList('open', true).body).toBe('Create an issue to give the work a shared record.');
     expect(emptyIssueList('open', false)).toEqual({ title: 'No open issues', body: 'No issues match this filter yet.' });
+  });
+
+  it('explains the create form and advertises its shortcut without a second hint', () => {
+    expect(ISSUE_FORM_HINT).toBe('The description holds the task context; the conversation holds updates and questions.');
+    expect(ISSUE_FORM_HINT).not.toContain('Ctrl');
+    expect(ISSUE_FORM_SUBMIT_HINT).toBe('Ctrl+Enter creates the issue from the description.');
   });
 
   it('keeps empty-state copy distinct from the read-only access callout', () => {

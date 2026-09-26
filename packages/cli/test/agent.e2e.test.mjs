@@ -369,3 +369,37 @@ test('list and status sanitize malformed persisted summary metadata', (t) => {
   assert.equal(entry.finished_at, null);
   assert.equal(entry.last_activity_at, null);
 });
+
+
+test('prompt rejects malformed durable execution configuration before reservation', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', 'c0de', '--cwd', work], env).status, 0);
+  const path = metaPath(root, 'c0de');
+
+  const malformedCwd = JSON.parse(readFileSync(path, 'utf8'));
+  malformedCwd.cwd = 'relative';
+  writeFileSync(path, JSON.stringify(malformedCwd));
+  const cwdPrompt = run(['agent', 'prompt', '--id', 'c0de', '--detach', 'must-not-run'], env);
+  assert.equal(cwdPrompt.status, 1);
+  assert.match(cwdPrompt.stderr, /cwd is malformed/);
+  let after = JSON.parse(readFileSync(path, 'utf8'));
+  assert.equal(after.prompt_count, 0);
+  assert.equal(after.active_runner, false);
+
+  after.cwd = work;
+  after.variant = '';
+  writeFileSync(path, JSON.stringify(after));
+  const variantPrompt = run(['agent', 'prompt', '--id', 'c0de', '--detach', 'must-not-run'], env);
+  assert.equal(variantPrompt.status, 1);
+  assert.match(variantPrompt.stderr, /variant is malformed/);
+  after = JSON.parse(readFileSync(path, 'utf8'));
+  assert.equal(after.prompt_count, 0);
+  assert.equal(after.active_runner, false);
+});
+
+test('legacy top-level agent command spellings are not accepted', (t) => {
+  const { env } = fixture(t);
+  const result = run(['list', '--json'], env);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /expected "agent" or "board"/);
+});

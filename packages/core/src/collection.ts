@@ -447,17 +447,17 @@ export type CollectionOutcomeReason =
   | 'outside-managed-roots'
   /**
    * The candidate is inside a configured root but that root does not authorise
-   * this particular path, or the facts about it are not the ones the board
-   * recorded. The specific refusal is reported by the path-safety front; here it
-   * is only ever a withheld outcome.
+   * this particular path. The specific refusal is reported by the path-safety
+   * front; here it is only ever a withheld outcome.
    */
   | 'not-managed-collectible'
   /**
-   * The candidate's own filesystem facts could not be gathered -- the path or the
-   * directory containing it does not exist, or cannot be resolved -- so no
-   * managed-root judgment was possible at all. The gatherer was asked for
-   * `claim.path` and only `claim.path`, and a `null` answer is the one way a
-   * candidate can fail for want of facts.
+   * The candidate's own filesystem facts were either not gathered at all -- the
+   * gatherer answered `null`, meaning the path or the directory containing it
+   * does not exist, or cannot be resolved -- or refused because they name a
+   * path other than the one asked about, so in both cases no managed-root
+   * judgment of the claimed path was possible. The gatherer was asked for
+   * `claim.path` and only `claim.path`.
    */
   | 'candidate-facts-unavailable'
   /**

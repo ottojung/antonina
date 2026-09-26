@@ -213,3 +213,38 @@ test('clean dry-run observes and clean removes old terminal agents', (t) => {
   assert.match(clean.stdout, /deleted agent f00d/);
   assert.throws(() => readFileSync(path, 'utf8'));
 });
+
+
+test('delete without force refuses live work and force converges before removal', async (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', 'feed', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'prompt', '--id', 'feed', '--detach', 'slow'], env).status, 0);
+  await waitFor(root, 'feed', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
+
+  const refused = run(['agent', 'delete', '--id', 'feed'], env);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /use --force/);
+  assert.equal(JSON.parse(readFileSync(metaPath(root, 'feed'), 'utf8')).state, 'running');
+
+  const forced = run(['agent', 'delete', '--id', 'feed', '--force'], env);
+  assert.equal(forced.status, 0, forced.stderr);
+  assert.match(forced.stdout, /deleted agent feed/);
+  assert.throws(() => readFileSync(metaPath(root, 'feed'), 'utf8'));
+});
+
+test('delete tombstone blocks later prompt reservation', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', 'face', '--cwd', work], env).status, 0);
+  const path = metaPath(root, 'face');
+  const meta = JSON.parse(readFileSync(path, 'utf8'));
+  meta.delete_pending = true;
+  writeFileSync(path, JSON.stringify(meta));
+
+  const prompt = run(['agent', 'prompt', '--id', 'face', '--detach', 'must-not-run'], env);
+  assert.equal(prompt.status, 1);
+  assert.match(prompt.stderr, /still running|redirect/);
+  const after = JSON.parse(readFileSync(path, 'utf8'));
+  assert.equal(after.pending_prompt, null);
+  assert.equal(after.active_runner, false);
+  assert.equal(after.prompt_count, 0);
+});

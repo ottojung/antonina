@@ -160,10 +160,10 @@ function parseCapabilities(args: string[]): BoardCapability[] {
 }
 
 /**
- * The CLI's advice for the states the shared API reports, so an operator is
- * never told to configure a trust anchor for a board that does not exist, left
- * guessing what to do about one it cannot verify, or left without a next step
- * for a deleted board or a refused storage capability.
+ * The same advice, for the failure kinds a collection snapshot classifies itself
+ * instead of throwing. `board-missing` and `board-unverifiable` are byte-for-byte
+ * the advice above, so a collector is never taught a different next step for
+ * the same board state.
  */
 function collectionAdvice(kind: string): string | null {
   if (kind === 'board-missing') return 'run: antonina board initialize to create it';
@@ -178,6 +178,12 @@ function collectionAdvice(kind: string): string | null {
   return null;
 }
 
+/**
+ * The CLI's advice for the states the shared API reports, so an operator is
+ * never told to configure a trust anchor for a board that does not exist, left
+ * guessing what to do about one it cannot verify, or left without a next step
+ * for a deleted board or a refused storage capability.
+ */
 function boardStateAdvice(error: unknown): string | null {
   if (error instanceof BoardMissingError) return 'run: antonina board initialize to create it';
   if (error instanceof BoardTrustRequiredError) return 'set ' + BOARD_TRUST_ENV + ' to the board trust anchor to read it';
@@ -359,7 +365,7 @@ async function execute(
         if (hostOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for collect list');
         return {
           mode: 'collect-list',
-          value: (await collectList(client, hostOption.value ?? requireArg(undefined, 'collect list --host'))).value,
+          value: (await collectList(client, requireArg(hostOption.value, 'collect list --host'))).value,
         };
       }
       if (subcommand === 'delete') {
@@ -368,8 +374,8 @@ async function execute(
         const confirmFlag = flag(pathOption.rest, '--confirm');
         if (confirmFlag.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for collect delete');
         const collected = await collectDelete(client, {
-          host: hostOption.value ?? requireArg(undefined, 'collect delete --host'),
-          path: pathOption.value ?? requireArg(undefined, 'collect delete --path'),
+          host: requireArg(hostOption.value, 'collect delete --host'),
+          path: requireArg(pathOption.value, 'collect delete --path'),
           confirm: confirmFlag.value,
           env,
         });

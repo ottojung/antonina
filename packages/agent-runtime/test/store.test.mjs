@@ -7,6 +7,7 @@ import test from 'node:test';
 import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
 import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import {
+  AgentStateMissingError,
   MetadataLockError,
   MetadataReadError,
   MetadataWriteError,
@@ -22,7 +23,10 @@ import {
 function root(t) {
   const dir = nodeFs.mkdtempSync(join(tmpdir(), 'antonina-store-'));
   t.after(() => nodeFs.rmSync(dir, { recursive: true, force: true }));
-  return { env: { XDG_STATE_HOME: dir }, home: join(dir, 'home') };
+  return {
+    env: { XDG_STATE_HOME: dir, XDG_CONFIG_HOME: join(dir, 'config') },
+    home: join(dir, 'home'),
+  };
 }
 
 function storeFs(overrides = {}) {
@@ -42,6 +46,33 @@ function storeFs(overrides = {}) {
 
 function ioError(code, message = code) {
   return Object.assign(new Error(message), { code });
+}
+
+// A lock record is only reclaimable when the process it names is provably gone.
+// "Provably dead" and "still running" are only distinguishable from "waited out
+// the whole retry budget" if the budget is bounded here, so this double refuses
+// a further attempt at the lock path and lets the caller say which of the two
+// happened.
+function boundedLockAttempts(options, lockPath, budget) {
+  const state = { attempts: 0, installed: [] };
+  const fs = storeFs({
+    openSync(path, flags, mode) {
+      if (String(path) === lockPath) {
+        state.attempts += 1;
+        if (state.attempts > budget) {
+          throw Object.assign(new Error(`lock at ${lockPath} unresolved after ${budget} attempts`), {
+            code: 'ELOCKBUDGET',
+          });
+        }
+      }
+      return nodeFs.openSync(path, flags, mode);
+    },
+    writeFileSync(fd, ...rest) {
+      if (typeof fd === 'number' && rest[0] !== undefined) state.installed.push(String(rest[0]));
+      return nodeFs.writeFileSync(fd, ...rest);
+    },
+  });
+  return { options: { ...options, fs }, state };
 }
 
 test('state root follows XDG_STATE_HOME with home fallback', () => {
@@ -432,4 +463,167 @@ test('concurrent in-process updates serialize through the lock file', async (t) 
   const second = withAgentLock('cc', () => { order.push('second'); }, options);
   await Promise.all([first, second]);
   assert.deepEqual(order, ['first-start', 'first-end', 'second']);
+});
+
+test('a lock is reclaimed only when the process it names is provably not this one', async (t) => {
+  const selfTicks = procStartTicks(process.pid);
+  if (selfTicks === null) {
+    t.skip('liveness is decided on /proc/<pid>/stat start ticks, unreadable on this host');
+    return;
+  }
+  const options = root(t);
+
+  // A recycled pid: the pid is live but the start time in the record is not this
+  // process's. Ownership may never be inferred from a bare pid, so the record is
+  // dead authority and must be reclaimed instead of blocking the waiter.
+  createAgentDirectory('d20', options);
+  writeMeta('d20', idleMeta('d20', '/tmp', null, 5), options);
+  const recycledPath = join(agentDir('d20', options), '.lock');
+  const recycledRaw = JSON.stringify({ pid: process.pid, startTicks: selfTicks + 1 });
+  nodeFs.writeFileSync(recycledPath, recycledRaw);
+
+  const recycled = boundedLockAttempts(options, recycledPath, 2);
+  const reclaimed = await withAgentLock('d20', () => 'ok', recycled.options).then(
+    (value) => ({ value }),
+    (error) => ({ error }),
+  );
+  assert.equal(
+    reclaimed.error,
+    undefined,
+    `a record whose start time disagrees must be reclaimed, not retried `
+      + `(attempts=${recycled.state.attempts}): ${reclaimed.error}`,
+  );
+  assert.equal(reclaimed.value, 'ok');
+  assert.equal(recycled.state.attempts, 2, 'reclaiming costs one observation and one retry');
+  assert.deepEqual(recycled.state.installed.length, 1, 'exactly one acquisition installed a record');
+  assert.equal(
+    JSON.parse(recycled.state.installed[0]).pid,
+    process.pid,
+    'the recycled record must be replaced by this process\'s own acquisition',
+  );
+  assert.equal(nodeFs.existsSync(recycledPath), false, 'the reclaimed lock was released');
+
+  // A live record whose start time is unreadable proves no ownership and grants
+  // no licence to steal either. A waiter must keep waiting, leaving the owner's
+  // record exactly as it found it.
+  createAgentDirectory('d21', options);
+  writeMeta('d21', idleMeta('d21', '/tmp', null, 5), options);
+  const heldPath = join(agentDir('d21', options), '.lock');
+  const heldRaw = JSON.stringify({ pid: process.pid, startTicks: null });
+  nodeFs.writeFileSync(heldPath, heldRaw);
+
+  const held = boundedLockAttempts(options, heldPath, 3);
+  await assert.rejects(
+    withAgentLock('d21', () => 'ok', held.options),
+    MetadataLockError,
+    'a live owner\'s lock must not be reclaimed on the pid alone',
+  );
+  assert.equal(
+    nodeFs.readFileSync(heldPath, 'utf8'),
+    heldRaw,
+    'a refused takeover must leave the owner\'s record byte-identical',
+  );
+  assert.equal(held.state.attempts > 1, true, 'the waiter must retry rather than steal');
+});
+
+test('metadata is published by an exclusive, fsynced sequence that never recreates state', (t) => {
+  const options = root(t);
+
+  // A missing agent directory means deletion won the race. Publishing must fail
+  // rather than resurrect the durable authority that was just removed.
+  createAgentDirectory('e20', options);
+  const removed = idleMeta('e20', '/tmp', null, 5);
+  writeMeta('e20', removed, options);
+  nodeFs.rmSync(agentDir('e20', options), { recursive: true, force: true });
+  assert.throws(() => writeMeta('e20', removed, options), AgentStateMissingError);
+  assert.equal(
+    nodeFs.existsSync(agentDir('e20', options)),
+    false,
+    'a write must not recreate a deleted agent directory',
+  );
+
+  // The temporary file is created exclusively, so a path that already exists
+  // belongs to someone else and must not be truncated or renamed into place.
+  const squatted = 'e21';
+  createAgentDirectory(squatted, options);
+  const squattedDir = agentDir(squatted, options);
+  const squatterContents = '{"pid":31337,"startTicks":null}\n';
+  const realNow = Date.now;
+  const realRandom = Math.random;
+  try {
+    // The temporary name is derived from the pid, the clock and Math.random, so
+    // freezing the latter two is what lets the test place a squatter exactly
+    // where the next write will look.
+    Date.now = () => 1700000000000;
+    Math.random = () => 0.5;
+    const squatterPath = join(
+      squattedDir,
+      `.meta-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`,
+    );
+    nodeFs.writeFileSync(squatterPath, squatterContents);
+    assert.throws(
+      () => writeMeta(squatted, idleMeta(squatted, '/tmp', null, 5), options),
+      MetadataWriteError,
+      'a pre-existing temporary path must not be adopted',
+    );
+    assert.equal(
+      nodeFs.existsSync(join(squattedDir, 'meta.json')),
+      false,
+      'the squatted record must not be renamed over metadata this write never durably produced',
+    );
+  } finally {
+    Date.now = realNow;
+    Math.random = realRandom;
+  }
+
+  // Durability is the temp contents, then the rename, then the directory entry.
+  const published = 'e22';
+  createAgentDirectory(published, options);
+  const publishedDir = agentDir(published, options);
+  const shorten = (path) => String(path).replace(publishedDir, '<dir>');
+  const opened = new Map();
+  const events = [];
+  const observed = {
+    ...options,
+    fs: storeFs({
+      openSync(path, flags, mode) {
+        const fd = nodeFs.openSync(path, flags, mode);
+        opened.set(fd, shorten(path));
+        events.push(`open:${flags}:${shorten(path)}`);
+        return fd;
+      },
+      writeFileSync(fd, ...rest) {
+        events.push(`write:${opened.get(fd)}`);
+        return nodeFs.writeFileSync(fd, ...rest);
+      },
+      fsyncSync(fd) {
+        events.push(`fsync:${opened.get(fd)}`);
+        return nodeFs.fsyncSync(fd);
+      },
+      closeSync(fd) {
+        events.push(`close:${opened.get(fd)}`);
+        return nodeFs.closeSync(fd);
+      },
+      renameSync(from, to) {
+        events.push(`rename:${shorten(from)}->${shorten(to)}`);
+        return nodeFs.renameSync(from, to);
+      },
+    }),
+  };
+  writeMeta(published, idleMeta(published, '/tmp', null, 5), observed);
+
+  const tempFsync = events.findIndex((event) => /^fsync:<dir>\/\.meta-.*\.tmp$/.test(event));
+  const dirFsync = events.findIndex((event) => event === 'fsync:<dir>');
+  const rename = events.findIndex((event) => event.startsWith('rename:'));
+  assert.equal(
+    tempFsync >= 0,
+    true,
+    `the temporary file must be fsynced before it is published: ${events.join(' -> ')}`,
+  );
+  assert.equal(
+    dirFsync > rename && rename > tempFsync,
+    true,
+    `fsync temp, then rename, then fsync directory, in that order: ${events.join(' -> ')}`,
+  );
+  assert.equal(readMeta(published, options)?.id, published);
 });

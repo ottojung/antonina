@@ -5,6 +5,7 @@ dist/
 build/
 node_modules/
 *.tsbuildinfo
+web/node_modules
 web/dist/
 web/build/
 

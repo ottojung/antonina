@@ -265,3 +265,22 @@ test('root has the complete capability vocabulary and board deletion is terminal
   await append(log, root, 'issue.create', { number: 1, title: 'Too late', body: '' }, 2);
   await assert.rejects(() => verifyAndReplayOperationLog(log, anchor), /follow board deletion/);
 });
+
+
+test('operation history rejects timestamp regression', async () => {
+  const { root, anchor, log } = await initialized();
+  await append(log, root, 'issue.create', { number: 1, title: 'Later', body: '' }, 2);
+  await append(log, root, 'issue.comment', { number: 1, author: 'root', body: 'earlier clock' }, 1);
+  await assert.rejects(() => verifyAndReplayOperationLog(log, anchor), /timestamps must be nondecreasing/);
+});
+
+test('repeated resource registration is a deterministic no-op', async () => {
+  const { root, anchor, log } = await initialized();
+  await append(log, root, 'issue.create', { number: 1, title: 'Resource owner', body: '' }, 1);
+  await append(log, root, 'resource.add', { number: 1, host: 'lubko://host', path: '/workspace' }, 2);
+  await append(log, root, 'resource.add', { number: 1, host: 'lubko://host', path: '/workspace' }, 3);
+  const replayed = await verifyAndReplayOperationLog(log, anchor);
+  assert.equal(replayed.board.resources.length, 1);
+  assert.deepEqual(replayed.board.resources[0].issueNumbers, [1]);
+  assert.equal(replayed.board.resources[0].updatedAt, timestamp(2));
+});

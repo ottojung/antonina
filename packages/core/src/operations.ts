@@ -559,12 +559,11 @@ function applyBoardMutation(
       const path = canonicalPath(payload.path);
       const current = candidate.resources.find((resource) => resource.host === host && resource.path === path);
       if (current) {
-        if (current.issueNumbers.includes(payload.number)) {
-          throw new OperationLogVerificationError('Resource dependency already exists');
+        if (!current.issueNumbers.includes(payload.number)) {
+          current.issueNumbers.push(payload.number);
+          current.issueNumbers.sort((a, b) => a - b);
+          current.updatedAt = operation.timestamp;
         }
-        current.issueNumbers.push(payload.number);
-        current.issueNumbers.sort((a, b) => a - b);
-        current.updatedAt = operation.timestamp;
       } else {
         candidate.resources.push({
           host,
@@ -637,6 +636,7 @@ export async function verifyAndReplayOperationLog(
   });
 
   let previous: string | null = null;
+  let previousTimestamp: string | null = null;
   let board: Board | undefined;
   let queue: number[] = [];
   let deleted = false;
@@ -649,6 +649,9 @@ export async function verifyAndReplayOperationLog(
     }
     if (operation.previous !== previous) {
       throw new OperationLogVerificationError('Operation history predecessor chain is invalid');
+    }
+    if (previousTimestamp !== null && operation.timestamp < previousTimestamp) {
+      throw new OperationLogVerificationError('Operation history timestamps must be nondecreasing');
     }
 
     const unsigned = unsignedFromSigned(operation);
@@ -675,6 +678,7 @@ export async function verifyAndReplayOperationLog(
       board = cloneBoard((operation.payload as InitializePayload).board);
       queue = board.issues.filter((issue) => issue.state === 'open').map((issue) => issue.number);
       previous = operation.opId;
+      previousTimestamp = operation.timestamp;
       continue;
     }
     if (operation.kind === 'board.initialize') {
@@ -730,6 +734,7 @@ export async function verifyAndReplayOperationLog(
     }
 
     previous = operation.opId;
+    previousTimestamp = operation.timestamp;
   }
 
   if (!board || previous === null) throw new OperationLogVerificationError('Operation log has no initialized board state');

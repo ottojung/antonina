@@ -72,6 +72,32 @@ function appendToLog(log: BoardOperationLog, operation: SignedBoardOperation): B
   };
 }
 
+function canonicalTimestampAtOrAfter(value: string, floor?: string): string {
+  const millis = Date.parse(value);
+  if (!Number.isFinite(millis) || new Date(millis).toISOString() !== value) {
+    throw new SignedBoardStoreError('Signed board operation timestamp must be canonical ISO-8601 UTC');
+  }
+  if (floor === undefined) return value;
+  const floorMillis = Date.parse(floor);
+  if (!Number.isFinite(floorMillis)) throw new SignedBoardStoreError('Signed board timestamp floor is malformed');
+  return new Date(Math.max(millis, floorMillis)).toISOString();
+}
+
+function boardTimestampFloor(board: Board): string | undefined {
+  const timestamps: string[] = [];
+  for (const issue of board.issues) {
+    timestamps.push(issue.createdAt, issue.updatedAt);
+    for (const message of issue.messages) timestamps.push(message.createdAt);
+  }
+  for (const resource of board.resources) timestamps.push(resource.createdAt, resource.updatedAt);
+  if (timestamps.length === 0) return undefined;
+  const millis = timestamps.map((timestamp) => Date.parse(timestamp));
+  if (millis.some((value) => !Number.isFinite(value))) {
+    throw new SignedBoardStoreError('Initial board contains a malformed timestamp');
+  }
+  return new Date(Math.max(...millis)).toISOString();
+}
+
 export class SignedBoardStore {
   private readonly fetcher: typeof fetch;
   private readonly signedUrl: string;
@@ -114,6 +140,13 @@ export class SignedBoardStore {
     return stored;
   }
 
+  async signedBoardExists(): Promise<boolean> {
+    const response = await this.fetcher(this.signedUrl, { cache: 'no-store' });
+    if (response.status === 404) return false;
+    if (response.status === 200) return true;
+    throw this.httpError('GET', SIGNED_BOARD_KEY, response);
+  }
+
   async readLegacyBoard(): Promise<Board | null> {
     const response = await this.fetcher(this.legacyUrl, { cache: 'no-store' });
     if (response.status === 404) return null;
@@ -130,13 +163,13 @@ export class SignedBoardStore {
     const operation = await signBoardOperation({
       boardId,
       previous: null,
-      timestamp: this.now().toISOString(),
+      timestamp: canonicalTimestampAtOrAfter(this.now().toISOString(), boardTimestampFloor(board)),
       nonce: this.newId(),
       kind: 'board.initialize',
       payload: { board },
     }, root);
     const initialized = appendToLog(log, operation);
-    const verified = await verifyAndReplayOperationLog(initialized, anchor);
+    await verifyAndReplayOperationLog(initialized, anchor);
 
     const response = await this.fetcher(this.signedUrl, {
       method: 'POST',
@@ -160,7 +193,7 @@ export class SignedBoardStore {
     }
     const credential = await createBoardCredential(anchor, root, created.capability);
     const stored = await this.require(anchor, operation.opId);
-    return { ...stored, state: verified.head === stored.state.head ? stored.state : stored.state, credential };
+    return { ...stored, credential };
   }
 
   async append(
@@ -171,11 +204,15 @@ export class SignedBoardStore {
     const credential = await verifyBoardCredential(credentialValue);
     const anchor = credentialTrustAnchor(credential);
     const signer = credentialSigningKey(credential);
-    const timestamp = request.timestamp ?? this.now().toISOString();
+    const requestedTimestamp = request.timestamp ?? this.now().toISOString();
     const nonce = request.nonce ?? this.newId();
     let stored = await this.require(anchor, previouslyAcceptedHead);
 
     for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
+      const timestamp = canonicalTimestampAtOrAfter(
+        requestedTimestamp,
+        stored.log.operations.at(-1)?.timestamp,
+      );
       const payload = typeof request.payload === 'function'
         ? request.payload(stored.state)
         : request.payload;

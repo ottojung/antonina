@@ -107,7 +107,7 @@ test('concurrent valid writers converge through ETag retry without losing the wi
     const winner = await signBoardOperation({
       boardId: current.boardId,
       previous: current.head,
-      timestamp: '2026-09-25T12:01:00.000Z',
+      timestamp: '2026-09-25T12:03:00.000Z',
       nonce: 'winner',
       kind: 'issue.create',
       payload: { number: 1, title: 'Winner', body: '' },
@@ -134,6 +134,7 @@ test('concurrent valid writers converge through ETag retry without losing the wi
   );
   assert.equal(committed.log.operations.length, 3);
   assert.equal(committed.log.operations[2].previous, committed.log.operations[1].opId);
+  assert.equal(committed.log.operations[2].timestamp, '2026-09-25T12:03:00.000Z');
 });
 
 test('storage capability validation is separate from cryptographic authority', async () => {
@@ -190,4 +191,46 @@ test('legacy board-v1 is only exposed as an explicit migration source', async ()
 
   assert.deepEqual(await store.readLegacyBoard(), legacy);
   assert.equal(server.signed, null);
+});
+
+
+test('initialization and later appends are floored by imported board timestamps', async () => {
+  const server = fakeSkrynia();
+  const legacy = {
+    ...emptyBoard(),
+    nextIssueNumber: 2,
+    issues: [{
+      number: 1,
+      title: 'Future legacy timestamp',
+      body: '',
+      state: 'open',
+      createdAt: '2026-09-25T13:00:00.000Z',
+      updatedAt: '2026-09-25T13:00:00.000Z',
+      messages: [],
+    }],
+  };
+  const store = new SignedBoardStore({
+    fetch: server.fetch.bind(server),
+    now: () => new Date('2026-09-25T12:00:00.000Z'),
+    newId: (() => { let sequence = 0; return () => `floor-${++sequence}`; })(),
+  });
+
+  const initialized = await store.initialize(legacy);
+  assert.equal(initialized.log.operations[0].timestamp, '2026-09-25T13:00:00.000Z');
+
+  const committed = await store.append(initialized.credential, {
+    kind: 'issue.comment',
+    payload: { number: 1, author: 'root', body: 'after import' },
+  }, initialized.state.head);
+  assert.equal(committed.log.operations[1].timestamp, '2026-09-25T13:00:00.000Z');
+  assert.equal(committed.state.board.issues[0].messages[0].createdAt, '2026-09-25T13:00:00.000Z');
+});
+
+test('signed-board existence probing does not accept or initialize board state', async () => {
+  const server = fakeSkrynia();
+  const store = new SignedBoardStore({ fetch: server.fetch.bind(server) });
+  assert.equal(await store.signedBoardExists(), false);
+  assert.equal(server.signed, null);
+  await store.initialize();
+  assert.equal(await store.signedBoardExists(), true);
 });

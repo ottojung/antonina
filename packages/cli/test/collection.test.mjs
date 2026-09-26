@@ -10,7 +10,7 @@ import test from 'node:test';
 // node-side `gatherCandidatePathFacts`.
 import { BoardApi } from '../dist/packages/core/src/api.js';
 import { runBoardCommand, COLLECT_ROOTS_ENV } from '../dist/packages/cli/src/board.js';
-import { unlinkCollectedPath } from '../dist/packages/cli/src/collection.js';
+import { removeAuthorizedPath } from '../dist/packages/cli/src/collection.js';
 import {
   openCollectionClaim,
   readCollectionSnapshot,
@@ -323,9 +323,9 @@ test('collect delete without --confirm reports the pending action and removes no
     assert.equal(code, 0);
     assert.deepEqual(err, []);
     assert.equal(out.length, 1);
-    // The dry run does not assert a single removal shape: it says what a symlink
-    // would get and what anything else would get, because the authorization
-    // carries no removal shape and the confirmed run branches on its own `lstat`.
+    // The dry run reports no removal shape: the shape is on the authorization,
+    // which exists only inside a confirmed run's re-check, so a pending report
+    // says what the command would do with a path and nothing about how.
     assert.equal(
       out[0],
       `would delete ${context.worktree} on ${HOST} (a symlink would be unlinked as a link, `
@@ -734,26 +734,102 @@ test('collect delete treats an already-absent path as success', async () => {
   });
 });
 
-test('unlinkCollectedPath refuses to remove anything when the removal shape cannot be classified', async () => {
+test('a removal that fails for any reason other than absence is not swallowed', async () => {
   await withWorkTree(async (context) => {
     await seededWorkTree(context);
     await mkdir(context.worktree, { recursive: true });
-    let removalCalls = 0;
+    const managed = await loadManagedRoots(collectEnv(context));
+    const snapshot = await readCollectionSnapshot(HOST, boardApiCollectionReader(context.reader));
+    const claim = openCollectionClaim(snapshot, context.worktree);
+    // A real gatherer, so the authorization carries the shape a directory earns.
+    const authorized = await recheckCollectionClaim(
+      claim,
+      context.reader,
+      managed.roots,
+      gatherCandidatePathFacts,
+    );
+    assert.equal(authorized.outcome, 'collect');
+    let fallbackCalls = 0;
 
     await assert.rejects(
-      () => unlinkCollectedPath(context.worktree, {
-        lstat: async () => {
+      () => removeAuthorizedPath(authorized, {
+        rm: async () => {
           const error = new Error('permission denied');
           error.code = 'EACCES';
           throw error;
         },
-        rm: async () => { removalCalls += 1; },
-        unlink: async () => { removalCalls += 1; },
+        unlink: async () => { fallbackCalls += 1; },
       }),
       /permission denied/,
     );
-    assert.equal(removalCalls, 0, 'neither unlink nor rm was attempted');
+    assert.equal(fallbackCalls, 0, 'the other branch was not tried as a fallback');
     assert.equal(existsSync(context.worktree), true);
+  });
+});
+
+/**
+ * The removal takes the shape the re-check authorized and observes nothing of
+ * its own. The candidate's final component is replaced *after* the re-check
+ * completes, so a collector that re-derived the shape would take the other
+ * branch. The authorized shape is what is followed.
+ *
+ * The second half is the one that cannot be mistaken: a candidate the re-check
+ * found to be a symlink is replaced by a directory, and the authorized removal
+ * is `unlink` -- which fails on a directory. A re-deriving implementation would
+ * have seen the directory and recursed into it, removing the very resource the
+ * re-check said was a link's target and not a deletion target.
+ */
+test('the removal follows the authorized shape even when the final component changed after the re-check', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    const outside = join(context.managed, 'target');
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, 'keep'), 'not part of the candidate');
+    const managed = await loadManagedRoots(collectEnv(context));
+    const reader = boardApiCollectionReader(context.reader);
+
+    // Half one: a directory at re-check time, a symlink at removal time. The
+    // authorized shape is "not a symlink", so the link is removed as the shape
+    // the re-check judged, and the report says `unlinked` rather than
+    // `unlinked-symlink` -- which is what a re-deriving collector would print.
+    await mkdir(context.worktree, { recursive: true });
+    const asDirectory = await recheckCollectionClaim(
+      openCollectionClaim(await readCollectionSnapshot(HOST, reader), context.worktree),
+      context.reader,
+      managed.roots,
+      gatherCandidatePathFacts,
+    );
+    assert.equal(asDirectory.outcome, 'collect');
+    assert.equal(asDirectory.unlinkFinalComponent, false);
+    await rm(context.worktree, { recursive: true, force: true });
+    await symlink(outside, context.worktree);
+
+    assert.equal(await removeAuthorizedPath(asDirectory), 'unlinked');
+    assert.equal(existsSync(context.worktree), false);
+    assert.equal(existsSync(join(outside, 'keep')), true, 'the link target was not collected');
+
+    // Half two: a symlink at re-check time, a directory at removal time.
+    await context.writer.createIssue('Issue 4');
+    await context.writer.addResourceDependency(HOST, context.worktree, 4);
+    await context.writer.close(4);
+    await symlink(outside, context.worktree);
+    const asSymlink = await recheckCollectionClaim(
+      openCollectionClaim(await readCollectionSnapshot(HOST, reader), context.worktree),
+      context.reader,
+      managed.roots,
+      gatherCandidatePathFacts,
+    );
+    assert.equal(asSymlink.outcome, 'collect');
+    assert.equal(asSymlink.unlinkFinalComponent, true);
+    await rm(context.worktree, { recursive: true, force: true });
+    await mkdir(context.worktree, { recursive: true });
+    await writeFile(join(context.worktree, 'inside'), 'the candidate');
+
+    // `unlink` on a directory is `EISDIR`/`EPERM`; `rm --recursive` would have
+    // succeeded. The failure is the proof that the authorized shape was used
+    // with no observation of its own.
+    await assert.rejects(() => removeAuthorizedPath(asSymlink), /EISDIR|EPERM|is a directory|not permitted/);
+    assert.equal(existsSync(join(context.worktree, 'inside')), true, 'nothing was removed');
   });
 });
 

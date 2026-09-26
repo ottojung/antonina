@@ -1,4 +1,4 @@
-import { lstat as lstatCall, realpath as realpathCall, rm as rmCall, unlink as unlinkCall } from 'node:fs/promises';
+import { realpath as realpathCall, rm as rmCall, unlink as unlinkCall } from 'node:fs/promises';
 
 import { AntoninaApiError, type BoardApi } from '../../core/src/api.js';
 import {
@@ -9,6 +9,10 @@ import {
   protectionOf,
   readCollectionSnapshot,
   recheckCollectionClaim,
+  removeAuthorizedPath as coreRemoveAuthorizedPath,
+  type AuthorizedCollection,
+  type AuthorizedRemoval,
+  type AuthorizedRemovalFs,
   type CollectionFailureKind,
   type CollectionOutcomeReason,
   type CollectionSnapshot,
@@ -360,78 +364,53 @@ export async function collectList(api: BoardApi, host: string): Promise<CollectL
  * How the collector's path-safety side removes an authorized path, and the
  * residual window it sits inside.
  *
- * `AuthorizedCollection` says *which* path may be removed and carries no removal
- * shape: `ManagedPathResult.unlinkFinalComponent` -- the explicit instruction
- * that an eligible symlink is unlinked at `path`, never followed, never recursed
- * into -- is not visible to the caller at the point of action. So this function
- * does its own single `lstat` on the authorized path and branches on it. It is
- * I/O shape, not a verdict: nothing here decides whether a path may be touched,
- * and every such decision was made by `recheckCollectionClaim` beforehand.
+ * The removal itself is core's `removeAuthorizedPath`, and this module only binds
+ * it to the node filesystem. There is one implementation: the shape of a removal
+ * -- `AuthorizedCollection.unlinkFinalComponent`, the explicit instruction that
+ * an eligible symlink is unlinked at `path`, never followed, never recursed
+ * into -- is decided by the re-check from the facts its own gatherer gathered,
+ * and carried on the authorization. This module used to do a second `lstat` of
+ * the authorized path and branch on the answer, which added one I/O to the end of
+ * the interval the intent record measures and re-derived a safety instruction
+ * the re-check had already issued. That `lstat` and its branch are gone, not
+ * superseded: there is no fallback and no optional path here.
  *
- * The residual window is real, and this function does not close it -- it cannot.
- * It is not bounded by the final component. Between the re-check's facts and the
- * removal, *any* component can change, including the containing directory: if the
- * directory holding the authorized path is replaced by a symlink, the `rm` below
- * resolves through it and recursively removes a directory outside the managed
- * root, one the re-check never judged at any component. Re-listing the parent
- * immediately before the `rm` would only move the interval, not remove it: there
- * is no compare-and-remove on a path, so every check is a read followed by a
- * window. The signed board log has no compare-and-delete or lease primitive
- * either, so the protocol can only promise the path was unowed at the last
- * authoritative read. This is one named function so it is greppable if core later
- * grows a removal descriptor on the authorization, or an `openat`-style handle
- * that would actually close the interval.
+ * The residual window is real, and this does not close it -- it cannot. It is
+ * not bounded by the final component, which the authorization now pins. Between
+ * the re-check's facts and the removal, *any* other component can change,
+ * including the containing directory: if the directory holding the authorized
+ * path is replaced by a symlink, the `rm` below resolves through it and
+ * recursively removes a directory outside the managed root, one the re-check
+ * never judged at any component. Re-listing the parent immediately before the
+ * `rm` would only move the interval, not remove it: there is no
+ * compare-and-remove on a path, so every check is a read followed by a window.
+ * The signed board log has no compare-and-delete or lease primitive either, so
+ * the protocol can only promise the path was unowed at the last authoritative
+ * read. This is one named function so it is greppable if core ever grows an
+ * `openat`-style handle that would actually close the interval.
  *
  * `rm(..., { recursive: true })` also descends into a mount point inside the
  * candidate: a bind mount, a devcontainer mount, or an sshfs mount under a
  * worktree is removed from the mounted side, which is standard `rm -rf`
- * semantics and not something this function narrows.
+ * semantics and not something this narrows.
  */
-export interface RemovalFs {
-  lstat: typeof lstatCall;
-  rm: typeof rmCall;
-  unlink: typeof unlinkCall;
-}
+export type RemovalFs = AuthorizedRemovalFs;
 
 const DEFAULT_REMOVAL_FS: RemovalFs = {
-  lstat: lstatCall,
   rm: rmCall,
   unlink: unlinkCall,
 };
 
-function isMissing(error: unknown): boolean {
-  return (error as { code?: unknown } | null)?.code === 'ENOENT';
-}
-
 /**
- * Removes one authorized path, as `ManagedPathResult.unlinkFinalComponent`
- * requires and as nothing else permits: a symlink is unlinked as a link, and
- * anything else is removed recursively -- `recursive` is not a convenience, a
- * worktree is a directory and a non-recursive removal of one fails with
- * `ENOTEMPTY`, which would fail on exactly the resources this command exists to
- * remove.
- *
- * A path that is already gone is success: the goal state already holds, and a
- * `rm` with `force` would have said the same. Any other `lstat` failure throws,
- * so no authorization is spent on a removal whose shape could not be classified.
+ * Core's `removeAuthorizedPath`, bound to the node filesystem. This is the whole
+ * CLI half: the algorithm -- which of the two calls a removal takes, and what it
+ * reports -- is core's and is not written again here.
  */
-export async function unlinkCollectedPath(
-  path: string,
+export async function removeAuthorizedPath(
+  authorized: AuthorizedCollection,
   fs: RemovalFs = DEFAULT_REMOVAL_FS,
-): Promise<'unlinked' | 'unlinked-symlink' | 'absent'> {
-  let stats;
-  try {
-    stats = await fs.lstat(path);
-  } catch (error) {
-    if (isMissing(error)) return 'absent';
-    throw error;
-  }
-  if (stats.isSymbolicLink()) {
-    await fs.unlink(path);
-    return 'unlinked-symlink';
-  }
-  await fs.rm(path, { recursive: true, force: true });
-  return 'unlinked';
+): Promise<AuthorizedRemoval> {
+  return coreRemoveAuthorizedPath(authorized, fs);
 }
 
 /**
@@ -457,12 +436,12 @@ export interface CollectDeleteReportBase {
 
 export interface CollectDeleteReport extends CollectDeleteReportBase {
   /**
-   * Which of `unlinkCollectedPath`'s three results the command is reporting: the
+   * Which of `removeAuthorizedPath`'s three results the command is reporting: the
    * path itself was removed, a symlink was unlinked as a link, or the path was
    * already absent and nothing was removed. It is absent from the pending
    * report, where no removal has been attempted.
    */
-  readonly removal: 'unlinked' | 'unlinked-symlink' | 'absent';
+  readonly removal: AuthorizedRemoval;
 }
 
 export type CollectDeleteResult = {
@@ -584,9 +563,11 @@ export async function collectDelete(
   // 6. The confirmation gate. Everything above has already happened for real.
   if (!options.confirm) return { mode: 'collect-pending', value: report };
 
-  // 7. The removal, at the board-recorded spelling: the authorization names one
-  //    path and the CLI acts on that path and no other.
-  const removal = await unlinkCollectedPath(authorized.path, options.removalFs ?? DEFAULT_REMOVAL_FS);
+  // 7. The removal, at the board-recorded spelling and in the shape the re-check
+  //    authorized. The authorization names one path and the CLI acts on that path
+  //    and no other; it observes nothing about the path to work out how to remove
+  //    it, because the re-check already decided that.
+  const removal = await removeAuthorizedPath(authorized, options.removalFs ?? DEFAULT_REMOVAL_FS);
 
   // 8. The authorization is spent exactly once, after the action it authorized.
   commitCollectionDeletion(authorized);

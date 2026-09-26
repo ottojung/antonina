@@ -20,6 +20,7 @@ import { SignedBoardStoreError } from './board-store.js';
 import {
   evaluateManagedCandidate,
   type CandidatePathFacts,
+  type ManagedCollectionRoot,
   type ManagedPathRefusal,
   type ManagedRoots,
 } from './managed-roots.js';
@@ -496,6 +497,80 @@ export type CandidateFactsGatherer = (path: string) => Promise<CandidatePathFact
 const authorizationSeal: unique symbol = Symbol('antonina.collection.authorization');
 
 /**
+ * The fields every authorization carries, whichever way it came out.
+ *
+ * The `[authorizationSeal]` key is module-private, so no caller can construct
+ * one of these: the only way to obtain an authorization is a completed re-check.
+ *
+ * Every carried field is `readonly`. That is the type-level half of the
+ * guarantee, and it stops a caller from re-pointing an authorization in
+ * TypeScript. It is not the guarantee itself: a `readonly` field is still an
+ * ordinary writable property at runtime, so the runtime half is
+ * `issuedAuthorizations` below, which records what this module handed out and
+ * is what the commit function compares against.
+ */
+interface AuthorizationCommon {
+  readonly [authorizationSeal]: true;
+  readonly state: 'authorized';
+  readonly reason: CollectionOutcomeReason;
+  readonly host: string;
+  /**
+   * The path this authorization is about. It is the claim's own path, and the
+   * re-check asks its gatherer about that path alone and refuses facts naming any
+   * other, so on a `collect` authorization it is also the eligible candidate's
+   * own `path` -- the same value the managed-root judgment returned. It is
+   * therefore carried once, here, and the removal shape below does not repeat
+   * it.
+   */
+  readonly path: string;
+  readonly boardId: string;
+  /**
+   * The revision the claim named, but only when the re-check's own read landed on
+   * that revision. `null` otherwise, so this field never carries a revision the
+   * re-check did not verify.
+   */
+  readonly snapshotHead: string | null;
+  readonly recheckHead: string | null;
+  readonly status: ProtectionStatus;
+}
+
+/**
+ * A re-check that authorized a removal, carrying the shape the removal must take.
+ *
+ * The managed-root judgment is made from the candidate's own filesystem facts --
+ * the required gatherer `lstat`s the candidate and `evaluateManagedCandidate`
+ * turns that into this instruction. The re-check already holds the result, so
+ * carrying it here is what lets the destructive step act with *no* filesystem
+ * observation of its own: a second `lstat` at that point would widen the
+ * residual window the record measures, by an I/O the collector chose to add, for
+ * a value it could have been handed.
+ *
+ * These two fields exist on no other variant. A `withheld` authorization has
+ * none of them, so "no removal shape was ever authorized" is representable and a
+ * collector cannot read `unlinkFinalComponent: false` off a refusal.
+ */
+export interface AuthorizedCollect extends AuthorizationCommon {
+  readonly outcome: 'collect';
+  /**
+   * The configured managed root whose judgment authorized this path. Carried so a
+   * caller can report which configured root it acted under without re-deriving
+   * it, and so the removal is taken as the same root the judgment named.
+   */
+  readonly root: ManagedCollectionRoot;
+  /**
+   * Whether the final component of the authorized path is itself a symlink, as
+   * the re-check's gatherer observed it. An eligible symlink is unlinked as a
+   * link, never followed and never recursed into.
+   */
+  readonly unlinkFinalComponent: boolean;
+}
+
+/** A re-check that refused. It authorizes no removal and carries no removal shape. */
+export interface AuthorizedWithheld extends AuthorizationCommon {
+  readonly outcome: 'withheld';
+}
+
+/**
  * The second state: an authorization produced only by a completed re-check
  * against an authoritative read. It is what a caller may hand to the
  * destructive step, and it can be spent exactly once.
@@ -509,24 +584,12 @@ const authorizationSeal: unique symbol = Symbol('antonina.collection.authorizati
  * ordinary writable property at runtime, so the runtime half is
  * `issuedAuthorizations` below, which records what this module handed out and
  * is what the commit function compares against.
+ *
+ * It is a union on `outcome` rather than one interface with optional fields, so
+ * the removal shape is not merely `undefined` on a refusal: a caller cannot even
+ * name `authorized.root` on a `withheld` value.
  */
-export interface AuthorizedCollection {
-  readonly [authorizationSeal]: true;
-  readonly state: 'authorized';
-  readonly outcome: 'collect' | 'withheld';
-  readonly reason: CollectionOutcomeReason;
-  readonly host: string;
-  readonly path: string;
-  readonly boardId: string;
-  /**
-   * The revision the claim named, but only when the re-check's own read landed on
-   * that revision. `null` otherwise, so this field never carries a revision the
-   * re-check did not verify.
-   */
-  readonly snapshotHead: string | null;
-  readonly recheckHead: string | null;
-  readonly status: ProtectionStatus;
-}
+export type AuthorizedCollection = AuthorizedCollect | AuthorizedWithheld;
 
 /**
  * The authorizations this process has issued and not yet committed. Membership
@@ -552,7 +615,16 @@ const liveAuthorizations = new WeakSet<AuthorizedCollection>();
 const issuedAuthorizations = new WeakMap<AuthorizedCollection, IssuedAuthorization>();
 
 /** The fields of an authorization, as recorded when the re-check issued it. */
-type IssuedAuthorization = Omit<AuthorizedCollection, typeof authorizationSeal>;
+type IssuedAuthorization = OmitSeal<AuthorizedCollection>;
+
+/**
+ * `Omit` over a union, member by member, so an issued record keeps the same
+ * two-variant shape as the authorization it was copied from. `Omit` alone would
+ * collapse the union to the fields the members share, and the removal shape --
+ * the fields that distinguish them -- would vanish from the type of the very
+ * record the commit compares against.
+ */
+type OmitSeal<T> = T extends unknown ? Omit<T, typeof authorizationSeal> : never;
 
 /**
  * The moment immediately before the destructive action, as a protocol and not
@@ -608,6 +680,16 @@ type IssuedAuthorization = Omit<AuthorizedCollection, typeof authorizationSeal>;
  * compare-and-delete or lease primitive, so this protocol can only promise
  * that the path was unowed at the last authoritative read, and the integrating
  * collector must keep that interval as small as it can make it.
+ *
+ * This module shrinks its own end of that window rather than only documenting
+ * it. The managed-root judgment needs the candidate's own filesystem facts, and
+ * those facts already answer the only question the removal has left -- whether
+ * the final component is a symlink -- so the answer is carried on the
+ * authorization (`root` and `unlinkFinalComponent`, on the `collect` branch
+ * only) and `removeAuthorizedPath` takes it from there. A collector must not
+ * re-observe the path before removing it: that would widen the measured
+ * interval by an I/O the collector chose to add, and re-derive a safety
+ * instruction the re-check had already issued.
  */
 export async function recheckCollectionClaim(
   claim: CollectionClaim,
@@ -616,43 +698,45 @@ export async function recheckCollectionClaim(
   gatherFacts: CandidateFactsGatherer,
 ): Promise<AuthorizedCollection> {
   const snapshot = await readCollectionSnapshot(claim.host, boardApiCollectionReader(api));
-  const issue = (
-    outcome: AuthorizedCollection['outcome'],
-    reason: CollectionOutcomeReason,
-    status: ProtectionStatus,
-    head: string | null,
-  ): AuthorizedCollection => {
-    const authorization: AuthorizedCollection = {
-      [authorizationSeal]: true,
-      state: 'authorized',
-      outcome,
-      reason,
-      host: claim.host,
-      path: claim.path,
-      boardId: claim.boardId,
-      snapshotHead: head !== null && head === claim.snapshotHead ? head : null,
-      recheckHead: head,
-      status,
-    };
+  // Every authorization is recorded the moment it is issued, and the record is
+  // what the commit compares against. The two branches build different objects:
+  // only a `collect` carries a removal shape, and a `withheld` carries none at
+  // all rather than a `false` no collector could act on.
+  const issue = (authorization: AuthorizedCollection): AuthorizedCollection => {
     liveAuthorizations.add(authorization);
     issuedAuthorizations.set(authorization, { ...authorization });
     return authorization;
   };
+  const withhold = (
+    reason: CollectionOutcomeReason,
+    status: ProtectionStatus,
+    head: string | null,
+  ): AuthorizedCollection => issue({
+    [authorizationSeal]: true,
+    state: 'authorized',
+    outcome: 'withheld',
+    reason,
+    host: claim.host,
+    path: claim.path,
+    boardId: claim.boardId,
+    snapshotHead: head !== null && head === claim.snapshotHead ? head : null,
+    recheckHead: head,
+    status,
+  });
 
   // The snapshot's own classification is carried through: an operator reading a
   // transport failure is told the read failed, not that the board was
   // unverifiable.
   if (!snapshot.verified) {
-    return issue('withheld', snapshot.failure.kind, 'protected', null);
+    return withhold(snapshot.failure.kind, 'protected', null);
   }
   if (snapshot.boardId !== claim.boardId) {
-    return issue('withheld', 'wrong-board', 'protected', snapshot.head);
+    return withhold('wrong-board', 'protected', snapshot.head);
   }
 
   const verdict = protectionOf(snapshot, claim.path);
   if (verdict.status !== 'collectible') {
-    return issue(
-      'withheld',
+    return withhold(
       verdict.basis === 'not-registered' ? 'unregistered' : 'became-protected',
       verdict.status,
       snapshot.head,
@@ -667,14 +751,34 @@ export async function recheckCollectionClaim(
   // ever about the path it was judged from.
   const facts = await gatherFacts(claim.path);
   if (facts === null || facts.path !== claim.path) {
-    return issue('withheld', 'candidate-facts-unavailable', 'protected', snapshot.head);
+    return withhold('candidate-facts-unavailable', 'protected', snapshot.head);
   }
   const candidatePath = evaluateManagedCandidate(managed, facts);
   if (candidatePath.eligible !== true) {
-    return issue('withheld', managedReason(candidatePath.refusal), 'protected', snapshot.head);
+    return withhold(managedReason(candidatePath.refusal), 'protected', snapshot.head);
   }
 
-  return issue('collect', 'still-collectible', 'collectible', snapshot.head);
+  // The removal shape is carried from the very `ManagedPathResult` this branch
+  // already holds, so the destructive step takes it as it was authorized and
+  // observes nothing. `candidatePath.path` is not repeated: the facts check above
+  // refused anything but `claim.path`, so it is `claim.path`, which is carried
+  // once as `AuthorizedCollection.path`.
+  return issue({
+    [authorizationSeal]: true,
+    state: 'authorized',
+    outcome: 'collect',
+    reason: 'still-collectible',
+    host: claim.host,
+    path: claim.path,
+    boardId: claim.boardId,
+    snapshotHead: snapshot.head !== null && snapshot.head === claim.snapshotHead
+      ? snapshot.head
+      : null,
+    recheckHead: snapshot.head,
+    status: 'collectible',
+    root: candidatePath.root,
+    unlinkFinalComponent: candidatePath.unlinkFinalComponent,
+  });
 }
 
 /** The terminal state: what a caller actually did with an authorization. */
@@ -716,8 +820,8 @@ export function commitCollectionDeletion(authorized: AuthorizedCollection): Comp
   if (!isUnchanged(authorized, issued)) {
     throw new Error(
       `Collection authorization for ${authorized.path} was changed after the re-check: `
-      + 'an authorization authorizes only the path, host, board, revision, outcome and reason '
-      + 'the re-check read, and this one no longer carries them',
+      + 'an authorization authorizes only the path, host, board, revision, outcome, reason and '
+      + 'removal shape the re-check read, and this one no longer carries them',
     );
   }
   liveAuthorizations.delete(authorized);
@@ -733,19 +837,105 @@ export function commitCollectionDeletion(authorized: AuthorizedCollection): Comp
 }
 
 /**
- * The comparison is derived from the issued record's own keys, so a field added
- * to the interface later is compared without any edit here: a caller-owned write
- * to it, an own property the caller added, and a carried field the caller
- * deleted are all a mismatch.
+ * Every carried field, so a caller-owned edit to any one of them is a mismatch.
+ *
+ * The comparison is structural rather than a hand-written list of field names,
+ * because the list is the trap: a field added to the authorization is recorded
+ * here and, if the comparison named its predecessors instead of iterating, never
+ * checked. So the key set comes from the issued record itself -- every field the
+ * re-check recorded, and only those -- and the caller's key set must match it
+ * both in membership and in length, so neither an added field nor a deleted one
+ * nor a renamed one passes. The key set is what makes the check automatic: a
+ * field added to the authorization later is compared with no edit here.
+ *
+ * The seal is a non-enumerable module-private symbol, so it is outside this
+ * comparison without being special-cased, and its own value is not what decides
+ * anything: liveness is membership in the process's own `WeakSet`.
+ *
+ * `root` is compared by identity, not field by field. It is the very frozen
+ * object `validateManagedRoots` produced, and `validateManagedRoots` freezes
+ * each entry, so its own contents cannot be edited in place; substituting a
+ * different, equal-looking root is a mismatch and is refused.
  */
-function isUnchanged(
+function isUnchanged<T extends object>(authorized: T, issued: T): boolean {
+  const carried = Object.keys(issued) as (keyof T & string)[];
+  const present = Object.keys(authorized) as (keyof T & string)[];
+  if (present.length !== carried.length) return false;
+  if (!carried.every((field) => present.includes(field))) return false;
+  return carried.every((field) => Object.is(authorized[field], issued[field]));
+}
+
+/**
+ * The filesystem surface the removal needs, and the only two calls it can make.
+ *
+ * There is no `lstat` here, and that absence is the point: the shape of the
+ * removal was decided by the re-check, from facts its own gatherer gathered, and
+ * re-deriving it here would be a second observation of the very path the
+ * re-check judged. `packages/core` performs no filesystem I/O, so the real
+ * `node:fs/promises` functions are supplied by `packages/agent-runtime` or the
+ * CLI; this module only calls what it is handed.
+ */
+export interface AuthorizedRemovalFs {
+  unlink(path: string): Promise<void>;
+  /**
+   * `recursive` is not a convenience: a worktree is a directory, and a
+   * non-recursive removal of one fails with `ENOTEMPTY` -- on exactly the
+   * resources collection exists to remove.
+   *
+   * There is deliberately no `force`, so a path that is already gone fails with
+   * `ENOENT` and is reported as `absent` rather than being silently counted as
+   * removed.
+   */
+  rm(path: string, options: { readonly recursive: true }): Promise<void>;
+}
+
+/** What a removal did, as `collect delete` reports it. */
+export type AuthorizedRemoval = 'unlinked' | 'unlinked-symlink' | 'absent';
+
+function isAbsent(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === 'ENOENT';
+}
+
+/**
+ * Removes one authorized path, in the shape the re-check authorized, and takes
+ * no filesystem observation of its own.
+ *
+ * This is the destructive step's half that the re-check made possible, and it is
+ * exactly the `lstat`-then-branch the CLI used to do by hand: a final component
+ * the gatherer found to be a symlink is unlinked as a link, never followed and
+ * never recursed into, and anything else is removed recursively. What moved is
+ * the *instruction*, not the algorithm, and there is one implementation of it --
+ * the previous `lstat` and its branch are gone, not superseded.
+ *
+ * The residual window is not closed here; it cannot be. It is, however, not
+ * widened by this function: a `lstat` at this point would add one I/O to the end
+ * of the interval the record measures, chosen by the collector, for a value the
+ * re-check had already computed and handed over.
+ *
+ * A path that is already gone is `absent`: the goal state already holds. Any
+ * other failure throws, so an authorization is never spent on a removal that did
+ * not happen. A `withheld` authorization is refused here, before any call.
+ */
+export async function removeAuthorizedPath(
   authorized: AuthorizedCollection,
-  issued: IssuedAuthorization,
-): boolean {
-  const read = (o: object, k: string) => (o as Record<string, unknown>)[k];
-  const authorizedKeys = Object.keys(authorized);
-  const issuedKeys = Object.keys(issued);
-  if (authorizedKeys.length !== issuedKeys.length) return false;
-  if (!issuedKeys.every((key) => authorizedKeys.includes(key))) return false;
-  return issuedKeys.every((key) => read(authorized, key) === read(issued, key));
+  fs: AuthorizedRemovalFs,
+): Promise<AuthorizedRemoval> {
+  if (authorized.outcome !== 'collect') {
+    throw new Error(
+      `Refusing to remove ${authorized.path}: this authorization withheld (${authorized.reason}), `
+      + 'so it carries no removal shape',
+    );
+  }
+  const { path, unlinkFinalComponent } = authorized;
+  try {
+    if (unlinkFinalComponent) {
+      await fs.unlink(path);
+    } else {
+      await fs.rm(path, { recursive: true });
+    }
+  } catch (error) {
+    if (isAbsent(error)) return 'absent';
+    throw error;
+  }
+  return unlinkFinalComponent ? 'unlinked-symlink' : 'unlinked';
 }

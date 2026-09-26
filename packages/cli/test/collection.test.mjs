@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -10,6 +10,17 @@ import test from 'node:test';
 // node-side `gatherCandidatePathFacts`.
 import { BoardApi } from '../dist/packages/core/src/api.js';
 import { runBoardCommand, COLLECT_ROOTS_ENV } from '../dist/packages/cli/src/board.js';
+import { unlinkCollectedPath } from '../dist/packages/cli/src/collection.js';
+import {
+  openCollectionClaim,
+  readCollectionSnapshot,
+  boardApiCollectionReader,
+  recheckCollectionClaim,
+  commitCollectionDeletion,
+} from '../dist/packages/core/src/collection.js';
+import { gatherCandidatePathFacts } from '../dist/packages/agent-runtime/src/candidate-facts.js';
+import { loadManagedRoots } from '../dist/packages/cli/src/collection.js';
+import { existsSync, readFileSync } from 'node:fs';
 
 const STAMP = '2026-09-25T12:00:00.000Z';
 const HOST = 'lubko://server';
@@ -90,7 +101,7 @@ async function withWorkTree(body) {
   const stateHome = join(root, 'state');
   const managed = join(root, 'managed');
   const worktree = join(managed, 'project');
-  await rm(managed, { recursive: true, force: true });
+  await mkdir(managed, { recursive: true });
   const previous = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = stateHome;
   const server = fakeSkrynia();
@@ -265,5 +276,452 @@ test('collect list needs no managed roots configured', async () => {
     assert.equal(code, 0);
     assert.deepEqual(err, []);
     assert.equal(out.length, 1);
+  });
+});
+
+const deleteArgs = (context, path, extra = []) => [
+  'collect',
+  'delete',
+  '--host',
+  HOST,
+  '--path',
+  path,
+  ...extra,
+];
+
+const collectEnv = (context) => ({ [COLLECT_ROOTS_ENV]: context.managed });
+
+/** A reader that lets the board move on exactly once, between two reads. */
+function advancingReader(context, onSecondRead) {
+  let reads = 0;
+  return {
+    async loadState() {
+      reads += 1;
+      if (reads === 2) await onSecondRead();
+      return context.reader.loadState();
+    },
+    accessState() {
+      return context.reader.accessState();
+    },
+  };
+}
+
+test('collect delete without --confirm reports the pending action and removes nothing', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    await mkdir(context.worktree, { recursive: true });
+    const before = context.writer.getRememberedHead();
+
+    const { code, out, err } = await run(deleteArgs(context, context.worktree), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+
+    assert.equal(code, 0);
+    assert.deepEqual(err, []);
+    assert.equal(out.length, 1);
+    assert.equal(
+      out[0],
+      `would delete ${context.worktree} on ${HOST}; board ${context.reader.accessState().boardId} `
+        + `rev ${before}; re-run with --confirm`,
+    );
+    assert.equal(existsSync(context.worktree), true, 'nothing was unlinked');
+  });
+});
+
+test('collect delete with --confirm removes the path and reports the re-read revision', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    await mkdir(join(context.worktree, 'nested'), { recursive: true });
+    const boardId = context.reader.accessState().boardId;
+    const revision = context.writer.getRememberedHead();
+
+    const { code, out, err } = await run(deleteArgs(context, context.worktree, ['--confirm', '--json']), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+
+    assert.equal(code, 0);
+    assert.deepEqual(err, []);
+    assert.deepEqual(JSON.parse(out[0]), {
+      host: HOST,
+      boardId,
+      path: context.worktree,
+      outcome: 'collect',
+      reason: 'still-collectible',
+      recheckHead: revision,
+      snapshotHead: revision,
+    });
+    assert.equal(existsSync(context.worktree), false);
+  });
+});
+
+test('collect delete reports recheckHead and leaves snapshotHead null when the board advanced between the claim and the re-check', async () => {
+  await withWorkTree(async (context) => {
+    const { open } = await seededWorkTree(context);
+    await mkdir(context.worktree, { recursive: true });
+    const claimRevision = context.writer.getRememberedHead();
+
+    const advance = async () => {
+      await context.writer.comment(open[0].number, 'root', 'unrelated board traffic');
+    };
+
+    const pending = await run(deleteArgs(context, context.worktree, ['--json']), {
+      env: collectEnv(context),
+      createClient: () => advancingReader(context, advance),
+    });
+    assert.equal(pending.code, 0);
+    const report = JSON.parse(pending.out[0]);
+    // The claim named one revision and the re-check read a different one, so the
+    // claim's revision is reported as null and only the verified one is reported
+    // as authority.
+    assert.equal(report.snapshotHead, null);
+    assert.notEqual(report.recheckHead, claimRevision);
+    assert.equal(report.outcome, 'collect');
+
+    const human = await run(deleteArgs(context, context.worktree), {
+      env: collectEnv(context),
+      createClient: () => advancingReader(context, advance),
+    });
+    assert.equal(human.code, 0);
+    const revisions = human.out[0].match(/rev \S+/g) ?? [];
+    assert.equal(revisions.length, 1, human.out[0]);
+    assert.equal(human.out[0].includes(`rev ${claimRevision}`), false);
+    // The named revision is the one this run's own re-check read, which is not
+    // the revision the claim named and not any revision the listing printed.
+    assert.equal(human.out[0].includes('rev unavailable'), false);
+    assert.match(human.out[0], /; re-run with --confirm$/);
+    assert.equal(existsSync(context.worktree), true);
+  });
+});
+
+test('collect delete refuses a path that is not registered, and leaves it alone', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    const stranger = join(context.managed, 'stranger');
+    await mkdir(stranger);
+
+    const { code, out, err } = await run(deleteArgs(context, stranger, ['--confirm']), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+
+    assert.equal(code, 1);
+    assert.deepEqual(out, []);
+    assert.match(err[0], /unregistered/);
+    assert.equal(existsSync(stranger), true);
+  });
+});
+
+test('collect delete refuses a path another host owns', async () => {
+  await withWorkTree(async (context) => {
+    const { open } = await seededWorkTree(context);
+    const theirs = join(context.managed, 'theirs');
+    await mkdir(theirs);
+    await context.writer.addResourceDependency(OTHER_HOST, theirs, open[2].number);
+
+    const { code, err } = await run(deleteArgs(context, theirs, ['--confirm']), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+
+    assert.equal(code, 1);
+    assert.match(err[0], /wrong-board/);
+    assert.equal(existsSync(theirs), true);
+  });
+});
+
+test('collect delete refuses a path that became protected and leaves it alone', async () => {
+  await withWorkTree(async (context) => {
+    const { open } = await seededWorkTree(context);
+    await mkdir(context.worktree, { recursive: true });
+    // An open issue depends on it again, so the re-check withholds.
+    await context.writer.reopen(open[1].number);
+
+    const { code, err } = await run(deleteArgs(context, context.worktree, ['--confirm']), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+
+    assert.equal(code, 1);
+    assert.match(err[0], /became-protected/);
+    assert.equal(existsSync(context.worktree), true);
+  });
+});
+
+test('collect delete refuses a path in no configured managed root with outside-managed-roots', async () => {
+  await withWorkTree(async (context) => {
+    const issue = await context.writer.createIssue('Issue 1');
+    const elsewhere = join(context.root, 'outside');
+    await mkdir(elsewhere, { recursive: true });
+    await context.writer.addResourceDependency(HOST, elsewhere, issue.number);
+    await context.writer.close(issue.number);
+
+    const { code, err } = await run(deleteArgs(context, elsewhere, ['--confirm']), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+
+    assert.equal(code, 1);
+    assert.match(err[0], /outside-managed-roots/);
+    assert.equal(existsSync(elsewhere), true);
+  });
+});
+
+test('collect delete refuses a managed root itself with candidate-is-managed-root', async () => {
+  await withWorkTree(async (context) => {
+    const issue = await context.writer.createIssue('Issue 1');
+    await context.writer.addResourceDependency(HOST, context.managed, issue.number);
+    await context.writer.close(issue.number);
+
+    const { code, err } = await run(deleteArgs(context, context.managed, ['--confirm']), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+
+    assert.equal(code, 1);
+    assert.match(err[0], /candidate-is-managed-root/);
+    assert.equal(existsSync(context.managed), true);
+  });
+});
+
+test('collect delete refuses a symlink whose target escapes its managed root and leaves both the link and its target intact', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    const outside = join(context.root, 'outside-target');
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, 'keep.txt'), 'keep');
+    await symlink(outside, context.worktree);
+
+    const { code, err } = await run(deleteArgs(context, context.worktree, ['--confirm']), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+
+    assert.equal(code, 1);
+    assert.match(err[0], /not-managed-collectible/);
+    assert.equal(existsSync(context.worktree), true, 'the link is still there');
+    assert.equal(existsSync(join(outside, 'keep.txt')), true, 'the target is untouched');
+  });
+});
+
+test('collect delete unlinks an in-root symlink as a link and never recurses into its target', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    const target = join(context.managed, 'target');
+    await mkdir(target, { recursive: true });
+    await writeFile(join(target, 'keep.txt'), 'keep');
+    await symlink(target, context.worktree);
+
+    const { code, out, err } = await run(deleteArgs(context, context.worktree, ['--confirm']), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+
+    assert.equal(code, 0, err.join('\n'));
+    assert.equal(out.length, 1);
+    assert.equal(existsSync(context.worktree), false, 'the link is gone');
+    assert.equal(existsSync(target), true, 'the target was not followed');
+    assert.equal(readFileSync(join(target, 'keep.txt'), 'utf8'), 'keep');
+  });
+});
+
+test('collect delete removes a non-empty directory recursively', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    await mkdir(join(context.worktree, 'a', 'b'), { recursive: true });
+    await writeFile(join(context.worktree, 'a', 'b', 'file.txt'), 'x');
+
+    const { code, err } = await run(deleteArgs(context, context.worktree, ['--confirm']), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+
+    assert.equal(code, 0, err.join('\n'));
+    assert.equal(existsSync(context.worktree), false);
+  });
+});
+
+test('collect delete reports candidate-facts-unavailable when the containing directory is gone and touches nothing', async () => {
+  await withWorkTree(async (context) => {
+    const issue = await context.writer.createIssue('Issue 1');
+    const orphan = join(context.managed, 'vanished', 'child');
+    await context.writer.addResourceDependency(HOST, orphan, issue.number);
+    await context.writer.close(issue.number);
+
+    const { code, err } = await run(deleteArgs(context, orphan, ['--confirm']), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+
+    assert.equal(code, 1);
+    assert.match(err[0], /candidate-facts-unavailable/);
+    assert.equal(existsSync(join(context.managed, 'vanished')), false);
+  });
+});
+
+test('collect delete reports the ManagedRootDefect verbatim and reads no board when the root set is invalid', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    const missing = fakeSkrynia();
+    const methods = [];
+    const reader = api(missing, {
+      fetch: async (url, init = {}) => {
+        methods.push(init.method ?? 'GET');
+        return missing.fetch(url, init);
+      },
+    });
+
+    const { code, err } = await run(deleteArgs(context, context.worktree, ['--confirm']), {
+      env: { [COLLECT_ROOTS_ENV]: `${context.managed}:${context.managed}` },
+      createClient: () => reader,
+    });
+
+    assert.equal(code, 1);
+    assert.match(err[0], /duplicate/);
+    assert.match(err[0], new RegExp(context.managed.replace(/[./*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.deepEqual(methods, [], 'no board read at all');
+
+    const noRoots = await run(deleteArgs(context, context.worktree, ['--confirm']), {
+      env: {},
+      createClient: () => reader,
+    });
+    assert.equal(noRoots.code, 1);
+    assert.match(noRoots.err[0], /ANTONINA_COLLECT_ROOTS/);
+    assert.deepEqual(methods, []);
+  });
+});
+
+test('collect delete reports a board that cannot be read and commits no authorization', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    await mkdir(context.worktree, { recursive: true });
+    const broken = api(context.server, {
+      trustAnchor: context.reader.getTrustAnchor(),
+      fetch: async () => { throw new Error('network down'); },
+    });
+
+    const { code, err } = await run(deleteArgs(context, context.worktree, ['--confirm']), {
+      env: collectEnv(context),
+      createClient: () => broken,
+    });
+
+    assert.equal(code, 1);
+    assert.match(err[0], /board-read-failed/);
+    assert.match(err[0], /network down/);
+    assert.match(err[0], /ANTONINA_BOARD_URL/);
+    assert.equal(existsSync(context.worktree), true, 'nothing was removed');
+  });
+});
+
+test('collect delete refuses a malformed or non-canonical path before any board read', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    const missing = fakeSkrynia();
+    const methods = [];
+    const reader = api(missing, {
+      fetch: async (url, init = {}) => {
+        methods.push(init.method ?? 'GET');
+        return missing.fetch(url, init);
+      },
+    });
+
+    for (const path of ['relative/project', `${context.managed}/../elsewhere`, `${context.managed}/`]) {
+      const { code, err } = await run(deleteArgs(context, path, ['--confirm']), {
+        env: collectEnv(context),
+        createClient: () => reader,
+      });
+      assert.equal(code, 1, path);
+      assert.match(err[0], /canonical absolute POSIX path/, path);
+    }
+    assert.deepEqual(methods, []);
+  });
+});
+
+test('collect delete treats an already-absent path as success', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    // Registered and collectible, and never created on disk: a path that does
+    // not exist yet is a real deletion target, and the goal state already holds.
+    assert.equal(existsSync(context.worktree), false);
+
+    const { code, out, err } = await run(deleteArgs(context, context.worktree, ['--confirm']), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+
+    assert.equal(code, 0, err.join('\n'));
+    assert.match(out[0], /^deleted /);
+    assert.equal(existsSync(context.worktree), false);
+  });
+});
+
+test('collect delete reports a hard error and commits nothing when the removal shape cannot be classified', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    await mkdir(context.worktree, { recursive: true });
+    let removalCalls = 0;
+
+    await assert.rejects(
+      () => unlinkCollectedPath(context.worktree, {
+        lstat: async () => {
+          const error = new Error('permission denied');
+          error.code = 'EACCES';
+          throw error;
+        },
+        rm: async () => { removalCalls += 1; },
+        unlink: async () => { removalCalls += 1; },
+      }),
+      /permission denied/,
+    );
+    assert.equal(removalCalls, 0, 'neither unlink nor rm was attempted');
+    assert.equal(existsSync(context.worktree), true);
+  });
+});
+
+test('collect delete commits the authorization exactly once', async () => {
+  await withWorkTree(async (context) => {
+    await seededWorkTree(context);
+    await mkdir(context.worktree, { recursive: true });
+    const boardBefore = JSON.stringify(context.server.signed);
+
+    // The real four-argument re-check, with the real node-side gatherer, driven
+    // from this CLI-side test: an authorization is spent by exactly one removal.
+    const managed = await loadManagedRoots(collectEnv(context));
+    assert.equal(managed.ok, true, JSON.stringify(managed));
+    const snapshot = await readCollectionSnapshot(HOST, boardApiCollectionReader(context.reader));
+    assert.equal(snapshot.verified, true);
+    const claim = openCollectionClaim(snapshot, context.worktree);
+    const authorized = await recheckCollectionClaim(
+      claim,
+      context.reader,
+      managed.roots,
+      gatherCandidatePathFacts,
+    );
+    assert.equal(authorized.outcome, 'collect');
+    const completed = commitCollectionDeletion(authorized);
+    assert.deepEqual(completed, {
+      state: 'spent',
+      outcome: 'collect',
+      reason: 'still-collectible',
+      host: HOST,
+      path: context.worktree,
+      recheckHead: authorized.recheckHead,
+    });
+    assert.throws(
+      () => commitCollectionDeletion(authorized),
+      /not a live authorization/,
+    );
+
+    // And the command's own deletion is one removal, not two.
+    const { code, err } = await run(deleteArgs(context, context.worktree, ['--confirm']), {
+      env: collectEnv(context),
+      createClient: () => context.reader,
+    });
+    assert.equal(code, 0, err.join('\n'));
+    assert.equal(existsSync(context.worktree), false);
+    // Committing is local bookkeeping: it never writes to the board, so the
+    // board still registers the path it just removed.
+    assert.equal(JSON.stringify(context.server.signed), boardBefore);
   });
 });

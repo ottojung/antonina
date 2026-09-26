@@ -27,7 +27,10 @@ import {
 import {
   CollectBoardError,
   CollectRefusedError,
+  collectDelete,
   collectList,
+  renderRevision,
+  type CollectDeleteReport,
   type CollectListEntry,
 } from './collection.js';
 
@@ -65,6 +68,7 @@ type CommandValue =
   | BoardTrustAnchor
   | VerifiedAuthority[]
   | CollectListEntry[]
+  | CollectDeleteReport
   | number[]
   | null;
 
@@ -166,7 +170,11 @@ function collectionAdvice(kind: string): string | null {
   if (kind === 'board-unverifiable' || kind === 'board-state-rejected') {
     return 'set ' + BOARD_TRUST_ENV + ' to the board trust anchor to read it';
   }
-  if (kind === 'board-read-failed') return 'check ' + BOARD_BASE_URL_ENV + ' and that this host can reach it';
+  // A transport failure is the one kind with no established advice, so it is
+  // named as itself rather than flattened into another kind's advice.
+  if (kind === 'board-read-failed') {
+    return kind + ': check ' + BOARD_BASE_URL_ENV + ' and that this host can reach it';
+  }
   return null;
 }
 
@@ -354,6 +362,19 @@ async function execute(
           value: (await collectList(client, hostOption.value ?? requireArg(undefined, 'collect list --host'))).value,
         };
       }
+      if (subcommand === 'delete') {
+        const hostOption = option(args, '--host');
+        const pathOption = option(hostOption.rest, '--path');
+        const confirmFlag = flag(pathOption.rest, '--confirm');
+        if (confirmFlag.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for collect delete');
+        const collected = await collectDelete(client, {
+          host: hostOption.value ?? requireArg(undefined, 'collect delete --host'),
+          path: pathOption.value ?? requireArg(undefined, 'collect delete --path'),
+          confirm: confirmFlag.value,
+          env,
+        });
+        return { mode: collected.mode, value: collected.value };
+      }
       throw new AntoninaApiError('collect requires list or delete');
     }
     default:
@@ -423,6 +444,19 @@ function humanLines(result: CommandResult): string[] {
       return 'collectible ' + entry.path + ' on ' + entry.host
         + '; board ' + entry.boardId + ' rev ' + entry.revision + dependents;
     });
+  }
+
+  if (result.mode === 'collect-pending') {
+    const report = result.value as CollectDeleteReport;
+    // Exactly one revision is named, and it is the one the re-check verified.
+    return [
+      `would delete ${report.path} on ${report.host}; board ${report.boardId} `
+        + `${renderRevision(report.recheckHead)}; re-run with --confirm`,
+    ];
+  }
+  if (result.mode === 'collect-deleted') {
+    const report = result.value as CollectDeleteReport;
+    return [`deleted ${report.path} on ${report.host}; board ${report.boardId} ${renderRevision(report.recheckHead)}`];
   }
 
   const value = result.value;

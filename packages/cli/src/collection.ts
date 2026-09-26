@@ -1,16 +1,24 @@
-import { realpath as realpathCall } from 'node:fs/promises';
+import { lstat as lstatCall, realpath as realpathCall, rm as rmCall, unlink as unlinkCall } from 'node:fs/promises';
 
 import { AntoninaApiError, type BoardApi } from '../../core/src/api.js';
 import {
   boardApiCollectionReader,
   collectiblePaths,
+  commitCollectionDeletion,
   openCollectionClaim,
   protectionOf,
   readCollectionSnapshot,
+  recheckCollectionClaim,
   type CollectionFailureKind,
   type CollectionOutcomeReason,
   type CollectionSnapshot,
 } from '../../core/src/collection.js';
+// The node-side gatherer `recheckCollectionClaim` requires. It is the
+// implementation core's docstring points at, it is imported rather than
+// rewritten, and it is passed through unwrapped: one path in,
+// `Promise<CandidatePathFacts | null>` out, which is exactly
+// `CandidateFactsGatherer`.
+import { gatherCandidatePathFacts } from '../../agent-runtime/src/candidate-facts.js';
 import { validateManagedRoots } from '../../core/src/managed-roots.js';
 import type {
   ManagedCollectionRoot,
@@ -216,28 +224,34 @@ export async function loadManagedRoots(
   return { ok: true, roots: validated.roots };
 }
 
-/** How a defect is rendered to an operator, in core's own vocabulary. */
+/**
+ * How a defect is rendered to an operator: core's own `kind` first, so the
+ * vocabulary an operator reads is the vocabulary the judgment used, and the
+ * configured spelling after it, so the offending entry is named.
+ */
 export function describeRootsDefect(result: {
   readonly spelling: string | null;
   readonly defect: CollectRootsDefect;
 }): string {
   const { spelling, defect } = result;
-  const where = spelling === null ? '' : ` (${spelling})`;
   if (defect.kind === 'empty') {
-    return `no managed collection roots are configured in ${COLLECT_ROOTS_ENV}; `
+    return `empty: no managed collection roots are configured in ${COLLECT_ROOTS_ENV}; `
       + 'set it to a ":"-separated list of absolute directories the collector may remove from';
   }
-  if (defect.kind === 'malformed-root') return `a configured managed root is not a spelled/resolved pair${where}`;
+  if (defect.kind === 'malformed-root') {
+    return `malformed-root: a configured managed root is not a spelled/resolved pair${spelling === null ? '' : ` (${spelling})`}`;
+  }
   if (defect.kind === 'path-form') {
-    return `configured managed root ${defect.path} is not a canonical absolute POSIX path (${defect.defect})`;
+    return `path-form: configured managed root ${defect.path} is not a canonical absolute POSIX path (${defect.defect})`;
   }
-  if (defect.kind === 'duplicate') return `configured managed root ${defect.path} is listed twice`;
+  if (defect.kind === 'duplicate') {
+    return `duplicate: configured managed root ${defect.path} is listed twice`;
+  }
   if (defect.kind === 'nested') {
-    return `configured managed root ${defect.path} is inside configured managed root ${defect.within}`;
+    return `nested: configured managed root ${defect.path} is inside configured managed root ${defect.within}`;
   }
-  return defect.message;
+  return `unresolvable-root: ${defect.message}`;
 }
-
 /**
  * The verified snapshot both subcommands answer from, or the board's own
  * failure.
@@ -307,4 +321,218 @@ export async function collectList(api: BoardApi, host: string): Promise<CollectL
     };
   });
   return { mode: 'collect-list', value };
+}
+
+/**
+ * How the collector's path-safety side removes an authorized path, and the
+ * residual window it sits inside.
+ *
+ * `AuthorizedCollection` says *which* path may be removed and carries no removal
+ * shape: `ManagedPathResult.unlinkFinalComponent` -- the explicit instruction
+ * that an eligible symlink is unlinked at `path`, never followed, never recursed
+ * into -- is not visible to the caller at the point of action. So this function
+ * does its own single `lstat` on the authorized path and branches on it. It is
+ * I/O shape, not a verdict: nothing here decides whether a path may be touched,
+ * and every such decision was made by `recheckCollectionClaim` beforehand.
+ *
+ * The residual window is real and this function does not close it. The component
+ * can change between the gather inside the re-check and this `lstat`, and a swap
+ * to a symlink removes the *link* -- the safe direction -- while a swap to a
+ * directory recursively removes a directory the re-check never judged. The
+ * signed board log has no compare-and-delete or lease primitive, so the protocol
+ * can only promise the path was unowed at the last authoritative read. This is
+ * one named function so it is greppable if core later grows a removal descriptor
+ * on the authorization.
+ */
+export interface RemovalFs {
+  lstat: typeof lstatCall;
+  rm: typeof rmCall;
+  unlink: typeof unlinkCall;
+}
+
+const DEFAULT_REMOVAL_FS: RemovalFs = {
+  lstat: lstatCall,
+  rm: rmCall,
+  unlink: unlinkCall,
+};
+
+function isMissing(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === 'ENOENT';
+}
+
+/**
+ * Removes one authorized path, as `ManagedPathResult.unlinkFinalComponent`
+ * requires and as nothing else permits: a symlink is unlinked as a link, and
+ * anything else is removed recursively -- `recursive` is not a convenience, a
+ * worktree is a directory and a non-recursive removal of one fails with
+ * `ENOTEMPTY`, which would fail on exactly the resources this command exists to
+ * remove.
+ *
+ * A path that is already gone is success: the goal state already holds, and a
+ * `rm` with `force` would have said the same. Any other `lstat` failure throws,
+ * so no authorization is spent on a removal whose shape could not be classified.
+ */
+export async function unlinkCollectedPath(
+  path: string,
+  fs: RemovalFs = DEFAULT_REMOVAL_FS,
+): Promise<'unlinked' | 'unlinked-symlink' | 'absent'> {
+  let stats;
+  try {
+    stats = await fs.lstat(path);
+  } catch (error) {
+    if (isMissing(error)) return 'absent';
+    throw error;
+  }
+  if (stats.isSymbolicLink()) {
+    await fs.unlink(path);
+    return 'unlinked-symlink';
+  }
+  await fs.rm(path, { recursive: true, force: true });
+  return 'unlinked';
+}
+
+/**
+ * What `collect delete` reports, in both the pending and the completed case, so
+ * a script reads one shape.
+ *
+ * `recheckHead` is the revision this command acted on: the one its own re-check
+ * read and verified. `snapshotHead` is the revision the *claim* named, and it is
+ * `null` whenever the re-check landed on a different revision -- the normal case
+ * when the board advanced in between, not a warning and not a failure. The two
+ * key names are distinct on purpose, so a script cannot read `snapshotHead` as
+ * authority; only `recheckHead` is one.
+ */
+export interface CollectDeleteReport {
+  host: string;
+  boardId: string;
+  path: string;
+  outcome: 'collect' | 'withheld';
+  reason: CollectionOutcomeReason;
+  recheckHead: string | null;
+  snapshotHead: string | null;
+}
+
+export type CollectDeleteResult = {
+  mode: 'collect-pending' | 'collect-deleted';
+  value: CollectDeleteReport;
+};
+
+export interface CollectDeleteOptions {
+  host: string;
+  path: string;
+  confirm: boolean;
+  env: Record<string, string | undefined>;
+  rootsFs?: RootsFs;
+  removalFs?: RemovalFs;
+}
+
+/**
+ * The destructive half, in this order and no other: configured roots, then a
+ * fresh verified snapshot, then a claim, then a re-check, then the confirmation
+ * gate, then the removal, then the commit.
+ *
+ * Each step is fail-closed at its own boundary. An unusable root set is reported
+ * before any board read, so a misconfigured collector never learns what the board
+ * says. A claim cannot be opened for a protected, foreign, unregistered or
+ * non-canonical path. The re-check is core's, with the real node-side gatherer as
+ * its required fourth argument: the gatherer is asked about `claim.path` and
+ * nothing else, and the re-check builds its own verifying read, so the CLI
+ * supplies no reader and no board state of its own. A withheld outcome touches
+ * nothing and spends nothing.
+ *
+ * Without `--confirm` the command stops after a *real* re-check and reports the
+ * pending action. The claim is simply dropped; the gate is not a cached verdict
+ * re-used at confirmation time, so a path that stopped being collectible in
+ * between is refused rather than deleted.
+ */
+export async function collectDelete(
+  api: BoardApi,
+  options: CollectDeleteOptions,
+): Promise<CollectDeleteResult> {
+  const host = requireCollectionHost(options.host, 'collect delete');
+
+  // 1. Managed roots. A configuration error is reported verbatim and nothing is
+  //    read from the board.
+  const managed = options.rootsFs === undefined
+    ? await loadManagedRoots(options.env)
+    : await loadManagedRoots(options.env, COLLECT_ROOTS_ENV, options.rootsFs);
+  if (!managed.ok) throw new CollectRootsError(describeRootsDefect(managed));
+
+  // A path that is not canonical is a usage error, refused before the board is
+  // read: it could not be located in the registry, so no decision about it
+  // exists.
+  const candidate = options.path.trim();
+  const formDefect = pathFormDefect(candidate);
+  if (formDefect !== null) {
+    throw new AntoninaApiError(
+      `collect delete requires a canonical absolute POSIX path, not ${JSON.stringify(options.path)} (${formDefect})`,
+    );
+  }
+
+  // 2. A fresh verified snapshot for the host.
+  const snapshot = await verifiedSnapshot(api, host);
+
+  // 3. The claim, which pins the revision that called the path collectible.
+  let claim;
+  try {
+    claim = openCollectionClaim(snapshot, candidate);
+  } catch {
+    // The message below restates the claim's own refusal -- the same path, the
+    // same status, the same basis -- with the classified reason named, so the
+    // operator reads one line in core's vocabulary instead of a stack.
+    const verdict = protectionOf(snapshot, candidate);
+    // The claim's own refusal, classified from the basis it was refused for. A
+    // path another host registered is reported as a different board, a path no
+    // host registered as unregistered, and a path this host still owes
+    // protection to as became-protected.
+    const reason: CollectionOutcomeReason = verdict.basis === 'other-host'
+      ? 'wrong-board'
+      : verdict.basis === 'not-registered'
+        ? 'unregistered'
+        : 'became-protected';
+    throw new CollectRefusedError(
+      reason,
+      `refusing to claim ${verdict.path} for collection: ${reason} (${verdict.status}, ${verdict.basis})`,
+    );
+  }
+
+  // 4. The re-check: four arguments, the last of them the node-side gatherer
+  //    `recheckCollectionClaim` requires. It is core's own function, unwrapped.
+  const authorized = await recheckCollectionClaim(
+    claim,
+    api,
+    managed.roots,
+    gatherCandidatePathFacts,
+  );
+
+  const report: CollectDeleteReport = {
+    host: authorized.host,
+    boardId: authorized.boardId,
+    path: authorized.path,
+    outcome: authorized.outcome,
+    reason: authorized.reason,
+    recheckHead: authorized.recheckHead,
+    snapshotHead: authorized.snapshotHead,
+  };
+
+  // 5. Anything but `collect` is a refusal: printed verbatim, with board-state
+  //    advice when the reason is a board-state failure, and nothing touched.
+  if (authorized.outcome !== 'collect') {
+    throw new CollectRefusedError(
+      authorized.reason,
+      `refusing to collect ${authorized.path} on ${authorized.host}: ${authorized.reason}`,
+      isCollectionFailureKind(authorized.reason) ? authorized.reason : null,
+    );
+  }
+
+  // 6. The confirmation gate. Everything above has already happened for real.
+  if (!options.confirm) return { mode: 'collect-pending', value: report };
+
+  // 7. The removal, at the board-recorded spelling: the authorization names one
+  //    path and the CLI acts on that path and no other.
+  await unlinkCollectedPath(authorized.path, options.removalFs ?? DEFAULT_REMOVAL_FS);
+
+  // 8. The authorization is spent exactly once, after the action it authorized.
+  commitCollectionDeletion(authorized);
+  return { mode: 'collect-deleted', value: report };
 }

@@ -798,10 +798,14 @@ export interface CompletedCollection {
  * when it was issued: every field the commit reads back is compared against the
  * module-private record of the issue, so a caller cannot re-point the authority
  * at another path, host, board, revision, outcome or reason after the re-check
- * has completed. Committing consumes it: one completed re-check can authorize at
- * most one destructive action, and a copy of the record is not that
- * authorization. A withheld authorization reports `withheld`, and the caller
- * leaves the path alone.
+ * has completed. Committing is what spends it: this is the only place either
+ * module-private collection is deleted, so one completed re-check yields at most
+ * one completion record and a second call on it throws. It does not follow that a
+ * re-check is worth one removal -- a removal reads the record through the same
+ * door and leaves it live, so a caller that never commits can remove more than
+ * once from a single re-check. What is single-use is the completion record, not
+ * the removal. A copy of the record is not the authorization either. A withheld
+ * authorization reports `withheld`, and the caller leaves the path alone.
  *
  * A refusal over changed fields does not consume the authorization: a caller
  * that wrote to it by mistake can put the re-check's own values back and commit
@@ -945,8 +949,15 @@ function isAbsent(error: unknown): boolean {
  * re-check had already computed and handed over.
  *
  * A path that is already gone is `absent`: the goal state already holds. Any
- * other failure throws, so an authorization is never spent on a removal that did
- * not happen. A `withheld` authorization is refused here, before any call.
+ * other failure throws, so a failure is reported rather than passed off as a
+ * removal that happened. A `withheld` authorization is refused here, before any
+ * call.
+ *
+ * Nothing here spends the authorization. This function reads the issued record
+ * and never deletes it; `commitCollectionDeletion` is the only spender, and it
+ * spends the same authorization whether a removal preceded it or not. A refused
+ * removal therefore leaves the authorization just as committable as a successful
+ * one, and a successful removal leaves it committable too.
  *
  * The path and the removal shape are read off the module-private record of the
  * re-check, not off the caller's object, and the same re-pointing comparison the

@@ -6,7 +6,6 @@ import { runManagedRunner } from '../../agent-runtime/src/runner.js';
 import { runAgentCommand, type AgentCommandContext } from './agent.js';
 import { runBoardCommand } from './board.js';
 
-const AGENT_COMMANDS = new Set(['new', 'list', 'status', 'prompt', 'log', 'wait', 'stop', 'kill', 'delete', 'clean']);
 
 function io() {
   return {
@@ -46,11 +45,6 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   }
   if (namespace === 'agent') {
     return runAgentCommand(args, agentContext());
-  }
-  // Preserve the pre-migration top-level agent command spellings while the
-  // documented namespace converges on `antonina agent ...`.
-  if (namespace !== undefined && AGENT_COMMANDS.has(namespace)) {
-    return runAgentCommand(argv, agentContext());
   }
   process.stderr.write('antonina: expected "agent" or "board" command namespace\n');
   return 2;

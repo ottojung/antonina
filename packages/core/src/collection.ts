@@ -732,18 +732,20 @@ export function commitCollectionDeletion(authorized: AuthorizedCollection): Comp
   };
 }
 
-/** Every carried field, so a caller-owned edit to any one of them is a mismatch. */
+/**
+ * The comparison is derived from the issued record's own keys, so a field added
+ * to the interface later is compared without any edit here: a caller-owned write
+ * to it, an own property the caller added, and a carried field the caller
+ * deleted are all a mismatch.
+ */
 function isUnchanged(
   authorized: AuthorizedCollection,
   issued: IssuedAuthorization,
 ): boolean {
-  return authorized.state === issued.state
-    && authorized.outcome === issued.outcome
-    && authorized.reason === issued.reason
-    && authorized.host === issued.host
-    && authorized.path === issued.path
-    && authorized.boardId === issued.boardId
-    && authorized.snapshotHead === issued.snapshotHead
-    && authorized.recheckHead === issued.recheckHead
-    && authorized.status === issued.status;
+  const read = (o: object, k: string) => (o as Record<string, unknown>)[k];
+  const authorizedKeys = Object.keys(authorized);
+  const issuedKeys = Object.keys(issued);
+  if (authorizedKeys.length !== issuedKeys.length) return false;
+  if (!issuedKeys.every((key) => authorizedKeys.includes(key))) return false;
+  return issuedKeys.every((key) => read(authorized, key) === read(issued, key));
 }

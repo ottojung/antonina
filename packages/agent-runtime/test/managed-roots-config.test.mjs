@@ -169,6 +169,13 @@ test('(a) a spelling and its resolved form naming one directory twice is refused
   });
 });
 
+// Title caveat: the "before any I/O" in the title below is scoped to the entry
+// under test, and each case here configures exactly one spelling, so no realpath
+// call at all is what this test observes. The loader's checks are per-entry
+// inside its loop (`managed-roots-config.ts:182-187`): entry N's form defect is
+// decided after the entries before it were resolved, so the loader does not
+// guarantee that a non-canonical spelling anywhere in a list is refused before
+// any I/O. This test does not establish that, and does not claim it.
 test('(b) a non-canonical spelling is refused before any I/O', async () => {
   await withTree(async () => {
     const cases = [
@@ -185,9 +192,12 @@ test('(b) a non-canonical spelling is refused before any I/O', async () => {
       assert.equal(result.defect.kind, 'path-form');
       assert.equal(result.defect.path, spelling);
       assert.equal(result.defect.defect, defect, spelling);
-      // The load-bearing half: the form check happens before any filesystem
-      // access, so a relative spelling is never resolved against this process's
-      // working directory and reported as a path nobody configured.
+      // The load-bearing half: the form check happens before *this* entry is
+      // resolved, so a relative spelling is never resolved against this process's
+      // working directory and reported as a path nobody configured. Each case
+      // below configures exactly one spelling, so "no realpath call was made" is
+      // the whole of the ordering observed here -- see the title caveat above for
+      // what this deliberately does not cover.
       assert.deepEqual(calls, [], spelling);
     }
   });

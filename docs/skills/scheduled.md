@@ -1,15 +1,18 @@
 # Scheduled Antonina agent work
 
-This document is the reusable operating guide for a recurring ChatGPT invocation that uses Antonina's optional agent runtime. It defines ownership, recovery, liveness, and completion for agentic work. The calling project itinerary supplies the target repository, work-selection policy, branch policy, and completion predicate.
+This document is the reusable operating guide for recurring orchestrators that work on Antonina-managed repositories. It defines ownership, recovery, liveness, and completion for agentic work. The calling project itinerary supplies the target repository, work-selection policy, branch policy, and completion predicate.
 
 ## Contract
 
 Keep these resources distinct:
 
-- **Antonina** — the standalone agent runtime and its durable agent state.
+- **Antonina** — the preferred coding-agent runtime used to perform substantive repository work. Antonina is a capable agent and should be used for work that benefits from judgment, context, iteration, or multiple steps.
+- **Orchestrator** — the long-running coordinator (for example OpenClaw) that selects work, launches subprocesses, observes progress, and keeps the overall loop moving.
 - **Target repository** — the repository, issues, branches, pull requests, and validation requirements selected by the itinerary.
 
-Every scheduled invocation is disposable. Durable issue status, agent metadata, logs, and repository state are the sources of truth; conversation memory is only context.
+The orchestrator should use Antonina by launching `antonina agent ...` commands as subprocesses. The orchestrator coordinates; Antonina agents do the substantive agentic work. Do not replace Antonina with ad-hoc direct model calls when an Antonina agent is appropriate.
+
+Every orchestrator invocation or turn is disposable. Durable issue status, Antonina agent state and logs, repository state, and other explicit host state are the sources of truth; conversation memory is only context.
 
 ## Startup
 
@@ -17,8 +20,9 @@ Every scheduled invocation is disposable. Durable issue status, agent metadata, 
 2. Identify the concrete work item.
 3. Read the canonical issue status comment before claiming work.
 4. Claim only work that is not actively owned; recover abandoned work according to the issue's timestamp and owner.
-5. Use a preassigned base-16 agent ID and an explicit target worktree cwd.
-6. Continue until the itinerary's completion condition is verified; do not silently stop with an outstanding agent.
+5. Use a preassigned base-16 Antonina agent ID and an explicit target worktree cwd.
+6. Launch and control Antonina agents through subprocesses.
+7. Continue until the itinerary's completion condition is verified; do not silently stop with an outstanding agent.
 
 ## Issue ownership
 
@@ -28,7 +32,17 @@ Treat work as abandoned for coordination purposes only after its marked comment 
 
 ## Agent operation
 
-Use Antonina for work requiring judgment, context, iteration, or multiple steps. Use direct shell only for tiny deterministic observations. Record the agent ID before invocation, retain durable logs, and poll or inspect status and logs while work is nonterminal. Never treat a progress message or green test as completion by itself.
+Use Antonina for work requiring judgment, context, iteration, or multiple steps. The normal pattern is for the orchestrator to spawn Antonina CLI subprocesses such as:
+
+```sh
+antonina agent new --id <agent-id> --cwd <worktree>
+antonina agent prompt --id <agent-id> '<task>'
+antonina agent status --id <agent-id>
+antonina agent log --id <agent-id>
+antonina agent wait --id <agent-id> --timeout <seconds>
+```
+
+Use direct shell only for tiny deterministic observations or orchestration glue. Record the Antonina agent ID before invocation, retain durable logs, and poll or inspect status and logs while work is nonterminal. Never treat a progress message or green test as completion by itself.
 
 Before relying on a durable host path, follow [resources.md](resources.md): register it with `antonina board resource add`, verify it, and preserve open dependencies until handoff or completion.
 

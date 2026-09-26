@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { createBrowserBoardApi } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { boardLoadFailed, boardLoaded, emptyIssueList, filterLabel, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, loadedBoard, trustRequired, visibleIssues, FIRST_RUN_COPY, ISSUE_FORM_HINT, READ_ONLY_CALLOUT, TRUST_COPY, type BoardLoad, type IssueFilter } from './ui-state';
+import { boardDeleted, boardLoadFailed, boardLoaded, DELETED_COPY, emptyIssueList, filterLabel, firstRunResolved, firstRunUnresolved, formatUpdatedAt, groupResources, issueCounts, loadedBoard, trustRequired, visibleIssues, FIRST_RUN_COPY, ISSUE_FORM_HINT, READ_ONLY_CALLOUT, TRUST_COPY, type BoardLoad, type IssueFilter } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -35,6 +35,10 @@ export default function App() {
         setLoad((current) => (current.status === 'ready' ? current : { status: 'untrusted' }));
         return;
       }
+      if (boardDeleted(cause)) {
+        setLoad({ status: 'deleted' });
+        return;
+      }
       const message = cause instanceof Error ? cause.message : 'Could not load Antonina';
       setError(message);
       setLoad((current) => boardLoadFailed(current, message));
@@ -58,7 +62,14 @@ export default function App() {
   async function run<T>(action: () => Promise<T>, success: string): Promise<T | null> {
     setError(undefined); setNotice(undefined);
     try { const result = await action(); await refresh(); setNotice(success); return result; }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'The change could not be saved'); return null; }
+    catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'The change could not be saved';
+      // A refused mutation drops this client to read-only, so read access
+      // again instead of leaving a stale edit indicator until the next poll.
+      await refresh();
+      setError(message);
+      return null;
+    }
   }
   async function createIssue(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = event.currentTarget;
@@ -125,6 +136,7 @@ export default function App() {
   if (load.status === 'failed') return <main className="centered"><section className="load-error"><p className="eyebrow">Antonina</p><h1>The board could not be loaded</h1><p>{load.message}</p><button className="primary" onClick={() => void refresh()}>Try again</button></section></main>;
   if (load.status === 'uninitialized') return <main className="centered"><FirstRun error={error} initializing={initializing} initialize={() => void initializeBoard()} recheck={() => void refresh()} /></main>;
   if (load.status === 'untrusted') return <main className="centered"><TrustAnchor error={error} anchorInput={anchorInput} setAnchorInput={setAnchorInput} trusting={trusting} trust={trustBoard} retry={() => void refresh()} /></main>;
+  if (load.status === 'deleted') return <main className="centered"><section className="first-run"><p className="eyebrow">Antonina</p><h1>{DELETED_COPY.title}</h1><p>{DELETED_COPY.body}</p></section></main>;
 
   return <div className="app-shell">
     <header className="topbar">

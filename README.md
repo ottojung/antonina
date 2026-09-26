@@ -36,6 +36,8 @@ The board is created deliberately, not by reading it: open the web board and use
 
 `antonina board initialize` prints the same trust anchor and root credential for an agent, and `antonina board credential delegate` mints attenuated credentials.
 
+A credential's Skrynia storage capability can go stale: setup accepts it, the first real mutation is refused, and that client then stays read-only until it is given a freshly copied credential.
+
 ```sh
 antonina board --help
 ```

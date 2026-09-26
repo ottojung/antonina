@@ -124,16 +124,35 @@ test('every read command names initialization while the board is missing', async
   assert.equal(server.signed, null);
 });
 
-test('read commands refuse a client with no credential instead of asking about the board', async () => {
+test('mutating commands name initialization before they demand a credential', async () => {
   const server = fakeSkrynia();
+  const missing = 'antonina board: Antonina signed board does not exist; run: antonina board initialize to create it';
+  const methods = [];
+  const reader = client(server, { fetch: async (url, init = {}) => { methods.push(init.method); return server.fetch(url, init); } });
 
   for (const command of [['access'], ['create', 'Mine']]) {
-    const { code, err } = await run(command, { createClient: () => client(server) });
+    const { code, err } = await run(command, { createClient: () => reader });
+    assert.equal(code, 1, command.join(' '));
+    assert.equal(err[0], missing, command.join(' '));
+  }
+
+  assert.equal(methods.includes('POST'), false);
+  assert.equal(methods.includes('PUT'), false);
+  assert.equal(server.signed, null);
+});
+
+test('a client on an existing board with no credential is told exactly that', async () => {
+  const server = fakeSkrynia();
+  const initialized = await client(server).initialize();
+  const reader = client(server, { trustAnchor: initialized.trustAnchor });
+
+  for (const command of [['access'], ['create', 'Mine']]) {
+    const { code, err } = await run(command, { createClient: () => reader });
     assert.equal(code, 1, command.join(' '));
     assert.equal(err[0], 'antonina board: Antonina board credential is required', command.join(' '));
   }
 
-  assert.equal(server.signed, null);
+  assert.equal(server.signed.operations.length, 1);
 });
 
 test('every read command names the trust anchor when it cannot verify the board', async () => {

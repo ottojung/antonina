@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BoardApi, BoardMissingError, BOARD_CAPABILITIES, BoardTrustRequiredError } from '../dist/api.js';
+import {
+  BoardApi,
+  BoardDeletedError,
+  BoardMissingError,
+  BOARD_CAPABILITIES,
+  BoardStorageRejectedError,
+  BoardTrustRequiredError,
+  SignedBoardStoreError,
+} from '../dist/api.js';
 
 const STAMP = '2026-09-25T12:00:00.000Z';
 
@@ -147,10 +155,29 @@ test('a stale storage capability is refused by the first mutation, not before it
   assert.equal(access.storageRejected, false);
   assert.equal(methods.includes('PUT'), false, 'verifying a credential must not write');
 
-  await assert.rejects(() => watched.createIssue('Refused'), /failed \(403\)/);
+  await assert.rejects(
+    () => watched.createIssue('Refused'),
+    (error) => {
+      assert.ok(error instanceof BoardStorageRejectedError);
+      assert.equal(error.cause instanceof SignedBoardStoreError, true);
+      assert.equal(error.cause.status, 403);
+      return true;
+    },
+  );
   assert.equal(watched.hasWriteAccess(), false);
   assert.equal(watched.accessState().storageRejected, true);
   assert.equal(server.signed.operations.length, 1);
+});
+
+test('a deleted board is reported as its own state, not as a read failure', async () => {
+  const server = fakeSkrynia();
+  const owner = api(server);
+  const initialized = await owner.initialize();
+  await owner.deleteBoard();
+
+  const reader = api(server, { trustAnchor: initialized.trustAnchor });
+  await assert.rejects(() => reader.readBoard(), BoardDeletedError);
+  await assert.rejects(() => reader.createIssue('Blocked'), BoardDeletedError);
 });
 
 test('revocation invalidates a delegated credential on its next verification', async () => {

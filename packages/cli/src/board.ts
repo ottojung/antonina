@@ -1,7 +1,9 @@
 import {
   AntoninaApiError,
   BoardApi,
+  BoardDeletedError,
   BoardMissingError,
+  BoardStorageRejectedError,
   BoardTrustRequiredError,
   DEFAULT_BOARD_BASE_URL,
   type BoardAccessState,
@@ -19,6 +21,7 @@ import type { BoardIssue, BoardResource, IssueState, ResourceView } from '../../
 import {
   parseBoardCapability,
   type BoardCapability,
+  type BoardTrustAnchor,
   type VerifiedAuthority,
 } from '../../core/src/operations.js';
 
@@ -48,6 +51,7 @@ type CommandValue =
   | BoardInitialization
   | BoardCredential
   | BoardAccessState
+  | BoardTrustAnchor
   | VerifiedAuthority[]
   | number[]
   | null;
@@ -134,13 +138,18 @@ function parseCapabilities(args: string[]): BoardCapability[] {
 }
 
 /**
- * The CLI's advice for the three board states the shared API reports, so an
- * operator is never told to configure a trust anchor for a board that does not
- * exist, or left guessing what to do about one it cannot verify.
+ * The CLI's advice for the states the shared API reports, so an operator is
+ * never told to configure a trust anchor for a board that does not exist, left
+ * guessing what to do about one it cannot verify, or left without a next step
+ * for a deleted board or a refused storage capability.
  */
 function boardStateAdvice(error: unknown): string | null {
   if (error instanceof BoardMissingError) return 'run: antonina board initialize to create it';
   if (error instanceof BoardTrustRequiredError) return 'set ' + BOARD_TRUST_ENV + ' to the board trust anchor to read it';
+  if (error instanceof BoardDeletedError) return 'start a new board instead; this key is permanently occupied';
+  if (error instanceof BoardStorageRejectedError) {
+    return 'set ' + BOARD_CREDENTIAL_ENV + ' to a credential copied after the storage capability was issued';
+  }
   return null;
 }
 
@@ -168,7 +177,7 @@ async function execute(
         if (args.length !== 0) throw new AntoninaApiError('credential trust takes no arguments');
         const trust = client.getTrustAnchor();
         if (trust === null) throw new AntoninaApiError('Antonina board trust anchor is not configured');
-        return { mode: 'trust', value: trust as unknown as CommandValue };
+        return { mode: 'trust', value: trust };
       }
       if (subcommand === 'verify') {
         if (args.length !== 0) throw new AntoninaApiError('credential verify takes no arguments');
@@ -300,7 +309,7 @@ function humanIssue(issue: BoardIssue): string {
   return lines.join('\n');
 }
 
-function humanLines(result: CommandResult, parsed: ParsedCommand): string[] {
+function humanLines(result: CommandResult): string[] {
   if (result.mode === 'initialize') {
     const initialized = result.value as BoardInitialization;
     return [
@@ -315,7 +324,7 @@ function humanLines(result: CommandResult, parsed: ParsedCommand): string[] {
     return [serializeBoardCredential(result.value as BoardCredential)];
   }
   if (result.mode === 'trust') {
-    return [serializeBoardTrustAnchor(result.value as never)];
+    return [serializeBoardTrustAnchor(result.value as BoardTrustAnchor)];
   }
   if (result.mode === 'access') {
     const access = result.value as BoardAccessState;
@@ -373,7 +382,7 @@ export async function runBoardCommand(argv: string[], context: BoardCommandConte
       context.io.stdout(canonicalJson(result.value as unknown as CanonicalValue));
       return 0;
     }
-    for (const line of humanLines(result, parsed)) context.io.stdout(line);
+    for (const line of humanLines(result)) context.io.stdout(line);
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

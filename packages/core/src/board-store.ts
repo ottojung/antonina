@@ -26,7 +26,15 @@ export const DEFAULT_BOARD_BASE_URL = 'https://vau.place/_skrynia';
 
 const DEFAULT_MAX_ATTEMPTS = 6;
 
-export class SignedBoardStoreError extends Error {}
+export class SignedBoardStoreError extends Error {
+  /** The Skrynia HTTP status, when this error came from a response. */
+  readonly status: number | null;
+
+  constructor(message: string, options: { cause?: unknown; status?: number } = {}) {
+    super(message, { cause: options.cause });
+    this.status = options.status ?? null;
+  }
+}
 
 /** The signed board does not exist at its Skrynia key. */
 export class BoardMissingError extends SignedBoardStoreError {
@@ -257,6 +265,9 @@ export class SignedBoardStore {
   }
 
   private httpError(method: string, key: string, response: Response): SignedBoardStoreError {
-    return new SignedBoardStoreError(`Skrynia ${method} ${ANTONINA_NAMESPACE}/${key} failed (${response.status})`);
+    return new SignedBoardStoreError(
+      `Skrynia ${method} ${ANTONINA_NAMESPACE}/${key} failed (${response.status})`,
+      { status: response.status },
+    );
   }
 }

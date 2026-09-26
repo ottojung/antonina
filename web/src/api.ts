@@ -18,9 +18,7 @@ import type { BoardTrustAnchor } from '../../packages/core/src/operations';
 import type { Board } from '../../packages/core/src/model';
 
 export {
-  parseBoardCredential,
   parseBoardCredentialText,
-  parseBoardTrustAnchor,
   parseBoardTrustAnchorText,
   serializeBoardCredential,
   serializeBoardTrustAnchor,

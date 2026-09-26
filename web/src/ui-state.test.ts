@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { BoardTrustRequiredError } from './api';
+import { BoardDeletedError, BoardTrustRequiredError } from './api';
 import { emptyBoard, type Board, type BoardIssue } from './model';
 import {
+  boardDeleted,
   boardLoadFailed,
   boardLoaded,
+  DELETED_COPY,
   emptyIssueList,
   filterLabel,
   firstRunResolved,
@@ -106,6 +108,14 @@ describe('board load state', () => {
 
   it('sends a first-run client that lost the initialize race to the trust anchor screen', () => {
     expect(firstRunUnresolved(new BoardTrustRequiredError('no trust anchor'))).toEqual({ status: 'untrusted' });
+  });
+
+  it('treats a deleted board as terminal instead of retryable', () => {
+    const cause = new BoardDeletedError('Antonina board has been deleted');
+    expect(boardDeleted(cause)).toBe(true);
+    expect(trustRequired(cause)).toBe(false);
+    expect(firstRunUnresolved(cause)).toEqual({ status: 'deleted' });
+    expect(DELETED_COPY.body).toContain('can never be initialized again');
   });
 
   it('reports a failed first-run read as the failure it is, not as a missing board', () => {

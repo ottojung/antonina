@@ -221,7 +221,7 @@ describe('browser board session', () => {
     const access = await other.enableEditing(serializeBoardCredential(stale));
 
     expect(access.canEdit).toBe(true);
-    await expect(other.api.createIssue('Refused')).rejects.toThrow('failed (403)');
+    await expect(other.api.createIssue('Refused')).rejects.toThrow('copy a fresh credential');
     expect(other.api.hasWriteAccess()).toBe(false);
     expect(other.api.accessState().storageRejected).toBe(true);
     expect((server.signed as { operations: unknown[] }).operations.length).toBe(1);

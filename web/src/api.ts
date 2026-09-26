@@ -79,7 +79,16 @@ export class BrowserBoardSession {
     }
   }
 
-  /** Adopts a board trust anchor so this browser can read it. */
+  /**
+   * Adopts a board trust anchor so this browser can read it, and returns the
+   * board that call verified.
+   *
+   * The verified `VerifiedBoardState` — the one shape `readState` hands back,
+   * with the queue beside the board — is not reachable from here: `trustBoard`
+   * returns the board alone, and every queue lives behind another verified read
+   * of the whole log. Surfacing it means changing `packages/core`, which this
+   * branch does not touch, so the caller still makes the one read it needs.
+   */
   async trust(anchorText: string): Promise<Board> {
     const anchor = await parseBoardTrustAnchorText(anchorText);
     const board = await this.api.trustBoard(anchor);

@@ -113,6 +113,8 @@ export default function App() {
   async function trustBoard(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setTrusting(true); setError(undefined);
     try {
+      // Trusting verifies the log and returns the board, but not the queue, so
+      // the load is the one read that carries both. See BrowserBoardSession.
       await session.trust(anchorInput);
       setAnchorInput('');
       setLoad(boardLoaded(await session.readState()));
@@ -122,15 +124,35 @@ export default function App() {
   async function initializeBoard() {
     setInitializing(true); setError(undefined); setNotice(undefined);
     try {
+      // Whether this browser won the board is settled by this call alone, so its
+      // failure is the only place a lost race can come from: a board that is
+      // there now was created by someone else, and any other failure is reported
+      // as itself. It returns the board but not the queue, so the read below
+      // still follows; see BrowserBoardSession.
       await session.initialize();
-      setAccess('editable');
-      setLoad(boardLoaded(await session.readState()));
-      setNotice('Board initialized; this browser holds the root signing credential');
     } catch (cause) {
       const { load: resolved, error } = firstRunResolved(await resolveFirstRun(), cause);
       setLoad(resolved);
       if (error) setError(error);
       else setNotice(FIRST_RUN_COPY.raced);
+      setInitializing(false);
+      return;
+    }
+    setAccess('editable');
+    // The board is this browser's now, so a failure of the read that follows is
+    // a real failure and never the race above: the reason is shown, and the
+    // board is not claimed to be readable until it has been read.
+    try {
+      const state = await session.readState();
+      // A read that found no board has not loaded one, so it is a failure and
+      // not a success with nothing behind it.
+      if (state === null) throw new Error(FIRST_RUN_COPY.readFailed);
+      setLoad(boardLoaded(state));
+      setNotice(FIRST_RUN_COPY.initialized);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : FIRST_RUN_COPY.readFailed;
+      setError(message);
+      setLoad(boardLoadFailed(load, message));
     } finally { setInitializing(false); }
   }
   async function resolveFirstRun(): Promise<BoardLoad> {

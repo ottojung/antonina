@@ -22,6 +22,8 @@ export const FIRST_RUN_COPY = {
   action: 'Initialize board',
   recheck: 'Check again',
   raced: 'Another browser initialized the board first; this browser is read-only.',
+  initialized: 'Board initialized; this browser holds the root signing credential',
+  readFailed: 'The board was created but could not be read back',
 } as const;
 
 export const TRUST_COPY = {

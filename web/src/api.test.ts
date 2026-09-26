@@ -82,6 +82,43 @@ async function initializedBoard(storage: BoardKeyStorage = memoryStorage()) {
 }
 
 describe('browser board session', () => {
+  it('verifies the stored log once per trust and once per initialize', async () => {
+    // The first-run paths are the reason this count matters: each of these two
+    // calls already reads and verifies the whole operation log, and neither
+    // returns the queue that `readState` pairs with the board, so the app makes
+    // one more read for the queue. What must never happen is a second
+    // verification inside either of these calls.
+    const server = fakeSkrynia();
+    const storage = memoryStorage();
+    let gets = 0;
+    const counting = () => new BrowserBoardSession(storage, {
+      fetch: async (input, init) => {
+        if ((init?.method ?? 'GET') === 'GET') gets += 1;
+        return server.fetch(String(input), init);
+      },
+      now: () => new Date(STAMP),
+    });
+    const owner = counting();
+    const initialized = await owner.initialize();
+    // The existence probe and the create's own compare-and-set read; both belong
+    // to the one create, and neither is repeated inside our call.
+    expect(gets).toBe(2);
+    expect(initialized.board.issues).toEqual([]);
+
+    const reader = counting();
+    const board = await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
+    // One read: trusting a known anchor is a single verified pass over the log.
+    expect(gets).toBe(3);
+    expect(board.issues).toEqual([]);
+
+    // One more read, and only one, is what it costs to learn the queue those two
+    // calls did not return.
+    await reader.readState();
+    expect(gets).toBe(4);
+    await reader.readState();
+    expect(gets).toBe(5);
+  });
+
   it('reports a missing board on a plain page load without creating it', async () => {
     const server = fakeSkrynia();
     const methods: Array<string | undefined> = [];

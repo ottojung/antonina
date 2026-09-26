@@ -168,8 +168,8 @@ describe('priority queue moves', () => {
     }
   });
 
-  it('names the issue a move-to control places, so the slot is read from the options', () => {
-    expect(queueMoveToLabel(1)).toBe('Move to a chosen position in the priority queue: #1');
+  it('names the issue and the slot range a move-to control places, so the numbers can be read aloud', () => {
+    expect(queueMoveToLabel(1, 4)).toBe('Move to a chosen position in the priority queue: #1 (positions run from 1 to 4)');
   });
 });
 

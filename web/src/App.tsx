@@ -310,9 +310,15 @@ function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSel
     {position > 0 && <span className="queue-position" aria-label={priorityLabel(position)}>{position}</span>}
     {queued && <span className="queue-controls">
       {(['earlier', 'later'] as QueueDirection[]).map((direction) => <button key={direction} aria-label={`${QUEUE_MOVE_LABELS[direction]} (#${issue.number})`} disabled={!canMoveInQueue(order, issue.number, direction)} onClick={(event) => { void onReorder(issueMoveRequested(event, order, issue.number, direction)); }}>{direction === 'earlier' ? '▲' : '▼'}</button>)}
-      <select aria-label={queueMoveToLabel(issue.number)} value={position} onChange={(event) => { void onReorder(issueMovedToPosition(event, order, issue.number, Number(event.target.value))); }}>
+      {/* The move-to control belongs to the selected row alone. Offering every
+          slot on every row would render one option per slot per row, so a
+          200-issue board would mount 40,000 option elements. The row is
+          keyboard-reachable and the control sits after it in the tab order, so
+          selecting the row is the only extra step; the step buttons above stay
+          on every row so nothing has to be selected just to nudge an issue. */}
+      {selected && <select aria-label={queueMoveToLabel(issue.number, order.length)} value={position} onChange={(event) => { void onReorder(issueMovedToPosition(event, order, issue.number, Number(event.target.value))); }}>
         {queueSlots(order).map((slot) => <option key={slot} value={slot}>{slot}</option>)}
-      </select>
+      </select>}
     </span>}
   </div>;
 }

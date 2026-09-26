@@ -149,28 +149,58 @@ describe('issue queue wiring', () => {
   });
 
   it('lets a keyboard user place an issue at a chosen position in one commit', () => {
-    const controls = moveToControls();
-    expect(controls.map((node) => node.props['aria-label'])).toEqual([
-      `${QUEUE_MOVE_TO_LABEL}: #3`,
-      `${QUEUE_MOVE_TO_LABEL}: #1`,
-      `${QUEUE_MOVE_TO_LABEL}: #2`,
-    ]);
+    // The move-to control is rendered on the selected row alone, so the
+    // keyboard path is: reach the row's select button, then Tab to the control.
+    const controls = moveToControls({ selectedNumber: 3 });
+    expect(controls).toHaveLength(1);
+    expect(controls[0].props['aria-label']).toBe(`${QUEUE_MOVE_TO_LABEL}: #3 (positions run from 1 to 3)`);
     // The control is a real select: every slot is offered, and the row's own
     // position is what it currently shows.
-    expect(controls.map((node) => node.props.value)).toEqual([1, 2, 3]);
+    expect(controls.map((node) => node.props.value)).toEqual([1]);
     expect(elements(controls[0].props.children as ReactNode).map((option) => option.props.value)).toEqual([1, 2, 3]);
     expect(issueMovedToPosition({ preventDefault: () => {} }, sharedOrder, 2, 1)).toEqual([2, 3, 1]);
     // The slot an issue already holds is the same no-op a boundary step is.
     expect(issueMovedToPosition({ preventDefault: () => {} }, sharedOrder, 2, 3)).toBeNull();
   });
 
+  it('offers no move-to control on a queued row until that row is selected', () => {
+    expect(moveToControls()).toHaveLength(0);
+    expect(moveToControls({ selectedNumber: 1 }).map((node) => node.props['aria-label']))
+      .toEqual([`${QUEUE_MOVE_TO_LABEL}: #1 (positions run from 1 to 3)`]);
+    // The selected row is reachable by keyboard alone: its own control is a
+    // real button, and pressing it is what makes the move-to control appear.
+    const selected: number[] = [];
+    const selectButtons = rendered({ selectedNumber: 1, onSelect: (number: number) => { selected.push(number); } })
+      .filter((node) => node.type === 'button' && node.props.className === 'issue-select');
+    expect(selectButtons).toHaveLength(3);
+    // Row order is 3, 1, 2, so the second row button is issue 1.
+    (selectButtons[1].props.onClick as () => void)();
+    expect(selected).toEqual([1]);
+  });
+
   it('sends the chosen position through the rendered control as a whole queue', async () => {
     const sent: Array<number[] | null> = [];
-    const control = moveToControls({ onReorder: async (target: QueueTarget) => { sent.push(target); return null; } }).at(-1)!;
+    const control = moveToControls({ selectedNumber: 2, onReorder: async (target: QueueTarget) => { sent.push(target); return null; } })[0];
     expect(typeof control.props.onChange).toBe('function');
     (control.props.onChange as (event: { preventDefault(): void; target: { value: string } }) => void)({ preventDefault: () => {}, target: { value: '1' } });
     await Promise.resolve();
     expect(sent).toEqual([[2, 3, 1]]);
+    // A whole-list permutation: every open issue exactly once, the same shape a
+    // step or a drop commits.
+    expect(sent[0]).toHaveLength(3);
+    expect([...sent[0]!].sort()).toEqual([...sharedOrder].sort());
+  });
+
+  it('steps an unselected row without the row being selected first', async () => {
+    const sent: Array<number[] | null> = [];
+    const buttons = queueButtons({ onReorder: async (target: QueueTarget) => { sent.push(target); return null; } });
+    // Row order is 3, 1, 2 with earlier/later per row, so the fourth button is
+    // issue 1's "later" — a row nobody selected.
+    const later = buttons[3];
+    (later.props.onClick as (event: { preventDefault(): void }) => void)({ preventDefault: () => {} });
+    await Promise.resolve();
+    expect(moveToControls()).toHaveLength(0);
+    expect(sent).toEqual([[3, 2, 1]]);
   });
 
   it('disables the move that has nowhere to go instead of sending a rejected queue', () => {
@@ -188,7 +218,9 @@ describe('issue queue wiring', () => {
     expect(readOnly.every((row) => row.props.onDragOver === undefined)).toBe(true);
     expect(readOnly.every((row) => row.props.onDrop === undefined)).toBe(true);
     expect(queueButtons({ hasWriteAccess: false })).toHaveLength(0);
-    expect(moveToControls({ hasWriteAccess: false })).toHaveLength(0);
+    // Not even the selected row gets a move-to control, so a visitor cannot
+    // reach the write path by selecting their way through the list.
+    expect(moveToControls({ hasWriteAccess: false, selectedNumber: 3 })).toHaveLength(0);
   });
 
   it('gives a closed issue no priority position and offers it no drop, because the queue has no closed entries', () => {
@@ -206,7 +238,11 @@ describe('issue queue wiring', () => {
     expect(closed.props.onDragOver).toBeUndefined();
     expect(closed.props.onDrop).toBeUndefined();
     expect(mixed.slice(0, 3).every((row) => row.props.onDragOver === allowIssueDrop)).toBe(true);
-    expect(moveToControls({ issues: all, queue: [2, 1, 3] })).toHaveLength(3);
+    // A closed issue is not in the shared order, so it is never the selected
+    // row that carries the move-to control.
+    expect(moveToControls({ issues: all, queue: [2, 1, 3] })).toHaveLength(0);
+    expect(moveToControls({ issues: all, queue: [2, 1, 3], selectedNumber: 4 })).toHaveLength(0);
+    expect(moveToControls({ issues: all, queue: [2, 1, 3], selectedNumber: 1 })).toHaveLength(1);
   });
 
   it('renders the empty state the copy describes, with no rows to reorder', () => {

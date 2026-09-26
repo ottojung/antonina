@@ -66,7 +66,7 @@ export const ISSUE_FORM_SUBMIT_HINT = 'Ctrl+Enter creates the issue from the des
 
 export const WRITE_ACCESS_SUMMARY = 'Write access allows issue, description, dependency, status, and priority order changes.';
 
-export const QUEUE_HINT = 'Issues are listed in the board’s shared priority order.';
+export const QUEUE_HINT = 'Issues are listed in the board’s shared priority order. Select an issue to place it at any position in one commit.';
 
 export const QUEUE_MOVE_LABELS: Record<QueueDirection, string> = {
   earlier: 'Move one place earlier in the priority queue',
@@ -235,9 +235,14 @@ export function moveQueueTo(order: number[], number: number, to: number): number
   return moveQueueIssue(order, number, to - 1);
 }
 
-/** The accessible name of a row's move-to control; its options are the slots themselves. */
-export function queueMoveToLabel(number: number): string {
-  return `${QUEUE_MOVE_TO_LABEL}: #${number}`;
+/**
+ * The accessible name of the selected row's move-to control: which issue it
+ * places, and that the option numbers are the queue's one-based positions.
+ * The control is offered on the selected row alone — a select per row would be
+ * one option per slot per row — so its name has to carry the whole instruction.
+ */
+export function queueMoveToLabel(number: number, slots: number): string {
+  return `${QUEUE_MOVE_TO_LABEL}: #${number} (positions run from 1 to ${slots})`;
 }
 
 /** The one-based position an issue holds in the shared queue, or 0 when unqueued. */

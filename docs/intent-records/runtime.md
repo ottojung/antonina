@@ -1,11 +1,3 @@
-$id-4729183650148372
-title: Antonina owns the managed-agent runtime
-date: 2026/09/25
-source: issue-3
-kind: requirement
-
-Antonina provides the standalone managed-agent runtime, including durable local session state, process lifecycle control, logs, and the `antonina` command-line interface.
-
 $id-9146205382714063
 title: Antonina production runtime is TypeScript on Node.js
 date: 2026/09/25
@@ -23,7 +15,6 @@ source: issue-3
 kind: requirement
 
 The public command is `antonina`. Alternate historical command names or compatibility launchers are not part of the product contract.
-
 
 $id-5081437296412058
 title: Managed-agent metadata has one authoritative schema

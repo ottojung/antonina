@@ -31,8 +31,6 @@ export const DELETED_COPY = {
   body: 'The board was deleted on purpose, and its key can never be initialized again. Start from a board that still exists, or ask the people who shared this one what to use instead.',
 } as const;
 
-export const ISSUE_FORM_HINT = 'The description holds the task context; the conversation holds updates and questions.';
-
 export type AccessCallout = { title: string; body: string; action: string };
 
 export type ReadOnlyAccess = 'read-only' | 'rejected';
@@ -56,6 +54,10 @@ export const REJECTED_CREDENTIAL_COPY = {
   body: 'The board credential stored in this browser was rejected, so the board is read-only. Paste a fresh credential that this board still accepts.',
   action: 'Paste a fresh credential',
 } as const;
+
+export const ISSUE_FORM_HINT = 'The description holds the task context; the conversation holds updates and questions.';
+
+export const ISSUE_FORM_SUBMIT_HINT = 'Ctrl+Enter creates the issue from the description.';
 
 /** A stored credential the board refused is its own state, not a browser holding none. */
 export function boardAccess(hasWriteAccess: boolean, credentialRejected: boolean): BoardAccess {

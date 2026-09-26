@@ -1,15 +1,4 @@
-import {
-  closeSync,
-  existsSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import * as nodeFs from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -19,9 +8,47 @@ import { persistedAgentId, procStartTicks } from './process.js';
 const LOCK_RETRY_MS = 25;
 const LOCK_ATTEMPTS = 400;
 
+export interface StoreFs {
+  closeSync: typeof nodeFs.closeSync;
+  fsyncSync: typeof nodeFs.fsyncSync;
+  mkdirSync: typeof nodeFs.mkdirSync;
+  openSync: typeof nodeFs.openSync;
+  readFileSync: typeof nodeFs.readFileSync;
+  renameSync: typeof nodeFs.renameSync;
+  rmSync: typeof nodeFs.rmSync;
+  unlinkSync: typeof nodeFs.unlinkSync;
+  writeFileSync: typeof nodeFs.writeFileSync;
+}
+
+const DEFAULT_FS: StoreFs = {
+  closeSync: nodeFs.closeSync,
+  fsyncSync: nodeFs.fsyncSync,
+  mkdirSync: nodeFs.mkdirSync,
+  openSync: nodeFs.openSync,
+  readFileSync: nodeFs.readFileSync,
+  renameSync: nodeFs.renameSync,
+  rmSync: nodeFs.rmSync,
+  unlinkSync: nodeFs.unlinkSync,
+  writeFileSync: nodeFs.writeFileSync,
+};
+
 export interface StatePathsOptions {
   env?: Record<string, string | undefined>;
   home?: string;
+  fs?: StoreFs;
+}
+
+export class AgentStateMissingError extends Error {}
+export class MetadataReadError extends Error {}
+export class MetadataLockError extends Error {}
+export class MetadataWriteError extends Error {}
+
+function filesystem(options: StatePathsOptions): StoreFs {
+  return options.fs ?? DEFAULT_FS;
+}
+
+function hasCode(error: unknown, code: string): boolean {
+  return error instanceof Error && (error as NodeJS.ErrnoException).code === code;
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -52,49 +79,83 @@ export function logPath(agentId: string, options: StatePathsOptions = {}): strin
 }
 
 export function readMeta(agentId: string, options: StatePathsOptions = {}): AgentMetadata | null {
-  if (persistedAgentId(agentId) !== agentId) return null;
-  try {
-    const value: unknown = JSON.parse(readFileSync(metaPath(agentId, options), 'utf8'));
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-    const meta = value as AgentMetadata;
-    return persistedAgentId(meta.id) === agentId ? meta : null;
-  } catch {
-    return null;
+  if (persistedAgentId(agentId) !== agentId) {
+    throw new MetadataReadError('managed-agent id is malformed');
   }
+  const fs = filesystem(options);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(metaPath(agentId, options), 'utf8') as string;
+  } catch (error) {
+    if (hasCode(error, 'ENOENT')) return null;
+    throw new MetadataReadError(`failed to read metadata for agent ${agentId}`, { cause: error });
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch (error) {
+    throw new MetadataReadError(`managed-agent metadata for ${agentId} is malformed JSON`, { cause: error });
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new MetadataReadError(`managed-agent metadata for ${agentId} is malformed`);
+  }
+  const meta = value as AgentMetadata;
+  if (persistedAgentId(meta.id) !== agentId) {
+    throw new MetadataReadError(`managed-agent metadata id for ${agentId} is malformed or mismatched`);
+  }
+  return meta;
 }
 
-function syncDirectory(path: string): void {
-  const fd = openSync(path, 'r');
+function syncDirectory(path: string, fs: StoreFs): void {
+  let fd: number;
   try {
-    fsyncSync(fd);
+    fd = fs.openSync(path, 'r');
+  } catch (error) {
+    throw new MetadataWriteError(`failed to open metadata directory for sync: ${path}`, { cause: error });
+  }
+  try {
+    fs.fsyncSync(fd);
+  } catch (error) {
+    throw new MetadataWriteError(`failed to sync metadata directory: ${path}`, { cause: error });
   } finally {
-    closeSync(fd);
+    try {
+      fs.closeSync(fd);
+    } catch (error) {
+      throw new MetadataWriteError(`failed to close metadata directory: ${path}`, { cause: error });
+    }
   }
 }
 
 export function writeMeta(agentId: string, meta: AgentMetadata, options: StatePathsOptions = {}): void {
   if (persistedAgentId(agentId) !== agentId || persistedAgentId(meta.id) !== agentId) {
-    throw new Error('managed-agent metadata id is malformed or mismatched');
+    throw new MetadataWriteError('managed-agent metadata id is malformed or mismatched');
   }
+  const fs = filesystem(options);
   const destination = metaPath(agentId, options);
   const directory = dirname(destination);
-  mkdirSync(directory, { recursive: true });
   const temporary = join(directory, `.meta-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
   let fd: number | null = null;
   try {
-    fd = openSync(temporary, 'wx', 0o600);
-    writeFileSync(fd, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
-    fsyncSync(fd);
-    closeSync(fd);
+    // The directory must already exist. Never recreate it here: a missing
+    // directory means deletion won the race and durable authority is gone.
+    fd = fs.openSync(temporary, 'wx', 0o600);
+    fs.writeFileSync(fd, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
     fd = null;
-    renameSync(temporary, destination);
-    syncDirectory(directory);
+    fs.renameSync(temporary, destination);
+    syncDirectory(directory, fs);
   } catch (error) {
     if (fd !== null) {
-      try { closeSync(fd); } catch {}
+      try { fs.closeSync(fd); } catch {}
     }
-    try { unlinkSync(temporary); } catch {}
-    throw error;
+    try { fs.unlinkSync(temporary); } catch {}
+    if (error instanceof MetadataWriteError) throw error;
+    if (hasCode(error, 'ENOENT')) {
+      throw new AgentStateMissingError(`agent state disappeared while writing metadata for ${agentId}`, { cause: error });
+    }
+    throw new MetadataWriteError(`failed to persist metadata for agent ${agentId}`, { cause: error });
   }
 }
 
@@ -103,17 +164,42 @@ interface LockOwner {
   startTicks: number | null;
 }
 
-function parseLockOwner(path: string): LockOwner | null {
+type LockOwnerRecord =
+  | { state: 'missing' }
+  | { state: 'malformed' }
+  | { state: 'valid'; owner: LockOwner };
+
+function parseLockOwner(path: string, fs: StoreFs): LockOwnerRecord {
+  let raw: string;
   try {
-    const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-    const record = value as Record<string, unknown>;
-    if (typeof record.pid !== 'number' || !Number.isSafeInteger(record.pid) || record.pid <= 0) return null;
-    if (record.startTicks !== null && (typeof record.startTicks !== 'number' || !Number.isSafeInteger(record.startTicks) || record.startTicks < 0)) return null;
-    return { pid: record.pid, startTicks: record.startTicks as number | null };
-  } catch {
-    return null;
+    raw = fs.readFileSync(path, 'utf8') as string;
+  } catch (error) {
+    if (hasCode(error, 'ENOENT')) return { state: 'missing' };
+    throw new MetadataLockError(`failed to read metadata lock: ${path}`, { cause: error });
   }
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { state: 'malformed' };
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return { state: 'malformed' };
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.pid !== 'number' || !Number.isSafeInteger(record.pid) || record.pid <= 0) {
+    return { state: 'malformed' };
+  }
+  if (
+    record.startTicks !== null
+    && (typeof record.startTicks !== 'number' || !Number.isSafeInteger(record.startTicks) || record.startTicks < 0)
+  ) {
+    return { state: 'malformed' };
+  }
+  return {
+    state: 'valid',
+    owner: { pid: record.pid, startTicks: record.startTicks as number | null },
+  };
 }
 
 function lockOwnerAlive(owner: LockOwner): boolean {
@@ -126,29 +212,62 @@ function lockOwnerAlive(owner: LockOwner): boolean {
   return procStartTicks(owner.pid) === owner.startTicks;
 }
 
-async function acquireLock(path: string): Promise<number> {
-  mkdirSync(dirname(path), { recursive: true });
+async function acquireLock(path: string, fs: StoreFs): Promise<number> {
   for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
+    let fd: number;
     try {
-      const fd = openSync(path, 'wx', 0o600);
-      const owner: LockOwner = { pid: process.pid, startTicks: procStartTicks(process.pid) };
-      writeFileSync(fd, JSON.stringify(owner), 'utf8');
-      fsyncSync(fd);
+      fd = fs.openSync(path, 'wx', 0o600);
+    } catch (error) {
+      if (hasCode(error, 'ENOENT')) {
+        throw new AgentStateMissingError(`agent state directory no longer exists: ${dirname(path)}`, { cause: error });
+      }
+      if (!hasCode(error, 'EEXIST')) {
+        throw new MetadataLockError(`failed to acquire metadata lock: ${path}`, { cause: error });
+      }
+
+      const observed = parseLockOwner(path, fs);
+      if (observed.state === 'missing') continue;
+      if (observed.state === 'valid' && !lockOwnerAlive(observed.owner)) {
+        try {
+          fs.unlinkSync(path);
+          continue;
+        } catch (unlinkError) {
+          if (hasCode(unlinkError, 'ENOENT')) continue;
+          throw new MetadataLockError(`failed to reclaim stale metadata lock: ${path}`, { cause: unlinkError });
+        }
+      }
+      // A malformed lock can be the tiny create-before-write window of a live
+      // owner. Never steal it. If it stays malformed, time out explicitly.
+      await sleep(LOCK_RETRY_MS);
+      continue;
+    }
+
+    const owner: LockOwner = { pid: process.pid, startTicks: procStartTicks(process.pid) };
+    try {
+      fs.writeFileSync(fd, JSON.stringify(owner), 'utf8');
+      fs.fsyncSync(fd);
       return fd;
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'EEXIST') throw error;
-      const owner = parseLockOwner(path);
-      if (owner === null || !lockOwnerAlive(owner)) {
-        try {
-          unlinkSync(path);
-          continue;
-        } catch {}
-      }
-      await sleep(LOCK_RETRY_MS);
+      try { fs.closeSync(fd); } catch {}
+      try { fs.unlinkSync(path); } catch {}
+      throw new MetadataLockError(`failed to initialize metadata lock: ${path}`, { cause: error });
     }
   }
-  throw new Error(`timed out acquiring Antonina metadata lock: ${path}`);
+  throw new MetadataLockError(`timed out acquiring Antonina metadata lock: ${path}`);
+}
+
+function releaseLock(path: string, fd: number, fs: StoreFs): void {
+  try {
+    fs.closeSync(fd);
+  } catch (error) {
+    throw new MetadataLockError(`failed to close metadata lock: ${path}`, { cause: error });
+  }
+  try {
+    fs.unlinkSync(path);
+  } catch (error) {
+    if (hasCode(error, 'ENOENT')) return;
+    throw new MetadataLockError(`failed to release metadata lock: ${path}`, { cause: error });
+  }
 }
 
 export async function withAgentLock<T>(
@@ -156,15 +275,13 @@ export async function withAgentLock<T>(
   fn: () => Promise<T> | T,
   options: StatePathsOptions = {},
 ): Promise<T> {
-  const directory = agentDir(agentId, options);
-  if (!existsSync(directory)) throw new Error(`unknown agent: ${agentId}`);
-  const path = join(directory, '.lock');
-  const fd = await acquireLock(path);
+  const fs = filesystem(options);
+  const path = join(agentDir(agentId, options), '.lock');
+  const fd = await acquireLock(path, fs);
   try {
     return await fn();
   } finally {
-    try { closeSync(fd); } catch {}
-    try { unlinkSync(path); } catch {}
+    releaseLock(path, fd, fs);
   }
 }
 
@@ -173,29 +290,43 @@ export async function updateMeta(
   mutate: (meta: AgentMetadata) => void,
   options: StatePathsOptions = {},
 ): Promise<AgentMetadata | null> {
-  return withAgentLock(agentId, () => {
-    const meta = readMeta(agentId, options);
-    if (meta === null) return null;
-    mutate(meta);
-    writeMeta(agentId, meta, options);
-    return meta;
-  }, options);
-}
-
-export function createAgentDirectory(agentId: string, options: StatePathsOptions = {}): boolean {
-  mkdirSync(agentsDir(options), { recursive: true });
-  const directory = agentDir(agentId, options);
   try {
-    mkdirSync(directory);
-    syncDirectory(dirname(directory));
-    return true;
+    return await withAgentLock(agentId, () => {
+      const meta = readMeta(agentId, options);
+      if (meta === null) return null;
+      mutate(meta);
+      writeMeta(agentId, meta, options);
+      return meta;
+    }, options);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    // Intentional deletion is the one non-error no-op: a late runner may lose
+    // the directory race, but it must never recreate deleted authority.
+    if (error instanceof AgentStateMissingError) return null;
     throw error;
   }
 }
 
+export function createAgentDirectory(agentId: string, options: StatePathsOptions = {}): boolean {
+  const fs = filesystem(options);
+  try {
+    fs.mkdirSync(agentsDir(options), { recursive: true });
+    fs.mkdirSync(agentDir(agentId, options));
+    syncDirectory(agentsDir(options), fs);
+    return true;
+  } catch (error) {
+    if (hasCode(error, 'EEXIST')) return false;
+    if (error instanceof MetadataWriteError) throw error;
+    throw new MetadataWriteError(`failed to create state directory for agent ${agentId}`, { cause: error });
+  }
+}
+
 export function removeAgentDirectory(agentId: string, options: StatePathsOptions = {}): void {
-  rmSync(agentDir(agentId, options), { recursive: true, force: true });
-  syncDirectory(agentsDir(options));
+  const fs = filesystem(options);
+  try {
+    fs.rmSync(agentDir(agentId, options), { recursive: true, force: true });
+    syncDirectory(agentsDir(options), fs);
+  } catch (error) {
+    if (error instanceof MetadataWriteError) throw error;
+    throw new MetadataWriteError(`failed to remove state directory for agent ${agentId}`, { cause: error });
+  }
 }

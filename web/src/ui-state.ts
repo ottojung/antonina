@@ -147,20 +147,17 @@ export function firstRunUnresolved(cause: unknown): BoardLoad {
 /**
  * The open issues' numbers in the board's shared priority order.
  *
- * The queue is the only ordering concept in this app. It is walked entry by
- * entry, and a committed queue is exactly the open issues once each, so the
- * entries this cannot use — a number with no open issue behind it, or the same
- * number twice — are dropped rather than given a position. An open issue the
- * queue has not caught up with yet (a board read mid-mutation, an entry missing
- * from a hand-built queue) follows the queue in board order, so the result is
- * always a complete permutation of the open issues and never an empty list.
+ * The queue is the only ordering concept in this app, and a queue the board
+ * could commit is every open issue exactly once — `exactOpenIssueQueue` in
+ * `packages/core/src/operations.ts` rejects anything else, and
+ * `docs/intent-records/board.md` records it as a board invariant. So this is
+ * one walk of the committed queue with the closed issues filtered out: the
+ * result is the board's order, never one the browser invented. There is no
+ * other order to fall back to, so nothing is sorted or appended here.
  */
 export function openQueueOrder(issues: BoardIssue[], queue: number[]): number[] {
   const open = new Set(issues.filter((issue) => issue.state === 'open').map((issue) => issue.number));
-  const order: number[] = [];
-  for (const number of queue) if (open.has(number) && !order.includes(number)) order.push(number);
-  for (const issue of issues) if (issue.state === 'open' && !order.includes(issue.number)) order.push(issue.number);
-  return order;
+  return queue.filter((number) => open.has(number));
 }
 
 /**

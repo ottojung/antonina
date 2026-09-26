@@ -59,19 +59,18 @@ describe('issue UI state', () => {
     expect(visibleIssues(issues, [1, 2, 3], 'open').map((entry) => entry.number)).toEqual([1, 2, 3]);
   });
 
-  it('keeps every open issue exactly once whatever the queue contains', () => {
+  it('takes the open order straight from the shared queue, for every queue the board could commit', () => {
     const issues = [issue(1, 'open'), issue(2, 'open'), issue(3, 'open')];
-    for (const queue of [[], [1], [3, 1], [1, 1, 2, 2, 3], [2, 2], [9, 1], [1, 2, 3, 3, 4]]) {
-      const order = openQueueOrder(issues, queue);
-      expect([...order].sort((left, right) => left - right)).toEqual([1, 2, 3]);
+    for (const queue of [[1, 2, 3], [3, 2, 1], [2, 1, 3], [3, 1, 2]]) {
+      expect(openQueueOrder(issues, queue)).toEqual(queue);
     }
   });
 
-  it('drops queue entries with no open issue and appends ones the queue missed', () => {
-    const issues = [issue(1, 'open'), issue(2, 'open'), issue(3, 'closed')];
-    expect(openQueueOrder(issues, [3, 2, 1])).toEqual([2, 1]);
-    expect(openQueueOrder(issues, [2])).toEqual([2, 1]);
-    expect(openQueueOrder(issues, [])).toEqual([1, 2]);
+  it('leaves a closed issue out of the order, because the queue holds open issues only', () => {
+    const issues = [issue(1, 'open'), issue(2, 'open'), issue(3, 'closed'), issue(4, 'closed')];
+    expect(openQueueOrder(issues, [2, 1])).toEqual([2, 1]);
+    expect(queuePosition([2, 1], 3)).toBe(0);
+    expect(priorityLabel(queuePosition([2, 1], 3))).toBe('Not in the queue');
   });
 
   it('lists closed issues outside the queue, oldest first, under every filter', () => {

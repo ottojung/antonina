@@ -732,14 +732,53 @@ test('fixture guard: the backend is pinned to an absolute exec-able fixture path
   assertFixtureInvoked(handle);
 });
 
-test('fixture guard: a non-exec-able fixture location is a named failure, never a substitution', () => {
+test('fixture guard: a non-exec-able fixture location is a named failure, never a substitution', (t) => {
+  // Candidate parents are directories this suite owns, not host paths such as
+  // `/tmp` or `/workspace`: whether the host permits a test `mkdir /workspace` is
+  // host-dependent, and an uncreatable parent reports through the *create*
+  // branch ("cannot create fixture parent") rather than the probe reason pinned
+  // here. See the matching guard in packages/agent-runtime/test/backend.test.mjs.
+  const base = mkdtempSync(join(tmpdir(), 'antonina-fixture-guard-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const parents = [join(base, 'noexec-a'), join(base, 'noexec-b')];
+
   assert.throws(
-    () => selectExecRoot('antonina-cli-e2e-', ['/tmp', '/workspace'], () => ({ ok: false, reason: 'EACCES' })),
+    () => selectExecRoot('antonina-cli-e2e-', parents, () => ({ ok: false, reason: 'EACCES' })),
     (error) => {
       assert.equal(error.code, 'ANTONINA_FIXTURE_NOEXEC');
       assert.match(error.message, /no exec-capable fixture directory/);
-      assert.match(error.message, /\/tmp: EACCES/);
-      assert.match(error.message, /\/workspace: EACCES/);
+      for (const parent of parents) {
+        assert.ok(
+          error.message.includes(`${parent}: EACCES`),
+          `expected a per-parent EACCES reason for ${parent}, got: ${error.message}`,
+        );
+      }
+      assert.doesNotMatch(error.message, /cannot create fixture parent/);
+      return true;
+    },
+  );
+});
+
+test('fixture guard: an uncreatable fixture parent is a named failure, never a substitution', (t) => {
+  // A parent beneath a regular file fails ENOTDIR on every host and for every
+  // user, so this pins the create branch without depending on host permissions.
+  const base = mkdtempSync(join(tmpdir(), 'antonina-fixture-guard-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const blocker = join(base, 'blocker');
+  writeFileSync(blocker, 'not a directory\n');
+  const parents = [join(blocker, 'nested'), join(blocker, 'other')];
+
+  assert.throws(
+    () => selectExecRoot('antonina-cli-e2e-', parents, () => ({ ok: true, reason: 'exec ok' })),
+    (error) => {
+      assert.equal(error.code, 'ANTONINA_FIXTURE_NOEXEC');
+      assert.match(error.message, /no exec-capable fixture directory/);
+      for (const parent of parents) {
+        assert.ok(
+          error.message.includes(`${parent}: cannot create fixture parent`),
+          `expected a per-parent create failure for ${parent}, got: ${error.message}`,
+        );
+      }
       return true;
     },
   );

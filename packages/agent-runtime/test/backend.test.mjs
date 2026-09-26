@@ -260,14 +260,58 @@ test('a non-absolute backend override is refused, so it cannot fall back to PATH
   assert.equal(resolveOpencode({ [OPENCODE_BIN_ENV]: '/opt/opencode/bin/opencode' }), '/opt/opencode/bin/opencode');
 });
 
-test('fixture guard: a non-exec-able fixture location is a named failure, never a substitution', () => {
+test('fixture guard: a non-exec-able fixture location is a named failure, never a substitution', (t) => {
+  // The candidate parents are directories this suite owns and has just created,
+  // never host paths like `/tmp` or `/workspace`. Whether the host lets a test
+  // `mkdir /workspace` is the host's business, not the invariant under test:
+  // an uncreatable parent reports through the *create* branch, which says
+  // "cannot create fixture parent", not the probe reason this case is about.
+  // Pinning host paths here made the guard assert the create-failure wording on
+  // a runner that refuses the mkdir, so it failed there while passing locally.
+  const base = mkdtempSync(join(tmpdir(), 'antonina-fixture-guard-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const parents = [join(base, 'noexec-a'), join(base, 'noexec-b')];
+
   assert.throws(
-    () => selectExecRoot('antonina-backend-', ['/tmp', '/workspace'], () => ({ ok: false, reason: 'EACCES' })),
+    () => selectExecRoot('antonina-backend-', parents, () => ({ ok: false, reason: 'EACCES' })),
     (error) => {
       assert.equal(error.code, 'ANTONINA_FIXTURE_NOEXEC');
       assert.match(error.message, /no exec-capable fixture directory/);
-      assert.match(error.message, /\/tmp: EACCES/);
-      assert.match(error.message, /\/workspace: EACCES/);
+      for (const parent of parents) {
+        assert.ok(
+          error.message.includes(`${parent}: EACCES`),
+          `expected a per-parent EACCES reason for ${parent}, got: ${error.message}`,
+        );
+      }
+      // No substitution: a bare `opencode` lookup must never become the fallback.
+      assert.doesNotMatch(error.message, /cannot create fixture parent/);
+      return true;
+    },
+  );
+});
+
+test('fixture guard: an uncreatable fixture parent is a named failure, never a substitution', (t) => {
+  // The other branch of the same fail-closed guard, pinned with a parent that
+  // cannot be created on any host and for any user: a path underneath a regular
+  // file fails ENOTDIR even as root, where a permission-based fixture would
+  // succeed.
+  const base = mkdtempSync(join(tmpdir(), 'antonina-fixture-guard-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const blocker = join(base, 'blocker');
+  writeFileSync(blocker, 'not a directory\n');
+  const parents = [join(blocker, 'nested'), join(blocker, 'other')];
+
+  assert.throws(
+    () => selectExecRoot('antonina-backend-', parents, () => ({ ok: true, reason: 'exec ok' })),
+    (error) => {
+      assert.equal(error.code, 'ANTONINA_FIXTURE_NOEXEC');
+      assert.match(error.message, /no exec-capable fixture directory/);
+      for (const parent of parents) {
+        assert.ok(
+          error.message.includes(`${parent}: cannot create fixture parent`),
+          `expected a per-parent create failure for ${parent}, got: ${error.message}`,
+        );
+      }
       return true;
     },
   );

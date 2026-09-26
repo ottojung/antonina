@@ -43,6 +43,8 @@ antonina board initialize --trust-anchor > .antonina-trust
 
 `antonina board credential delegate` mints attenuated credentials.
 
+The board's issue queue is durable shared state, not a browser-local sort. The queue is exactly the set of currently open issues, each once: creating an issue appends it, closing or deleting one removes it, and reopening one adds it back. `antonina board queue list` prints that order as `#1 #3 #2`, or as a bare JSON array with `--json`. `antonina board queue reorder 3 1 2` replaces the whole order with a permutation of the open issues; it is rejected, without writing anything, if the list is partial, repeats an issue, or names a closed or unknown issue. Both commands need only the board's trust anchor to read, and reordering additionally needs a credential holding the `queue.reorder` capability, which `antonina board credential delegate queue.reorder` can mint.
+
 A credential's Skrynia storage capability can go stale: setup accepts it, the first real mutation is refused, and that client then stays read-only until it is given a freshly copied credential.
 
 ```sh

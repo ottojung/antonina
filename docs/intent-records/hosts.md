@@ -52,7 +52,9 @@ date: 2026/09/26
 source: @ottojung
 kind: constraint
 
-A path that became protected after the board revision a collector decided from must not be deleted. The moment immediately before a destructive action, the path must be re-verified against a fresh authoritative read, and the action proceeds only if that read still owes nothing to the path. A re-check that cannot be completed, a path that is protected at re-check, a path that is no longer registered, and a read from a different board all stop the action. A re-check authorizes at most one destructive action and is never reusable.
+A destructive action must re-verify the path against a fresh authoritative read immediately before it is taken, and may proceed only if that read still owes nothing to the path. A re-check that cannot be completed, a path that is protected at re-check, a path that is no longer registered, and a read from a different board all stop the action. A re-check authorizes at most one destructive action and is never reusable.
+
+What the re-check guarantees is exactly this: the path owed nothing to any open issue at the last authoritative read. It does not guarantee that a path which became protected after that read will survive, because the interval between the completed read and the destructive action is not covered by any board primitive. The signed board log is append-only and offers no compare-and-delete and no lease, so a collector cannot close that interval; it can only narrow it. An integrating collector must therefore treat a path protected after the re-check read as a real possibility, keep the interval as short as it can make it, and must not claim otherwise. A path that was already protected at the re-check read, by contrast, is never deleted.
 
 $id-7319058461288540
 title: Collection decides only what a path is owed, never whether it is safe

@@ -551,7 +551,6 @@ export { emptyBoard, parseBoard } from './model.js';
 export {
   boardApiCollectionReader,
   collectiblePaths,
-  collectionSnapshot,
   commitCollectionDeletion,
   openCollectionClaim,
   protectionOf,

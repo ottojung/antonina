@@ -9,7 +9,6 @@ import {
 import { OperationLogVerificationError } from '../dist/operations.js';
 import {
   collectiblePaths,
-  collectionSnapshot,
   commitCollectionDeletion,
   openCollectionClaim,
   protectionOf,
@@ -214,7 +213,7 @@ test('every way of failing to read the board leaves every path protected', async
     [failing(new Error('the signed log is malformed')), 'board-read-failed'],
     [async () => null, 'board-state-rejected'],
     [async () => ({ boardId: 'board', state: { head: 42 } }), 'board-state-rejected'],
-    [async () => ({ boardId: '', state: {} }), 'board-state-rejected'],
+    [async () => ({ boardId: '', state: { head: 'head' } }), 'board-state-rejected'],
     [failing(new OperationLogVerificationError('bad head')), 'board-state-rejected'],
   ];
 
@@ -256,11 +255,17 @@ test('a host sees only its own resources, and a host absent from the registry de
 
   const mine = await readCollectionSnapshot(HOST, reader);
   assert.deepEqual(collectiblePaths(mine), []);
-  assert.deepEqual(mine.decisions.map((entry) => entry.path).sort(), [BUILD, WORKTREE]);
-  // Another host's registered path is not in this host's decision, so it can
-  // never be claimed from a snapshot taken on this host.
-  assert.equal(protectionOf(mine, '/srv/other').status, 'protected');
-  assert.equal(protectionOf(mine, '/srv/other').basis, 'not-registered');
+  assert.deepEqual(mine.decisions.map((entry) => entry.path).sort(), ['/srv/other', BUILD, WORKTREE]);
+  // Another host's registered path is a decision this host does not own, so it
+  // can never be claimed from a snapshot taken on this host, and it is reported
+  // as another host's path rather than as an unregistered one.
+  assert.deepEqual(protectionOf(mine, '/srv/other'), {
+    host: OTHER_HOST,
+    path: '/srv/other',
+    status: 'protected',
+    issues: [{ number: open[0].number, state: 'open' }],
+    basis: 'other-host',
+  });
   assert.throws(() => openCollectionClaim(mine, '/srv/other'), /protected/);
 
   await writer.close(open[0].number);
@@ -268,15 +273,54 @@ test('a host sees only its own resources, and a host absent from the registry de
   await writer.close(open[2].number);
   const theirs = await readCollectionSnapshot(OTHER_HOST, reader);
   assert.deepEqual(collectiblePaths(theirs), ['/srv/other']);
-  assert.equal(protectionOf(theirs, WORKTREE).status, 'protected');
+  assert.equal(protectionOf(theirs, '/srv/other').status, 'collectible');
+  // The same path read from the other host's snapshot is this host's
+  // neighbour's, and still not this host's to delete.
+  assert.deepEqual(protectionOf(theirs, WORKTREE), {
+    host: HOST,
+    path: WORKTREE,
+    status: 'protected',
+    issues: [{ number: open[0].number, state: 'closed' }, { number: open[1].number, state: 'closed' }],
+    basis: 'other-host',
+  });
+  assert.throws(() => openCollectionClaim(theirs, WORKTREE), /protected/);
 
+  // A host with nothing of its own still reads the whole board, so it can name
+  // what every other host's paths are, and collects none of them.
   const stranger = await readCollectionSnapshot('lubko://nobody-home', reader);
   assert.equal(stranger.verified, true);
-  assert.deepEqual(stranger.decisions, []);
+  assert.deepEqual(
+    stranger.decisions.map((entry) => entry.path).sort(),
+    ['/srv/other', BUILD, WORKTREE],
+  );
   assert.deepEqual(collectiblePaths(stranger), []);
   assert.equal(protectionOf(stranger, WORKTREE).status, 'protected');
-  assert.equal(protectionOf(stranger, WORKTREE).basis, 'not-registered');
+  assert.equal(protectionOf(stranger, WORKTREE).basis, 'other-host');
   assert.throws(() => openCollectionClaim(stranger, WORKTREE), /protected/);
+});
+
+test('an unverified snapshot is empty of decisions however it was built', () => {
+  // The type of the unverified branch leaves no room for a decision, so this
+  // record is only reachable by ignoring the type or by hand-building one. It
+  // must still decide nothing: no consumer may read a collectible path out of
+  // a snapshot that never verified a board.
+  const smuggled = {
+    verified: false,
+    host: HOST,
+    boardId: null,
+    head: null,
+    decisions: [{ host: HOST, path: WORKTREE, status: 'collectible', issues: [] }],
+    failure: { kind: 'board-read-failed', message: 'gone' },
+  };
+  assert.deepEqual(collectiblePaths(smuggled), []);
+  assert.deepEqual(protectionOf(smuggled, WORKTREE), {
+    host: HOST,
+    path: WORKTREE,
+    status: 'protected',
+    issues: [],
+    basis: 'snapshot-unverified',
+  });
+  assert.throws(() => openCollectionClaim(smuggled, WORKTREE), /protected/);
 });
 
 test('a claim can only be opened for a collectible path on the snapshot host', async () => {
@@ -399,7 +443,7 @@ test('a re-check against a different board withholds', async () => {
   assert.equal(authorized.status, 'protected');
 });
 
-test('one re-check cannot be spent into two deletions', async () => {
+test('one re-check authorizes one deletion, and a copy of it is not that authorization', async () => {
   const { writer, open } = await seeded();
   await writer.close(open[0].number);
   await writer.close(open[1].number);
@@ -407,11 +451,29 @@ test('one re-check cannot be spent into two deletions', async () => {
   const claim = openCollectionClaim(await readCollectionSnapshot(HOST, reader), WORKTREE);
   const authorized = await recheckCollectionClaim(claim, reader);
 
+  // A shallow copy is a different record, and only the record the re-check
+  // issued is a live authorization, so a copy cannot be committed either.
+  assert.throws(() => commitCollectionDeletion({ ...authorized }), /not a live authorization/);
+  assert.throws(
+    () => commitCollectionDeletion({
+      state: 'authorized',
+      outcome: 'collect',
+      reason: 'still-collectible',
+      host: HOST,
+      path: WORKTREE,
+      boardId: authorized.boardId,
+      snapshotHead: authorized.snapshotHead,
+      recheckHead: authorized.recheckHead,
+      status: 'collectible',
+    }),
+    /not a live authorization/,
+  );
+
   assert.equal(commitCollectionDeletion(authorized).outcome, 'collect');
-  assert.throws(() => commitCollectionDeletion(authorized), /already spent/);
+  assert.throws(() => commitCollectionDeletion(authorized), /not a live authorization/);
 });
 
-test('a snapshot names the board and revision it decided from', async () => {
+test('a snapshot names the board and revision it decided from, and cannot be minted by a caller', async () => {
   const { writer, open } = await seeded();
   const reader = readerFor(writer);
   const first = await readCollectionSnapshot(HOST, reader);
@@ -422,9 +484,11 @@ test('a snapshot names the board and revision it decided from', async () => {
   assert.notEqual(first.head, second.head);
   assert.equal(second.head, writer.getRememberedHead());
 
-  const forged = { boardId: 'anything', state: await writer.loadState() };
-  const direct = collectionSnapshot(forged, HOST);
-  assert.equal(direct.boardId, 'anything');
-  assert.equal(direct.head, writer.getRememberedHead());
-  assert.equal(direct.failure, null);
+  // The board identity and the revision come from the read itself, so a
+  // verified snapshot is only ever one of the board the client is actually
+  // talking about: there is no exported constructor that takes a board id.
+  const exported = await import('../dist/collection.js');
+  assert.equal(exported.collectionSnapshot, undefined);
+  const api = await import('../dist/api.js');
+  assert.equal(api.collectionSnapshot, undefined);
 });

@@ -87,6 +87,11 @@ export interface VerifiedCollectionSnapshot {
   boardId: string;
   /** The board revision this decision was made from. */
   head: string;
+  /**
+   * Every resource the verified revision registers, on every host, so a path
+   * another host registered is distinguishable from a path nobody registered.
+   * Only decisions on `host` are this collector's to act on.
+   */
   decisions: ProtectionDecision[];
   failure: null;
 }
@@ -96,8 +101,8 @@ export interface UnverifiedCollectionSnapshot {
   host: string;
   boardId: null;
   head: null;
-  /** Always empty: no decision may be derived from failed board state. */
-  decisions: ProtectionDecision[];
+  /** No decision may be derived from failed board state, so there are none. */
+  decisions: readonly [];
   failure: CollectionFailure;
 }
 
@@ -117,7 +122,11 @@ export interface ProtectionVerdict {
    * Why the answer is what it is: the canonical rule applied to a verified
    * snapshot, or the snapshot declining to answer.
    */
-  basis: 'snapshot-verified' | 'snapshot-unverified' | 'not-registered';
+  basis:
+    | 'snapshot-verified'
+    | 'snapshot-unverified'
+    | 'not-registered'
+    | 'other-host';
 }
 
 function decisionFromView(view: ResourceView): ProtectionDecision {
@@ -130,22 +139,25 @@ function decisionFromView(view: ResourceView): ProtectionDecision {
 }
 
 /**
- * The only constructor of a snapshot that claims anything. It requires a
- * `VerifiedBoardRead`, which the board store produces only after replaying and
- * verifying the signed log, so no snapshot can be built from state that was
- * merely fetched. The board is put back through the canonical parser before
- * any decision is derived from it, so a resource registered against an issue
- * that does not exist, or against no issue at all, cannot be decided here: it
- * is rejected as unverified state instead of read as a collectible path.
+ * The only constructor of a snapshot that claims anything, and it is
+ * module-private: `readCollectionSnapshot` is the sole public way to obtain a
+ * verified snapshot, so a caller cannot mint one and choose its `boardId` or
+ * revision. It requires a `VerifiedBoardRead`, which the board store produces
+ * only after replaying and verifying the signed log, so no snapshot can be built
+ * from state that was merely fetched. The board is put back through the
+ * canonical parser before any decision is derived from it, so a resource
+ * registered against an issue that does not exist, or against no issue at all,
+ * cannot be decided here: it is rejected as unverified state instead of read as
+ * a collectible path.
  */
-export function collectionSnapshot(read: VerifiedBoardRead, host: string): VerifiedCollectionSnapshot {
+function collectionSnapshot(read: VerifiedBoardRead, host: string): VerifiedCollectionSnapshot {
   const scoped = canonicalHost(host);
   return {
     verified: true,
     host: scoped,
     boardId: read.boardId,
     head: read.state.head,
-    decisions: resourceViews(parseBoard(read.state.board), scoped).map(decisionFromView),
+    decisions: resourceViews(parseBoard(read.state.board)).map(decisionFromView),
     failure: null,
   };
 }
@@ -201,9 +213,14 @@ export async function readCollectionSnapshot(
       message: error instanceof Error ? error.message : String(error),
     });
   }
-  if (value === null || typeof value !== 'object' || typeof value.state !== 'object'
-      || typeof value.state?.head !== 'string' || value.state === null
-      || typeof value.boardId !== 'string' || value.boardId.length === 0) {
+  // A reader that is not the board store can return anything at all, so the
+  // shape that carries the board identity and the revision is checked before
+  // the state is handed to the canonical parser.
+  if (value === null
+      || typeof value !== 'object'
+      || typeof value.boardId !== 'string'
+      || value.boardId.length === 0
+      || typeof value.state?.head !== 'string') {
     return unverifiedCollectionSnapshot(scoped, {
       kind: 'board-state-rejected',
       message: 'Board read did not return verified board state',
@@ -221,8 +238,9 @@ export async function readCollectionSnapshot(
 
 /**
  * The answer for one path on this host, always `protected` or `collectible`.
- * A path the snapshot says nothing about is protected: absence of a decision
- * is never an authorization to delete.
+ * A path this host's collector may not act on is protected: a path the snapshot
+ * says nothing about is protected, and so is a path another host registered,
+ * because absence of a decision is never an authorization to delete.
  */
 export function protectionOf(snapshot: CollectionSnapshot, path: string): ProtectionVerdict {
   const target = canonicalPath(path);
@@ -236,6 +254,15 @@ export function protectionOf(snapshot: CollectionSnapshot, path: string): Protec
       status: 'protected',
       issues: [],
       basis: snapshot.verified ? 'not-registered' : 'snapshot-unverified',
+    };
+  }
+  if (decision.host !== snapshot.host) {
+    return {
+      host: decision.host,
+      path: decision.path,
+      status: 'protected',
+      issues: decision.issues,
+      basis: 'other-host',
     };
   }
   return {
@@ -252,8 +279,9 @@ export function protectionOf(snapshot: CollectionSnapshot, path: string): Protec
  * for an unverified snapshot, because an unreadable board decides nothing.
  */
 export function collectiblePaths(snapshot: CollectionSnapshot): string[] {
+  if (!snapshot.verified) return [];
   return snapshot.decisions
-    .filter((decision) => decision.status === 'collectible')
+    .filter((decision) => decision.host === snapshot.host && decision.status === 'collectible')
     .map((decision) => decision.path);
 }
 
@@ -278,7 +306,7 @@ export interface CollectionClaim {
  */
 export function openCollectionClaim(snapshot: CollectionSnapshot, path: string): CollectionClaim {
   const verdict = protectionOf(snapshot, path);
-  if (!snapshot.verified || verdict.host !== snapshot.host || verdict.status !== 'collectible') {
+  if (!snapshot.verified || verdict.status !== 'collectible') {
     throw new Error(
       `Refusing to claim ${verdict.path} for collection: it is ${verdict.status} (${verdict.basis})`,
     );
@@ -307,12 +335,19 @@ export interface CollectionResolution {
   status: ProtectionStatus;
 }
 
+/** Module-private: not exported, so no caller can construct a seal. */
+const authorizationSeal: unique symbol = Symbol('antonina.collection.authorization');
+
 /**
  * The second state: an authorization produced only by a completed re-check
  * against an authoritative read. It is what a caller may hand to the
  * destructive step, and it can be spent exactly once.
+ *
+ * The `[authorizationSeal]` key is module-private, so no caller can construct
+ * one of these: the only way to obtain an authorization is a completed re-check.
  */
 export interface AuthorizedCollection {
+  readonly [authorizationSeal]: true;
   state: 'authorized';
   outcome: 'collect' | 'withheld';
   reason: CollectionResolution['reason'];
@@ -324,7 +359,13 @@ export interface AuthorizedCollection {
   status: ProtectionStatus;
 }
 
-const spentAuthorizations = new WeakSet<AuthorizedCollection>();
+
+/**
+ * The authorizations this process has issued and not yet committed. Membership
+ * is what makes a record a live authorization, so neither a hand-built
+ * look-alike nor a copy of an issued one is accepted.
+ */
+const liveAuthorizations = new WeakSet<AuthorizedCollection>();
 
 /**
  * The moment immediately before the destructive action, as a protocol and not
@@ -354,46 +395,43 @@ export async function recheckCollectionClaim(
   read: CollectionReader,
 ): Promise<AuthorizedCollection> {
   const snapshot = await readCollectionSnapshot(claim.host, read);
-  const withhold = (
+  const issue = (
+    outcome: AuthorizedCollection['outcome'],
     reason: CollectionResolution['reason'],
     status: ProtectionStatus,
     head: string | null,
-  ): AuthorizedCollection => ({
-    state: 'authorized',
-    outcome: 'withheld',
-    reason,
-    host: claim.host,
-    path: claim.path,
-    boardId: claim.boardId,
-    snapshotHead: claim.snapshotHead,
-    recheckHead: head,
-    status,
-  });
+  ): AuthorizedCollection => {
+    const authorization: AuthorizedCollection = {
+      [authorizationSeal]: true,
+      state: 'authorized',
+      outcome,
+      reason,
+      host: claim.host,
+      path: claim.path,
+      boardId: claim.boardId,
+      snapshotHead: claim.snapshotHead,
+      recheckHead: head,
+      status,
+    };
+    liveAuthorizations.add(authorization);
+    return authorization;
+  };
 
-  if (!snapshot.verified) return withhold('board-unverifiable', 'protected', null);
+  if (!snapshot.verified) return issue('withheld', 'board-unverifiable', 'protected', null);
   if (snapshot.boardId !== claim.boardId) {
-    return withhold('wrong-board', 'protected', snapshot.head);
+    return issue('withheld', 'wrong-board', 'protected', snapshot.head);
   }
 
   const verdict = protectionOf(snapshot, claim.path);
   if (verdict.status !== 'collectible') {
-    return withhold(
+    return issue(
+      'withheld',
       verdict.basis === 'not-registered' ? 'unregistered' : 'became-protected',
       verdict.status,
       snapshot.head,
     );
   }
-  return {
-    state: 'authorized',
-    outcome: 'collect',
-    reason: 'still-collectible',
-    host: claim.host,
-    path: claim.path,
-    boardId: claim.boardId,
-    snapshotHead: claim.snapshotHead,
-    recheckHead: snapshot.head,
-    status: 'collectible',
-  };
+  return issue('collect', 'still-collectible', 'collectible', snapshot.head);
 }
 
 /** The terminal state: what a caller actually did with an authorization. */
@@ -407,15 +445,20 @@ export interface CompletedCollection {
 }
 
 /**
- * An authorization cannot be spent twice, so one completed re-check cannot be
- * replayed into a second deletion. A withheld authorization reports
+ * An authorization is accepted only while it is the live record this process
+ * issued for a completed re-check, and committing it consumes it: one
+ * completed re-check can authorize at most one destructive action, and a copy
+ * of the record is not that authorization. A withheld authorization reports
  * `withheld`, and the caller leaves the path alone.
  */
 export function commitCollectionDeletion(authorized: AuthorizedCollection): CompletedCollection {
-  if (spentAuthorizations.has(authorized)) {
-    throw new Error(`Collection authorization for ${authorized.path} was already spent`);
+  if (!liveAuthorizations.has(authorized)) {
+    throw new Error(
+      `Collection authorization for ${authorized.path} is not a live authorization: `
+      + 'it was already committed, or it was not issued by a completed re-check',
+    );
   }
-  spentAuthorizations.add(authorized);
+  liveAuthorizations.delete(authorized);
   return {
     state: 'spent',
     outcome: authorized.outcome,

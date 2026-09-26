@@ -16,9 +16,9 @@ Normal execution uses precompiled JavaScript. A TypeScript compiler is only a de
 Build and pack the CLI from a development checkout:
 
 ```sh
-npm ci --prefix web
-./web/node_modules/.bin/tsc -p packages/cli/tsconfig.json
-npm pack ./packages/cli
+npm run bootstrap
+npm run typecheck
+npm run pack:cli
 npm install -g ./antonina-cli-*.tgz
 ```
 
@@ -52,15 +52,10 @@ npm run build
 ## Development
 
 ```sh
-npm ci --prefix web
-./web/node_modules/.bin/tsc -p packages/core/tsconfig.json
-./web/node_modules/.bin/tsc -p packages/agent-runtime/tsconfig.json
-./web/node_modules/.bin/tsc -p packages/cli/tsconfig.json
-node --test packages/core/test/*.test.mjs
-node --test packages/agent-runtime/test/*.test.mjs
-node --test packages/cli/test/*.test.mjs
-npm test --prefix web
-npm run build --prefix web
+npm run bootstrap
+npm run typecheck
+npm test
+npm run build
 ```
 
 The repository contains one supported Antonina runtime: the precompiled TypeScript/Node.js implementation described above.

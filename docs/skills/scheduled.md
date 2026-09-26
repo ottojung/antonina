@@ -1,18 +1,18 @@
 # Scheduled Antonina agent work
 
-This document is the reusable operating guide for recurring orchestrators that work on Antonina-managed repositories. It defines ownership, recovery, liveness, and completion for agentic work. The calling project itinerary supplies the target repository, work-selection policy, branch policy, and completion predicate.
+This document is the reusable operating guide for recurring agents that work on Antonina-managed repositories. It defines ownership, recovery, liveness, and completion for agentic work. The calling project itinerary supplies the target repository, work-selection policy, branch policy, and completion predicate.
 
 ## Contract
 
 Keep these resources distinct:
 
 - **Antonina** — the preferred coding-agent runtime used to perform substantive repository work. Antonina is a capable agent and should be used for work that benefits from judgment, context, iteration, or multiple steps.
-- **Orchestrator** — the long-running coordinator (for example OpenClaw) that selects work, launches subprocesses, observes progress, and keeps the overall loop moving.
+- **Coordinating agent** — the agent following this document. It selects work, launches subprocesses, observes progress, and keeps the overall loop moving.
 - **Target repository** — the repository, issues, branches, pull requests, and validation requirements selected by the itinerary.
 
-The orchestrator should use Antonina by launching `antonina agent ...` commands as subprocesses. The orchestrator coordinates; Antonina agents do the substantive agentic work. Do not replace Antonina with ad-hoc direct model calls when an Antonina agent is appropriate.
+The coordinating agent should use Antonina by launching `antonina agent ...` commands as subprocesses. The coordinating agent coordinates; Antonina agents do the substantive agentic work. Do not replace Antonina with ad-hoc direct model calls when an Antonina agent is appropriate.
 
-Every orchestrator invocation or turn is disposable. Durable issue status, Antonina agent state and logs, repository state, and other explicit host state are the sources of truth; conversation memory is only context.
+Every invocation or turn of the coordinating agent is disposable. Durable issue status, Antonina agent state and logs, repository state, and other explicit host state are the sources of truth; conversation memory is only context.
 
 ## Startup
 
@@ -32,7 +32,7 @@ Treat work as abandoned for coordination purposes only after its marked comment 
 
 ## Agent operation
 
-Use Antonina for work requiring judgment, context, iteration, or multiple steps. The normal pattern is for the orchestrator to spawn Antonina CLI subprocesses such as:
+Use Antonina for work requiring judgment, context, iteration, or multiple steps. The normal pattern is for the coordinating agent to spawn Antonina CLI subprocesses such as:
 
 ```sh
 antonina agent new --id <agent-id> --cwd <worktree>
@@ -42,7 +42,7 @@ antonina agent log --id <agent-id>
 antonina agent wait --id <agent-id> --timeout <seconds>
 ```
 
-Use direct shell only for tiny deterministic observations or orchestration glue. Record the Antonina agent ID before invocation, retain durable logs, and poll or inspect status and logs while work is nonterminal. Never treat a progress message or green test as completion by itself.
+Use direct shell only for tiny deterministic observations or coordination glue. Record the Antonina agent ID before invocation, retain durable logs, and poll or inspect status and logs while work is nonterminal. Never treat a progress message or green test as completion by itself.
 
 Before relying on a durable host path, follow [resources.md](resources.md): register it with `antonina board resource add`, verify it, and preserve open dependencies until handoff or completion.
 

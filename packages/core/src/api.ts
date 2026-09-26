@@ -13,6 +13,7 @@ import {
 import {
   createBoardCredential,
   credentialTrustAnchor,
+  lookupCredentialAuthority,
   parseBoardCredential,
   parseBoardTrustAnchor,
   resolveCredentialAuthority,
@@ -257,7 +258,7 @@ export class BoardApi {
     }
 
     const stored = await this.readStored(anchor);
-    const authority = await this.requireActiveAuthority(stored.state, credential);
+    const authority = this.requireActiveAuthority(stored.state, credential);
     this.anchor = anchor;
     this.credential = credential;
     this.storageRejected = false;
@@ -461,10 +462,9 @@ export class BoardApi {
     return issue;
   }
 
-  private async requireActiveAuthority(state: VerifiedBoardState, credential: BoardCredential): Promise<VerifiedAuthority> {
-    const resolved = await resolveCredentialAuthority(credential, state);
-    if (resolved.active) return resolved.authority;
-    if (resolved.rejection === 'unverified') throw resolved.cause;
+  private requireActiveAuthority(state: VerifiedBoardState, credential: BoardCredential): VerifiedAuthority {
+    const looked = lookupCredentialAuthority(credential, state);
+    if (looked.active) return looked.authority;
     throw new AntoninaApiError('Antonina board credential is unknown or revoked');
   }
 

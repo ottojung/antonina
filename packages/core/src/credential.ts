@@ -149,6 +149,33 @@ export type CredentialAuthority =
   | { active: false; rejection: 'unverified'; cause: unknown }
   | { active: false; rejection: 'unknown' | 'revoked' };
 
+/** Either a credential that verifies as one key, or the `'unverified'` cause. */
+export type CredentialVerification =
+  | { verified: BoardCredential }
+  | { verified: null; cause: unknown };
+
+export async function verifyCredentialValue(value: unknown): Promise<CredentialVerification> {
+  try {
+    return { verified: await verifyBoardCredential(value) };
+  } catch (cause) {
+    return { verified: null, cause };
+  }
+}
+
+/** What a verified credential's key id means in a verified board's log. */
+export type AuthorityLookup =
+  | { active: true; authority: VerifiedAuthority }
+  | { active: false; rejection: 'unknown' | 'revoked' };
+
+export function lookupCredentialAuthority(
+  credential: BoardCredential,
+  state: VerifiedBoardState,
+): AuthorityLookup {
+  const authority = state.authorities.find((candidate) => candidate.keyId === credential.keyId);
+  if (authority === undefined) return { active: false, rejection: 'unknown' };
+  return authority.revoked ? { active: false, rejection: 'revoked' } : { active: true, authority };
+}
+
 /**
  * The one place a credential value is turned into board authority: it must
  * first verify as one key, and only then is its verified key id looked up in
@@ -159,15 +186,11 @@ export async function resolveCredentialAuthority(
   value: unknown,
   state: VerifiedBoardState,
 ): Promise<CredentialAuthority> {
-  let credential: BoardCredential;
-  try {
-    credential = await verifyBoardCredential(value);
-  } catch (cause) {
-    return { active: false, rejection: 'unverified', cause };
+  const verification = await verifyCredentialValue(value);
+  if (verification.verified === null) {
+    return { active: false, rejection: 'unverified', cause: verification.cause };
   }
-  const authority = state.authorities.find((candidate) => candidate.keyId === credential.keyId);
-  if (authority === undefined) return { active: false, rejection: 'unknown' };
-  return authority.revoked ? { active: false, rejection: 'revoked' } : { active: true, authority };
+  return lookupCredentialAuthority(verification.verified, state);
 }
 
 export async function createBoardCredential(

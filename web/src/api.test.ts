@@ -261,7 +261,7 @@ describe('browser board session', () => {
   });
 
   it('reports a rejected stored credential after a read that still succeeds', async () => {
-    const { server, storage, initialized } = await initializedBoard();
+    const { server, storage } = await initializedBoard();
     await session(server, storage).api.createIssue('Visible');
     const foreign = await generateSigningKey();
     storage.set('antonina:board-v2:credential', JSON.stringify({

@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
 import {
   BoardApi,
@@ -26,12 +23,13 @@ const STAMP = '2026-09-25T12:00:00.000Z';
 const HOST = 'lubko://server';
 const OTHER_HOST = 'lubko://other';
 
-// The re-check gathers the candidate's filesystem facts itself, so the
-// registered paths have to be real ones. A temporary root stands in for the
-// configured managed root, resolved so that it is the same directory in both
-// coordinate systems even where the temporary directory sits behind a symlink.
-const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'antonina-collection-')));
-process.on('exit', () => rmSync(ROOT, { recursive: true, force: true }));
+// `packages/core` performs no filesystem I/O: the re-check asks a required
+// gatherer for the facts about the one path it named, so these tests need no
+// temporary tree at all. The paths below are plain strings standing in for
+// directories, and the facts about them are data the test chooses. The gatherer
+// itself is implemented and tested in `packages/agent-runtime`, which is the only
+// place in the collection stack that reads a filesystem.
+const ROOT = '/managed';
 const WORKTREE = `${ROOT}/project`;
 const BUILD = `${ROOT}/build`;
 
@@ -45,6 +43,29 @@ const rootsOf = (spelled) => {
 };
 
 const MANAGED = rootsOf([ROOT]);
+
+/**
+ * A gatherer that always answers with the facts it was given, and records the
+ * paths it was asked about so a test can assert that only `claim.path` ever was.
+ */
+function factsGatherer(overrides = {}) {
+  const asked = [];
+  const gather = async (path) => {
+    asked.push(path);
+    const facts = overrides[path];
+    if (typeof facts === 'undefined') {
+      return {
+        path,
+        resolvedPath: path,
+        finalComponentIsSymlink: false,
+        parentResolvedPath: ROOT,
+      };
+    }
+    return facts;
+  };
+  gather.asked = asked;
+  return gather;
+}
 
 // A minimal Skrynia stand-in: the collector's only contact with the board is
 // this store, so the re-check tests exercise the real verified read path.
@@ -298,7 +319,7 @@ test('a host sees only its own resources, and a host absent from the registry de
 
   const mine = await readCollectionSnapshot(HOST, reader);
   assert.deepEqual(collectiblePaths(mine), []);
-  assert.deepEqual(mine.decisions.map((entry) => entry.path).sort(), ['/srv/other', BUILD, WORKTREE]);
+  assert.deepEqual(mine.decisions.map((entry) => entry.path).sort(), [BUILD, WORKTREE, '/srv/other'].sort());
   // Another host's registered path is a decision this host does not own, so it
   // can never be claimed from a snapshot taken on this host, and it is reported
   // as another host's path rather than as an unregistered one.
@@ -334,7 +355,7 @@ test('a host sees only its own resources, and a host absent from the registry de
   assert.equal(stranger.verified, true);
   assert.deepEqual(
     stranger.decisions.map((entry) => entry.path).sort(),
-    ['/srv/other', BUILD, WORKTREE],
+    [BUILD, WORKTREE, '/srv/other'].sort(),
   );
   assert.deepEqual(collectiblePaths(stranger), []);
   assert.equal(protectionOf(stranger, WORKTREE).status, 'protected');
@@ -408,15 +429,17 @@ test('an unverified snapshot is empty of decisions however it was built', () => 
 });
 
 /**
- * The re-check builds its own verifying read from a `BoardApi` and gathers the
- * candidate's filesystem facts itself, so a test cannot hand it a reader of its
- * own or facts of its own; the only things a test chooses are the client and
- * the managed-root judgment.
+ * The re-check builds its own verifying read from a `BoardApi`, and takes the
+ * facts gatherer as a required fourth argument that it calls with `claim.path`
+ * alone, so a test cannot hand it a reader of its own or facts about some other
+ * path; the things a test chooses are the client, the managed-root judgment, and
+ * what the path-safety side reports about the one path under re-check.
  */
 const recheck = (claim, writer, options = {}) => recheckCollectionClaim(
   claim,
   writer,
   options.roots ?? MANAGED,
+  options.gatherFacts ?? factsGatherer(),
 );
 
 test('a claim can only be opened for a collectible path on the snapshot host', async () => {
@@ -512,7 +535,9 @@ test('a re-check that cannot be completed withholds instead of falling back on t
   const claim = openCollectionClaim(await readCollectionSnapshot(HOST, reader), WORKTREE);
 
   // A client that cannot reach the board at all. The re-check is given the
-  // client, not a reader, so the failure has to be the client's own.
+  // client, not a reader, so the failure has to be the client's own -- and it is
+  // reported as the transport failure the snapshot classified it as, not as the
+  // `board-unverifiable` a different failure would produce.
   const broken = api(fakeSkrynia(), {
     fetch: async () => {
       throw new TypeError('fetch failed');
@@ -520,13 +545,47 @@ test('a re-check that cannot be completed withholds instead of falling back on t
   });
   const authorized = await recheck(claim, broken);
   assert.equal(authorized.outcome, 'withheld');
-  assert.equal(authorized.reason, 'board-unverifiable');
+  assert.equal(authorized.reason, 'board-read-failed');
   assert.equal(authorized.recheckHead, null);
 
+  // A board that no longer exists is a different failure, and keeps its own name.
   await writer.deleteBoard();
   const afterDelete = await recheck(claim, writer);
   assert.equal(afterDelete.outcome, 'withheld');
   assert.equal(afterDelete.reason, 'board-unverifiable');
+
+  // An unconfigured client has no board to read at all, and that is reported as
+  // what it is too.
+  const unconfigured = await recheck(claim, api(fakeSkrynia()));
+  assert.equal(unconfigured.outcome, 'withheld');
+  assert.equal(unconfigured.reason, 'board-missing');
+});
+
+test('a gatherer is asked about the claimed path and nothing else', async () => {
+  const { writer, open } = await seeded();
+  await writer.close(open[0].number);
+  await writer.close(open[1].number);
+  const claim = openCollectionClaim(
+    await readCollectionSnapshot(HOST, readerFor(writer)),
+    WORKTREE,
+  );
+
+  // Facts for the other registered path are on offer, so a gatherer that
+  // answered with them would collect a path the board no longer calls
+  // collectible. The re-check asks about the path it named, and the returned
+  // authorization is about that path.
+  const gather = factsGatherer({
+    [BUILD]: {
+      path: BUILD,
+      resolvedPath: BUILD,
+      finalComponentIsSymlink: false,
+      parentResolvedPath: ROOT,
+    },
+  });
+  const authorized = await recheck(claim, writer, { gatherFacts: gather });
+  assert.deepEqual(gather.asked, [WORKTREE]);
+  assert.equal(authorized.path, WORKTREE);
+  assert.equal(authorized.outcome, 'collect');
 });
 
 test('a re-check against a different board withholds', async () => {
@@ -619,39 +678,74 @@ test('a board cannot authorise collecting a path no managed root contains', asyn
 test('a collect authorization is impossible for a candidate whose own facts resolve elsewhere', async () => {
   const { writer, open } = await seeded();
   // The registry calls this path collectible and it is spelled inside the managed
-  // root, so nothing but the filesystem can refuse it. But a component of the
-  // path is a symlink out of the root: the directory that holds the candidate is
-  // really /etc. A caller that guessed the facts -- resolved path equal to the
-  // spelled path, parent equal to the root -- would have collected /etc, and the
-  // re-check gathers the facts itself, so it cannot.
-  symlinkSync('/etc', join(ROOT, 'link'));
+  // root, so nothing but the path-safety facts can refuse it. The facts say its
+  // containing directory is really `/etc`: a component of the path is a symlink
+  // out of the root. A gatherer that guessed instead -- resolved path equal to
+  // the spelled path, parent equal to the root -- would have collected `/etc`.
   const escaping = `${ROOT}/link/antonina`;
   await writer.addResourceDependency(HOST, escaping, open[0].number);
   await writer.close(open[0].number);
 
   const claim = openCollectionClaim(await readCollectionSnapshot(HOST, readerFor(writer)), escaping);
-  const authorized = await recheck(claim, writer);
+  const gather = factsGatherer({
+    [escaping]: {
+      path: escaping,
+      // The candidate's own resolution looks harmless...
+      resolvedPath: escaping,
+      finalComponentIsSymlink: false,
+      // ...but the directory that would hold it is somewhere else entirely.
+      parentResolvedPath: '/etc',
+    },
+  });
+  const authorized = await recheck(claim, writer, { gatherFacts: gather });
+  assert.deepEqual(gather.asked, [escaping]);
   assert.equal(authorized.outcome, 'withheld');
   assert.equal(authorized.reason, 'not-managed-collectible');
   assert.equal(authorized.status, 'protected');
   assert.equal(authorized.path, escaping);
   assert.equal(commitCollectionDeletion(authorized).outcome, 'withheld');
+
+  // The same candidate described the other way round: its own path resolves out
+  // of the root, which is refused for the same reason. Neither spelling of a
+  // candidate that is not really where it says it is can be collected.
+  const ownEscape = `${ROOT}/link`;
+  await writer.addResourceDependency(HOST, ownEscape, open[1].number);
+  await writer.close(open[1].number);
+  const ownClaim = openCollectionClaim(
+    await readCollectionSnapshot(HOST, readerFor(writer)),
+    ownEscape,
+  );
+  const ownAuthorized = await recheck(ownClaim, writer, {
+    gatherFacts: factsGatherer({
+      [ownEscape]: {
+        path: ownEscape,
+        resolvedPath: '/etc',
+        finalComponentIsSymlink: true,
+        parentResolvedPath: ROOT,
+      },
+    }),
+  });
+  assert.equal(ownAuthorized.outcome, 'withheld');
+  assert.equal(ownAuthorized.reason, 'not-managed-collectible');
 });
 
 test('a candidate whose filesystem facts cannot be gathered is withheld, not collected', async () => {
   const { writer, open } = await seeded();
   // Registered and collectible, spelled inside the managed root, but the
-  // directory that would contain it is not there, so there is no fact about
-  // where the candidate really is. There is no eligible answer without them.
+  // path-safety side cannot say where it really is -- the directory that would
+  // contain it is not there. `null` is not an eligible answer.
   const absent = `${ROOT}/never-created/candidate`;
   await writer.addResourceDependency(HOST, absent, open[0].number);
   await writer.close(open[0].number);
 
   const claim = openCollectionClaim(await readCollectionSnapshot(HOST, readerFor(writer)), absent);
-  const authorized = await recheck(claim, writer);
+  const gather = factsGatherer({ [absent]: null });
+  const authorized = await recheck(claim, writer, { gatherFacts: gather });
+  assert.deepEqual(gather.asked, [absent]);
   assert.equal(authorized.outcome, 'withheld');
   assert.equal(authorized.reason, 'candidate-facts-unavailable');
   assert.equal(authorized.status, 'protected');
+  assert.equal(commitCollectionDeletion(authorized).outcome, 'withheld');
 });
 
 test('a hand-built state cannot mint a collect authorization', async () => {
@@ -687,9 +781,22 @@ test('a hand-built state cannot mint a collect authorization', async () => {
   assert.equal(authorized.recheckHead, writer.getRememberedHead());
 
   // The reader is gone from the destructive path altogether: it is not a
-  // parameter a caller can pass, and neither are the candidate's filesystem
-  // facts.
-  assert.equal(recheckCollectionClaim.length, 3);
+  // parameter a caller can pass. Nor are the candidate's filesystem facts a
+  // value a caller can pass -- a re-check that has no path-safety gatherer to ask
+  // cannot complete at all, so there is no way to answer for a path whose facts
+  // nobody read. This is asserted on a claim that is otherwise collectible, so
+  // the re-check really does reach the point of needing the facts.
+  await writer.close(open[0].number);
+  await writer.close(open[1].number);
+  const collectible = openCollectionClaim(
+    await readCollectionSnapshot(HOST, readerFor(writer)),
+    WORKTREE,
+  );
+  assert.equal((await recheck(collectible, writer)).outcome, 'collect');
+  await assert.rejects(
+    () => recheckCollectionClaim(collectible, writer, MANAGED),
+    TypeError,
+  );
 });
 
 test('a path this module cannot canonicalise is protected, and a sweep survives it', async () => {
@@ -742,7 +849,7 @@ test('a host that is not already canonical yields an unverified snapshot', async
   assert.equal((await readCollectionSnapshot(HOST, reader)).verified, true);
 });
 
-test('a snapshot names the board and revision it decided from, and cannot be minted by a caller', async () => {
+test('a snapshot names the board and revision it decided from, and a forged one is worth nothing', async () => {
   const { writer, open } = await seeded();
   const reader = readerFor(writer);
   const first = await readCollectionSnapshot(HOST, reader);
@@ -753,11 +860,27 @@ test('a snapshot names the board and revision it decided from, and cannot be min
   assert.notEqual(first.head, second.head);
   assert.equal(second.head, writer.getRememberedHead());
 
-  // The board identity and the revision come from the read itself, so a
-  // verified snapshot is only ever one of the board the client is actually
-  // talking about: there is no exported constructor that takes a board id.
-  const exported = await import('../dist/collection.js');
-  assert.equal(exported.collectionSnapshot, undefined);
-  const api = await import('../dist/api.js');
-  assert.equal(api.collectionSnapshot, undefined);
+  // The board identity and the revision come from the read itself, so a verified
+  // snapshot names only the board the client is actually talking about. A caller
+  // that writes its own snapshot in untyped JavaScript can put any board and any
+  // revision in one, and can open a claim from it -- and the claim is worth
+  // nothing, because the re-check reads the board itself and refuses a claim that
+  // does not belong to it.
+  const forged = {
+    verified: true,
+    host: HOST,
+    boardId: 'board-of-my-own-choosing',
+    head: 'head-of-my-own-choosing',
+    decisions: [{ host: HOST, path: WORKTREE, status: 'collectible', issues: [] }],
+    failure: null,
+  };
+  assert.deepEqual(collectiblePaths(forged), [WORKTREE]);
+  const claimed = openCollectionClaim(forged, WORKTREE);
+  assert.equal(claimed.boardId, 'board-of-my-own-choosing');
+
+  const authorized = await recheck(claimed, writer);
+  assert.equal(authorized.outcome, 'withheld');
+  assert.equal(authorized.reason, 'wrong-board');
+  assert.equal(authorized.snapshotHead, null);
+  assert.equal(authorized.recheckHead, writer.getRememberedHead());
 });

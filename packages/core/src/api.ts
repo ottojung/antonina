@@ -568,6 +568,7 @@ export {
 export type { Board, BoardIssue, BoardResource, IssueState, ResourceView } from './model.js';
 export type {
   AuthorizedCollection,
+  CandidateFactsGatherer,
   CollectionClaim,
   CollectionFailure,
   CollectionFailureKind,

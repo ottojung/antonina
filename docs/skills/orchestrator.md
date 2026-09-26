@@ -73,6 +73,8 @@ Queue order still expresses shared priority. The orchestrator should preserve th
 
 Useful evidence of independence includes disjoint repositories, separate monorepo packages/apps, unrelated subsystems, separate worktrees, distinct deployment targets, or clearly non-overlapping implementation areas. Potential conflict domains include the same source files, shared core APIs under active redesign, one database/schema migration path, the same mutable deployment environment, or another shared external resource.
 
+Execution resources are also a conflict domain. Before adding new heavy workers to a host, inspect objective resource headroom when it is readily available, especially hard cgroup limits and recent OOM evidence. Do not add workers to a host that is already at or near a hard resource limit merely because their repository work is logically independent; prefer another compatible execution target when one is available. This is a feasibility constraint, not a fairness quota.
+
 Development can often proceed concurrently even when integration must later serialize. Separate branches or worktrees may be safe to implement in parallel and then merge into a shared release branch one at a time.
 
 Do not manufacture work merely to stay busy.
@@ -95,6 +97,8 @@ Before starting new substantive work on an unowned issue:
 2. append a `working` orchestrator comment;
 3. immediately read the issue again;
 4. if a later conflicting `working` claim from another orchestrator now exists, yield before launching duplicate work.
+
+After a claim survives that reread, perform the concrete launch promptly. Do not spend the rest of the pass scouting while an admitted issue exists only as a promise to create a worktree or agent later. Once the agent is launched, append its real ID and worktree before relying on it for handoff. If execution cannot actually be launched this pass, record the issue as `handoff` or `blocked` rather than leaving a misleading execution claim.
 
 The latest coordination comment in the issue history is the current declared status, but objective state can prove that declaration stale.
 
@@ -165,7 +169,7 @@ A handoff comment should let a fresh orchestrator continue without reconstructin
 
 Prefer factual state such as a branch name, commit, PR, test result, agent ID, or host path over prose about effort.
 
-A blocked issue stays open. Name the blocker precisely and, when possible, the event that would clear it. Once the blocker is recorded, continue with the next actionable queued issue rather than repeatedly rediscovering the same block.
+A blocked issue stays open. Name the blocker precisely and, when possible, the event that would clear it. When a queue scan newly discovers a blocker, append that fact on the blocked issue itself; mentioning it only in another issue's comment does not count as recording the blocker. Once the blocker is recorded, continue with the next actionable queued issue rather than repeatedly rediscovering the same block.
 
 Do not create a follow-up issue for work that is merely the unfinished remainder of the current issue. Create a new issue only when it is a distinct durable task that deserves independent priority, lifecycle, or ownership.
 

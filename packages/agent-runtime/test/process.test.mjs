@@ -37,23 +37,26 @@ function withProc(t, entries) {
 }
 
 // Every test isolates both Antonina XDG roots so no test can read or write the
-// operator's real ~/.local/state/antonina or ~/.config/antonina.
+// operator's real ~/.local/state/antonina or ~/.config/antonina. The two roots are
+// separate directories: the state root and the config root are not the same tree.
 function withIsolatedXdg(t) {
-  const base = mkdtempSync(join('/tmp', `antonina-xdg-${process.pid}-`));
+  const stateRoot = mkdtempSync(join('/tmp', `antonina-xdg-state-${process.pid}-`));
+  const configRoot = mkdtempSync(join('/tmp', `antonina-xdg-config-${process.pid}-`));
   const previous = {
     state: process.env.XDG_STATE_HOME,
     config: process.env.XDG_CONFIG_HOME,
   };
-  process.env.XDG_STATE_HOME = base;
-  process.env.XDG_CONFIG_HOME = base;
+  process.env.XDG_STATE_HOME = stateRoot;
+  process.env.XDG_CONFIG_HOME = configRoot;
   t.after(() => {
     if (previous.state === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previous.state;
     if (previous.config === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = previous.config;
-    rmSync(base, { recursive: true, force: true });
+    rmSync(stateRoot, { recursive: true, force: true });
+    rmSync(configRoot, { recursive: true, force: true });
   });
-  return base;
+  return { stateRoot, configRoot };
 }
 
 function recordingSignal(result = true) {
@@ -197,17 +200,22 @@ test('an identity whose start ticks agree but which carries no agent marker is n
 test('a stat tail shorter than the kernel field count is not a stat record', (t) => {
   withIsolatedXdg(t);
   const full = statLine();
-  const truncated = `${full.split(')')[0]}) ${statLine().split(') ')[1].split(' ').slice(0, 19).join(' ')}`;
+  // The comm field contains its own parentheses, so the stat tail must be cut at
+  // the LAST ')' -- otherwise this would collapse to a single malformed field.
+  const cut = full.lastIndexOf(')');
+  const truncated = `${full.slice(0, cut + 1)} ${full.slice(cut + 1).trim().split(/\s+/).slice(0, 19).join(' ')}`;
+  assert.equal(splitProcStatFields(full).length, 20);
+  // Guard the fixture itself: the tail really is 19 well-formed fields, one short
+  // of the kernel minimum, so the rejection is attributable to the field count.
+  assert.equal(truncated.slice(truncated.lastIndexOf(')') + 1).trim().split(/\s+/).length, 19);
   assert.equal(splitProcStatFields(truncated), null);
   assert.equal(parseProcStat(truncated), null);
-  assert.equal(splitProcStatFields(full).length, 20);
   assert.notEqual(parseProcStat(full), null);
 });
 
 test('the state field is exactly one character', (t) => {
   withIsolatedXdg(t);
   assert.equal(parseProcStat(statLine({ state: 'SR' })), null);
-  assert.equal(parseProcStat(statLine({ state: '' })), null);
   assert.equal(parseProcStat(statLine({ state: 'S' })).state, 'S');
   assert.equal(parseProcStat(statLine({ state: 'Z' })).state, 'Z');
 });

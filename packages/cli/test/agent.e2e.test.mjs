@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -532,6 +533,26 @@ function procStartTicks(pid) {
   }
 }
 
+// The process group a PID actually belongs to, read the same way the runtime
+// reads it. A recorded pgid that disagrees with this is a signal into a group
+// the victim is not in, which is a silent no-op.
+function procPgrp(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[2]);
+  } catch {
+    return null;
+  }
+}
+
+// A process is gone when it has no /proc entry at all, and also when the entry
+// it does have belongs to a different process (PID reuse). Comparing the start
+// ticks is what makes the second case decidable without a name.
+function sameProcess(pid, ticks) {
+  const observed = procStartTicks(pid);
+  return observed !== null && observed === ticks;
+}
+
 test('delete tombstone blocks later prompt reservation', (t) => {
   const { root, work, env } = fixture(t);
   assert.equal(run(['agent', 'new', '--id', 'face', '--cwd', work], env).status, 0);
@@ -871,9 +892,10 @@ test('log on an agent with no output yet says so and succeeds', (t) => {
   assert.match(result.stderr, /\(no output yet\)/);
 });
 
-// An async front end is required here: `--follow` must stay open across a live
-// invocation, stream what the invocation writes, and only then return.
-function followLog(args, env) {
+// An async front end is required for anything that must stay open across a live
+// invocation: `--follow` must stay attached, and `stop` must stay across its own
+// grace period.
+function spawnCli(args, env) {
   const child = spawn(process.execPath, [CLI, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   const out = [];
   const err = [];
@@ -887,6 +909,22 @@ function followLog(args, env) {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Condition-based waits, so a slow host cannot turn "not yet" into "never".
+// Fixed sleeps are only ever used as the racing timeout, never as the trigger.
+async function waitUntil(read, describe, timeoutMs = 15_000, intervalMs = 25) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = read();
+    if (value) return value;
+    await delay(intervalMs);
+  }
+  throw new Error(`timed out after ${timeoutMs}ms waiting for ${describe}`);
+}
+
+function outputLogPath(root, id) {
+  return join(root, 'state', 'antonina', 'agents', id, 'output.log');
+}
+
 test('log --follow streams a live invocation and returns when it reaches a terminal state', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
@@ -898,14 +936,37 @@ test('log --follow streams a live invocation and returns when it reaches a termi
     try { process.kill(live.pid, 'SIGKILL'); } catch {}
   });
 
-  const followed = followLog(['agent', 'log', '--id', '109b', '--follow'], env);
-  await delay(1_500);
+  const followed = spawnCli(['agent', 'log', '--id', '109b', '--follow'], env);
+  // Wait until the follower has actually produced its up-front tail, so the
+  // marker appended below provably arrives *after* --follow attached.
+  await waitUntil(
+    () => followed.stdout().includes('slow-start'),
+    'log --follow to print the invocation\'s own output',
+  );
   assert.equal(
     followed.child.exitCode,
     null,
     'log --follow must keep following while the invocation is still running',
   );
-  assert.match(followed.stdout(), /slow-start/, 'log --follow must stream the live invocation output');
+
+  // Content that did not exist when the follower attached: only the incremental
+  // read can surface it, and the up-front tailLines window cannot.
+  const marker = `follow-live-${Date.now()}-${process.pid}`;
+  assert.doesNotMatch(
+    readFileSync(outputLogPath(root, '109b'), 'utf8'),
+    new RegExp(marker),
+    'the marker must be unique to this run',
+  );
+  appendFileSync(outputLogPath(root, '109b'), `${marker}\n`);
+  await waitUntil(
+    () => followed.stdout().includes(marker),
+    `the post-attach marker ${marker} to be streamed to the follower's stdout`,
+  );
+  assert.equal(
+    followed.child.exitCode,
+    null,
+    'log --follow must still be following after streaming live content',
+  );
 
   assert.equal(run(['agent', 'stop', '--id', '109b'], env).status, 0);
   const result = await Promise.race([
@@ -914,6 +975,7 @@ test('log --follow streams a live invocation and returns when it reaches a termi
   ]);
   assert.notEqual(result, null, 'log --follow must return once the agent reaches a terminal state');
   assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, new RegExp(marker), 'the streamed marker must be in the returned output');
   assert.match(followed.stdout(), /slow-start/);
   assertFixtureInvoked(handle, 'slow');
   await waitFor(root, '109b', (meta) => meta.state === 'stopped');
@@ -944,8 +1006,11 @@ test('log --follow reports a vanished agent directory instead of following forev
     }
   });
 
-  const followed = followLog(['agent', 'log', '--id', '109c', '--follow'], env);
-  await delay(1_000);
+  const followed = spawnCli(['agent', 'log', '--id', '109c', '--follow'], env);
+  await waitUntil(
+    () => followed.stdout().length > 0,
+    'log --follow to attach and print the invocation\'s own output',
+  );
   assert.equal(followed.child.exitCode, null, 'log --follow must be following while the agent is live');
   rmSync(join(root, 'state', 'antonina', 'agents', '109c'), { recursive: true, force: true });
 
@@ -959,6 +1024,17 @@ test('log --follow reports a vanished agent directory instead of following forev
 // The invariant, in one sentence: `stop` escalates SIGTERM to SIGKILL on the
 // recorded process group for a backend that refuses to die politely, and only
 // reports the agent stopped once the invocation is actually gone.
+//
+// The recorded invocation here is deliberately NOT a child of a live runner. A
+// runner's own control poller signals SIGKILL to the recorded group at its
+// CONTROL_GRACE_MS boundary, so a fixture driven by a real runner cannot tell
+// the CLI's escalation from the runner's: deleting the CLI's escalation leaves
+// such a test green. This fixture is spawned by the test process, leads its own
+// process group, and carries real PID + start ticks + env markers with no
+// runner recorded at all, so the only process anywhere that can deliver the
+// SIGKILL is `agent stop` itself. The recorded pgid is the invocation's real
+// group, so the escalation is a real signal rather than a no-op into a group
+// that does not exist.
 test('stop escalates SIGTERM to SIGKILL for a backend that ignores SIGTERM', async (t) => {
   if (!existsSync('/proc/self/stat')) {
     t.skip('/proc is unavailable on this host: liveness cannot be decided on PID plus start ticks');
@@ -967,51 +1043,95 @@ test('stop escalates SIGTERM to SIGKILL for a backend that ignores SIGTERM', asy
   const handle = fixture(t);
   const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', '7e40', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'prompt', '--id', '7e40', '--detach', 'term-trap'], env).status, 0);
-  const live = await waitFor(
-    root,
-    '7e40',
-    (meta) => meta.state === 'running' && typeof meta.pid === 'number' && meta.pid > 1,
-    12_000,
-  );
-  const pid = live.pid;
-  const ticks = live.start_time;
-  t.after(() => {
-    try { process.kill(-pid, 'SIGKILL'); } catch {}
-    try { process.kill(pid, 'SIGKILL'); } catch {}
-  });
-  // The trap has to be armed before stop, otherwise SIGTERM could land first.
-  const armed = await waitFor(
-    root,
-    '7e40',
-    () => readFileSync(join(root, 'state', 'antonina', 'agents', '7e40', 'output.log'), 'utf8').includes('term-trap-armed'),
-    12_000,
-  );
-  assert.ok(armed);
 
-  const startedAt = Date.now();
-  // stop waits 10s for a polite death before escalating, so this cannot use
-  // the 15s default timeout of run().
-  const stopped = spawnSync(process.execPath, [CLI, 'agent', 'stop', '--id', '7e40'], {
-    env,
-    encoding: 'utf8',
-    timeout: 60_000,
-  });
-  const elapsed = Date.now() - startedAt;
-  assert.equal(stopped.status, 0, `stop must succeed via escalation; stderr: ${stopped.stderr}`);
-  assert.match(stopped.stdout, /stopped agent 7e40/);
-  assert.ok(
-    elapsed >= 10_000,
-    `stop must wait for the SIGTERM grace period before escalating; took ${elapsed}ms`,
+  const invocationId = 'e'.repeat(32);
+  // A live backend that refuses to die politely: SIGTERM is observed and
+  // ignored, so only SIGKILL stops it.
+  const victim = spawn(
+    process.execPath,
+    ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 60000);"],
+    {
+      env: { ...env, ANTONINA_AGENT_ID: '7e40', ANTONINA_INVOCATION_ID: invocationId },
+      stdio: 'ignore',
+      detached: true,
+    },
   );
+  const reaped = new Promise((resolve) => victim.on('close', () => resolve()));
+  t.after(async () => {
+    try { process.kill(-victim.pid, 'SIGKILL'); } catch {}
+    try { victim.kill('SIGKILL'); } catch {}
+    await reaped;
+  });
+
+  const ticks = await waitUntil(
+    () => procStartTicks(victim.pid),
+    'the stubborn invocation to be alive with real start ticks',
+  );
+  const pgid = procPgrp(victim.pid);
+  assert.equal(pgid, victim.pid, 'the invocation must lead its own process group');
+
+  const path = metaPath(root, '7e40');
+  const meta = JSON.parse(readFileSync(path, 'utf8'));
+  Object.assign(meta, {
+    state: 'running',
+    // No runner and no reservation: nothing else polls this invocation and can
+    // escalate on its own.
+    active_runner: false,
+    runner_pid: null,
+    runner_start_time: null,
+    runner_reservation: null,
+    pending_prompt: null,
+    pid: victim.pid,
+    pgid,
+    start_time: ticks,
+    invocation_id: invocationId,
+    started_at: 1,
+  });
+  writeFileSync(path, JSON.stringify(meta));
+  assert.equal(procStartTicks(meta.pid), ticks, 'the recorded invocation must be alive before stop');
+
+  // stop waits 10s for a polite death, then escalates, then allows 5s more, so
+  // it cannot use the 15s default timeout of run().
+  const startedAt = Date.now();
+  const stopped = spawnCli(['agent', 'stop', '--id', '7e40'], env);
+  // Watch the victim while stop runs, so the moment of the SIGKILL is observed
+  // instead of being inferred from the command's own report.
+  let diedAt = null;
+  const watcher = (async () => {
+    while (diedAt === null) {
+      if (!sameProcess(victim.pid, ticks)) diedAt = Date.now();
+      else if (Date.now() - startedAt > 30_000) return;
+      await delay(25);
+    }
+  })();
+  const result = await Promise.race([stopped.exited, delay(45_000).then(() => null)]);
+  await watcher;
+  const elapsed = Date.now() - startedAt;
+
+  assert.notEqual(result, null, 'stop must return while the invocation is being escalated');
+  assert.equal(result.status, 0, `stop must succeed via escalation; stderr: ${result.stderr}`);
+  assert.match(result.stdout, /stopped agent 7e40/);
+  assert.notEqual(diedAt, null, 'the invocation must actually be gone, not merely reported gone');
+  // The SIGKILL landed inside stop's own post-escalation window, and it could
+  // only have come from stop: the whole grace period elapsed first (SIGTERM was
+  // ignored throughout it, and no runner existed to escalate on its own), and
+  // the kill landed with a second to spare before the 5s post-escalation wait
+  // expired.
+  assert.ok(
+    diedAt - startedAt >= 10_000,
+    `stop must wait out the SIGTERM grace period before escalating; killed after ${diedAt - startedAt}ms`,
+  );
+  assert.ok(
+    diedAt - startedAt <= 14_000,
+    `the escalation must land inside stop's post-escalation window, not at its deadline; killed after ${diedAt - startedAt}ms`,
+  );
+  assert.ok(elapsed < 15_000, `stop must not spend its full post-escalation window; took ${elapsed}ms`);
   assert.equal(
-    procStartTicks(pid),
+    procStartTicks(victim.pid),
     null,
     'the invocation must be gone once stop reports success, escalation or not',
   );
-  assert.equal(JSON.parse(readFileSync(metaPath(root, '7e40'), 'utf8')).state, 'stopped');
-  assertFixtureInvoked(handle, 'term-trap');
-  void ticks;
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).state, 'stopped');
 });
 
 // The mirror invariant: when even SIGKILL does not make the invocation go away,

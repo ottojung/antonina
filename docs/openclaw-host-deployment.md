@@ -455,3 +455,42 @@ The desired final deployment therefore has two model-related checks:
    OpenCode configuration.
 2. Any OpenClaw embedded/system-agent route that is enabled must also be constrained
    to the intended model rather than silently falling back to another provider.
+
+
+### Direct OpenCode provider catalog versus OpenCode CLI catalog
+
+A later check clarified why the embedded OpenClaw route cannot currently be pinned to
+Space Bunny even though ACP workers can use it.
+
+When the OpenCode credential is explicitly exported into the process environment,
+OpenClaw's direct provider discovery works:
+
+```sh
+set -a
+. ~/.openclaw/.env
+set +a
+openclaw models list --refresh --provider opencode
+```
+
+but the current direct OpenClaw/OpenCode catalog contains models such as
+`opencode/gpt-5.6-sol`, `opencode/claude-opus-5`, and
+`opencode/big-pickle`; it does **not** contain
+`opencode/space-bunny-free`.
+
+By contrast, the dedicated OpenCode CLI configuration used by ACP reports exactly:
+
+```text
+opencode/space-bunny-free
+```
+
+This is an important architectural distinction:
+
+- Space Bunny is available through the OpenCode CLI/ACP path we are using.
+- Space Bunny is not presently available through OpenClaw's direct OpenCode provider
+  catalog on this host/account.
+- Therefore OpenClaw's embedded/system-agent model cannot currently be set to Space
+  Bunny through the direct provider, while ACP workers can be.
+
+Do not work around this by silently choosing a different direct-provider model. If
+the product requirement remains Space Bunny-only, keep the embedded recurring agent
+path disabled and use the ACP/OpenCode path until a supported direct route exists.

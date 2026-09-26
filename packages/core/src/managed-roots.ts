@@ -222,6 +222,9 @@ export function validateManagedRoots(inputs: readonly ManagedCollectionRoot[]): 
 
   return {
     ok: true,
+    // The cast is required rather than decorative: without it the literal's brand
+    // property widens to `boolean` and stops satisfying `readonly
+    // [MANAGED_ROOTS]: true`. It asserts the same type, not a looser one.
     roots: Object.freeze({
       [MANAGED_ROOTS]: true,
       roots: Object.freeze(roots),

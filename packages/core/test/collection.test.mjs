@@ -7,6 +7,7 @@ import {
   BoardTrustRequiredError,
 } from '../dist/api.js';
 import { OperationLogVerificationError } from '../dist/operations.js';
+import { validateManagedRoots } from '../dist/managed-roots.js';
 import {
   collectiblePaths,
   commitCollectionDeletion,
@@ -23,6 +24,33 @@ const HOST = 'lubko://server';
 const OTHER_HOST = 'lubko://other';
 const WORKTREE = '/workspace/project';
 const BUILD = '/workspace/build';
+
+// The configured managed collection roots every destructive re-check is judged
+// against. `/workspace` contains both registered paths above; nothing else in
+// these tests is collectible, because nothing else is inside a managed root.
+const rootsOf = (spelled) => {
+  const result = validateManagedRoots(spelled.map((path) => ({ spelled: path, resolved: path })));
+  assert.equal(result.ok, true, JSON.stringify(result));
+  return result.roots;
+};
+
+const MANAGED = rootsOf(['/workspace']);
+
+/**
+ * The filesystem facts a caller must gather for one candidate. These tests
+ * spell them out instead of creating directories: the re-check is what is under
+ * test, and the facts are inputs to it.
+ */
+const factsFor = (path, overrides = {}) => {
+  const separator = path.lastIndexOf('/');
+  return {
+    path,
+    resolvedPath: path,
+    finalComponentIsSymlink: false,
+    parentResolvedPath: separator <= 0 ? '/' : path.slice(0, separator),
+    ...overrides,
+  };
+};
 
 // A minimal Skrynia stand-in: the collector's only contact with the board is
 // this store, so the re-check tests exercise the real verified read path.
@@ -206,6 +234,8 @@ test('every way of failing to read the board leaves every path protected', async
   // The same board, and the same reader, one moment before it goes unreadable.
   assert.deepEqual(collectiblePaths(await readCollectionSnapshot(HOST, readerFor(writer))), [WORKTREE]);
 
+  const live = await writer.loadState();
+  const liveBoardId = writer.accessState().boardId;
   const cases = [
     [failing(new BoardMissingError()), 'board-missing'],
     [failing(new BoardTrustRequiredError('no anchor')), 'board-unverifiable'],
@@ -215,6 +245,10 @@ test('every way of failing to read the board leaves every path protected', async
     [async () => ({ boardId: 'board', state: { head: 42 } }), 'board-state-rejected'],
     [async () => ({ boardId: '', state: { head: 'head' } }), 'board-state-rejected'],
     [failing(new OperationLogVerificationError('bad head')), 'board-state-rejected'],
+    // A well-formed board and a real head that says the board was deleted. The
+    // registry half of collection establishes for itself that a deleted board is
+    // unverified state, rather than relying on `BoardApi` to refuse to serve one.
+    [async () => ({ boardId: liveBoardId, state: { ...live, deleted: true } }), 'board-unverifiable'],
   ];
 
   for (const [reader, kind] of cases) {
@@ -233,6 +267,21 @@ test('every way of failing to read the board leaves every path protected', async
   assert.equal(absent.verified, false);
   assert.equal(absent.failure.kind, 'board-missing');
   assert.deepEqual(collectiblePaths(absent), []);
+
+  // The deleted-state case spelled out, because it is the one that could
+  // otherwise be satisfied by the right answer for the wrong reason: this board
+  // really is well formed, really does register the path, and really has the
+  // head that called it collectible a moment ago. A deleted board still decides
+  // nothing, and the only thing that stops it is this module's own rule.
+  const deleted = await readCollectionSnapshot(HOST, async () => ({
+    boardId: liveBoardId,
+    state: { ...live, deleted: true },
+  }));
+  assert.equal(deleted.verified, false);
+  assert.equal(deleted.failure.kind, 'board-unverifiable');
+  assert.match(deleted.failure.message, /deleted/);
+  assert.deepEqual(collectiblePaths(deleted), []);
+  assert.throws(() => openCollectionClaim(deleted, WORKTREE), /protected/);
 });
 
 test('a deleted board is not an empty registry', async () => {
@@ -364,6 +413,19 @@ test('an unverified snapshot is empty of decisions however it was built', () => 
   assert.throws(() => openCollectionClaim(smuggled, WORKTREE), /protected/);
 });
 
+/**
+ * The re-check builds its own verifying read from a `BoardApi`, so a test cannot
+ * hand it a reader of its own; the only things a test chooses are the client and
+ * the managed-root judgment. The claim names the path, so the facts default to
+ * that path spelled as the board spelled it.
+ */
+const recheck = (claim, writer, options = {}) => recheckCollectionClaim(
+  claim,
+  writer,
+  options.roots ?? MANAGED,
+  options.facts ?? factsFor(claim.path),
+);
+
 test('a claim can only be opened for a collectible path on the snapshot host', async () => {
   const { writer, open } = await seeded();
   await writer.close(open[0].number);
@@ -393,7 +455,7 @@ test('the re-check authorizes a path that is still collectible at a later revisi
   const claim = openCollectionClaim(snapshot, WORKTREE);
 
   await writer.comment(open[0].number, 'root', 'unrelated board traffic');
-  const authorized = await recheckCollectionClaim(claim, reader);
+  const authorized = await recheck(claim, writer);
   assert.equal(authorized.outcome, 'collect');
   assert.equal(authorized.reason, 'still-collectible');
   assert.equal(authorized.snapshotHead, snapshot.head);
@@ -421,7 +483,7 @@ test('a path protected after the snapshot is withheld by the re-check, not delet
   await writer.reopen(open[0].number);
   await writer.addResourceDependency(HOST, WORKTREE, open[2].number);
 
-  const authorized = await recheckCollectionClaim(claim, reader);
+  const authorized = await recheck(claim, writer);
   assert.equal(authorized.outcome, 'withheld');
   assert.equal(authorized.reason, 'became-protected');
   assert.equal(authorized.status, 'protected');
@@ -440,7 +502,7 @@ test('the re-check withholds a path that stopped being registered', async () => 
   await writer.deleteIssue(open[0].number);
   await writer.deleteIssue(open[1].number);
 
-  const authorized = await recheckCollectionClaim(claim, reader);
+  const authorized = await recheck(claim, writer);
   assert.equal(authorized.outcome, 'withheld');
   assert.equal(authorized.reason, 'unregistered');
   assert.equal(authorized.status, 'protected');
@@ -453,14 +515,20 @@ test('a re-check that cannot be completed withholds instead of falling back on t
   const reader = readerFor(writer);
   const claim = openCollectionClaim(await readCollectionSnapshot(HOST, reader), WORKTREE);
 
-  const broken = failing(new TypeError('fetch failed'));
-  const authorized = await recheckCollectionClaim(claim, broken);
+  // A client that cannot reach the board at all. The re-check is given the
+  // client, not a reader, so the failure has to be the client's own.
+  const broken = api(fakeSkrynia(), {
+    fetch: async () => {
+      throw new TypeError('fetch failed');
+    },
+  });
+  const authorized = await recheck(claim, broken);
   assert.equal(authorized.outcome, 'withheld');
   assert.equal(authorized.reason, 'board-unverifiable');
   assert.equal(authorized.recheckHead, null);
 
   await writer.deleteBoard();
-  const afterDelete = await recheckCollectionClaim(claim, reader);
+  const afterDelete = await recheck(claim, writer);
   assert.equal(afterDelete.outcome, 'withheld');
   assert.equal(afterDelete.reason, 'board-unverifiable');
 });
@@ -471,14 +539,13 @@ test('a re-check against a different board withholds', async () => {
   await writer.close(open[1].number);
   const claim = openCollectionClaim(await readCollectionSnapshot(HOST, readerFor(writer)), WORKTREE);
 
-  const elsewhere = api(fakeSkrynia());
-  const initialized = await elsewhere.initialize();
-  const foreign = async () => ({
-    boardId: initialized.trustAnchor.boardId === 'board' ? 'another-board' : 'board',
-    state: await elsewhere.loadState(),
-  });
+  // A second, real board: an honest client that simply is not talking to the
+  // board the claim came from. The re-check builds its own read, so this is
+  // reached by handing it the wrong client rather than a wrong reader.
+  const elsewhere = api(fakeSkrynia(), { newId: () => 'another-board' });
+  await elsewhere.initialize();
 
-  const authorized = await recheckCollectionClaim(claim, foreign);
+  const authorized = await recheck(claim, elsewhere);
   assert.equal(authorized.outcome, 'withheld');
   assert.equal(authorized.reason, 'wrong-board');
   assert.equal(authorized.status, 'protected');
@@ -490,7 +557,7 @@ test('one re-check authorizes one deletion, and a copy of it is not that authori
   await writer.close(open[1].number);
   const reader = readerFor(writer);
   const claim = openCollectionClaim(await readCollectionSnapshot(HOST, reader), WORKTREE);
-  const authorized = await recheckCollectionClaim(claim, reader);
+  const authorized = await recheck(claim, writer);
 
   // A shallow copy is a different record, and only the record the re-check
   // issued is a live authorization, so a copy cannot be committed either.
@@ -512,6 +579,147 @@ test('one re-check authorizes one deletion, and a copy of it is not that authori
 
   assert.equal(commitCollectionDeletion(authorized).outcome, 'collect');
   assert.throws(() => commitCollectionDeletion(authorized), /not a live authorization/);
+});
+
+test('a board cannot authorise collecting a configured managed root', async () => {
+  const { writer, open } = await seeded();
+  // The board registers the configured managed root itself. Protection and
+  // registry say it owes nothing to any open issue, which is exactly the case
+  // where a board acting on its own authority would authorise removing the root
+  // that defines every other collection permission.
+  await writer.addResourceDependency(HOST, '/workspace', open[0].number);
+  await writer.close(open[0].number);
+
+  const snapshot = await readCollectionSnapshot(HOST, readerFor(writer));
+  assert.deepEqual(collectiblePaths(snapshot), ['/workspace']);
+  const claim = openCollectionClaim(snapshot, '/workspace');
+
+  const authorized = await recheck(claim, writer);
+  assert.equal(authorized.outcome, 'withheld');
+  assert.equal(authorized.reason, 'candidate-is-managed-root');
+  assert.equal(authorized.status, 'protected');
+  assert.equal(commitCollectionDeletion(authorized).outcome, 'withheld');
+});
+
+test('a board cannot authorise collecting a path no managed root contains', async () => {
+  const { writer, open } = await seeded();
+  // A perfectly well-formed absolute path the registry is happy to call
+  // collectible, and that lives in no configured managed root at all.
+  const unmanaged = '/etc/antonina';
+  await writer.addResourceDependency(HOST, unmanaged, open[0].number);
+  await writer.close(open[0].number);
+
+  const snapshot = await readCollectionSnapshot(HOST, readerFor(writer));
+  assert.deepEqual(collectiblePaths(snapshot), [unmanaged]);
+  const claim = openCollectionClaim(snapshot, unmanaged);
+
+  const authorized = await recheck(claim, writer);
+  assert.equal(authorized.outcome, 'withheld');
+  assert.equal(authorized.reason, 'outside-managed-roots');
+  assert.equal(authorized.status, 'protected');
+  assert.equal(commitCollectionDeletion(authorized).outcome, 'withheld');
+});
+
+test('a collect authorization is impossible for a candidate the root facts name differently', async () => {
+  const { writer, open } = await seeded();
+  await writer.close(open[0].number);
+  await writer.close(open[1].number);
+  const claim = openCollectionClaim(await readCollectionSnapshot(HOST, readerFor(writer)), WORKTREE);
+
+  // The path is inside the managed root, but the facts are about a path the
+  // claim does not name. A collector is never handed a differently spelled path
+  // than the board recorded, so this is a refusal, not a collect.
+  const elsewhere = await recheck(claim, writer, { facts: factsFor(BUILD) });
+  assert.equal(elsewhere.outcome, 'withheld');
+  assert.equal(elsewhere.reason, 'outside-managed-roots');
+  assert.equal(elsewhere.path, WORKTREE);
+});
+
+test('a hand-built state cannot mint a collect authorization', async () => {
+  const { writer, open } = await seeded();
+  // A reader that lies: it reports the live board with every issue closed, so
+  // the snapshot is verified and calls the path collectible. Nothing here is a
+  // real board revision.
+  const liar = async () => {
+    const state = await writer.loadState();
+    return {
+      boardId: writer.accessState().boardId,
+      state: {
+        ...state,
+        board: {
+          ...state.board,
+          issues: state.board.issues.map((issue) => ({ ...issue, state: 'closed' })),
+        },
+      },
+    };
+  };
+
+  const forged = await readCollectionSnapshot(HOST, liar);
+  assert.equal(forged.verified, true);
+  assert.deepEqual(collectiblePaths(forged), [WORKTREE, BUILD].sort());
+  const claim = openCollectionClaim(forged, WORKTREE);
+
+  // The snapshot is a real object and the claim is a real claim, but the
+  // re-check reads the board itself: the same client, one moment later, still
+  // has open issues, so there is nothing to collect.
+  const authorized = await recheck(claim, writer);
+  assert.equal(authorized.outcome, 'withheld');
+  assert.equal(authorized.reason, 'became-protected');
+  assert.equal(authorized.recheckHead, writer.getRememberedHead());
+
+  // The reader is gone from the destructive path altogether: it is not a
+  // parameter a caller can pass.
+  assert.equal(recheckCollectionClaim.length, 4);
+});
+
+test('a path this module cannot canonicalise is protected, and a sweep survives it', async () => {
+  const { writer, open } = await seeded();
+  await writer.close(open[0].number);
+  await writer.close(open[1].number);
+  const snapshot = await readCollectionSnapshot(HOST, readerFor(writer));
+  assert.deepEqual(collectiblePaths(snapshot), [WORKTREE]);
+
+  // A malformed candidate in a sweep must not take the sweep with it, and must
+  // not be decided by whatever it resembles.
+  for (const malformed of ['workspace/project', '/workspace/project/', '/workspace/../etc']) {
+    assert.deepEqual(protectionOf(snapshot, malformed), {
+      host: HOST,
+      path: malformed,
+      status: 'protected',
+      issues: [],
+      basis: 'path-not-canonical',
+    }, malformed);
+  }
+  assert.throws(() => openCollectionClaim(snapshot, '/workspace/project/'), /path-not-canonical/);
+
+  // The well-formed candidates in the same sweep are still decided normally.
+  assert.equal(protectionOf(snapshot, WORKTREE).status, 'collectible');
+  assert.equal(protectionOf(snapshot, '  ' + WORKTREE + '  ').status, 'collectible');
+});
+
+test('a host that is not already canonical yields an unverified snapshot', async () => {
+  const { writer, open } = await seeded();
+  await writer.close(open[0].number);
+  await writer.close(open[1].number);
+  const reader = readerFor(writer);
+
+  for (const malformed of ['server', 'https://server', 'lubko://', 'lubko://a/b']) {
+    const snapshot = await readCollectionSnapshot(malformed, reader);
+    assert.equal(snapshot.verified, false, malformed);
+    assert.equal(snapshot.failure.kind, 'host-not-canonical', malformed);
+    assert.equal(snapshot.head, null);
+    assert.deepEqual(snapshot.decisions, []);
+    assert.deepEqual(collectiblePaths(snapshot), []);
+    assert.throws(() => openCollectionClaim(snapshot, WORKTREE), /protected/);
+  }
+
+  // The unverified shape itself never throws on the way out, so an operator
+  // reading a failure for a malformed host gets one.
+  assert.equal(
+    unverifiedCollectionSnapshot('not-a-host', { kind: 'host-not-canonical', message: 'x' }).host,
+    'not-a-host',
+  );
+  assert.equal((await readCollectionSnapshot(HOST, reader)).verified, true);
 });
 
 test('a snapshot names the board and revision it decided from, and cannot be minted by a caller', async () => {

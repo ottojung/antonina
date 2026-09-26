@@ -17,6 +17,12 @@ import {
   type VerifiedBoardState,
 } from './operations.js';
 import { SignedBoardStoreError } from './board-store.js';
+import {
+  evaluateManagedCandidate,
+  type CandidatePathFacts,
+  type ManagedPathRefusal,
+  type ManagedRoots,
+} from './managed-roots.js';
 
 /**
  * The registry half of resource-driven host garbage collection.
@@ -34,10 +40,16 @@ import { SignedBoardStoreError } from './board-store.js';
  * opinion about: the canonical board parser rejects both, so such state is
  * unverified state and the snapshot is fail-closed.
  *
- * What makes a revision *verified* is the `CollectionReader` the caller
- * supplies, not this module: only `boardApiCollectionReader` verifies the
+ * What makes a revision *verified* is the read itself, not this module: only
+ * the reader `boardApiCollectionReader` builds over a `BoardApi` verifies the
  * signed log. All this module does with a revision is put it back through the
  * canonical parser, so it can refuse state that is not a well-formed board.
+ *
+ * A snapshot may be read through any `CollectionReader`, so a snapshot is only
+ * ever as trustworthy as the reader behind it. The destructive path is not: the
+ * re-check builds its own verifying reader from a `BoardApi` and additionally
+ * requires the managed-root judgment for the candidate, so `outcome: 'collect'`
+ * cannot be minted from a hand-built state.
  */
 
 /** One authoritative read: a verified board revision and the board it belongs to. */
@@ -68,7 +80,8 @@ export type CollectionFailureKind =
   | 'board-missing'
   | 'board-unverifiable'
   | 'board-read-failed'
-  | 'board-state-rejected';
+  | 'board-state-rejected'
+  | 'host-not-canonical';
 
 export interface CollectionFailure {
   kind: CollectionFailureKind;
@@ -125,13 +138,15 @@ export interface ProtectionVerdict {
   issues: ResourceDependencyView[];
   /**
    * Why the answer is what it is: the canonical rule applied to a verified
-   * snapshot, or the snapshot declining to answer.
+   * snapshot, the snapshot declining to answer, or an input this module refuses
+   * to canonicalise.
    */
   basis:
     | 'snapshot-verified'
     | 'snapshot-unverified'
     | 'not-registered'
-    | 'other-host';
+    | 'other-host'
+    | 'path-not-canonical';
 }
 
 function decisionFromView(view: ResourceView): ProtectionDecision {
@@ -141,6 +156,20 @@ function decisionFromView(view: ResourceView): ProtectionDecision {
     status: view.protected ? 'protected' : 'collectible',
     issues: view.issues.map((dependency) => ({ ...dependency })),
   };
+}
+
+/**
+ * The host a decision is scoped to, without ever throwing. A host that is not
+ * already canonical is not a host this module can scope a decision to, so the
+ * answer is "not canonical" rather than an exception: a single malformed
+ * argument must not abort a whole sweep.
+ */
+function scopedHost(host: string): { host: string; canonical: boolean } {
+  try {
+    return { host: canonicalHost(host), canonical: true };
+  } catch {
+    return { host: host.trim(), canonical: false };
+  }
 }
 
 /**
@@ -154,9 +183,22 @@ function decisionFromView(view: ResourceView): ProtectionDecision {
  * registered against an issue that does not exist, or against no issue at all,
  * cannot be decided here: it is rejected as unverified state instead of read as
  * a collectible path.
+ *
+ * A deleted board is unverified state here, and this module establishes that
+ * invariant itself rather than inheriting it from `BoardApi` refusing to serve a
+ * deleted board. `boardApiCollectionReader` never sees a deleted board, but a
+ * `CollectionReader` can be anything, and a reader that handed back the last
+ * pre-deletion revision's resources would otherwise produce a verified snapshot
+ * full of collectible paths for a board that no longer exists.
  */
-function collectionSnapshot(read: VerifiedBoardRead, host: string): VerifiedCollectionSnapshot {
+function collectionSnapshot(read: VerifiedBoardRead, host: string): CollectionSnapshot {
   const scoped = canonicalHost(host);
+  if (read.state.deleted === true) {
+    return unverifiedCollectionSnapshot(scoped, {
+      kind: 'board-unverifiable',
+      message: `Board ${read.boardId} is deleted, so it protects nothing and collects nothing`,
+    });
+  }
   return {
     verified: true,
     host: scoped,
@@ -173,7 +215,7 @@ export function unverifiedCollectionSnapshot(
 ): UnverifiedCollectionSnapshot {
   return {
     verified: false,
-    host: canonicalHost(host),
+    host: scopedHost(host).host,
     boardId: null,
     head: null,
     decisions: [],
@@ -199,16 +241,24 @@ function failureKind(error: unknown): CollectionFailureKind {
 /**
  * Reads the board and turns the result into a snapshot. Every failure of the
  * read -- a missing board, a board this client cannot verify, a log that no
- * longer validates, a transport error, or a read that returns something other
- * than verified state -- becomes one unverified snapshot rather than an error.
- * An unreadable board must leave every path protected rather than abort a
- * sweep or, worse, be treated as an empty registry.
+ * longer validates, a transport error, a read that returns something other
+ * than verified state, a deleted board, or a host that is not already canonical
+ * -- becomes one unverified snapshot rather than an error. An unreadable board
+ * must leave every path protected rather than abort a sweep or, worse, be
+ * treated as an empty registry.
  */
 export async function readCollectionSnapshot(
   host: string,
   read: CollectionReader,
 ): Promise<CollectionSnapshot> {
-  const scoped = canonicalHost(host);
+  const scoping = scopedHost(host);
+  if (!scoping.canonical) {
+    return unverifiedCollectionSnapshot(host, {
+      kind: 'host-not-canonical',
+      message: 'Host must be lubko://<non-empty-server-name> before a decision can be scoped to it',
+    });
+  }
+  const scoped = scoping.host;
   let value: VerifiedBoardRead;
   try {
     value = await read();
@@ -244,11 +294,26 @@ export async function readCollectionSnapshot(
 /**
  * The answer for one path on this host, always `protected` or `collectible`.
  * A path this host's collector may not act on is protected: a path the snapshot
- * says nothing about is protected, and so is a path another host registered,
- * because absence of a decision is never an authorization to delete.
+ * says nothing about is protected, a path another host registered is protected
+ * because absence of a decision is never an authorization to delete, and so is
+ * a path that is not already canonical. That last one is fail-closed rather than
+ * loud: a malformed candidate in a sweep must not take the whole sweep with it,
+ * and a path this module cannot canonicalise is not a path it can locate in the
+ * registry, so it decides nothing.
  */
 export function protectionOf(snapshot: CollectionSnapshot, path: string): ProtectionVerdict {
-  const target = canonicalPath(path);
+  let target: string;
+  try {
+    target = canonicalPath(path);
+  } catch {
+    return {
+      host: snapshot.host,
+      path,
+      status: 'protected',
+      issues: [],
+      basis: 'path-not-canonical',
+    };
+  }
   // A resource is identified by the `(host, path)` pair, not by `path` alone, so
   // this host's decision has to win over any other host's decision for the same
   // path. Looking up by path alone would let a foreign host's decision that
@@ -345,7 +410,37 @@ export type CollectionOutcomeReason =
   | 'became-protected'
   | 'unregistered'
   | 'board-unverifiable'
-  | 'wrong-board';
+  | 'wrong-board'
+  /**
+   * The candidate is a configured managed root, so the roots that define it do
+   * not authorise its removal.
+   */
+  | 'candidate-is-managed-root'
+  /**
+   * The candidate is canonical but lies in no configured managed root, so no
+   * configured root authorises its removal.
+   */
+  | 'outside-managed-roots'
+  /**
+   * The candidate is inside a configured root but that root does not authorise
+   * this particular path, or the facts about it are not the ones the board
+   * recorded. The specific refusal is reported by the path-safety front; here it
+   * is only ever a withheld outcome.
+   */
+  | 'not-managed-collectible';
+
+/**
+ * The managed-root judgment as a re-check reason. The two refusals that name a
+ * configured root -- the root itself, and a path no root contains -- are
+ * reported under their own names, because they are the two cases a board could
+ * otherwise authorise on its own authority. Everything else is a path-safety
+ * detail and is reported as one reason.
+ */
+function managedReason(refusal: ManagedPathRefusal): CollectionOutcomeReason {
+  if (refusal === 'candidate-is-managed-root') return 'candidate-is-managed-root';
+  if (refusal === 'outside-managed-roots') return 'outside-managed-roots';
+  return 'not-managed-collectible';
+}
 
 /** Module-private: not exported, so no caller can construct a seal. */
 const authorizationSeal: unique symbol = Symbol('antonina.collection.authorization');
@@ -386,15 +481,26 @@ const liveAuthorizations = new WeakSet<AuthorizedCollection>();
  * 1. The caller holds a claim naming the path, its host, and the board
  *    revision that called the path collectible.
  * 2. The caller must re-verify that exact path against a fresh authoritative
- *    read of the same board: a new `readCollectionSnapshot` over a new
- *    `CollectionReader`, never the snapshot the claim came from and never a
- *    local copy of the board.
+ *    read of the same board. The re-check builds that read itself, from the
+ *    `BoardApi` it is given, through `boardApiCollectionReader`: a caller cannot
+ *    hand the destructive step a reader of its own, so no fabricated state can
+ *    reach an authorization. The read is a new one, never the snapshot the claim
+ *    came from and never a local copy of the board.
  * 3. The re-check authorizes deletion only if the fresh verified state still
- *    calls the path collectible. Every disagreement withholds: the path is
- *    protected now, the path is no longer registered at all, the board cannot
- *    be read or verified, or the read came back from a different board.
+ *    calls the path collectible *and* a configured managed root authorises
+ *    removing it. Every disagreement withholds: the path is protected now, the
+ *    path is no longer registered at all, the board cannot be read or verified,
+ *    the read came back from a different board, or the managed-root judgment
+ *    does not find the path collectible.
  * 4. A re-check that cannot be completed is a `withheld`, never a retry with
  *    the stale snapshot. There is no third option.
+ *
+ * The managed-root judgment is a required input, not advice. `protectionOf`
+ * answers for any board-registered absolute path, so without this step a board
+ * could authorise collecting a configured managed root itself, or an absolute
+ * path that lies in no managed root at all. `outcome: 'collect'` therefore
+ * implies that some configured managed root authorises the removal of exactly
+ * the path the board recorded.
  *
  * The residual window is the interval between the completed re-check read and
  * the destructive step itself. The signed board log is append-only with no
@@ -404,9 +510,11 @@ const liveAuthorizations = new WeakSet<AuthorizedCollection>();
  */
 export async function recheckCollectionClaim(
   claim: CollectionClaim,
-  read: CollectionReader,
+  api: BoardApi,
+  managed: ManagedRoots,
+  candidate: CandidatePathFacts,
 ): Promise<AuthorizedCollection> {
-  const snapshot = await readCollectionSnapshot(claim.host, read);
+  const snapshot = await readCollectionSnapshot(claim.host, boardApiCollectionReader(api));
   const issue = (
     outcome: AuthorizedCollection['outcome'],
     reason: CollectionOutcomeReason,
@@ -443,6 +551,19 @@ export async function recheckCollectionClaim(
       snapshot.head,
     );
   }
+
+  // Path safety last, so an unowned or renamed candidate is reported as what it
+  // is rather than as a managed-root refusal. A candidate is eligible only if it
+  // is eligible for the path the claim names: the facts a caller supplies are
+  // about a path, and a collector is never handed a differently spelled one.
+  const candidatePath = evaluateManagedCandidate(managed, candidate);
+  if (candidatePath.eligible !== true || candidatePath.path !== claim.path) {
+    const refusal: ManagedPathRefusal = candidatePath.eligible === true
+      ? 'outside-managed-roots'
+      : candidatePath.refusal;
+    return issue('withheld', managedReason(refusal), 'protected', snapshot.head);
+  }
+
   return issue('collect', 'still-collectible', 'collectible', snapshot.head);
 }
 

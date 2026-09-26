@@ -18,7 +18,7 @@ import {
   runnerReservationState,
   stopLikeOrMalformed,
   validateAgentMetadata,
-} from '../dist/metadata.js';
+} from '../dist/packages/agent-runtime/src/metadata.js';
 
 const badAuthority = [123, true, 1.5, [], {}, ''];
 

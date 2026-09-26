@@ -15,7 +15,7 @@ import {
   processPgrp,
   signalGroupChecked,
   signalIdentityChecked,
-} from '../dist/process.js';
+} from '../dist/packages/agent-runtime/src/process.js';
 
 function statLine({ state = 'S', ppid = 1, pgrp = 4242, start = 1234 } = {}) {
   const fields = [state, String(ppid), String(pgrp), '0', '0', '0', '0', '0', '0', '0', '0', '7', '11', '0', '0', '0', '0', '0', '0', String(start)];

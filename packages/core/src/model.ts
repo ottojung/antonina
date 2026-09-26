@@ -100,10 +100,29 @@ function isValidHost(host: string): boolean {
   return /^lubko:\/\/[^/\s?#\\]+$/.test(host);
 }
 
+/**
+ * Why a path is not already in the one canonical form Antonina stores, or `null`
+ * when it is. The reason is a value rather than a thrown message so that a caller
+ * deciding what to do about a path can distinguish a relative path from a
+ * `..` traversal without re-deriving it from prose.
+ */
+export type PathFormDefect =
+  | 'empty'
+  | 'relative'
+  | 'parent-traversal'
+  | 'non-canonical';
+
+export function pathFormDefect(path: string): PathFormDefect | null {
+  if (path.length === 0) return 'empty';
+  if (path === '/') return null;
+  if (path.split('/').some((segment) => segment === '..')) return 'parent-traversal';
+  if (!path.startsWith('/')) return 'relative';
+  if (path.endsWith('/') || path.includes('//')) return 'non-canonical';
+  return path.split('/').some((segment) => segment === '.') ? 'non-canonical' : null;
+}
+
 function isValidPath(path: string): boolean {
-  if (path === '/') return true;
-  if (!path.startsWith('/') || path.endsWith('/') || path.includes('//')) return false;
-  return path.split('/').every((segment) => segment !== '.' && segment !== '..');
+  return pathFormDefect(path) === null;
 }
 
 export function canonicalHost(value: string): string {
@@ -143,7 +162,7 @@ export function parseCanonicalBoard(value: unknown): Board {
       || !Array.isArray(value.issues)
       || !value.issues.every(isIssue)
       || !Array.isArray(value.resources)) {
-    throw new Error('Skrynia object antonina/board-v1 contains an incompatible or malformed board');
+    throw new Error('Antonina board object is incompatible or malformed');
   }
 
   const board = value as unknown as Board;

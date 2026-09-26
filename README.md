@@ -30,7 +30,22 @@ This installs the `antonina` executable. Release artifacts should ship the alrea
 
 ## Board
 
-The Antonina board stores issues and durable resources in Skrynia. The CLI is available as `antonina board`; set `ANTONINA_BOARD_CAPABILITY` for writes.
+The Antonina board stores issues and durable resources in Skrynia as a signed operation log under `antonina/board-v2`. The CLI is available as `antonina board`; set `ANTONINA_BOARD_TRUST` to read it and `ANTONINA_BOARD_CREDENTIAL` to write to it.
+
+Reading the board never creates it. Creation is deliberate and has a single path, `BoardApi.initialize()`, reached either from the web board's first-run **Initialize board** action or from `antonina board initialize`; there is no second or fallback creation path, and a second initializer is refused with a non-zero exit instead of taking the trust root. The initializer keeps the board's root signing credential and its public trust anchor, both copyable from the web board's Settings; share the anchor with readers and the credential with editors.
+
+`antonina board initialize` prints both values for a human, and `--credential` or `--trust-anchor` prints exactly one serialized value on stdout for a script. Pass at most one of them:
+
+```sh
+antonina board initialize --credential > .antonina-credential
+antonina board initialize --trust-anchor > .antonina-trust
+```
+
+`antonina board credential delegate` mints attenuated credentials.
+
+The board's issue queue is durable shared state, not a browser-local sort. The queue is exactly the set of currently open issues, each once: creating an issue appends it, closing or deleting one removes it, and reopening one adds it back. `antonina board queue list` prints that order as `#1 #3 #2`, or as a bare JSON array with `--json`. `antonina board queue reorder 3 1 2` replaces the whole order with a permutation of the open issues; it is rejected, without writing anything, if the list is partial, repeats an issue, or names a closed or unknown issue. Both commands need only the board's trust anchor to read, and reordering additionally needs a credential holding the `queue.reorder` capability, which `antonina board credential delegate queue.reorder` can mint.
+
+A credential's Skrynia storage capability can go stale: setup accepts it, the first real mutation is refused, and that client then stays read-only until it is given a freshly copied credential.
 
 ```sh
 antonina board --help

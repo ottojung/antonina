@@ -13,7 +13,7 @@
     "typeRoots": ["../../web/node_modules/@types"],
     "declaration": true,
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "../.."
   },
   "include": ["src/**/*.ts"]
 }

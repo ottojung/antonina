@@ -33,6 +33,7 @@ import {
 import {
   BOARD_CAPABILITIES,
   type BoardCapability,
+  type BoardOperationKind,
   type BoardOperationPayload,
   type BoardTrustAnchor,
   type VerifiedAuthority,
@@ -457,7 +458,7 @@ export class BoardApi {
   }
 
   private async append(
-    kind: Exclude<Parameters<SignedBoardStore['append']>[1]['kind'], never>,
+    kind: Exclude<BoardOperationKind, 'board.initialize'>,
     payload: BoardOperationPayload | ((state: VerifiedBoardState) => BoardOperationPayload),
     capability: BoardCapability,
   ): Promise<StoredSignedBoard> {
@@ -480,18 +481,13 @@ export class BoardApi {
   }
 }
 
-export {
-  BOARD_CAPABILITIES,
-  emptyBoard,
-  parseBoard,
-  type Board,
-  type BoardCapability,
-  type BoardCredential,
-  type BoardIssue,
-  type BoardResource,
-  type BoardTrustAnchor,
-  type IssueState,
-  type ResourceView,
-  type VerifiedAuthority,
-  type VerifiedBoardState,
+export { BOARD_CAPABILITIES } from './operations.js';
+export { emptyBoard, parseBoard } from './model.js';
+export type { Board, BoardIssue, BoardResource, IssueState, ResourceView } from './model.js';
+export type { BoardCredential } from './credential.js';
+export type {
+  BoardCapability,
+  BoardTrustAnchor,
+  VerifiedAuthority,
+  VerifiedBoardState,
 } from './operations.js';

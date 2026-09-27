@@ -12,8 +12,8 @@ The orchestrator has four jobs:
 
 1. reconcile the board with objective execution state;
 2. continue useful work already in progress when possible;
-3. otherwise select the highest-priority actionable issue from the board queue;
-4. leave an append-only board update that makes the next pass able to continue safely.
+3. build the largest clearly safe and useful parallel frontier from the board queue;
+4. leave append-only board updates that make later passes able to continue safely.
 
 Do useful work and then return. Do not keep an invocation alive merely to wait for a long-running agent or external event. A later invocation should be able to reconstruct the state from the board and the durable artifacts named there.
 
@@ -30,7 +30,7 @@ antonina board show NUMBER --json
 
 The board trust anchor and credential come from Antonina's config directory. Never print, copy into comments, or otherwise expose credentials, private keys, tokens, or other secrets.
 
-Comments need an author. Prefer one stable identity for the orchestrator, configured with `ANTONINA_BOARD_AUTHOR`, for example `openclaw@mycelium-dev`. Passing `--author` explicitly is also valid.
+Comments need an author. Prefer one stable identity for the orchestrator, configured with `ANTONINA_BOARD_AUTHOR`, for example `openclaw@marceline-dev`. Passing `--author` explicitly is also valid.
 
 If the board is readable but not editable, do not pretend to claim or complete work. Read enough state to diagnose the problem, then stop without making unrecorded substantive changes.
 
@@ -57,17 +57,25 @@ At the beginning of every pass:
 2. Read the queue.
 3. Inspect enough queued issues, in queue order, to classify ongoing work, ownership, blockers, and actionability.
 4. Reconcile any referenced agent, worktree, branch, pull request, job, or other durable artifact before trusting an old status comment.
-5. Select exactly one primary issue for substantive attention in this pass.
+5. Build a portfolio of useful concurrent work rather than stopping after one issue.
 
-Selection uses these tiers, in order:
+Selection proceeds in phases:
 
-1. **Recoverable ongoing work.** Prefer an issue whose existing work can usefully continue now: a live subordinate agent to inspect or steer, a handoff with a clear next step, a branch or pull request awaiting the next local action, or interrupted work whose durable state is recoverable.
-2. **Highest-priority new work.** If no ongoing work should be continued, choose the first actionable issue in queue order that is not actively owned by another live orchestrator and is not blocked on an unavailable dependency.
-3. **No actionable work.** If every open issue is actively owned elsewhere, blocked, or otherwise non-actionable, record a board update only when doing so adds new durable information, then return.
+1. **Recoverable ongoing work.** Reconcile and continue every issue whose existing work can usefully continue now: a live subordinate agent to inspect or steer, a handoff with a clear next step, a branch or pull request awaiting the next local action, or interrupted work whose durable state is recoverable.
+2. **Breadth scan.** Scan the queue from front to back. For each actionable unclaimed issue, ask whether it is clearly safe and useful to execute concurrently with the work already admitted into this pass. Admit it when the answer is yes; otherwise defer it and keep scanning.
+3. **Prefer obvious independence.** Issues from clearly unrelated projects or repositories should normally be admitted concurrently unless they share an explicit dependency, deployment target, mutable external resource, or other concrete conflict. Do not stop scanning merely because an earlier issue is already being worked on.
+4. **Be conservative within one project.** When two issues appear to belong to the same project, defer additional work unless there is positive evidence that the fronts are independent. The same repository is not proof of conflict: monorepos may contain independent packages, apps, services, or subsystems that can safely progress in separate worktrees.
+5. **Depth scan.** After establishing broad cross-project parallelism, revisit deferred same-project issues in queue order and admit additional work when independence is evident.
+6. **Intra-issue parallelism.** For substantial issues, consider complementary agents with genuinely different roles, such as implementation, independent review, verification/testing, or focused research/design. Do not spawn duplicate agents merely to increase concurrency.
+7. **No further safe work.** Stop expanding the frontier when additional work would be blocked, duplicate existing work, or rely on uncertain independence.
 
-Within the same tier, queue order wins.
+Queue order still expresses shared priority. The orchestrator should preserve that priority while exploiting concurrency; do not reorder the queue merely to encode scheduler state.
 
-A higher-priority issue may be skipped for this pass when it is actively owned by another live worker, blocked on a named unresolved dependency, or less appropriate than genuinely ongoing recoverable work. Skipping it is a scheduling decision, not a queue-priority change.
+Useful evidence of independence includes disjoint repositories, separate monorepo packages/apps, unrelated subsystems, separate worktrees, distinct deployment targets, or clearly non-overlapping implementation areas. Potential conflict domains include the same source files, shared core APIs under active redesign, one database/schema migration path, the same mutable deployment environment, or another shared external resource.
+
+Execution resources are also a conflict domain. Before adding new heavy workers to a host, inspect objective resource headroom when it is readily available, especially hard cgroup limits and recent OOM evidence. Do not add workers to a host that is already at or near a hard resource limit merely because their repository work is logically independent; prefer another compatible execution target when one is available. This is a feasibility constraint, not a fairness quota.
+
+Development can often proceed concurrently even when integration must later serialize. Separate branches or worktrees may be safe to implement in parallel and then merge into a shared release branch one at a time.
 
 Do not manufacture work merely to stay busy.
 
@@ -89,6 +97,8 @@ Before starting new substantive work on an unowned issue:
 2. append a `working` orchestrator comment;
 3. immediately read the issue again;
 4. if a later conflicting `working` claim from another orchestrator now exists, yield before launching duplicate work.
+
+After a claim survives that reread, perform the concrete launch promptly. Do not spend the rest of the pass scouting while an admitted issue exists only as a promise to create a worktree or agent later. Once the agent is launched, append its real ID and worktree before relying on it for handoff. If execution cannot actually be launched this pass, record the issue as `handoff` or `blocked` rather than leaving a misleading execution claim.
 
 The latest coordination comment in the issue history is the current declared status, but objective state can prove that declaration stale.
 
@@ -143,7 +153,7 @@ antonina agent new --id ID --cwd /absolute/worktree
 
 Record a new agent ID and its worktree in the issue comment before relying on them for handoff. Use separate worktrees for materially independent repository work.
 
-Parallel agents are useful only for genuinely independent fronts. Do not spawn duplicates just to fill capacity.
+Parallel agents are useful for genuinely independent fronts and for complementary roles on the same substantial issue. Favor broad, clearly independent work first; then add proven same-project or intra-issue parallelism. Do not spawn duplicates just to fill capacity.
 
 Do not wait idly for long-running agents. Inspect what is available now, steer if useful, record durable state when it materially changes, and let a later orchestrator pass continue.
 
@@ -159,7 +169,7 @@ A handoff comment should let a fresh orchestrator continue without reconstructin
 
 Prefer factual state such as a branch name, commit, PR, test result, agent ID, or host path over prose about effort.
 
-A blocked issue stays open. Name the blocker precisely and, when possible, the event that would clear it. Once the blocker is recorded, continue with the next actionable queued issue rather than repeatedly rediscovering the same block.
+A blocked issue stays open. Name the blocker precisely and, when possible, the event that would clear it. When a queue scan newly discovers a blocker, append that fact on the blocked issue itself; mentioning it only in another issue's comment does not count as recording the blocker. Once the blocker is recorded, continue with the next actionable queued issue rather than repeatedly rediscovering the same block.
 
 Do not create a follow-up issue for work that is merely the unfinished remainder of the current issue. Create a new issue only when it is a distinct durable task that deserves independent priority, lifecycle, or ownership.
 

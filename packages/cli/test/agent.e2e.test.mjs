@@ -696,7 +696,7 @@ test('legacy top-level agent command spellings are not accepted', (t) => {
   const { env } = fixture(t);
   const result = run(['list', '--json'], env);
   assert.equal(result.status, 2);
-  assert.match(result.stderr, /expected "agent" or "board"/);
+  assert.match(result.stderr, /expected "agent", "board" or "daemon" command namespace/);
 });
 
 

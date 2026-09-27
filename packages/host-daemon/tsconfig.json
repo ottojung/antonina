@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": ["ES2022"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
@@ -11,8 +11,9 @@
     "skipLibCheck": true,
     "types": ["node"],
     "typeRoots": ["../../web/node_modules/@types"],
+    "declaration": true,
     "outDir": "dist",
     "rootDir": "../.."
   },
-  "include": ["src/**/*.ts", "../core/src/**/*.ts", "../agent-runtime/src/**/*.ts", "../host-daemon/src/**/*.ts"]
+  "include": ["src/**/*.ts"]
 }

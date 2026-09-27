@@ -93,6 +93,33 @@ antonina agent wait --id a13f09c2 --timeout 3600
 
 Lifecycle controls are available through `stop`, `kill`, `delete`, and `clean`. Local runtime state is stored under `$XDG_STATE_HOME/antonina`, defaulting to `$HOME/.local/state/antonina`. That is a different tree from the board configuration above: `clean` sweeps runtime state and never touches your board trust anchor or credential.
 
+## Host daemon
+
+A persistent hardware host can run a long-lived Antonina daemon. It keeps a stable identity for the host, publishes a heartbeat and host telemetry -- memory, filesystem and workspace capacity, CPU count, load, uptime -- and stops there: it is a host-local observer, not a second transport to a host. Lubko remains the transport for a Lubko-managed host, and the daemon never executes a command.
+
+```sh
+antonina daemon identity          # the stable name this host answers to
+antonina daemon start             # publish heartbeats until signalled
+antonina daemon status [--json]   # the last report, and whether it is fresh
+```
+
+`start` runs in the foreground on purpose: a host's most persistent process should be the one a supervisor already knows how to restart, not a detached process with no exit status. Run it from a systemd unit, a launchd plist, or whatever your host already uses.
+
+The host is named by `hostId` in `$XDG_CONFIG_HOME/antonina/daemon.json` when you set one, and otherwise from a machine fact -- `/etc/machine-id`, else `/var/lib/dbus/machine-id`, else the hostname -- recorded once under `$XDG_STATE_HOME/antonina/daemon`. That record is what keeps a host the same host after a reinstall, a clone or a rename. No process name is ever consulted.
+
+`daemon.json` also configures which paths are reported and how fresh a report has to be:
+
+```json
+{
+  "hostId": "phoebe-dev",
+  "workspaces": ["/workspace/project-worktree"],
+  "heartbeatIntervalMs": 30000,
+  "staleAfterMs": 180000
+}
+```
+
+A report is read, never written, through `BoardApi.daemonHosts(reports, { nowMs })`, which joins host reports with the execution-target catalog and reports each host as `online`, `stale` or `offline`. It requires no board credential and appends nothing to the signed board.
+
 ## Development
 
 ```sh

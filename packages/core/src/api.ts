@@ -63,6 +63,11 @@ import {
   type TargetView,
 } from './model.js';
 import {
+  daemonHostViews,
+  type DaemonHostReport,
+  type DaemonHostView,
+} from './host-daemon.js';
+import {
   BOARD_CAPABILITIES,
   parseBoardCapability,
   type BoardCapability,
@@ -449,6 +454,25 @@ export class BoardApi {
     const target = (await this.loadBoard()).targets.find((entry) => entry.id === id);
     if (!target) throw new AntoninaApiError('Antonina execution target ' + id + ' is not registered');
     return clone(target);
+  }
+
+  /**
+   * The persistent hosts a daemon has reported, each related to the target
+   * catalog, and how fresh each report is.
+   *
+   * This is a read of a caller-supplied set of host-local reports joined
+   * against the verified board. It appends nothing, needs no credential, and
+   * never rewrites a target's recorded status: a report is evidence about a
+   * host, not an edit to the registration an operator placed in the catalog. A
+   * board that is not readable yields no hosts rather than an error, so a host
+   * with telemetry to report is still reportable on a machine with no board.
+   */
+  async daemonHosts(
+    reports: readonly DaemonHostReport[],
+    options: { nowMs: number; staleAfterMs?: number },
+  ): Promise<DaemonHostView[]> {
+    const board = await this.readBoard();
+    return clone(daemonHostViews(reports, { ...options, board }));
   }
 
   /**

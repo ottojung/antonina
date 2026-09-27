@@ -8,6 +8,7 @@ import {
   PRESSURE_WARNING_AVG10,
   checkHostLaunchCapacity,
   capacityOverrideRequested,
+  derivedMinHeadroomBytes,
   evaluateLaunchCapacity,
   formatBytes,
   readHostCapacity,
@@ -326,3 +327,118 @@ test('every degraded capacity produces a non-empty stated reason', () => {
 function escape(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
+
+
+test('b. the default threshold is derived from the limit, not from a fixed constant', () => {
+  // 30 GiB limit: the ceiling still applies, so the derived default is 2 GiB
+  // and behaviour on a host of this size is unchanged.
+  assert.equal(derivedMinHeadroomBytes(30 * GIB), DEFAULT_MIN_HEADROOM_BYTES);
+  // Below the size where 1/8 of the limit is under 2 GiB, the limit decides.
+  // This is the case a fixed 2 GiB default got wrong: on a 1 GiB container it
+  // could never be satisfied, so the guard refused every launch and the operator
+  // override became the only way to start an agent.
+  assert.equal(derivedMinHeadroomBytes(GIB), Math.floor(GIB / 8));
+  assert.equal(derivedMinHeadroomBytes(4 * GIB), Math.floor(4 * GIB / 8));
+  assert.ok(derivedMinHeadroomBytes(GIB) < GIB, 'a small host must stay launchable');
+  // The large-host end: a pure fraction would demand 32 GiB free on a 256 GiB
+  // build host and refuse launches on exactly the machines that run builds.
+  assert.equal(derivedMinHeadroomBytes(256 * GIB), DEFAULT_MIN_HEADROOM_BYTES);
+  // No readable limit is not a licence to invent one, and the ceiling stands.
+  assert.equal(derivedMinHeadroomBytes(null), DEFAULT_MIN_HEADROOM_BYTES);
+});
+
+test('b. a small host is launchable at a fixed threshold would have refused it', () => {
+  // The regression this whole change exists for, asserted through the decision
+  // rather than through the helper: a 1 GiB cgroup at zero occupancy must be
+  // accepted, because a 2 GiB default is unreachable there.
+  const empty = readHostCapacity({
+    readText: fakeCgroup({
+      '/sys/fs/cgroup/memory.max': String(GIB),
+      '/sys/fs/cgroup/memory.current': '0',
+    }),
+  });
+  const decision = evaluateLaunchCapacity(empty, { env: {} });
+  assert.equal(decision.outcome, 'ok');
+  assert.equal(decision.thresholdBytes, Math.floor(GIB / 8));
+  assert.equal(decision.thresholdDerived, true);
+  assert.equal(decision.thresholdUnsatisfiable, false);
+  // The number in force is accounted for rather than silently different.
+  assert.match(decision.reason, /derived as 1\/8 of the 1\.00 GiB cgroup limit/);
+});
+
+test('b. a small host still refuses on its own measurements', () => {
+  // The other half: deriving the default must not make the guard permissive.
+  // 1 GiB cgroup, 900 MiB used leaves ~124 MiB, under the derived 128 MiB.
+  const capacity = readHostCapacity({
+    readText: fakeCgroup({
+      '/sys/fs/cgroup/memory.max': String(GIB),
+      '/sys/fs/cgroup/memory.current': String(900 * 1024 * 1024),
+    }),
+  });
+  const decision = evaluateLaunchCapacity(capacity, { env: {} });
+  assert.equal(decision.thresholdBytes, Math.floor(GIB / 8));
+  assert.equal(decision.outcome, 'refused');
+  assert.equal(decision.overrideApplied, false);
+  // And a refusal on a derived threshold still names the hatch.
+  assert.match(decision.reason, new RegExp(CAPACITY_OVERRIDE_ENV));
+});
+
+test('b. a threshold above the limit is reported, not silently changed', () => {
+  // A configured value is the operator's decision. Overriding it would make a
+  // deliberately unlaunchable host quietly launchable, and would break the
+  // determinism the CLI suite builds on when it forces a refusal with a huge
+  // threshold. So the number stands and the impossibility is stated.
+  const capacity = readHostCapacity({
+    readText: fakeCgroup({
+      '/sys/fs/cgroup/memory.max': String(30 * GIB),
+      '/sys/fs/cgroup/memory.current': String(30 * GIB - 4 * GIB),
+    }),
+  });
+  const decision = evaluateLaunchCapacity(capacity, { env: { [MIN_HEADROOM_ENV]: '1T' } });
+  // `T` is 1024^4, so this is 1 TiB, which is the number the reason string
+  // below asserts on. Written the other way round it would read as 1 PiB and
+  // pin a value the parser never produces.
+  assert.equal(decision.thresholdBytes, 1024 * GIB);
+  assert.equal(decision.thresholdConfigured, true);
+  assert.equal(decision.thresholdDerived, false);
+  assert.equal(decision.thresholdUnsatisfiable, true);
+  assert.equal(decision.outcome, 'refused');
+  assert.match(decision.reason, /at or above the 30\.00 GiB cgroup limit/);
+  // The value the operator set is still what the refusal names.
+  assert.match(decision.reason, /below the required minimum 1\.00 TiB/);
+});
+
+test('b. a deliberate threshold this host can reach is left exactly as configured', () => {
+  // 8 GiB on a 30 GiB cgroup is a real choice and must survive untouched; the
+  // headroom here is 4 GiB, so it refuses on the operator's number.
+  const capacity = readHostCapacity({
+    readText: fakeCgroup({
+      '/sys/fs/cgroup/memory.max': String(30 * GIB),
+      '/sys/fs/cgroup/memory.current': String(30 * GIB - 4 * GIB),
+    }),
+  });
+  const decision = evaluateLaunchCapacity(capacity, { env: { [MIN_HEADROOM_ENV]: '8G' } });
+  assert.equal(decision.thresholdBytes, 8 * GIB);
+  assert.equal(decision.thresholdDerived, false);
+  assert.equal(decision.thresholdUnsatisfiable, false);
+  assert.equal(decision.outcome, 'refused');
+  assert.doesNotMatch(decision.reason, /at or above the .* cgroup limit/);
+  assert.doesNotMatch(decision.reason, /derived as 1\/8/);
+});
+
+test('b. a large host keeps the portable default rather than a fraction of its limit', () => {
+  // 256 GiB, 40 GiB used: 216 GiB free. A pure 1/8 fraction would demand 32 GiB
+  // and this would still pass, but the point of the ceiling is that the default
+  // does not drift upward on bigger machines.
+  const capacity = readHostCapacity({
+    readText: fakeCgroup({
+      '/sys/fs/cgroup/memory.max': String(256 * GIB),
+      '/sys/fs/cgroup/memory.current': String(40 * GIB),
+    }),
+  });
+  const decision = evaluateLaunchCapacity(capacity, { env: {} });
+  assert.equal(decision.thresholdBytes, DEFAULT_MIN_HEADROOM_BYTES);
+  assert.equal(decision.thresholdDerived, false);
+  assert.equal(decision.outcome, 'ok');
+  assert.doesNotMatch(decision.reason, /derived as 1\/8/);
+});

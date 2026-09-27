@@ -446,3 +446,82 @@ test('e. a signal death with no readable OOM counters says the evidence is unava
   assert.equal(after.backend_error.oom_kill_delta, null);
   assert.match(after.error, /OOM involvement is unknown rather than absent/);
 });
+
+test('e. a signal death with a steer pending and no operator signal is an external kill', async (t) => {
+  if (!requireProc(t)) return;
+  // The steer intent is persisted, so the guard sees an operator request. What
+  // makes this an external death is that the process is gone before the
+  // runner's first control poll at CONTROL_POLL_MS (200ms) can signal it, which
+  // is the same timing shape the test above already relies on: a /bin/sh that
+  // SIGKILLs itself exits in single-digit milliseconds. Before this was
+  // classified, the persisted steer mapped this death to a clean `stopped` with
+  // a null backend_error, which reads as an intentional stop and invites no
+  // investigation of a host that was killing agents.
+  const marker = join(mkdtempSync(join(tmpdir(), 'antonina-steer-')), 'died');
+  t.after(() => rmSync(join(marker, '..'), { recursive: true, force: true }));
+  const backend = fakeBackend(t, `#!/bin/sh\necho "starting"\n: >'${marker}'\nkill -KILL $$\n`);
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const id = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    pending_prompt: 'work',
+    intent: 'steer',
+    stop_reason: 'steer',
+    steer_seq: 0,
+    steer_queue: [],
+  });
+
+  await runManagedRunner(id, 'new', 7, {
+    ...options,
+    capacity: { readText: cgroupWithOomDrift(1, marker), env: {} },
+  });
+
+  const after = readMeta(id, options);
+  // Not a stop: nothing here stopped it, and a `stopped` reading is exactly the
+  // misdiagnosis this test exists to prevent.
+  assert.equal(after.state, 'failed');
+  assert.equal(after.exit_signal, 9);
+  assert.equal(after.backend_error.classification, 'external_signal_kill');
+  assert.equal(after.backend_error.signal, 9);
+  assert.equal(after.backend_error.backend_scope, 'host');
+  assert.equal(after.backend_error.oom_evidence, 'observed');
+  assert.equal(after.backend_error.oom_kill_delta, 1);
+  assert.match(after.error, /SIGKILL \(signal 9\)/);
+  // The steer is still on the record: the operator did ask for it, it simply
+  // never took effect.
+  assert.equal(after.stop_reason, 'steer');
+});
+
+test('e. a steer the runner itself signalled is still recorded as a clean stopped', async (t) => {
+  if (!requireProc(t)) return;
+  // The complement of the case above, and the guard against over-correcting it.
+  // A steer that this runner signalled is an operator decision, so classifying
+  // it as an external kill would be a false positive. This backend outlives the
+  // control poll, so the runner really does send the signal.
+  const backend = fakeBackend(t, '#!/bin/sh\necho "starting"\nsleep 30\n');
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const id = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    pending_prompt: 'work',
+    intent: 'steer',
+    stop_reason: 'steer',
+    steer_seq: 0,
+    steer_queue: [],
+  });
+
+  await runManagedRunner(id, 'new', 7, {
+    ...options,
+    capacity: { readText: cgroup(1), env: {} },
+  });
+
+  const after = readMeta(id, options);
+  assert.equal(after.state, 'stopped');
+  assert.equal(after.stop_reason, 'steer');
+  // An operator-requested termination is not an external kill, and saying so
+  // would point the next reader at the host instead of at their own steer.
+  assert.equal(after.backend_error, null);
+  assert.equal(after.error, null);
+});

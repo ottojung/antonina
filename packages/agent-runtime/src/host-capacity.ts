@@ -25,21 +25,66 @@ export const PROC_SELF_CGROUP = '/proc/self/cgroup';
 export const PRESSURE_PATH = '/proc/pressure/memory';
 
 /**
- * Default minimum free memory for a managed agent's cgroup, in bytes.
+ * Ceiling on the *default* minimum free memory, in bytes.
  *
- * 2 GiB is chosen because it is the one number that is defensible across the
- * range of developer hosts Antonina is expected to run on: it is comfortably
- * above the working set a single `opencode run --thinking` invocation has been
- * observed to reach, and it is a small fraction of a typical 8-32 GiB laptop or
- * workstation limit, so it does not block normal launches on a healthy host.
+ * This is a ceiling on a derived value, not the threshold the guard compares
+ * against. The default is derived from the cgroup limit that was just read, as
+ * `min(limit / MIN_HEADROOM_LIMIT_DIVISOR, DEFAULT_MIN_HEADROOM_BYTES)`, so no
+ * single absolute number decides whether a launch is allowed.
  *
- * It is deliberately *not* the 2 GiB this board improvised as prose in issue
- * comments: that number was chosen against one 30 GiB host. On a 4 GiB
- * container it would be half the limit, and on a 256 GiB build host it would be
- * noise. Hence `ANTONINA_AGENT_MIN_HEADROOM_BYTES`, which accepts a plain byte
- * count or a K/M/G/T suffix, and `0` to disable the refusal outright.
+ * The ceiling exists because a pure fraction is wrong at the other end. One
+ * eighth of a 256 GiB build host is 32 GiB, and refusing a launch whenever a
+ * large host has less than that free would turn the guard into an outage on
+ * exactly the machines where builds run. 2 GiB is comfortably above the working
+ * set one `opencode run` invocation has been observed to reach and is a small
+ * fraction of a typical 8-32 GiB laptop, so it does not block normal launches on
+ * a healthy host. Above the ceiling the number is a chosen default; below it, the
+ * limit decides.
  */
 export const DEFAULT_MIN_HEADROOM_BYTES = 2 * 1024 * 1024 * 1024;
+
+/**
+ * The fraction of the cgroup limit the *default* threshold is derived from.
+ *
+ * This is what makes the default portable. A bare absolute constant is wrong at
+ * both ends of the range: 2 GiB on a 1 GiB container can never be satisfied, so
+ * the guard refuses every launch and the environment override becomes the only
+ * way to start an agent, while on a 256 GiB build host the same number is
+ * noise. A fraction is strictly smaller than the limit it came from, so on any
+ * host the kernel can actually model there is always some headroom at which a
+ * launch proceeds.
+ */
+export const MIN_HEADROOM_LIMIT_DIVISOR = 8;
+
+/**
+ * The default threshold, derived from the limit that was read.
+ *
+ * With no readable limit this is the ceiling unchanged. That path never refuses
+ * anyway, because the decision for a limit-less reading is `unknown` rather
+ * than `refused`, so nothing here is a second guess about an unmodelled host.
+ */
+export function derivedMinHeadroomBytes(limitBytes: number | null): number {
+  if (limitBytes === null || !Number.isFinite(limitBytes) || limitBytes <= 0) {
+    return DEFAULT_MIN_HEADROOM_BYTES;
+  }
+  return Math.min(DEFAULT_MIN_HEADROOM_BYTES, Math.floor(limitBytes / MIN_HEADROOM_LIMIT_DIVISOR));
+}
+
+/**
+ * True when a threshold cannot be satisfied by any headroom on this host.
+ *
+ * Reported rather than prevented. A configured value is the operator's decision
+ * and is never silently overridden, so an operator who sets a threshold above
+ * the cgroup limit — to make a host refuse every launch deliberately, which is a
+ * legitimate thing to want — keeps the number they set and is told plainly that
+ * nothing can satisfy it. The one thing that is prevented is the *derived*
+ * default reaching this state by accident, which is what
+ * `derivedMinHeadroomBytes` exists to stop.
+ */
+export function thresholdUnsatisfiable(limitBytes: number | null, thresholdBytes: number): boolean {
+  if (limitBytes === null || !Number.isFinite(limitBytes) || limitBytes <= 0) return false;
+  return thresholdBytes >= limitBytes;
+}
 
 /** Configurable refusal threshold, in bytes. `0` disables the refusal. */
 export const MIN_HEADROOM_ENV = 'ANTONINA_AGENT_MIN_HEADROOM_BYTES';
@@ -283,17 +328,23 @@ const BYTE_SUFFIXES: Record<string, number> = {
 };
 
 /**
- * Resolves the configured refusal threshold. An explicitly configured but
- * unusable value is refused loudly rather than silently defaulted, because a
- * typo that quietly disabled the guard is exactly the "check that cannot fail"
- * defect class this guard was written to end.
+ * Resolves the requested refusal threshold, before the limit bound is applied.
+ *
+ * An explicitly configured but unusable value is refused loudly rather than
+ * silently defaulted, because a typo that quietly disabled the guard is exactly
+ * the "check that cannot fail" defect class this guard was written to end.
+ *
+ * With nothing configured the threshold is derived from the limit that was read,
+ * so the same guard behaves sensibly on a 256 MiB container and on a 256 GiB
+ * build host rather than on one particular 30 GiB machine.
  */
 export function resolveMinHeadroomBytes(
   env: Record<string, string | undefined> = process.env,
+  limitBytes: number | null = null,
 ): { bytes: number; configured: boolean } {
   const raw = env[MIN_HEADROOM_ENV];
   if (raw === undefined || raw === '') {
-    return { bytes: DEFAULT_MIN_HEADROOM_BYTES, configured: false };
+    return { bytes: derivedMinHeadroomBytes(limitBytes), configured: false };
   }
   const value = raw.trim();
   const match = /^(\d+)([kmgt]?)$/i.exec(value);
@@ -328,6 +379,20 @@ export interface CapacityDecision {
   capacity: HostCapacity;
   thresholdBytes: number;
   thresholdConfigured: boolean;
+  /**
+   * True when the default threshold was derived from the limit that was read and
+   * came out below the portable ceiling, because the ceiling is larger than this
+   * host can satisfy. It is reported rather than applied silently, because a
+   * threshold an operator cannot account for is the same class of defect as a
+   * guard that cannot fail.
+   */
+  thresholdDerived: boolean;
+  /**
+   * True when the threshold in force is at or above the limit that was read, so
+   * no headroom on this host can satisfy it. Always operator-caused, never a
+   * surprise: only a configured value can reach this state.
+   */
+  thresholdUnsatisfiable: boolean;
   overrideApplied: boolean;
   /** The operator-facing explanation, always present and never empty. */
   reason: string;
@@ -365,18 +430,43 @@ function measuredDetail(capacity: HostCapacity): string {
 }
 
 /**
+ * How the threshold reads to an operator.
+ *
+ * The two notes are the difference between a guard an operator can reason about
+ * and one they have to reverse-engineer: whether the number in force is the
+ * portable default or a fraction of this host's own limit, and whether anything
+ * on this host could satisfy it at all.
+ */
+function thresholdPhrase(
+  bytes: number,
+  derived: boolean,
+  unsatisfiable: boolean,
+  limitBytes: number | null,
+): string {
+  const base = `the required minimum ${formatBytes(bytes)}`;
+  const notes: string[] = [];
+  if (derived) {
+    notes.push(`derived as 1/${MIN_HEADROOM_LIMIT_DIVISOR} of the ${formatBytes(limitBytes ?? 0)} cgroup limit rather than the ${formatBytes(DEFAULT_MIN_HEADROOM_BYTES)} default, because a fixed default cannot be satisfied on a host this small`);
+  }
+  if (unsatisfiable) {
+    notes.push(`that threshold is at or above the ${formatBytes(limitBytes ?? 0)} cgroup limit, so no amount of headroom on this host can satisfy it`);
+  }
+  return notes.length === 0 ? base : `${base} (${notes.join('; ')})`;
+}
+
+/**
  * Builds the refusal text. It names the headroom that was actually measured,
  * the threshold it failed, the readings behind both, and the escape hatch by
  * name and value, so an operator hitting it does not have to go looking for a
  * hidden flag.
  */
 export function capacityRefusalMessage(
-  decision: Pick<CapacityDecision, 'capacity' | 'thresholdBytes'>,
+  decision: Pick<CapacityDecision, 'capacity' | 'thresholdBytes' | 'thresholdDerived' | 'thresholdUnsatisfiable'>,
 ): string {
   const capacity = decision.capacity;
   const headroom = capacity.headroomBytes === null ? 'unknown' : formatBytes(capacity.headroomBytes);
   return [
-    `refusing to launch managed agent: host memory headroom ${headroom} is below the required minimum ${formatBytes(decision.thresholdBytes)}`,
+    `refusing to launch managed agent: host memory headroom ${headroom} is below ${thresholdPhrase(decision.thresholdBytes, decision.thresholdDerived, decision.thresholdUnsatisfiable, capacity.limitBytes)}`,
     `(${measuredDetail(capacity)})`,
     `Re-run with ${CAPACITY_OVERRIDE_ENV}=1 to launch anyway on operator request.`,
     'This is a feasibility guard only: nothing was killed, throttled, or reordered to make room, and the board queue was not touched.',
@@ -399,15 +489,27 @@ export function evaluateLaunchCapacity(
 ): CapacityDecision {
   const env: Record<string, string | undefined> = options.env ?? process.env;
   const resolved = options.thresholdBytes === undefined
-    ? resolveMinHeadroomBytes(env)
+    ? resolveMinHeadroomBytes(env, capacity.limitBytes)
     : { bytes: options.thresholdBytes, configured: options.thresholdConfigured ?? true };
+  // The derived default is the only value this function bounds, and bounding it
+  // is what keeps a small host launchable: a default at or above the limit can
+  // never be satisfied, so the guard would refuse every launch and the operator
+  // override would become the only way to start an agent. A configured value is
+  // the operator's decision and is left exactly as set, then reported if it
+  // cannot be satisfied.
+  const thresholdBytes = resolved.bytes;
+  const derivedFromLimit = !resolved.configured && thresholdBytes < DEFAULT_MIN_HEADROOM_BYTES;
+  const unsatisfiable = thresholdUnsatisfiable(capacity.limitBytes, thresholdBytes);
   const override = options.override ?? capacityOverrideRequested(env);
   const base = {
     capacity,
-    thresholdBytes: resolved.bytes,
+    thresholdBytes,
     thresholdConfigured: resolved.configured,
+    thresholdDerived: derivedFromLimit,
+    thresholdUnsatisfiable: unsatisfiable,
     overrideApplied: false,
   };
+  const minimum = thresholdPhrase(thresholdBytes, derivedFromLimit, unsatisfiable, capacity.limitBytes);
 
   if (capacity.source === 'degraded' || capacity.headroomBytes === null) {
     return {
@@ -417,13 +519,13 @@ export function evaluateLaunchCapacity(
     };
   }
 
-  if (capacity.headroomBytes < resolved.bytes) {
+  if (capacity.headroomBytes < thresholdBytes) {
     if (override) {
       return {
         ...base,
         overrideApplied: true,
         outcome: 'ok',
-        reason: `host memory headroom ${formatBytes(capacity.headroomBytes)} is below the minimum ${formatBytes(resolved.bytes)}, but ${CAPACITY_OVERRIDE_ENV} was set, so the launch proceeds on operator request (${measuredDetail(capacity)})`,
+        reason: `host memory headroom ${formatBytes(capacity.headroomBytes)} is below ${minimum}, but ${CAPACITY_OVERRIDE_ENV} was set, so the launch proceeds on operator request (${measuredDetail(capacity)})`,
       };
     }
     return { ...base, outcome: 'refused', reason: capacityRefusalMessage(base) };
@@ -433,14 +535,14 @@ export function evaluateLaunchCapacity(
     return {
       ...base,
       outcome: 'warning',
-      reason: `host memory headroom ${formatBytes(capacity.headroomBytes)} is above the minimum ${formatBytes(resolved.bytes)} but the cgroup is under transient memory pressure (pressure full avg10=${capacity.pressureFullAvg10}%, threshold ${PRESSURE_WARNING_AVG10}%); proceeding because refusing here would make a busy host unlaunchable`,
+      reason: `host memory headroom ${formatBytes(capacity.headroomBytes)} is at or above ${minimum} but the cgroup is under transient memory pressure (pressure full avg10=${capacity.pressureFullAvg10}%, threshold ${PRESSURE_WARNING_AVG10}%); proceeding because refusing here would make a busy host unlaunchable`,
     };
   }
 
   return {
     ...base,
     outcome: 'ok',
-    reason: `host memory headroom ${formatBytes(capacity.headroomBytes)} is at or above the minimum ${formatBytes(resolved.bytes)} (${measuredDetail(capacity)})`,
+    reason: `host memory headroom ${formatBytes(capacity.headroomBytes)} is at or above ${minimum} (${measuredDetail(capacity)})`,
   };
 }
 

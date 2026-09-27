@@ -69,6 +69,16 @@ interface OomBracket {
 interface ChildResult {
   code: number | null;
   signal: NodeJS.Signals | null;
+  /**
+   * True when this runner is the process that asked for the invocation to end.
+   *
+   * A steer, a stop and a kill are all operator decisions, and this runner
+   * signals the invocation for each of them. Without this flag the only
+   * evidence available at death is the persisted intent, and the intent alone
+   * cannot distinguish the death the operator asked for from a host kill that
+   * happened to land while the intent was pending.
+   */
+  operatorSignalled: boolean;
 }
 
 function signalNumber(signal: NodeJS.Signals | null): number | null {
@@ -79,28 +89,31 @@ function signalNumber(signal: NodeJS.Signals | null): number | null {
 function childResult(child: ChildProcess, agentId: string, options: RunnerOptions): Promise<ChildResult> {
   return new Promise((resolve) => {
     let controlStartedAt: number | null = null;
+    let operatorSignalled = false;
     const timer = setInterval(() => {
       const meta = readMeta(agentId, options);
       if (meta === null) return;
       const intent = persistedControlField(meta, 'intent');
       if (intent.malformed || intent.value === null) return;
       if (intent.value === 'kill') {
+        operatorSignalled = true;
         signalInvocation(meta, 'SIGKILL');
         return;
       }
       if (intent.value === 'stop' || intent.value === 'steer') {
         if (controlStartedAt === null) controlStartedAt = Date.now();
         const signal = Date.now() - controlStartedAt >= CONTROL_GRACE_MS ? 'SIGKILL' : 'SIGTERM';
+        operatorSignalled = true;
         signalInvocation(meta, signal);
       }
     }, CONTROL_POLL_MS);
     child.once('close', (code, signal) => {
       clearInterval(timer);
-      resolve({ code, signal });
+      resolve({ code, signal, operatorSignalled });
     });
     child.once('error', () => {
       clearInterval(timer);
-      resolve({ code: 127, signal: null });
+      resolve({ code: 127, signal: null, operatorSignalled });
     });
   });
 }
@@ -222,17 +235,32 @@ async function finalizeInvocation(
     if (intent.malformed || stopReason.malformed) return;
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);
+    // A stop and a kill are operator requests by construction. A steer is an
+    // operator request too, but it is a *redirect*: the invocation is signalled
+    // because this runner sent a signal for it, and `operatorSignalled` is the
+    // only evidence separating that death from a host kill that happened to land
+    // while the steer was still pending. Keying this off the persisted intent
+    // alone made those two indistinguishable, which is what recorded a long
+    // steered session killed by the OOM killer as a clean `stopped`.
+    const operatorSignalled = intent.value === 'stop'
+      || intent.value === 'kill'
+      || (intent.value === 'steer' && result.operatorSignalled);
+    const externalSignalDeath = signal !== null && !operatorSignalled;
     let state: 'succeeded' | 'failed' | 'stopped' | 'killed';
     if (intent.value === 'stop') state = 'stopped';
     else if (intent.value === 'kill') state = 'killed';
-    else if (intent.value === 'steer') state = signal !== null ? 'stopped' : code === 0 ? 'succeeded' : 'failed';
+    else if (signal !== null) state = operatorSignalled ? 'stopped' : 'failed';
     else state = code === 0 ? 'succeeded' : 'failed';
+    // The pending steer is left recorded even when the invocation died without
+    // it taking effect: the operator did ask for it, and `error` below names the
+    // death that actually ended the invocation.
     meta.stop_reason = intent.value;
-    // An unsignalled failure with a recognised backend marker is a model-side
-    // failure. A death on a signal with no operator stop/kill intent was killed
-    // from outside the agent, and is recorded as such rather than left as a
-    // bare negative exit code that reads like a model failure.
-    const death = signal !== null && intent.value !== 'stop' && intent.value !== 'kill' && state === 'failed'
+    // An unsignalled death on a signal was killed from outside the agent. This
+    // is classified on the signal and the absence of a signalled request,
+    // deliberately independent of the resulting state, so that no path through
+    // the state mapping above can leave an external kill recorded as a clean
+    // terminal state with a null backend error.
+    const death = externalSignalDeath
       ? classifySignalDeath({
         signal,
         isContinue,

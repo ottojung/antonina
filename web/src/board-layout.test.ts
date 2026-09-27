@@ -87,7 +87,7 @@ describe('board shell height chain', () => {
     // A view that drops out of the grid loses the pinned row, and a
     // content-sized workspace is exactly what puts a blank region under the
     // board. A tab that is not in this stylesheet yet has to keep the grid.
-    for (const selector of ['.workspace.resources-view', '.workspace.feed-view']) {
+    for (const selector of ['.workspace.resources-view', '.workspace.feed-view', '.workspace.targets-view']) {
       const declarations = desktop(selector);
       expect(declarations.display, selector).toBe('grid');
       expect(declarations['grid-template-columns'], selector).toBe('minmax(0, 1fr)');
@@ -102,7 +102,7 @@ describe('board shell height chain', () => {
     // therefore has to name every single-column view itself to undo it; a new
     // view that adds the desktop rule without adding this one is silently a
     // clipped grid on a phone, which is the trap issue 51 pinned for resources.
-    for (const selector of ['.workspace.resources-view', '.workspace.feed-view']) {
+    for (const selector of ['.workspace.resources-view', '.workspace.feed-view', '.workspace.targets-view']) {
       expect(mobile(selector), selector).toMatchObject({ display: 'block' });
     }
     expect(mobile('.issue-pane')).toMatchObject({ 'overflow-y': 'visible' });

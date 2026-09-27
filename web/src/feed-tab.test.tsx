@@ -283,14 +283,16 @@ describe('the feed tab in the app shell', () => {
   const app = readFileSync(fileURLToPath(new URL('./App.tsx', import.meta.url)), 'utf8');
 
   it('is a top-level tab beside Issues and Resources', () => {
-    expect(app).toMatch(/const TABS: readonly View\[\] = \['issues', 'resources', 'feed'\]/);
+    // The tab list grew a fourth entry for the target overview, so the pinned list
+    // names all four rather than the three that existed when the feed landed.
+    expect(app).toMatch(/const TABS: readonly View\[\] = \['issues', 'resources', 'feed', 'targets'\]/);
     expect(app).toMatch(/TABS\.map\(\(item\) => <button key=\{item\}/);
   });
 
   it('renders the feed container for that tab and nowhere else', () => {
     expect(app).toMatch(/<FeedView readFeed=\{session\.readFeed\}/);
     expect(app.match(/<FeedView /g)).toHaveLength(1);
-    expect(app).toMatch(/type View = 'issues' \| 'resources' \| 'feed'/);
+    expect(app).toMatch(/type View = 'issues' \| 'resources' \| 'feed' \| 'targets'/);
   });
 
   it('opens the feed through the shared reader, so the prop is the only read path', () => {

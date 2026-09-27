@@ -27,6 +27,64 @@ export const EXECUTION_TARGET_STATUSES = ['available', 'unavailable'] as const;
 export type ExecutionTargetStatus = (typeof EXECUTION_TARGET_STATUSES)[number];
 
 /**
+ * How a job is actually handed to the environment behind a target.
+ *
+ * The backend names who does the running; the access method names the mechanism
+ * by which work reaches it. They are related but not the same question: the
+ * backend is what Antonina selects against, and the access method is what an
+ * orchestrator has to arrange before it can submit anything. It is a closed
+ * vocabulary for the same reason capabilities are — "how do I reach this" is a
+ * question about typed membership, not about reading prose.
+ */
+export const EXECUTION_TARGET_ACCESS_METHODS = ['lubko-transport', 'github-workflow-dispatch'] as const;
+export type ExecutionTargetAccessMethod = (typeof EXECUTION_TARGET_ACCESS_METHODS)[number];
+
+/**
+ * What survives between two jobs on the same target.
+ *
+ * `durable-host-filesystem` is a real filesystem a later job can find the
+ * earlier one's work in; `per-job-workspace` is a workspace the provider builds
+ * for one job and destroys afterwards. The second is the only honest answer for
+ * an ephemeral environment, and stating it is what stops an orchestrator from
+ * planning a two-step job that assumes a directory the provider already deleted.
+ */
+export const EXECUTION_TARGET_PERSISTENCE = ['durable-host-filesystem', 'per-job-workspace'] as const;
+export type ExecutionTargetPersistence = (typeof EXECUTION_TARGET_PERSISTENCE)[number];
+
+/**
+ * Who removes what a job left behind.
+ *
+ * `host-local-collector` is the Antonina collector, which can only be pointed at
+ * a path a human registered and which no open issue depends on.
+ * `provider-managed` means the external service expires the environment on its
+ * own schedule and Antonina has no part in it. `none` means nothing removes it,
+ * which is a real and common state for a host with no configured managed roots.
+ */
+export const EXECUTION_TARGET_GARBAGE_COLLECTION = ['host-local-collector', 'provider-managed', 'none'] as const;
+export type ExecutionTargetGarbageCollection = (typeof EXECUTION_TARGET_GARBAGE_COLLECTION)[number];
+
+/**
+ * The guidance document each backend points at when a target names none of its
+ * own. A target carries a reference, never the procedure: the procedure is a
+ * document that changes when the backend changes, and copying it into board
+ * state would give the board a second spelling to keep current.
+ */
+export const EXECUTION_TARGET_GUIDANCE: { readonly [B in ExecutionTargetBackend]: string } = {
+  lubko: 'docs/skills/target-lubko-persistent-host.md',
+  'github-actions': 'docs/skills/target-github-actions-ephemeral.md',
+};
+
+/** The access method a backend provides, which is the only one it may declare. */
+export function defaultExecutionTargetAccessMethod(backend: ExecutionTargetBackend): ExecutionTargetAccessMethod {
+  return backend === 'lubko' ? 'lubko-transport' : 'github-workflow-dispatch';
+}
+
+/** The persistence a kind of environment has, which is the only one it may declare. */
+export function defaultExecutionTargetPersistence(kind: ExecutionTargetKind): ExecutionTargetPersistence {
+  return kind === 'persistent-host' ? 'durable-host-filesystem' : 'per-job-workspace';
+}
+
+/**
  * The closed vocabulary of what a target can do. Requirements are matched
  * against these names only, so "can it run a GPU job" is a question about
  * typed membership rather than a substring search over free-form metadata.
@@ -89,6 +147,40 @@ export interface BoardExecutionTarget {
    */
   address: string | null;
   description: string;
+  /**
+   * The human name a catalog and a board view print, or absent to print the id.
+   * It is display metadata and is never an identity: nothing matches on it.
+   */
+  displayName?: string;
+  /**
+   * How work is handed to this target. Absent means the backend's own method,
+   * which {@link defaultExecutionTargetAccessMethod} names; a record that
+   * declares a different one is refused, because a Lubko target cannot be
+   * reached by a workflow dispatch and claiming so would be a lie an
+   * orchestrator could act on.
+   */
+  accessMethod?: ExecutionTargetAccessMethod;
+  /**
+   * What survives between two jobs here. Absent means the kind's own answer,
+   * which is the only one that kind can have.
+   */
+  persistence?: ExecutionTargetPersistence;
+  /**
+   * Who removes what a job left behind. Absent means the widest honest answer
+   * for the backend; a persistent host may narrow this to `none`, and an
+   * ephemeral environment may narrow it to `none` when the provider is not the
+   * one expiring it. It may never widen: no target can claim a host-local
+   * collector when it has no host, or provider management when it is a host.
+   */
+  garbageCollection?: ExecutionTargetGarbageCollection;
+  /** Sorted, duplicate-free operational caveats stated about this target. */
+  limitations?: string[];
+  /**
+   * Sorted, duplicate-free repository-relative paths of the guidance documents
+   * that say how to reach and use this target. Absent means the backend's own
+   * document, named by {@link EXECUTION_TARGET_GUIDANCE}.
+   */
+  guidance?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -145,6 +237,54 @@ export interface TargetView extends BoardExecutionTarget {
   resources: BoardResource[];
   /** The issues currently dispatched to this target. */
   dispatchedIssues: number[];
+}
+
+/**
+ * One target as an operator or an orchestrator reads it: identity, what kind of
+ * thing it is, how work reaches it, what survives, who cleans up, and where the
+ * procedure is written down.
+ *
+ * This is a projection, not a stored record. Every field is either already on
+ * the target or derived from a closed vocabulary by one function here, so a
+ * board view, a CLI command and a scheduler all answer these questions the same
+ * way and none of them re-derives them. Nothing dynamic lives here: capacity,
+ * liveness and quota are observations, they are not part of a registration, and
+ * a reader with none of them is missing data rather than reading zeros.
+ */
+export interface ExecutionTargetAccess {
+  readonly targetId: string;
+  readonly displayName: string;
+  readonly backend: ExecutionTargetBackend;
+  readonly kind: ExecutionTargetKind;
+  readonly status: ExecutionTargetStatus;
+  readonly accessMethod: ExecutionTargetAccessMethod;
+  readonly persistence: ExecutionTargetPersistence;
+  readonly garbageCollection: ExecutionTargetGarbageCollection;
+  readonly capabilities: readonly ExecutionTargetCapability[];
+  readonly address: string | null;
+  readonly description: string;
+  readonly limitations: readonly string[];
+  readonly guidance: readonly string[];
+}
+
+/** One target's access facts, with every absent field resolved from its kind and backend. */
+export function executionTargetAccess(target: BoardExecutionTarget): ExecutionTargetAccess {
+  return {
+    targetId: target.id,
+    displayName: target.displayName ?? target.id,
+    backend: target.backend,
+    kind: target.kind,
+    status: target.status,
+    accessMethod: target.accessMethod ?? defaultExecutionTargetAccessMethod(target.backend),
+    persistence: target.persistence ?? defaultExecutionTargetPersistence(target.kind),
+    garbageCollection: target.garbageCollection
+      ?? (target.kind === 'persistent-host' ? 'host-local-collector' : 'provider-managed'),
+    capabilities: [...target.capabilities],
+    address: target.address,
+    description: target.description,
+    limitations: [...(target.limitations ?? [])],
+    guidance: [...(target.guidance ?? [EXECUTION_TARGET_GUIDANCE[target.backend]])],
+  };
 }
 
 export function emptyBoard(): Board {
@@ -287,6 +427,53 @@ export function parseExecutionTargetCapability(value: string): ExecutionTargetCa
   return value as ExecutionTargetCapability;
 }
 
+export function parseExecutionTargetAccessMethod(value: string): ExecutionTargetAccessMethod {
+  if (!(EXECUTION_TARGET_ACCESS_METHODS as readonly string[]).includes(value)) {
+    throw new Error('Unknown Antonina execution target access method: ' + value);
+  }
+  return value as ExecutionTargetAccessMethod;
+}
+
+export function parseExecutionTargetPersistence(value: string): ExecutionTargetPersistence {
+  if (!(EXECUTION_TARGET_PERSISTENCE as readonly string[]).includes(value)) {
+    throw new Error('Unknown Antonina execution target persistence: ' + value);
+  }
+  return value as ExecutionTargetPersistence;
+}
+
+export function parseExecutionTargetGarbageCollection(value: string): ExecutionTargetGarbageCollection {
+  if (!(EXECUTION_TARGET_GARBAGE_COLLECTION as readonly string[]).includes(value)) {
+    throw new Error('Unknown Antonina execution target garbage collection: ' + value);
+  }
+  return value as ExecutionTargetGarbageCollection;
+}
+
+/**
+ * Why a guidance reference is not a repository-relative document path, or `null`
+ * when it is. A guidance entry is a pointer a reader can follow, so an absolute
+ * path, a URL, or anything that climbs out of the repository is refused rather
+ * than rendered as a link to nowhere.
+ */
+export function guidancePathDefect(path: string): string | null {
+  if (path.length === 0) return 'empty';
+  if (path.startsWith('/')) return 'absolute';
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(path)) return 'not-a-repository-path';
+  if (path.split('/').some((segment) => segment === '..')) return 'parent-traversal';
+  if (!path.endsWith('.md')) return 'not-a-markdown-document';
+  if (path.includes('//')) return 'non-canonical';
+  return null;
+}
+
+/** A sorted, duplicate-free list of non-empty strings, or `null` when the value is not one. */
+function canonicalNoteList(value: unknown): string[] | null {
+  if (!Array.isArray(value) || !value.every(isText)) return null;
+  const notes = value as string[];
+  const sorted = [...notes].sort();
+  if (notes.some((note, index) => note !== sorted[index])) return null;
+  if (new Set(notes).size !== notes.length) return null;
+  return [...notes];
+}
+
 function parseTargetCapabilities(value: unknown): ExecutionTargetCapability[] {
   if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string'
       && (EXECUTION_TARGET_CAPABILITIES as readonly string[]).includes(entry))) {
@@ -331,12 +518,80 @@ export function executionTargetDefect(target: BoardExecutionTarget): string | nu
   if (target.backend === 'github-actions' && target.kind !== 'ephemeral-environment') {
     return 'the github-actions backend runs ephemeral environments only';
   }
+  // The descriptive fields are optional, so this is where a record that does
+  // carry one is held to it. A target may narrow what its backend and kind
+  // provide, but it may not contradict them: every one of these is a claim an
+  // orchestrator would otherwise act on.
+  if (target.accessMethod !== undefined
+      && !(EXECUTION_TARGET_ACCESS_METHODS as readonly string[]).includes(target.accessMethod)) {
+    return 'an execution target must declare a known access method';
+  }
+  if (target.persistence !== undefined
+      && !(EXECUTION_TARGET_PERSISTENCE as readonly string[]).includes(target.persistence)) {
+    return 'an execution target must declare a known persistence';
+  }
+  if (target.garbageCollection !== undefined
+      && !(EXECUTION_TARGET_GARBAGE_COLLECTION as readonly string[]).includes(target.garbageCollection)) {
+    return 'an execution target must declare a known garbage collection';
+  }
+  if (target.accessMethod !== undefined && target.accessMethod !== defaultExecutionTargetAccessMethod(target.backend)) {
+    return 'an execution target must declare the access method its backend provides';
+  }
+  if (target.persistence !== undefined && target.persistence !== defaultExecutionTargetPersistence(target.kind)) {
+    return 'an execution target must declare the persistence its kind has';
+  }
+  if (target.garbageCollection !== undefined) {
+    const allowed: readonly ExecutionTargetGarbageCollection[] = target.kind === 'persistent-host'
+      ? ['host-local-collector', 'none']
+      : ['provider-managed', 'none'];
+    if (!allowed.includes(target.garbageCollection)) {
+      return target.kind === 'persistent-host'
+        ? 'a persistent host cannot declare that the provider manages its garbage collection'
+        : 'an ephemeral environment cannot declare that a host-local collector manages it';
+    }
+  }
+  if (target.displayName !== undefined && !isText(target.displayName)) {
+    return 'an execution target display name must be a non-empty string';
+  }
+  if (target.limitations !== undefined && canonicalNoteList(target.limitations) === null) {
+    return 'execution target limitations must be a sorted, duplicate-free list of notes';
+  }
+  if (target.guidance !== undefined) {
+    if (canonicalNoteList(target.guidance) === null) {
+      return 'execution target guidance must be a sorted, duplicate-free list of document paths';
+    }
+    for (const path of target.guidance) {
+      const defect = guidancePathDefect(path);
+      if (defect !== null) return `execution target guidance path is unusable: ${defect}`;
+    }
+  }
   return null;
+}
+
+const TARGET_REQUIRED_KEYS = [
+  'id', 'backend', 'kind', 'status', 'capabilities', 'address', 'description', 'createdAt', 'updatedAt',
+] as const;
+const TARGET_OPTIONAL_KEYS = [
+  'displayName', 'accessMethod', 'persistence', 'garbageCollection', 'limitations', 'guidance',
+] as const;
+
+/**
+ * A target record may carry any of the descriptive fields and must carry all of
+ * the original ones. A record written before those fields existed is still a
+ * valid record: those fields were added to this shared API rather than
+ * substituted into it, so a board signed without them has to keep verifying and
+ * keeps reading through the defaults {@link executionTargetAccess} resolves.
+ */
+function hasTargetKeys(value: Record<string, unknown>): boolean {
+  return TARGET_REQUIRED_KEYS.every((key) => Object.hasOwn(value, key))
+    && Object.keys(value).every((key) =>
+      (TARGET_REQUIRED_KEYS as readonly string[]).includes(key)
+      || (TARGET_OPTIONAL_KEYS as readonly string[]).includes(key));
 }
 
 function isTarget(value: unknown): value is BoardExecutionTarget {
   if (!isRecord(value)
-      || !hasExactKeys(value, ['id', 'backend', 'kind', 'status', 'capabilities', 'address', 'description', 'createdAt', 'updatedAt'])
+      || !hasTargetKeys(value)
       || !isText(value.id)
       || !TARGET_ID.test(value.id)
       || typeof value.backend !== 'string'
@@ -352,6 +607,12 @@ function isTarget(value: unknown): value is BoardExecutionTarget {
     return false;
   }
   if (value.address !== null && !isValidHost(value.address)) return false;
+  if (value.accessMethod !== undefined
+      && !(EXECUTION_TARGET_ACCESS_METHODS as readonly string[]).includes(value.accessMethod as string)) return false;
+  if (value.persistence !== undefined
+      && !(EXECUTION_TARGET_PERSISTENCE as readonly string[]).includes(value.persistence as string)) return false;
+  if (value.garbageCollection !== undefined
+      && !(EXECUTION_TARGET_GARBAGE_COLLECTION as readonly string[]).includes(value.garbageCollection as string)) return false;
   let capabilities: ExecutionTargetCapability[];
   try {
     capabilities = parseTargetCapabilities(value.capabilities);
@@ -359,15 +620,8 @@ function isTarget(value: unknown): value is BoardExecutionTarget {
     return false;
   }
   return executionTargetDefect({
-    id: value.id,
-    backend: value.backend as ExecutionTargetBackend,
-    kind: value.kind as ExecutionTargetKind,
-    status: value.status as ExecutionTargetStatus,
+    ...(value as unknown as BoardExecutionTarget),
     capabilities,
-    address: value.address as string | null,
-    description: value.description,
-    createdAt: value.createdAt,
-    updatedAt: value.updatedAt,
   }) === null;
 }
 

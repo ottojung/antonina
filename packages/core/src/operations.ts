@@ -8,15 +8,21 @@ import {
   parsePersistedBoard,
   upgradePersistedBoard,
   parseExecutionTargetBackend,
+  parseExecutionTargetAccessMethod,
   parseExecutionTargetCapability,
+  parseExecutionTargetGarbageCollection,
   parseExecutionTargetKind,
+  parseExecutionTargetPersistence,
   parseExecutionTargetStatus,
   type Board,
   type PersistedBoard,
   type BoardIssue,
+  type ExecutionTargetAccessMethod,
   type ExecutionTargetBackend,
   type ExecutionTargetCapability,
+  type ExecutionTargetGarbageCollection,
   type ExecutionTargetKind,
+  type ExecutionTargetPersistence,
   type ExecutionTargetStatus,
 } from './model.js';
 
@@ -118,7 +124,25 @@ export interface ResourcePayload {
   path: string;
 }
 
-export interface TargetRegisterPayload {
+/**
+ * The descriptive fields a target registration may carry. They are optional on
+ * the payload and on the record alike: an operation written before they existed
+ * still has to verify, and a target that states none of them reads through the
+ * defaults `executionTargetAccess` resolves. Only the parts an operator can
+ * correct later are settable through `TargetSetPayload`; the backend, the kind
+ * and the address are fixed at registration because changing any of them makes
+ * a different target, not a reconfigured one.
+ */
+export interface TargetDescriptionFields {
+  displayName?: string;
+  accessMethod?: ExecutionTargetAccessMethod;
+  persistence?: ExecutionTargetPersistence;
+  garbageCollection?: ExecutionTargetGarbageCollection;
+  limitations?: string[];
+  guidance?: string[];
+}
+
+export interface TargetRegisterPayload extends TargetDescriptionFields {
   id: string;
   backend: ExecutionTargetBackend;
   kind: ExecutionTargetKind;
@@ -133,6 +157,9 @@ export interface TargetSetPayload {
   status: ExecutionTargetStatus;
   capabilities: ExecutionTargetCapability[];
   description: string;
+  displayName?: string;
+  limitations?: string[];
+  guidance?: string[];
 }
 
 export interface DispatchRecordPayload {
@@ -207,6 +234,19 @@ function isText(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
 
+/**
+ * Every key of `value` is required or explicitly optional, and nothing else is.
+ * A signed operation log is append-only, so a payload shape may only ever
+ * widen: an operation written before a field existed still has to verify, and
+ * the optional list is how that is spelled rather than a stricter check that
+ * would make old logs unverifiable.
+ */
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[], optional: readonly string[]): boolean {
+  const actual = Object.keys(value);
+  return keys.every((key) => Object.hasOwn(value, key))
+    && actual.every((key) => keys.includes(key) || optional.includes(key));
+}
+
 function isCanonicalTimestamp(value: unknown): value is string {
   if (!isText(value)) return false;
   const millis = Date.parse(value);
@@ -257,6 +297,93 @@ function parseTargetCapabilityList(value: unknown): ExecutionTargetCapability[] 
     throw new Error('Execution target capabilities contain duplicates');
   }
   return capabilities;
+}
+
+/** A sorted, duplicate-free list of non-empty strings, or a refusal by name. */
+function parseNoteList(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || !value.every(isText)) {
+    throw new Error(`${label} are malformed`);
+  }
+  const notes = value as string[];
+  const sorted = [...notes].sort();
+  if (notes.some((note, index) => note !== sorted[index])) {
+    throw new Error(`${label} must be sorted`);
+  }
+  if (new Set(notes).size !== notes.length) {
+    throw new Error(`${label} contain duplicates`);
+  }
+  return [...notes];
+}
+
+/**
+ * The descriptive fields of a registration, present only where the payload
+ * carried them. An absent field is never written as `undefined`: under
+ * `exactOptionalPropertyTypes` that is a different value from an absent one, and
+ * a target registered with these fields must read exactly as one registered
+ * without them did.
+ */
+function parseTargetDescriptionFields(value: Record<string, unknown>): TargetDescriptionFields {
+  const fields: TargetDescriptionFields = {};
+  if (value.displayName !== undefined) {
+    if (!isText(value.displayName)) throw new Error('Execution target display name is malformed');
+    fields.displayName = value.displayName;
+  }
+  if (value.accessMethod !== undefined) {
+    fields.accessMethod = parseExecutionTargetAccessMethod(String(value.accessMethod));
+  }
+  if (value.persistence !== undefined) {
+    fields.persistence = parseExecutionTargetPersistence(String(value.persistence));
+  }
+  if (value.garbageCollection !== undefined) {
+    fields.garbageCollection = parseExecutionTargetGarbageCollection(String(value.garbageCollection));
+  }
+  if (value.limitations !== undefined) {
+    fields.limitations = parseNoteList(value.limitations, 'Execution target limitations');
+  }
+  if (value.guidance !== undefined) {
+    fields.guidance = parseNoteList(value.guidance, 'Execution target guidance');
+  }
+  return fields;
+}
+
+/**
+ * Carries the payload's descriptive fields onto a board record, omitting the
+ * ones it did not carry. Spreading the payload directly would write absent
+ * fields as explicit `undefined`, which is a different stored value and would
+ * make a record written two ways compare unequal for no reason.
+ */
+function targetDescriptionRecord(payload: TargetDescriptionFields): TargetDescriptionFields {
+  return {
+    ...(payload.displayName !== undefined ? { displayName: payload.displayName } : {}),
+    ...(payload.accessMethod !== undefined ? { accessMethod: payload.accessMethod } : {}),
+    ...(payload.persistence !== undefined ? { persistence: payload.persistence } : {}),
+    ...(payload.garbageCollection !== undefined ? { garbageCollection: payload.garbageCollection } : {}),
+    ...(payload.limitations !== undefined ? { limitations: [...payload.limitations] } : {}),
+    ...(payload.guidance !== undefined ? { guidance: [...payload.guidance] } : {}),
+  };
+}
+
+/**
+ * The same carry-over for the fields `target.set` may correct. A field the
+ * payload omitted keeps whatever the registration already said, so a status
+ * change cannot silently drop a target's caveats or its guidance.
+ */
+function settableTargetNotes(payload: TargetSetPayload): Pick<TargetDescriptionFields, 'displayName' | 'limitations' | 'guidance'> {
+  return targetDescriptionRecord(payload);
+}
+function parseSettableTargetNotes(value: Record<string, unknown>): Pick<TargetSetPayload, 'displayName' | 'limitations' | 'guidance'> {
+  const fields: Pick<TargetSetPayload, 'displayName' | 'limitations' | 'guidance'> = {};
+  if (value.displayName !== undefined) {
+    if (!isText(value.displayName)) throw new Error('Execution target display name is malformed');
+    fields.displayName = value.displayName;
+  }
+  if (value.limitations !== undefined) {
+    fields.limitations = parseNoteList(value.limitations, 'Execution target limitations');
+  }
+  if (value.guidance !== undefined) {
+    fields.guidance = parseNoteList(value.guidance, 'Execution target guidance');
+  }
+  return fields;
 }
 
 function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationPayload {
@@ -329,7 +456,8 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
       return { number: value.number, host: value.host, path: value.path };
     }
     case 'target.register': {
-      if (!hasExactKeys(value, ['id', 'backend', 'kind', 'capabilities', 'address', 'description'])
+      if (!hasOnlyKeys(value, ['id', 'backend', 'kind', 'capabilities', 'address', 'description'],
+          ['displayName', 'accessMethod', 'persistence', 'garbageCollection', 'limitations', 'guidance'])
           || !isText(value.id)
           || !isText(value.backend)
           || !isText(value.kind)
@@ -344,10 +472,12 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
         capabilities: parseTargetCapabilityList(value.capabilities),
         address: value.address === null ? null : canonicalHost(value.address),
         description: value.description,
+        ...parseTargetDescriptionFields(value),
       };
     }
     case 'target.set': {
-      if (!hasExactKeys(value, ['id', 'status', 'capabilities', 'description'])
+      if (!hasOnlyKeys(value, ['id', 'status', 'capabilities', 'description'],
+          ['displayName', 'limitations', 'guidance'])
           || !isText(value.id)
           || !isText(value.status)
           || typeof value.description !== 'string') {
@@ -358,6 +488,7 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
         status: parseExecutionTargetStatus(value.status),
         capabilities: parseTargetCapabilityList(value.capabilities),
         description: value.description,
+        ...parseSettableTargetNotes(value),
       };
     }
     case 'dispatch.record': {
@@ -724,6 +855,7 @@ function applyBoardMutation(
         capabilities: [...payload.capabilities],
         address: payload.address,
         description: payload.description,
+        ...targetDescriptionRecord(payload),
         createdAt: operation.timestamp,
         updatedAt: operation.timestamp,
       };
@@ -745,6 +877,7 @@ function applyBoardMutation(
         status: payload.status,
         capabilities: [...payload.capabilities],
         description: payload.description,
+        ...settableTargetNotes(payload),
         updatedAt: operation.timestamp,
       };
       const defect = executionTargetDefect(updated);

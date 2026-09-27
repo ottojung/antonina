@@ -1,17 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { createBrowserBoardApi, type BoardFeedEntry, type BoardFeedPage } from './api';
+import { createBrowserBoardApi, targetViews, type BoardFeedEntry, type BoardFeedPage, type DaemonHostView, type TargetView } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
+import { TARGETS_EMPTY, TARGETS_HINT, TARGET_ACCESS_LABEL, TARGET_CLEANUP_LABEL, TARGET_KIND_LABEL, TARGET_PERSISTENCE_LABEL, TARGET_STATUS_LABEL, targetCatalogRows } from './targets';
 import { COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, appendFeedPage, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, boardReadOutcome, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
-type View = 'issues' | 'resources' | 'feed';
-const TABS: readonly View[] = ['issues', 'resources', 'feed'];
-const TAB_TITLE: { readonly [V in View]: string } = { issues: 'Issues', resources: 'Resources', feed: 'Feed' };
+type View = 'issues' | 'resources' | 'feed' | 'targets';
+const TABS: readonly View[] = ['issues', 'resources', 'feed', 'targets'];
+const TAB_TITLE: { readonly [V in View]: string } = { issues: 'Issues', resources: 'Resources', feed: 'Feed', targets: 'Targets' };
 const TAB_PANE_LABEL: { readonly [V in View]: string } = {
   issues: 'Shared issue list',
   resources: 'Registered resources',
   feed: 'Board activity feed',
+  targets: 'Execution target overview',
+};
+/** The tab's own sentence, so no view has to spell its case out inline. */
+const TAB_HINT: { readonly [V in View]: string } = {
+  issues: QUEUE_HINT,
+  resources: 'Registered paths are protected while at least one dependent Antonina issue remains open.',
+  feed: FEED_HINT,
+  targets: TARGETS_HINT,
 };
 
 export default function App() {
@@ -185,14 +194,22 @@ export default function App() {
     {notice && <div className="notice success" role="status"><span>{notice}</span><button onClick={() => setNotice(undefined)} aria-label="Dismiss message">Dismiss</button></div>}
     <main className={`workspace ${view}-view ${selected ? 'has-selection' : ''}`}>
       <aside className="issue-pane" aria-label={TAB_PANE_LABEL[view]}>
-        <div className="pane-heading"><div><p className="eyebrow">One board, everyone’s work</p><h1>{TAB_TITLE[view]}</h1><p>{view === 'issues' ? <>{QUEUE_HINT} Track what needs attention and discuss the details together.</> : view === 'resources' ? 'Registered paths are protected while at least one dependent Antonina issue remains open.' : FEED_HINT}</p></div></div>
+        <div className="pane-heading"><div><p className="eyebrow">One board, everyone’s work</p><h1>{TAB_TITLE[view]}</h1><p>{view === 'issues' ? <>{QUEUE_HINT} Track what needs attention and discuss the details together.</> : TAB_HINT[view]}</p></div></div>
         {view === 'issues' ? <>
           {hasWriteAccess ? <CreateIssueForm onSubmit={createIssue} />
             : <AccessNotice access={access} className="access-callout" onAction={() => setSettingsOpen(true)} />}
           <nav className="filters" aria-label="Filter issues">{(['open', 'closed', 'all'] as const).map((value) => <button key={value} className={filter === value ? 'active' : ''} aria-pressed={filter === value} onClick={() => setFilter(value)}>{filterLabel(value)}<span>{counts[value]}</span></button>)}</nav>
           <div className="issue-list" aria-label="Issues"><IssueQueue issues={visible} queue={load.queue} hasWriteAccess={hasWriteAccess} selectedNumber={selectedNumber} onSelect={setSelectedNumber} onReorder={reorderQueue} empty={empty} /></div>
-        </> : view === 'resources'
+        </>           : view === 'resources'
           ? <ResourcesView board={board!} issues={board!.issues} access={access} onOpenIssue={openIssue} onAdd={(host, path, number) => run(() => api.addResourceDependency(host, path, number), 'Resource dependency added')} onRemove={(resource, number) => run(() => api.removeResourceDependency(resource.host, resource.path, number), resource.issueNumbers.length === 1 ? 'Dependency removed; resource unregistered' : 'Resource dependency removed')} onEnableEditing={() => setSettingsOpen(true)} />
+          : view === 'targets'
+          // The browser cannot read a host's daemon report: those are files on
+          // the operator's own machine, and a page that fetched them would be
+          // claiming telemetry it did not receive. So the page is handed no host
+          // views and states `unknown` for every persistent host's live capacity,
+          // which is the truth from here. `antonina board target list
+          // --telemetry` is where a host's own numbers come from.
+          ? <TargetsView targets={targetViews(board!)} hosts={[]} onOpenIssue={openIssue} />
           : <FeedView readFeed={session.readFeed} issues={board!.issues} generation={feedGeneration} onOpenIssue={openIssue} />}
       </aside>
       {view === 'issues' ? selected ? <Thread issue={selected} access={access} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.number, body), 'Description updated')} close={() => void run(() => api.close(selected.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.number), 'Issue reopened')} back={() => setSelectedNumber(undefined)} />
@@ -592,6 +609,63 @@ export function FeedThread({ entries, nextCursor, total, issues, loading, error,
     {untracked.length > 0 && <p className="feed-caveat" role="note">{FEED_TRUNCATED_COPY(untracked)}</p>}
     <p className="feed-untracked">{FEED_UNTRACKED_COPY}</p>
     {nextCursor !== null && <button className="feed-more" disabled={loading} onClick={onShowMore}>{FEED_MORE_LABEL}</button>}
+  </div>;
+}
+
+/**
+ * The execution-target overview.
+ *
+ * Each target is drawn from what is true of *that* target rather than from one
+ * machine-shaped template. A persistent host shows its access method, its
+ * durability, who cleans up after it, and — when a daemon report reached the
+ * page — its real capacity. An ephemeral environment shows the same four
+ * questions answered `not applicable` or `unknown`, each with the reason, and
+ * never a RAM or disk figure, because there is no host to measure and a number
+ * here would be one an orchestrator schedules against.
+ *
+ * The target's own record points at the guidance document that says how to
+ * reach and use it. The page links to the reference rather than repeating the
+ * procedure: the procedure changes when the backend changes, and a second copy
+ * in board state is a second copy that goes stale.
+ */
+export function TargetsView({ targets, hosts, onOpenIssue }: {
+  targets: TargetView[];
+  hosts: DaemonHostView[];
+  onOpenIssue: (number: number) => void;
+}) {
+  const rows = targetCatalogRows(targets, hosts);
+  return <div className="targets-view">
+    <p className="targets-scope">A target is an execution environment a job may be dispatched to. It is not a resource: only a persistent host carries durable paths, and those are registered separately under Resources.</p>
+    {rows.map(({ target, access, state }) => <article className={`target-card target-${access.kind}`} key={target.id} data-target-id={target.id}>
+      <header className="target-header">
+        <div>
+          <p className="eyebrow">{TARGET_KIND_LABEL[access.kind]}</p>
+          <h2>{access.displayName}</h2>
+          <code className="target-identity">{access.targetId}{access.address === null ? ' · no host address' : ' · ' + access.address}</code>
+        </div>
+        <span className={`target-status ${access.status}`}>{TARGET_STATUS_LABEL[access.status]}</span>
+      </header>
+      {access.description !== '' && <p className="target-description">{access.description}</p>}
+      <dl className="target-facts">
+        <div><dt>Access method</dt><dd>{TARGET_ACCESS_LABEL[access.accessMethod]}</dd></div>
+        <div><dt>Persistence</dt><dd>{TARGET_PERSISTENCE_LABEL[access.persistence]}</dd></div>
+        <div><dt>Cleanup</dt><dd>{TARGET_CLEANUP_LABEL[access.garbageCollection]}</dd></div>
+        <div><dt>Capabilities</dt><dd>{access.capabilities.length === 0 ? 'none declared' : access.capabilities.join(', ')}</dd></div>
+      </dl>
+      <section className="target-state" aria-label={`Live state of ${access.displayName}`}>
+        <h3>Live state</h3>
+        <dl>{state.map((line) => <div key={line.label} data-state={line.absent ? 'absent' : 'reported'}><dt>{line.label}</dt>
+          <dd><span className={line.absent ? 'state-unknown' : 'state-value'}>{line.value}</span>
+            {line.reason !== undefined && <small>{line.reason}</small>}</dd></div>)}</dl>
+      </section>
+      {access.limitations.length > 0 && <section className="target-caveats"><h3>Caveats</h3><ul>{access.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}</ul></section>}
+      <section className="target-guidance"><h3>Guidance</h3><ul>{access.guidance.map((path) => <li key={path}><code>{path}</code></li>)}</ul></section>
+      <footer className="target-links">
+        {target.resources.length > 0 && <p>{target.resources.length} registered resource{target.resources.length === 1 ? '' : 's'} on this host — registered paths live under Resources, not here.</p>}
+        {target.dispatchedIssues.length > 0 && <p className="target-dispatched">Dispatched: {target.dispatchedIssues.map((number) => <button key={number} onClick={() => onOpenIssue(number)}>#{number}</button>)}</p>}
+      </footer>
+    </article>)}
+    {rows.length === 0 && <div className="empty-state"><h2>{TARGETS_EMPTY.title}</h2><p>{TARGETS_EMPTY.body}</p></div>}
   </div>;
 }
 

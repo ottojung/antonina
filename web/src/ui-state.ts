@@ -1,4 +1,5 @@
 import { BoardDeletedError, BoardTrustRequiredError } from './api';
+import type { BoardFeedEntry, BoardFeedEntryKind } from './api';
 import type { Board, BoardIssue, BoardResource, VerifiedBoardState } from './model';
 
 export type IssueFilter = 'open' | 'closed' | 'all';
@@ -319,6 +320,94 @@ export function groupResources(resources: BoardResource[]): Array<[string, Board
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([host, entries]) => [host, entries.sort((left, right) => left.path.localeCompare(right.path))]);
 }
+
+export const FEED_HINT = 'Everything the signed board recorded, newest first: creations, edits, comments, closures and reopenings, each at the moment it was committed.';
+
+/**
+ * How each feed entry kind reads on one line. A mapping over the whole
+ * vocabulary rather than a chain of comparisons, so a kind added to
+ * `BOARD_FEED_ENTRY_KINDS` is a type error here instead of silently rendering
+ * as the last case. These are the same six verbs `antonina board feed` prints,
+ * so the browser and the CLI name the same event the same way.
+ */
+export const FEED_VERB: { readonly [K in BoardFeedEntryKind]: string } = {
+  'issue-created': 'created',
+  'issue-edited': 'edited',
+  'comment-added': 'commented',
+  'issue-closed': 'closed',
+  'issue-reopened': 'reopened',
+  'issue-deleted': 'deleted',
+};
+
+/**
+ * The badge that tells the six kinds apart at a glance, and as a class name the
+ * row is styled from. Also total over the vocabulary, for the same reason.
+ */
+export const FEED_KIND_LABEL: { readonly [K in BoardFeedEntryKind]: string } = {
+  'issue-created': 'Created',
+  'issue-edited': 'Edited',
+  'comment-added': 'Comment',
+  'issue-closed': 'Closed',
+  'issue-reopened': 'Reopened',
+  'issue-deleted': 'Deleted',
+};
+
+/**
+ * One line describing the operation the entry names. The author's name and the
+ * body appear only for a comment, because the log records them only there: no
+ * other kind has them, and inventing one from the collapsed view would be an
+ * event the board never committed.
+ */
+export function feedEntrySummary(entry: BoardFeedEntry): string {
+  if (entry.kind === 'comment-added' && entry.author !== null) {
+    return `${FEED_VERB['comment-added']} by ${entry.author}: ${entry.body ?? ''}`;
+  }
+  return `${FEED_VERB[entry.kind]} — ${entry.title}`;
+}
+
+export const FEED_EMPTY = {
+  title: 'No activity recorded yet',
+  body: 'Entries appear here as soon as the board records its first operation.',
+} as const;
+
+export const FEED_MORE_LABEL = 'Show older entries';
+
+export const FEED_COUNT_LABEL = (shown: number, total: number) => `${shown} of ${total} recorded entries`;
+
+/**
+ * The two kinds the board genuinely cannot report, said out loud where a reader
+ * would otherwise assume they are merely missing.
+ *
+ * A message edit is inexpressible because a board message is immutable and there
+ * is no message-edit operation to project, and a per-field issue-edit history is
+ * not recorded because an edit operation names the issue, not the field it
+ * changed. An `issue-edited` entry says an edit was committed at that instant;
+ * it does not and cannot say which part of the issue it changed. Nothing here
+ * renders a placeholder that would imply either exists.
+ */
+export const FEED_UNTRACKED_COPY =
+  'The board does not record edits to messages, or which field an issue edit changed, so neither appears here.';
+
+/**
+ * The issues the board view knows about that the feed reports nothing for.
+ *
+ * The feed is a projection over the operation log, and an issue that was already
+ * in the `board.initialize` snapshot predates that log: no operation ever named
+ * its creation, so the projection cannot place it and does not. The CLI cannot
+ * tell that apart from an empty board and prints an empty feed, but a browser
+ * can, because it holds both the board view and the feed. The difference is a
+ * set of issue numbers and nothing more — no entry is invented for them, and
+ * they are not ordered or timestamped here, because the board recorded no such
+ * facts. It only reports that these issues are not in the stream, so the reader
+ * is never shown a confidently empty feed that is really a truncated one.
+ */
+export function untrackedIssueNumbers(issues: BoardIssue[], entries: BoardFeedEntry[]): number[] {
+  const tracked = new Set(entries.map((entry) => entry.issueNumber));
+  return issues.filter((issue) => !tracked.has(issue.number)).map((issue) => issue.number).sort((left, right) => left - right);
+}
+
+export const FEED_TRUNCATED_COPY = (numbers: number[]) =>
+  `These issues were already on the board when the signed log began, so the log recorded no operation for them and the feed cannot show when they were created or changed: ${numbers.map((number) => `#${number}`).join(', ')}.`;
 
 export function formatUpdatedAt(timestamp: string, now = new Date()): string {
   const date = new Date(timestamp);

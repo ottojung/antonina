@@ -16,6 +16,7 @@ import {
   type BoardCredential,
 } from '../../packages/core/src/credential';
 import type { BoardTrustAnchor, VerifiedBoardState } from '../../packages/core/src/operations';
+import type { BoardFeedPage, BoardFeedRequest } from '../../packages/core/src/feed';
 
 export {
   parseBoardCredentialText,
@@ -76,6 +77,21 @@ export class BrowserBoardSession {
       if (error instanceof BoardMissingError) return null;
       throw error;
     }
+  }
+
+  /**
+   * One page of the unified board activity stream, newest first.
+   *
+   * This is the same projection `antonina board feed` reads: it hands the
+   * request straight to the core `BoardApi.readFeed`, which derives the page
+   * from the verified operation log and returns the backend's own continuation
+   * token. Nothing here derives, orders, re-limits or re-tokenizes anything —
+   * a second implementation of the feed in the browser is exactly the failure
+   * mode this app avoids, so the cursor in `page.nextCursor` is the one the next
+   * call must pass back unchanged.
+   */
+  async readFeed(request: BoardFeedRequest = {}): Promise<BoardFeedPage> {
+    return this.api.readFeed(request);
   }
 
   /**

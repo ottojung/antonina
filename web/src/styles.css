@@ -103,6 +103,39 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .workspace.resources-view { display: grid; grid-template-columns: minmax(0, 1fr); background: var(--paper); }
 .workspace.resources-view .issue-pane { border-right: 0; }
 .workspace.resources-view .resources-view { max-width: 1100px; margin: 0 auto; padding: 0 32px; }
+/* The feed tab is a third single-column view, so it keeps the same pinned row
+   and the same single scrolling pane the resources view settled on. The two
+   rules above are not edited: this tab inherits that behaviour by declaring the
+   same single column, which is what a new view has to do. */
+.workspace.feed-view { display: grid; grid-template-columns: minmax(0, 1fr); background: var(--paper); }
+.workspace.feed-view .issue-pane { border-right: 0; }
+.workspace.feed-view .pane-heading { max-width: 1100px; margin: 0 auto; width: 100%; }
+.feed-view-inner { max-width: 1100px; margin: 0 auto; padding: 0 32px 32px; }
+.feed-count { margin: 0 0 12px; color: var(--muted); font-size: .78rem; }
+.feed-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.feed-entry { display: flex; align-items: baseline; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.feed-kind { flex: none; width: 86px; border-radius: 999px; padding: 2px 8px; background: #ecefe9; color: #51544d; font-size: .7rem; font-weight: 800; text-align: center; }
+.feed-kind-comment-added { background: var(--green-soft); color: var(--green-dark); }
+.feed-kind-issue-created { background: #e4ecf7; color: #2f4d75; }
+.feed-kind-issue-closed { background: #f1e5df; color: #7a4a35; }
+.feed-kind-issue-reopened { background: #f5ead8; color: #76532f; }
+.feed-kind-issue-deleted { background: #e8e6e4; color: #5c5751; }
+.feed-detail { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.feed-issue { border: 0; background: transparent; color: var(--green); padding: 0; font-weight: 750; text-align: left; overflow-wrap: anywhere; }
+.feed-summary { color: var(--ink); font-size: .88rem; overflow-wrap: anywhere; }
+.feed-at { flex: none; color: var(--muted); font-size: .75rem; white-space: nowrap; }
+.feed-caveat { margin: 16px 0 0; padding: 11px 13px; border: 1px solid #e2c4b2; border-radius: 9px; background: var(--orange-soft); color: #765c4c; font-size: .8rem; line-height: 1.5; }
+.feed-untracked { margin: 14px 0 0; color: var(--muted); font-size: .78rem; line-height: 1.5; }
+.feed-error { margin: 0 0 12px; color: #762e23; font-size: .85rem; }
+.feed-more { margin-top: 16px; border: 1px solid #bdc4bb; border-radius: 8px; background: #fff; color: var(--ink); padding: 9px 14px; font-weight: 750; }
+.feed-more:disabled { background: #e5e7e2; color: #969a92; border-color: #d2d5cf; cursor: not-allowed; }
+@media (max-width: 760px) {
+.workspace.feed-view { display: block; }
+.workspace.feed-view .issue-pane { border-right: 0; }
+.feed-view-inner { padding: 0 20px 28px; }
+.feed-entry { flex-wrap: wrap; gap: 6px; }
+.feed-at { white-space: normal; }
+}
 .resource-form, .resource-host { padding: 22px 24px; }
 .resource-form { display: grid; gap: 7px; border-bottom: 1px solid var(--line); }
 .resource-form textarea, .resource-form select, .resource-form input, .dependency-add select { min-width: 0; }

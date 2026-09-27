@@ -248,6 +248,15 @@ describe('the feed tab in the app shell', () => {
     expect(app.match(/<FeedView /g)).toHaveLength(1);
     expect(app).toMatch(/type View = 'issues' \| 'resources' \| 'feed'/);
   });
+
+  it('opens the feed through the shared reader, so the prop is the only read path', () => {
+    // The container's opening read is a named function rather than something
+    // inlined in the effect, which is what lets a detached read be exercised
+    // directly: the test in api.test.ts calls this same reader with a session
+    // method that has lost its receiver, the way this prop has.
+    expect(app).toMatch(/await readFeedFirstPage\(read\)/);
+    expect(app).toMatch(/readFeed: FeedRead;/);
+  });
 });
 
 describe('the requests the feed tab sends', () => {

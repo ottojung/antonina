@@ -12,11 +12,13 @@ import {
   BrowserBoardSession,
   BoardTrustRequiredError,
   createBrowserBoardApi,
+  DEFAULT_FEED_LIMIT,
   serializeBoardCredential,
   serializeBoardTrustAnchor,
   type BoardCredential,
   type BoardKeyStorage,
 } from './api';
+import { appendFeedPage, readFeedFirstPage, type FeedRead } from './ui-state';
 
 const STAMP = '2026-09-25T12:00:00.000Z';
 
@@ -532,6 +534,38 @@ describe('the board feed through the session', () => {
     await expect(writer.readFeed({ cursor: 'v1.not-base64' })).rejects.toThrow('cursor is malformed');
     await expect(writer.readFeed({ cursor: 'v9.eyJhdCI6IiJ9' })).rejects.toThrow('cursor is malformed');
     await expect(writer.readFeed({ limit: 0 })).rejects.toThrow('limit must be a positive integer');
+  });
+
+  it('hands the tab a read that still has its session once the view has detached it', async () => {
+    // The feed tab receives the session's read as a bare function prop and calls
+    // it on its own, so `owner.readFeed` below is the exact value the view
+    // holds: no receiver, nothing to fall back on. Every other read in this
+    // file is called as a method, which is why a read that lost its session
+    // passed the whole suite and threw only in the app.
+    const server = fakeSkrynia();
+    const owner = session(server);
+    await owner.initialize();
+    for (let index = 1; index <= 55; index += 1) await owner.api.createIssue(`Issue ${index}`);
+
+    const detached: FeedRead = owner.readFeed;
+    const first = await readFeedFirstPage(detached);
+    const second = await appendFeedPage(detached, first, first.nextCursor!);
+
+    expect(first.limit).toBe(DEFAULT_FEED_LIMIT);
+    expect(first.entries).toHaveLength(50);
+    expect(first.nextCursor).not.toBeNull();
+    // The walk still reaches the whole log through the same detached read, and
+    // the newest entry is still the top of the page.
+    expect(second.entries).toHaveLength(55);
+    expect(second.nextCursor).toBeNull();
+    expect(first.entries[0].title).toBe('Issue 55');
+  });
+
+  it('keeps its read off the prototype, so it cannot be handed over unbound', () => {
+    // The cheap structural half of the same guard: a read on the prototype is
+    // exactly the shape that detaches to nothing, so its absence here is what
+    // makes the test above a property of the class rather than of one fixture.
+    expect((BrowserBoardSession.prototype as { readFeed?: unknown }).readFeed).toBeUndefined();
   });
 
   it('reads the feed without a credential and without writing anything', async () => {

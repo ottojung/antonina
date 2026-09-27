@@ -1,5 +1,5 @@
 import { BoardDeletedError, BoardTrustRequiredError, DEFAULT_FEED_LIMIT } from './api';
-import type { BoardFeedEntry, BoardFeedEntryKind, BoardFeedPage, BoardFeedRequest } from './api';
+import type { BoardFeedEntry, BoardFeedEntryKind, BoardFeedPage, BoardFeedRequest, FeedRead } from './api';
 import type { Board, BoardIssue, BoardResource, VerifiedBoardState } from './model';
 
 export type IssueFilter = 'open' | 'closed' | 'all';
@@ -375,16 +375,12 @@ export const FEED_MORE_LABEL = 'Show older entries';
 export const FEED_COUNT_LABEL = (shown: number, total: number) => `${shown} of ${total} recorded entries`;
 
 /**
- * The one shape the feed is read through, wherever it is called from.
- *
- * It is a bare function and not a method on the session, because the tab
- * receives the session's read as a prop and calls it on its own: whatever is
- * handed to this type has to be callable without a receiver. A session method
- * that reads `this` therefore does not satisfy this type honestly, even though
- * TypeScript would accept it, so the session's own read is bound to its session
- * before it is passed here.
+ * The one shape the feed is read through, wherever it is called from: the bare
+ * function the tab receives as a prop. It is `FeedRead` from the session module
+ * rather than a second declaration, so the tab and the thing that hands it a
+ * read cannot drift apart into two shapes that each look right.
  */
-export type FeedRead = (request?: BoardFeedRequest) => Promise<BoardFeedPage>;
+export type { FeedRead } from './api';
 
 /**
  * The request the feed tab opens with. It asks the core projection for its own

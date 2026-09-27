@@ -3,17 +3,30 @@ name: Deploy web
 on:
   push:
     branches: [main]
+    # Derived from the build input graph of `make build`; verified by the
+    # `trigger-coverage` job below (.github/check-web-deploy-triggers.mjs).
     paths:
       - "web/**"
       - "packages/core/**"
+      - "package.json"
+      - "Makefile"
       - ".github/workflows/web-deploy.yml"
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  trigger-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Web deploy trigger coverage
+        run: node .github/check-web-deploy-triggers.mjs
+
   deploy:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

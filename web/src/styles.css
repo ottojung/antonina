@@ -93,7 +93,14 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .create-form input { flex: 1; min-width: 0; }
 .create-form textarea { min-height: 76px; resize: vertical; }
 .create-form small { color: var(--muted); font-size: .74rem; line-height: 1.4; }
-.workspace.resources-view { display: block; background: var(--paper); }
+/* Resources is one column across the whole workspace instead of a two-pane
+   split, but it is bounded by exactly the same mechanism: a plain block here
+   would be sized by its content, so a long list of hosts would grow past the
+   bottom of the viewport, get clipped by the shell, and stop being reachable
+   with no scrollbar anywhere. A single-column grid on the same pinned row
+   leaves the pane as the only thing that scrolls, and it is what a future tab
+   has to keep doing to inherit the same behaviour. */
+.workspace.resources-view { display: grid; grid-template-columns: minmax(0, 1fr); background: var(--paper); }
 .workspace.resources-view .issue-pane { border-right: 0; }
 .workspace.resources-view .resources-view { max-width: 1100px; margin: 0 auto; padding: 0 32px; }
 .resource-form, .resource-host { padding: 22px 24px; }
@@ -273,7 +280,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
   .thread { min-height: calc(100vh - 66px); overflow-y: visible; }
   .composer-area { position: sticky; bottom: 0; }
   .workspace.resources-view .resources-view { padding: 0 20px; }
-  .workspace.resources-view { padding-bottom: 32px; }
+  .workspace.resources-view { display: block; padding-bottom: 32px; }
   .issue-pane { border-right: 0; }
   .has-selection .issue-pane { display: none; }
   .pane-heading { padding-top: 24px; }

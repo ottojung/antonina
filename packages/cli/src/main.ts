@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { runManagedRunner } from '../../agent-runtime/src/runner.js';
 import { runAgentCommand, type AgentCommandContext } from './agent.js';
 import { runBoardCommand } from './board.js';
+import { runDaemonCommand } from './daemon.js';
 
 
 function io() {
@@ -43,10 +44,13 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (namespace === 'board') {
     return runBoardCommand(args, { env: process.env, io: io() });
   }
+  if (namespace === 'daemon') {
+    return runDaemonCommand(args, { env: process.env, io: io() });
+  }
   if (namespace === 'agent') {
     return runAgentCommand(args, agentContext());
   }
-  process.stderr.write('antonina: expected "agent" or "board" command namespace\n');
+  process.stderr.write('antonina: expected "agent", "board" or "daemon" command namespace\n');
   return 2;
 }
 

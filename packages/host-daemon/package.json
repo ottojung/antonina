@@ -1,0 +1,9 @@
+{
+  "name": "@antonina/host-daemon",
+  "private": true,
+  "type": "module",
+  "description": "The host-local Antonina daemon for persistent hardware hosts",
+  "engines": {
+    "node": ">=22"
+  }
+}

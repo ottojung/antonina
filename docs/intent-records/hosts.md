@@ -105,3 +105,53 @@ kind: constraint
 A host that finds a metadata lock whose recorded owner is judged dead may reclaim it, and what makes that safe is that the reclaim re-reads the lock and unlinks it only when the record it re-read is byte-for-byte the same acquisition it judged dead — same acquisition identity and same content, with a tokenless record falling back to exact-content identity because pid and start ticks alone would let a different acquisition sharing them be unlinked. What the reclaim does not have, and must not be described as having, is an exclusive claim on the lock path across that re-read and the unlink that follows it. Between the two there is an interval in which another owner can have reclaimed the same stale lock and installed its own live lock, and this reclaim's unlink can then remove a lock it never judged. That window is a property of the primitives, not of this implementation: POSIX offers no compare-and-unlink, so nothing in ordinary Node or POSIX can make the judgment and the removal one act. A narrowing that shortens the interval, and a refusal when the re-read no longer shows the same acquisition, are the whole of what is available, and a reclaim that keeps the interval is not thereby claiming it closed.
 
 The alternative considered for this window and deliberately rejected is quarantining the lock by renaming it aside and unlinking the renamed file. It is worse, not better, and the reason is worth recording so it is not relitigated blind. Renaming replaces one unexamined window with a longer chain of the same unexamined windows: the re-read, then the rename, then the unlink, each of which another owner can interleave with, so the operation that was meant to take the path out of contention adds two further steps in which a live owner's lock can be moved or removed. A rename also destroys the evidence the re-read depends on — once the record has been moved, nothing at the lock path states which acquisition the judgment was about, so a failure after the rename leaves a quarantined file that no later reader can attribute, and a reclaim that crashes there leaves the lock path free with a stale record beside it that nothing reclaims. Since the residual interval is already irreducible, the honest form of this code is the narrow one: judge, re-read, unlink only what the re-read still shows, and state the remaining window rather than trading it for a longer unstated one.
+
+$id-3917852640139474
+title: An execution target is not a resource
+date: 2026/09/26
+source: issue-21
+kind: constraint
+
+An execution target and a resource are different kinds of thing and neither is
+stored as the other. A resource is a durable filesystem path an open issue
+depends on; an execution target is an environment a job may be dispatched to. A
+target declares which backend runs it, whether it is a persistent host or an
+ephemeral environment, and what it can do; its capabilities, backend, and kind
+come from closed vocabularies rather than from free-form strings, because
+matching a requirement is a question about typed membership. A target that is an
+ephemeral environment has no durable host filesystem and therefore no resource
+anywhere in the board, and a target that is a persistent host answers to one
+canonical `lubko://` address, which is what relates it to the resources
+registered on that host. The relation is derived, so a resource never carries a
+second spelling of the host it belongs to, and a resource on a host no target
+claims is reported as belonging to no target rather than being attached to the
+nearest one. No target is privileged by name: the catalog, not `phoebe-dev`,
+decides what work can run where.
+
+Where a target is dispatched, the backend behind it remains responsible for
+running the work. Antonina decides and records which target a job runs on; it
+does not reimplement the transport to a Lubko host, and it does not claim to
+know whether a host is reachable at the moment it is selected. What a target
+declares is a registration, and a target whose recorded status says it is
+unavailable is refused by name rather than skipped in favour of another target.
+
+$id-3917852640139475
+title: A target selection is a decision, not a fallback
+date: 2026/09/26
+source: issue-21
+kind: constraint
+
+Selecting the target a job runs on is a decision made once, from the verified
+board and the request, and it is reported rather than merely performed. The same
+board and the same request always select the same target: candidates are ordered
+by target identity, a target the request names is taken as given or refused by
+name, and otherwise the eligible target declaring the fewest capabilities the
+request did not ask for wins, ties broken by the lower target identity.
+Nothing in the decision consults the clock, the registry's order, or a host's
+liveness. A request no target satisfies fails with an outcome naming which
+targets were considered and which requirement refused each, so an unknown
+target, an unavailable target, an ineligible target, and an unsatisfiable
+request are four distinguishable results. The rationale travels with the
+decision: the dispatch record on the board carries the reason the target was
+chosen, so the board itself explains a routing choice rather than leaving it
+to be reconstructed.

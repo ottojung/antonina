@@ -6,6 +6,7 @@ import {
   BoardStorageRejectedError,
   BoardTrustRequiredError,
   DEFAULT_BOARD_BASE_URL,
+  TargetSelectionError,
   type BoardAccessState,
   type BoardInitialization,
 } from '../../core/src/api.js';
@@ -15,7 +16,24 @@ import {
   type BoardCredential,
 } from '../../core/src/credential.js';
 import { canonicalJson, type CanonicalValue } from '../../core/src/canonical.js';
-import type { BoardIssue, BoardResource, IssueState, ResourceView } from '../../core/src/model.js';
+import {
+  parseExecutionTargetBackend,
+  parseExecutionTargetCapability,
+  parseExecutionTargetKind,
+  parseExecutionTargetStatus,
+  type BoardDispatch,
+  type BoardExecutionTarget,
+  type BoardIssue,
+  type BoardResource,
+  type ExecutionTargetBackend,
+  type ExecutionTargetKind,
+  type ExecutionTargetStatus,
+  type IssueState,
+  type ResourceView,
+  type TargetRequest,
+  type TargetSelection,
+  type TargetView,
+} from '../../core/src/model.js';
 import {
   parseBoardCapability,
   type BoardCapability,
@@ -68,7 +86,11 @@ type CommandValue =
   | BoardIssue[]
   | BoardResource
   | BoardResource[]
+  | BoardDispatch
+  | BoardExecutionTarget
   | ResourceView[]
+  | TargetView[]
+  | TargetSelection
   | BoardInitialization
   | BoardCredential
   | BoardAccessState
@@ -133,6 +155,40 @@ function flag(args: string[], name: string): { value: boolean; rest: string[] } 
   const index = args.indexOf(name);
   if (index < 0) return { value: false, rest: args };
   return { value: true, rest: [...args.slice(0, index), ...args.slice(index + 1)] };
+}
+
+/** An option that may be given more than once, keeping the order it was given in. */
+function repeatedOption(args: string[], name: string): { values: string[]; rest: string[] } {
+  const values: string[] = [];
+  let rest = [...args];
+  for (let index = rest.indexOf(name); index >= 0; index = rest.indexOf(name)) {
+    const value = rest[index + 1];
+    if (value === undefined || value.startsWith('--')) throw new AntoninaApiError(name + ' requires a value');
+    values.push(value);
+    rest = [...rest.slice(0, index), ...rest.slice(index + 2)];
+  }
+  return { values, rest };
+}
+
+/**
+ * The routing request a `target` or `dispatch` command carries. The flags are
+ * the same in every case so "run it here" and "run it where it fits" are one
+ * vocabulary, and none of them names a default host.
+ */
+function targetRequest(args: string[]): { request: TargetRequest; rest: string[] } {
+  const targetOption = option(args, '--target');
+  const backendOption = option(targetOption.rest, '--backend');
+  const kindOption = option(backendOption.rest, '--kind');
+  const capabilityOption = repeatedOption(kindOption.rest, '--capability');
+  return {
+    request: {
+      targetId: targetOption.value ?? null,
+      backend: backendOption.value === undefined ? null : parseExecutionTargetBackend(backendOption.value),
+      kind: kindOption.value === undefined ? null : parseExecutionTargetKind(kindOption.value),
+      capabilities: capabilityOption.values.map(parseExecutionTargetCapability),
+    },
+    rest: capabilityOption.rest,
+  };
 }
 
 /**
@@ -385,6 +441,96 @@ async function execute(
       }
       throw new AntoninaApiError('resource requires list, add, or remove');
     }
+    case 'target': {
+      const [subcommand, ...args] = parsed.args;
+      if (subcommand === 'list') {
+        const backendOption = option(args, '--backend');
+        const kindOption = option(backendOption.rest, '--kind');
+        if (kindOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for target list');
+        // Both filters are parsed before they are applied, so an unknown value
+        // is refused whether or not any target happens to match it.
+        const backend = backendOption.value === undefined ? null : parseExecutionTargetBackend(backendOption.value);
+        const kind = kindOption.value === undefined ? null : parseExecutionTargetKind(kindOption.value);
+        const targets = await client.listTargets();
+        return {
+          mode: 'targets',
+          value: targets.filter((target) =>
+            (backend === null || target.backend === backend) && (kind === null || target.kind === kind)),
+        };
+      }
+      if (subcommand === 'show') {
+        if (args.length !== 1) throw new AntoninaApiError('target show requires ID');
+        return { mode: 'target', value: await client.getTarget(requireArg(args[0], 'ID')) };
+      }
+      if (subcommand === 'add') {
+        const backendOption = option(args, '--backend');
+        const kindOption = option(backendOption.rest, '--kind');
+        const addressOption = option(kindOption.rest, '--address');
+        const descriptionOption = option(addressOption.rest, '--description');
+        const capabilityOption = repeatedOption(descriptionOption.rest, '--capability');
+        if (capabilityOption.rest.length !== 1) {
+          throw new AntoninaApiError('target add requires ID --backend BACKEND --kind KIND');
+        }
+        const id = requireArg(capabilityOption.rest[0], 'ID');
+        const address = addressOption.value ?? null;
+        if (address === null && kindOption.value === 'persistent-host') {
+          throw new AntoninaApiError('target add --kind persistent-host requires --address lubko://<server>');
+        }
+        return {
+          mode: 'target',
+          value: await client.registerTarget({
+            id,
+            backend: parseExecutionTargetBackend(requireArg(backendOption.value, 'target add --backend')),
+            kind: parseExecutionTargetKind(requireArg(kindOption.value, 'target add --kind')),
+            capabilities: capabilityOption.values.map(parseExecutionTargetCapability),
+            address,
+            description: descriptionOption.value ?? '',
+          }),
+        };
+      }
+      if (subcommand === 'set') {
+        const statusOption = option(args, '--status');
+        const descriptionOption = option(statusOption.rest, '--description');
+        const capabilityOption = repeatedOption(descriptionOption.rest, '--capability');
+        if (capabilityOption.rest.length !== 1) throw new AntoninaApiError('target set requires ID');
+        const id = requireArg(capabilityOption.rest[0], 'ID');
+        const existing = await client.getTarget(id);
+        const status: ExecutionTargetStatus = statusOption.value === undefined
+          ? existing.status
+          : parseExecutionTargetStatus(statusOption.value);
+        // An absent `--capability` keeps the declared capabilities, so a
+        // status change cannot silently strip what a target can do.
+        const capabilities = capabilityOption.values.length === 0
+          ? existing.capabilities
+          : capabilityOption.values.map(parseExecutionTargetCapability);
+        return {
+          mode: 'target',
+          value: await client.setTarget(id, {
+            status,
+            capabilities,
+            description: descriptionOption.value ?? existing.description,
+          }),
+        };
+      }
+      throw new AntoninaApiError('target requires list, show, add, or set');
+    }
+    case 'dispatch': {
+      const [subcommand, ...args] = parsed.args;
+      if (subcommand === 'select') {
+        const routed = targetRequest(args);
+        if (routed.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for dispatch select');
+        return { mode: 'selection', value: await client.selectTarget(routed.request) };
+      }
+      if (subcommand === 'record') {
+        const routed = targetRequest(args);
+        if (routed.rest.length !== 1) throw new AntoninaApiError('dispatch record requires NUMBER');
+        return {
+          mode: 'dispatch',
+          value: await client.recordDispatch(parsePositiveInteger(routed.rest[0], 'NUMBER'), routed.request),
+        };
+      }
+      throw new AntoninaApiError('dispatch requires select or record');
+    }
     case 'collect': {
       const [subcommand, ...args] = parsed.args;
       if (subcommand === 'list') {
@@ -432,6 +578,46 @@ const REMOVAL_OUTCOME: { readonly [K in CollectDeleteReport['removal']]: string 
   'unlinked-symlink': 'unlinked symlink',
   absent: 'already absent',
 };
+
+function humanTargetRecord(target: BoardExecutionTarget): string[] {
+  return [
+    target.id + ' [' + target.backend + '/' + target.kind + '] ' + target.status
+      + ' [' + target.capabilities.join(', ') + ']'
+      + (target.address === null ? ' no-host' : ' ' + target.address),
+    ...(target.description === '' ? [] : ['  ' + target.description]),
+  ];
+}
+
+function humanTarget(target: TargetView): string {
+  const lines = humanTargetRecord(target);
+  for (const resource of target.resources) {
+    lines.push('  resource ' + resource.path + ' -> ' + resource.issueNumbers.map((number) => '#' + number).join(', '));
+  }
+  if (target.dispatchedIssues.length > 0) {
+    lines.push('  dispatched ' + target.dispatchedIssues.map((number) => '#' + number).join(', '));
+  }
+  return lines.join('\n');
+}
+
+/**
+ * The selection as a caller reads it: which target, which rule chose it, and
+ * every candidate that was considered and why it was or was not eligible.
+ */
+function humanSelection(selection: TargetSelection): string[] {
+  const lines = [
+    (selection.target === null ? 'no target selected: ' : 'selected ' + selection.target.id + ': ')
+      + selection.rationale,
+  ];
+  for (const entry of selection.considered) {
+    lines.push(
+      '  ' + entry.targetId + ' [' + entry.backend + '/' + entry.kind + '] ' + entry.status
+        + (entry.eligible
+          ? ' eligible; undeclared ' + entry.surplus.join(', ')
+          : ' refused: ' + entry.unmet.join(', ')),
+    );
+  }
+  return lines;
+}
 
 function humanLines(result: CommandResult): string[] {
   if (result.mode === 'initialize') {
@@ -514,6 +700,18 @@ function humanLines(result: CommandResult): string[] {
     ];
   }
 
+  if (result.mode === 'target') return humanTargetRecord(result.value as BoardExecutionTarget);
+  if (result.mode === 'targets') {
+    const targets = result.value as TargetView[];
+    if (targets.length === 0) return ['No execution targets are registered.'];
+    return targets.map(humanTarget);
+  }
+  if (result.mode === 'selection') return humanSelection(result.value as TargetSelection);
+  if (result.mode === 'dispatch') {
+    const dispatch = result.value as BoardDispatch;
+    return ['Dispatched #' + dispatch.issueNumber + ' to ' + dispatch.targetId + '; ' + dispatch.rationale];
+  }
+
   const value = result.value;
   if (!Array.isArray(value)) return [humanIssue(value as BoardIssue)];
   return value.map((item) => {
@@ -547,6 +745,12 @@ export async function runBoardCommand(argv: string[], context: BoardCommandConte
     const message = error instanceof Error ? error.message : String(error);
     const advice = boardStateAdvice(error);
     context.io.stderr('antonina board: ' + message + (advice === null ? '' : '; ' + advice));
+    // A refused selection names every candidate it considered, so the operator
+    // sees which target was rejected and for which requirement rather than only
+    // being told that nothing was chosen.
+    if (error instanceof TargetSelectionError) {
+      for (const line of humanSelection(error.selection).slice(1)) context.io.stderr('antonina board: ' + line);
+    }
     return 1;
   }
 }

@@ -22,24 +22,28 @@ const issue = (number, state = 'open') => ({
 });
 
 test('canonical board parser rejects incompatible schemas and unknown issue fields', () => {
-  assert.throws(() => parseBoard({ schemaVersion: 1, nextIssueNumber: 1, issues: [], resources: [] }), /incompatible/);
+  assert.throws(() => parseBoard({ schemaVersion: 1, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] }), /incompatible/);
   assert.throws(() => parseBoard({
-    schemaVersion: 2,
+    schemaVersion: 3,
     nextIssueNumber: 2,
     issues: [{ ...issue(1), assignee: 'agent' }],
     resources: [],
+    targets: [],
+    dispatches: [],
   }), /incompatible/);
 });
 
 test('canonical board parser rejects unsafe counters and out-of-order messages', () => {
   assert.throws(() => parseBoard({
-    schemaVersion: 2,
+    schemaVersion: 3,
     nextIssueNumber: Number.MAX_SAFE_INTEGER + 1,
     issues: [],
     resources: [],
+    targets: [],
+    dispatches: [],
   }), /incompatible/);
   assert.throws(() => parseBoard({
-    schemaVersion: 2,
+    schemaVersion: 3,
     nextIssueNumber: 2,
     issues: [{
       ...issue(1),
@@ -49,12 +53,14 @@ test('canonical board parser rejects unsafe counters and out-of-order messages',
       ],
     }],
     resources: [],
+    targets: [],
+    dispatches: [],
   }), /chronological/);
 });
 
 test('resource schema is strict and resource views derive protection from open dependencies', () => {
   const board = parseBoard({
-    schemaVersion: 2,
+    schemaVersion: 3,
     nextIssueNumber: 3,
     issues: [issue(1), issue(2, 'closed')],
     resources: [{
@@ -64,9 +70,12 @@ test('resource schema is strict and resource views derive protection from open d
       createdAt: timestamp,
       updatedAt: timestamp,
     }],
+    targets: [],
+    dispatches: [],
   });
   assert.deepEqual(resourceViews(board), [{
     host: 'lubko://server',
+    targetId: null,
     path: '/workspace/project',
     issues: [{ number: 1, state: 'open' }, { number: 2, state: 'closed' }],
     protected: true,

@@ -28,6 +28,12 @@ import {
   waitForInvocationGone,
 } from '../../agent-runtime/src/lifecycle.js';
 import {
+  HostCapacityRefusalError,
+  checkHostLaunchCapacity,
+  formatBytes,
+  type CapacityDecision,
+} from '../../agent-runtime/src/host-capacity.js';
+import {
   TERMINAL_STATES,
   activeRunnerFlag,
   deletePendingFlag,
@@ -285,7 +291,33 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
   return EXIT_OK;
 }
 
-function statusJson(agentId: string, meta: AgentMetadata): Record<string, unknown> {
+function hostCapacityJson(decision: CapacityDecision): Record<string, unknown> {
+  const capacity = decision.capacity;
+  return {
+    source: capacity.source,
+    outcome: decision.outcome,
+    refused: decision.outcome === 'refused',
+    override_applied: decision.overrideApplied,
+    cgroup_path: capacity.cgroupPath,
+    limit_bytes: capacity.limitBytes,
+    usage_bytes: capacity.usageBytes,
+    headroom_bytes: capacity.headroomBytes,
+    headroom: capacity.headroomBytes === null ? null : formatBytes(capacity.headroomBytes),
+    min_headroom_bytes: decision.thresholdBytes,
+    min_headroom: formatBytes(decision.thresholdBytes),
+    pressure_full_avg10: capacity.pressureFullAvg10,
+    oom: capacity.oom,
+    oom_kill: capacity.oomKill,
+    degraded_reason: capacity.degradedReason,
+    reason: decision.reason,
+  };
+}
+
+function statusJson(
+  agentId: string,
+  meta: AgentMetadata,
+  env: Record<string, string | undefined> = process.env,
+): Record<string, unknown> {
   const item = summary(meta);
   const sequence = steerSequence(meta);
   const steers = steerQueue(meta, sequence);
@@ -316,6 +348,8 @@ function statusJson(agentId: string, meta: AgentMetadata): Record<string, unknow
     model: 'opencode/space-bunny-free',
     variant: persistedVariant(meta),
     backend_error: sanitizeBackendError(meta.backend_error),
+    host_capacity: hostCapacityJson(checkHostLaunchCapacity({ env })),
+
     log: '',
   };
 }
@@ -326,7 +360,7 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
   const agentId = requireAgentId(parsed.values.get('--id'), 'status');
   await reconcileAgent(agentId, context);
   const meta = requireMeta(agentId, context);
-  const status = statusJson(agentId, meta);
+  const status = statusJson(agentId, meta, context.env);
   status.log = logPath(agentId, paths(context));
   if (parsed.flags.has('--json')) {
     context.io.stdout(JSON.stringify(status, null, 2));
@@ -340,6 +374,13 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
     context.io.stdout(`started:    ${shown(status.started_at)}`);
     context.io.stdout(`finished:   ${shown(status.finished_at)}`);
     context.io.stdout(`exit code:  ${shown(status.exit_code)}`);
+    // Headroom and any standing refusal reason, so a pass can measure the host
+    // here before it launches instead of discovering it from a dead agent.
+    const capacity = status.host_capacity as Record<string, unknown>;
+    context.io.stdout(
+      `headroom:   ${shown(capacity.headroom)} of ${shown(capacity.min_headroom)} required (${shown(capacity.outcome)})`,
+    );
+    context.io.stdout(`host:       ${String(capacity.reason)}`);
     context.io.stdout(`prompts:    ${shown(status.prompts, '0')}`);
     if (status.steer_metadata_error) {
       context.io.stdout(`steers:     ${String(status.steer_metadata_error)}`);
@@ -488,6 +529,12 @@ async function cmdPrompt(args: string[], context: AgentCommandContext): Promise<
   if (configuredModelAvailable(context.env) === false) {
     throw new Error('configured OpenCode model opencode/space-bunny-free is unavailable');
   }
+  // Check the host *before* this prompt is granted runner or invocation
+  // authority, so a refusal leaves no accepted prompt and no dangling
+  // reservation behind. The runner repeats the same check at the spawn
+  // boundary, which is what covers a resumed or steered invocation.
+  const capacity = checkHostLaunchCapacity({ env: context.env });
+  if (capacity.outcome === 'refused') throw new HostCapacityRefusalError(capacity);
 
   const decision: {
     action?: 'busy' | 'spawn' | 'reuse';

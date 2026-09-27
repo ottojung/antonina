@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -40,8 +40,10 @@ function pruneFixtureParent(t) {
 
 // A successful fixture backend: exit 0, no output. Every red direction below
 // therefore converges on its own (the runner awaits the child), so no case can
-// leak a process.
-function fakeBackend(t) {
+// leak a process. `body` overrides the script for cases that need a backend
+// which dies some other way, and must still resolve through the same exec-root
+// probe: a fixture on a noexec tmpdir would silently skip instead of testing.
+function fakeBackend(t, body = '#!/bin/sh\nexit 0\n') {
   const failures = [];
   for (const parent of [tmpdir(), REPO_FIXTURE_PARENT]) {
     let root;
@@ -58,7 +60,7 @@ function fakeBackend(t) {
     });
     if (execProbe(root, 'probe-').ok) {
       const bin = join(root, 'opencode');
-      writeFileSync(bin, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      writeFileSync(bin, body, { mode: 0o755 });
       return bin;
     }
     failures.push(`${root}: fixture is not exec-capable`);
@@ -83,7 +85,17 @@ function scratch(t, backend) {
   const configHome = join(root, 'config');
   mkdirSync(stateHome);
   mkdirSync(configHome);
-  const env = { XDG_STATE_HOME: stateHome, XDG_CONFIG_HOME: configHome, ANTONINA_OPENCODE_BIN: backend };
+  // The pre-launch capacity guard reads the ambient host by default, so pin the
+  // threshold to 0 for the cases that are about lifecycle rather than capacity.
+  // Without this, every case below would depend on the host's live cgroup
+  // headroom and would refuse for real reasons on a busy machine. The guard's
+  // own behaviour is covered in host-capacity.test.mjs, through the seam.
+  const env = {
+    XDG_STATE_HOME: stateHome,
+    XDG_CONFIG_HOME: configHome,
+    ANTONINA_OPENCODE_BIN: backend,
+    ANTONINA_AGENT_MIN_HEADROOM_BYTES: '0',
+  };
   const saved = { ...process.env };
   Object.assign(process.env, env);
   t.after(() => {
@@ -237,4 +249,200 @@ test('the owning generation does claim the reservation and its prompt', async (t
   assert.equal(after.state, 'succeeded');
   assert.equal(after.exit_code, 0);
   assert.equal(after.runner_reservation, null);
+});
+
+// A synthetic cgroup for the runner's capacity seam. 30 GiB limit; `used` GiB of
+// usage, so the headroom the guard sees is (30 - used) GiB.
+function cgroup(usedGiB, extra = {}) {
+  const gib = 1024 * 1024 * 1024;
+  const files = new Map([
+    ['/sys/fs/cgroup/memory.max', String(30 * gib)],
+    ['/sys/fs/cgroup/memory.current', String(Math.round(usedGiB * gib))],
+    ['/sys/fs/cgroup/memory.events', 'oom 39\noom_kill 3\n'],
+    ['/proc/self/cgroup', '0::/\n'],
+    ...Object.entries(extra),
+  ]);
+  return (path) => files.get(path) ?? null;
+}
+
+test('a. the runner refuses to spawn below the threshold and records the refusal', async (t) => {
+  if (!requireProc(t)) return;
+  const backend = fakeBackend(t);
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const id = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    pending_prompt: 'work',
+  });
+
+  // 1 GiB of headroom against a 2 GiB threshold.
+  await runManagedRunner(id, 'new', 7, { ...options, capacity: { readText: cgroup(29), env: {} } });
+
+  const after = readMeta(id, options);
+  assert.equal(after.state, 'failed');
+  assert.equal(after.active_runner, false);
+  assert.equal(after.runner_reservation, null);
+  // Nothing was spawned, so there is no invocation identity and no exit status
+  // to misreport as a backend death.
+  assert.equal(after.pid, null);
+  assert.equal(after.exit_code, null);
+  assert.equal(after.exit_signal, null);
+  assert.equal(after.backend_error, null);
+  // The operator-facing reason, with the escape hatch, is on the record.
+  assert.match(after.error, /refusing to launch managed agent/);
+  assert.match(after.error, /1\.00 GiB is below the required minimum 2\.00 GiB/);
+  assert.match(after.error, /ANTONINA_AGENT_IGNORE_CAPACITY=1/);
+});
+
+test('a. the runner spawns and succeeds above the threshold', async (t) => {
+  if (!requireProc(t)) return;
+  const backend = fakeBackend(t);
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const id = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    pending_prompt: 'work',
+  });
+
+  // 20 GiB of headroom: the same code path as the refusal case, opposite verdict.
+  await runManagedRunner(id, 'new', 7, { ...options, capacity: { readText: cgroup(10), env: {} } });
+
+  const after = readMeta(id, options);
+  assert.equal(after.state, 'succeeded');
+  assert.equal(after.exit_code, 0);
+  assert.equal(after.error, null);
+});
+
+test('c. the runner proceeds, with a stated reason, when no cgroup limit can be read', async (t) => {
+  if (!requireProc(t)) return;
+  const backend = fakeBackend(t);
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const id = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    pending_prompt: 'work',
+  });
+
+  // memory.max reads "max": no hard limit, so there is no headroom to refuse on.
+  await runManagedRunner(id, 'new', 7, {
+    ...options,
+    capacity: { readText: cgroup(1, { '/sys/fs/cgroup/memory.max': 'max\n' }), env: {} },
+  });
+
+  const after = readMeta(id, options);
+  assert.equal(after.state, 'succeeded');
+  assert.equal(after.error, null);
+});
+
+test('4. the escape hatch launches an agent the guard would otherwise refuse', async (t) => {
+  if (!requireProc(t)) return;
+  const backend = fakeBackend(t);
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const id = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    pending_prompt: 'work',
+  });
+
+  // Identical readings to the refusal case, with the operator override set.
+  await runManagedRunner(id, 'new', 7, {
+    ...options,
+    capacity: { readText: cgroup(29), env: { ANTONINA_AGENT_IGNORE_CAPACITY: '1' } },
+  });
+
+  const after = readMeta(id, options);
+  assert.equal(after.state, 'succeeded');
+});
+
+// A cgroup whose OOM counters advance while the child is alive. The fixture
+// backend touches `markerPath` immediately before killing itself, and the
+// cgroup reading reports the post-death counters once that marker exists. This
+// is what makes the before/after bracket mean something: the kernel's counters
+// are cumulative, so a constant fixture would make every delta zero and the
+// bracket would assert nothing at all.
+function cgroupWithOomDrift(usedGiB, markerPath) {
+  const base = cgroup(usedGiB);
+  return (path) => {
+    if (path.endsWith('memory.events')) {
+      return existsSync(markerPath)
+        ? 'oom 40\noom_kill 4\n'
+        : 'oom 39\noom_kill 3\n';
+    }
+    return base(path);
+  };
+}
+
+test('e. a backend killed by a signal is recorded as an external kill, not a backend failure', async (t) => {
+  if (!requireProc(t)) return;
+  // A backend that kills itself with SIGKILL: the runner observes the child
+  // exit on signal 9, with a log that never names a backend error. It touches
+  // the marker on its way out, so the cgroup's OOM counters have advanced by
+  // the time the runner takes its post-death reading.
+  const marker = join(mkdtempSync(join(tmpdir(), 'antonina-oom-')), 'died');
+  t.after(() => rmSync(join(marker, '..'), { recursive: true, force: true }));
+  const backend = fakeBackend(t, `#!/bin/sh\necho "starting"\n: >'${marker}'\nkill -KILL $$\n`);
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const id = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    pending_prompt: 'work',
+  });
+
+  await runManagedRunner(id, 'new', 7, {
+    ...options,
+    capacity: { readText: cgroupWithOomDrift(1, marker), env: {} },
+  });
+
+  const after = readMeta(id, options);
+  assert.equal(after.state, 'failed');
+  assert.equal(after.exit_signal, 9);
+  // The classification, not the exit code, is what a reader acts on.
+  assert.equal(after.backend_error.classification, 'external_signal_kill');
+  assert.notEqual(after.backend_error.classification, 'transient_backend_server_error');
+  assert.equal(after.backend_error.signal, 9);
+  assert.equal(after.backend_error.signal_name, 'SIGKILL');
+  // The OOM counters rose across the lifetime, which is the kernel's own
+  // statement that the OOM killer fired inside the window.
+  assert.equal(after.backend_error.oom_evidence, 'observed');
+  assert.equal(after.backend_error.oom_delta, 1);
+  assert.equal(after.backend_error.oom_kill_delta, 1);
+  // A host kill is not a retryable model failure.
+  assert.equal(after.backend_error.transient, false);
+  assert.equal(after.backend_error.automatic_retry_safe, false);
+  assert.match(after.error, /SIGKILL \(signal 9\)/);
+  assert.match(after.error, /OOM killer fired inside the agent lifetime/);
+});
+
+test('e. a signal death with no readable OOM counters says the evidence is unavailable', async (t) => {
+  if (!requireProc(t)) return;
+  const backend = fakeBackend(t, '#!/bin/sh\nkill -KILL $$\n');
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const id = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    pending_prompt: 'work',
+  });
+
+  // No memory.events at all: the record must not read as "no OOM happened".
+  const noEvents = cgroup(1);
+  await runManagedRunner(id, 'new', 7, {
+    ...options,
+    capacity: {
+      readText: (path) => (path.endsWith('memory.events') ? null : noEvents(path)),
+      env: {},
+    },
+  });
+
+  const after = readMeta(id, options);
+  assert.equal(after.state, 'failed');
+  assert.equal(after.backend_error.classification, 'external_signal_kill');
+  assert.equal(after.backend_error.oom_evidence, 'unavailable');
+  assert.equal(after.backend_error.oom_kill_delta, null);
+  assert.match(after.error, /OOM involvement is unknown rather than absent/);
 });

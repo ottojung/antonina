@@ -11,15 +11,19 @@ import {
   BACKEND_RETRY_BASE_MS,
   DEFAULT_OPENCODE_BIN,
   OPENCODE_BIN_ENV,
+  SIGNAL_DEATH_CLASSIFICATION,
   backendRetryDelay,
   buildAgentCommand,
   classifyBackendFailure,
+  classifySignalDeath,
   configuredModelAvailable,
+  describeSignalDeath,
   discoverSessionId,
   resolveOpencode,
   sanitizeBackendError,
 } from '../dist/packages/agent-runtime/src/backend.js';
 import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
+import { validateAgentMetadata } from '../dist/packages/agent-runtime/src/metadata.js';
 
 const REPO_FIXTURE_PARENT = resolve('.antonina-test-tmp');
 const PROBE_SENTINEL = 'ANTONINA-FIXTURE-EXEC-OK';
@@ -438,5 +442,170 @@ test('agent command rejects malformed durable cwd and variant', () => {
     const meta = idleMeta('a11d', '/tmp', null, 1);
     meta.variant = variant;
     assert.throws(() => buildAgentCommand(meta, 'work', false, {}), /variant is malformed/);
+  }
+});
+
+test('e. a signal death is classified as an external kill, not a backend failure', () => {
+  const death = classifySignalDeath({
+    signal: 9,
+    isContinue: false,
+    before: { oom: 36, oomKill: 2 },
+    after: { oom: 39, oomKill: 3 },
+    lifetimeSeconds: 42.5,
+  });
+  assert.equal(death.classification, SIGNAL_DEATH_CLASSIFICATION);
+  assert.equal(death.classification !== 'transient_backend_server_error', true);
+  // The signal is named, with its number, so a reader never has to decode -9.
+  assert.equal(death.signal, 9);
+  assert.equal(death.signal_name, 'SIGKILL');
+  // The OOM counters the kernel exposed across the lifetime are reported as
+  // deltas over a named window.
+  assert.equal(death.oom_evidence, 'observed');
+  assert.equal(death.oom_delta, 3);
+  assert.equal(death.oom_kill_delta, 1);
+  assert.equal(death.lifetime_seconds, 42.5);
+  // A host kill is not a model failure, and must not be retryable as one.
+  assert.equal(death.transient, false);
+  assert.equal(death.automatic_retry_safe, false);
+  assert.equal(death.provider, null);
+  assert.equal(death.backend_scope, 'host');
+
+  const described = describeSignalDeath(death);
+  assert.match(described, /SIGKILL \(signal 9\)/);
+  assert.match(described, /oom 3 and oom_kill 1/);
+  assert.match(described, /OOM killer fired inside the agent lifetime/);
+});
+
+test('e. an unnamed signal is still recorded by number', () => {
+  const death = classifySignalDeath({
+    signal: 31,
+    isContinue: true,
+    before: { oom: 0, oomKill: 0 },
+    after: { oom: 0, oomKill: 0 },
+    lifetimeSeconds: 1,
+  });
+  assert.equal(death.signal, 31);
+  assert.equal(death.request_boundary, 'continuation');
+  assert.equal(death.fresh_session_useful, null);
+  assert.match(describeSignalDeath(death), /signal 31/);
+  // No OOM kill inside the window is stated as such, not left ambiguous.
+  assert.match(describeSignalDeath(death), /no OOM kill recorded inside the agent lifetime/);
+});
+
+test('e. a kernel that exposes no OOM counters says so rather than implying no OOM', () => {
+  const death = classifySignalDeath({
+    signal: 9,
+    isContinue: false,
+    before: null,
+    after: { oom: 99, oomKill: 99 },
+    lifetimeSeconds: null,
+  });
+  assert.equal(death.oom_evidence, 'unavailable');
+  assert.equal(death.oom_delta, null);
+  assert.equal(death.oom_kill_delta, null);
+  assert.equal(death.lifetime_seconds, null);
+  // The half-observed case must not be laundered into a delta.
+  assert.match(describeSignalDeath(death), /OOM involvement is unknown rather than absent/);
+  assert.doesNotMatch(describeSignalDeath(death), /OOM killer fired/);
+});
+
+test('e. a negative counter delta is clamped rather than persisted as a nonsense value', () => {
+  const death = classifySignalDeath({
+    signal: 9,
+    isContinue: false,
+    before: { oom: 39, oomKill: 3 },
+    after: { oom: 0, oomKill: 0 },
+    lifetimeSeconds: -5,
+  });
+  assert.equal(death.oom_delta, 0);
+  assert.equal(death.oom_kill_delta, 0);
+  assert.equal(death.lifetime_seconds, 0);
+});
+
+test('e. a backend failure stays distinguishable from a signal death', (t) => {
+  const root = fixture(t);
+  const log = join(root, 'output.log');
+  writeFileSync(log, '{"name":"UnknownError","data":{"message":"Unexpected server error.","ref":"err_x"}}\n');
+  const backend = classifyBackendFailure(log, 0, 1, false);
+  assert.equal(backend.classification, 'transient_backend_server_error');
+  assert.equal(backend.transient, true);
+  assert.equal(backend.provider, 'opencode');
+  // A backend failure carries no signal fields, so the two cannot be confused
+  // by a reader of persisted state.
+  for (const key of ['signal', 'signal_name', 'oom_evidence', 'oom_delta', 'oom_kill_delta', 'lifetime_seconds']) {
+    assert.equal(Object.hasOwn(backend, key), false, `${key} must not appear on a backend failure`);
+  }
+  // And a signal death is never described as a backend failure.
+  const death = classifySignalDeath({ signal: 9, isContinue: false, before: null, after: null, lifetimeSeconds: 2 });
+  assert.equal(death.classification !== backend.classification, true);
+  assert.equal(describeSignalDeath(backend), null);
+});
+
+test('signal fields survive status sanitization only on a signal death', () => {
+  const death = classifySignalDeath({
+    signal: 9,
+    isContinue: false,
+    before: { oom: 1, oomKill: 0 },
+    after: { oom: 2, oomKill: 1 },
+    lifetimeSeconds: 3,
+  });
+  const sanitized = sanitizeBackendError({ ...death, smuggled: 'must-not-escape' });
+  assert.equal(sanitized.classification, SIGNAL_DEATH_CLASSIFICATION);
+  assert.equal(sanitized.signal, 9);
+  assert.equal(sanitized.signal_name, 'SIGKILL');
+  assert.equal(sanitized.oom_evidence, 'observed');
+  assert.equal(sanitized.oom_kill_delta, 1);
+  assert.equal(Object.hasOwn(sanitized, 'smuggled'), false);
+
+  // Signal fields attached to a backend-failure classification are dropped, so
+  // a corrupted record cannot make a model failure read as a host kill.
+  const spoofed = sanitizeBackendError({
+    classification: 'transient_backend_server_error',
+    signal: 9,
+    signal_name: 'SIGKILL',
+    oom_evidence: 'observed',
+  });
+  assert.equal(Object.hasOwn(spoofed, 'signal'), false);
+  assert.equal(Object.hasOwn(spoofed, 'oom_evidence'), false);
+});
+
+test('a persisted signal death validates as canonical agent metadata', () => {
+  const meta = idleMeta('a11d', '/tmp', null, 1);
+  meta.state = 'failed';
+  meta.exit_code = -9;
+  meta.exit_signal = 9;
+  meta.backend_error = classifySignalDeath({
+    signal: 9,
+    isContinue: false,
+    before: { oom: 39, oomKill: 2 },
+    after: { oom: 39, oomKill: 3 },
+    lifetimeSeconds: 12,
+  });
+  validateAgentMetadata(meta);
+  assert.equal(meta.backend_error.classification, SIGNAL_DEATH_CLASSIFICATION);
+});
+
+test('a corrupted signal field is rejected rather than persisted', () => {
+  for (const patch of [
+    { signal: 0 },
+    { signal: -9 },
+    { signal: 1.5 },
+    { signal_name: '' },
+    { signal_name: 'x'.repeat(64) },
+    { oom_evidence: 'probably' },
+    { oom_kill_delta: -1 },
+    { oom_kill_delta: 1.5 },
+    { lifetime_seconds: -1 },
+  ]) {
+    const meta = idleMeta('a11d', '/tmp', null, 1);
+    meta.backend_error = {
+      ...classifySignalDeath({ signal: 9, isContinue: false, before: null, after: null, lifetimeSeconds: 1 }),
+      ...patch,
+    };
+    assert.throws(
+      () => validateAgentMetadata(meta),
+      /backend_error is malformed/,
+      `a signal death carrying ${JSON.stringify(patch)} must be rejected`,
+    );
   }
 });

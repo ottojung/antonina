@@ -3,7 +3,22 @@ import { randomBytes } from 'node:crypto';
 import { closeSync, fstatSync, openSync } from 'node:fs';
 import { constants } from 'node:os';
 
-import { backendRetryDelay, buildAgentCommand, classifyBackendFailure, discoverSessionId, type BackendError } from './backend.js';
+import {
+  backendRetryDelay,
+  buildAgentCommand,
+  classifyBackendFailure,
+  classifySignalDeath,
+  describeSignalDeath,
+  discoverSessionId,
+  type BackendError,
+} from './backend.js';
+import {
+  checkHostLaunchCapacity,
+  readOomCounters,
+  type CapacityDecisionOptions,
+  type HostCapacityReadOptions,
+  type OomCounters,
+} from './host-capacity.js';
 import {
   finalizeTerminal,
   popSteerIntoPending,
@@ -37,6 +52,18 @@ const CONTROL_GRACE_MS = 10_000;
 
 export interface RunnerOptions extends StatePathsOptions {
   env?: Record<string, string | undefined>;
+  /**
+   * Seam for the host capacity reading. Production leaves it unset so the
+   * runner reads the real cgroup; tests point it at synthetic values rather
+   * than asserting against live memory counters.
+   */
+  capacity?: HostCapacityReadOptions & CapacityDecisionOptions;
+}
+
+/** The OOM bracket captured around one backend spawn. */
+interface OomBracket {
+  before: OomCounters | null;
+  startedAt: number;
 }
 
 interface ChildResult {
@@ -181,7 +208,13 @@ async function finalizeInvocation(
   result: ChildResult,
   backendError: BackendError | null,
   options: RunnerOptions,
+  oom: OomBracket | null,
+  isContinue: boolean,
 ): Promise<void> {
+  // Read outside the metadata callback: the callback runs under the state lock,
+  // and it should be doing durable-state work, not file I/O against /sys and
+  // /proc. A death is classified from the bracket, not from a live reading.
+  const oomAfter = readOomCounters(options.capacity);
   await updateMeta(agentId, (meta) => {
     if (meta.state !== 'running') return;
     const intent = persistedControlField(meta, 'intent');
@@ -195,8 +228,21 @@ async function finalizeInvocation(
     else if (intent.value === 'steer') state = signal !== null ? 'stopped' : code === 0 ? 'succeeded' : 'failed';
     else state = code === 0 ? 'succeeded' : 'failed';
     meta.stop_reason = intent.value;
-    meta.backend_error = code === 0 ? null : backendError;
-    finalizeTerminal(meta, state, Date.now() / 1000, code, signal);
+    // An unsignalled failure with a recognised backend marker is a model-side
+    // failure. A death on a signal with no operator stop/kill intent was killed
+    // from outside the agent, and is recorded as such rather than left as a
+    // bare negative exit code that reads like a model failure.
+    const death = signal !== null && intent.value !== 'stop' && intent.value !== 'kill' && state === 'failed'
+      ? classifySignalDeath({
+        signal,
+        isContinue,
+        before: oom?.before ?? null,
+        after: oomAfter,
+        lifetimeSeconds: oom === null ? null : Date.now() / 1000 - oom.startedAt,
+      })
+      : null;
+    meta.backend_error = code === 0 || death !== null ? death : backendError;
+    finalizeTerminal(meta, state, Date.now() / 1000, code, signal, death === null ? undefined : describeSignalDeath(death) ?? undefined);
   }, options);
 }
 
@@ -232,10 +278,22 @@ async function runInvocation(
 
   let attempt = 0;
   while (true) {
+    // Read the host before spawning, not after: the point of this guard is
+    // that an operator learns the host is full *instead of* learning it from a
+    // SIGKILL and an empty log twenty minutes later.
+    const decision = checkHostLaunchCapacity({ env: options.env, ...options.capacity });
+    if (decision.outcome === 'refused') {
+      await updateMeta(agentId, (current) => {
+        finalizeTerminal(current, 'failed', Date.now() / 1000, null, null, decision.reason);
+        setActiveRunner(current, false);
+      }, options);
+      return false;
+    }
     const invocationId = randomBytes(16).toString('hex');
     const logFile = logPath(agentId, options);
     const fd = openSync(logFile, 'a', 0o600);
     const invocationLogStart = fstatSync(fd).size;
+    const oom: OomBracket = { before: readOomCounters(options.capacity), startedAt: Date.now() / 1000 };
     const env = {
       ...process.env,
       ...options.env,
@@ -338,7 +396,7 @@ async function runInvocation(
     // interrupts it. Preserve that session whenever it can be discovered so
     // queued steering continues the same native conversation.
     if (!isContinue) await rememberFreshSession(agentId, options);
-    await finalizeInvocation(agentId, result, backendError, options);
+    await finalizeInvocation(agentId, result, backendError, options, oom, isContinue);
     return true;
   }
 }

@@ -60,7 +60,12 @@ function capture() {
 
 function context(work, state, captureIo, fs) {
   return {
-    env: { ...state.env, PATH: '' },
+    // The pre-launch capacity guard reads the ambient host by default, so pin
+    // the threshold to 0 here: this suite asserts fault-injection behaviour, and
+    // a case must not start failing because the machine happens to be busy.
+    // The guard's own behaviour is covered through its seam and in the agent
+    // end-to-end suite.
+    env: { ...state.env, PATH: '', ANTONINA_AGENT_MIN_HEADROOM_BYTES: '0' },
     home: state.home,
     cwd: work,
     io: captureIo,

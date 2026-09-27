@@ -1,8 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
+import { constants } from 'node:os';
 import { isAbsolute } from 'node:path';
 
 import { DEFAULT_VARIANT, persistedAgentCwd, persistedNativeSessionId, persistedVariant, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
+import type { OomCounters } from './host-capacity.js';
 
 export const AGENT_MODEL = 'opencode/space-bunny-free';
 export const OPENCODE_TITLE_PREFIX = 'antonina-';
@@ -28,6 +30,115 @@ export interface BackendError {
   fresh_session_useful?: boolean | null;
   backend_scope?: string | null;
   diagnostic_bytes?: number;
+  /**
+   * Signal-death detail. Present only on `SIGNAL_DEATH_CLASSIFICATION` records,
+   * where it names the signal and reports the cgroup OOM counters observed
+   * across the agent's lifetime. Absent on genuine backend failures, which is
+   * what keeps the two cases distinguishable in persisted state and in
+   * `agent status`.
+   */
+  signal?: number | null;
+  signal_name?: string | null;
+  oom_evidence?: 'observed' | 'unavailable' | null;
+  oom_delta?: number | null;
+  oom_kill_delta?: number | null;
+  lifetime_seconds?: number | null;
+}
+
+/**
+ * A managed agent that exited on a signal without an operator stop/kill intent
+ * was killed from outside its own process. Recording that as a bare
+ * `exit_signal 9` / `exit_code -9` with a null backend error is what made a host
+ * OOM kill indistinguishable from a model-backend crash, so the signal death
+ * gets its own classification rather than sharing the backend-failure channel's
+ * null case.
+ */
+export const SIGNAL_DEATH_CLASSIFICATION = 'external_signal_kill';
+
+/** Longest accepted `signal_name`; keeps a corrupted record from bloating state. */
+const SIGNAL_NAME_MAX_CHARS = 32;
+
+const OOM_EVIDENCE_VALUES = ['observed', 'unavailable'] as const;
+
+function signalNameFor(signal: number): string | null {
+  for (const [name, value] of Object.entries(constants.signals)) {
+    if (value === signal && name.length <= SIGNAL_NAME_MAX_CHARS) return name;
+  }
+  return null;
+}
+
+export interface SignalDeathEvidence {
+  signal: number;
+  isContinue: boolean;
+  /** OOM counters sampled immediately before the agent was spawned. */
+  before: OomCounters | null;
+  /** OOM counters sampled immediately after the agent was reaped. */
+  after: OomCounters | null;
+  lifetimeSeconds: number | null;
+}
+
+/**
+ * Classifies an externally signalled death and brackets it with the cgroup OOM
+ * counters the kernel exposes.
+ *
+ * When both counter samples are readable the deltas across the agent's
+ * lifetime are reported, and a non-zero `oom_kill` delta is the kernel's own
+ * statement that the OOM killer fired inside the window. When the kernel
+ * exposes nothing, `oom_evidence` is `unavailable`: the record says the
+ * evidence is absent rather than implying the agent was not OOM killed.
+ */
+export function classifySignalDeath(evidence: SignalDeathEvidence): BackendError {
+  const { signal, isContinue, before, after } = evidence;
+  const observed = before !== null && after !== null;
+  // Millisecond precision, and deliberately fractional: an agent lifetime of
+  // 42.5s is a real observation, and rounding it to an integer would be a
+  // second small guess about a number the kernel gave us.
+  const rawLifetime = evidence.lifetimeSeconds;
+  const lifetime = typeof rawLifetime === 'number' && Number.isFinite(rawLifetime)
+    ? Math.round(Math.max(0, rawLifetime) * 1000) / 1000
+    : null;
+  const oomDelta = observed ? Math.max(0, after!.oom - before!.oom) : null;
+  const oomKillDelta = observed ? Math.max(0, after!.oomKill - before!.oomKill) : null;
+  const name = signalNameFor(signal);
+  return {
+    classification: SIGNAL_DEATH_CLASSIFICATION,
+    provider: null,
+    model: AGENT_MODEL,
+    request_boundary: isContinue ? 'continuation' : 'fresh_session',
+    reference: null,
+    transient: false,
+    automatic_retry_safe: false,
+    fresh_session_useful: isContinue ? null : false,
+    backend_scope: 'host',
+    diagnostic_bytes: 0,
+    signal,
+    signal_name: name,
+    oom_evidence: observed ? 'observed' : 'unavailable',
+    oom_delta: oomDelta,
+    oom_kill_delta: oomKillDelta,
+    lifetime_seconds: lifetime,
+  };
+}
+
+/**
+ * A one-line, human-readable summary of a signal death for the `error` note
+ * that `agent status` and the board carry. Says what is known and, just as
+ * importantly, what is not.
+ */
+export function describeSignalDeath(error: BackendError | null): string | null {
+  if (error === null || error.classification !== SIGNAL_DEATH_CLASSIFICATION) return null;
+  const signal = typeof error.signal === 'number' ? error.signal : null;
+  const name = typeof error.signal_name === 'string' && error.signal_name.length > 0
+    ? error.signal_name
+    : 'unknown signal';
+  const head = signal === null ? `killed by ${name}` : `killed by ${name} (signal ${signal})`;
+  if (error.oom_evidence !== 'observed') {
+    return `${head}; the kernel exposed no cgroup OOM counters for this cgroup, so OOM involvement is unknown rather than absent`;
+  }
+  const oom = error.oom_delta ?? 0;
+  const kills = error.oom_kill_delta ?? 0;
+  const window = typeof error.lifetime_seconds === 'number' ? ` over the ${error.lifetime_seconds}s agent lifetime` : '';
+  return `${head}; cgroup memory.events rose by oom ${oom} and oom_kill ${kills}${window}${kills > 0 ? ', so the OOM killer fired inside the agent lifetime' : ', with no OOM kill recorded inside the agent lifetime'}`;
 }
 
 interface BackendFailureRule {
@@ -267,5 +378,29 @@ export function sanitizeBackendError(value: unknown): BackendError | null {
     && bytes >= 0
     && bytes <= BACKEND_DIAGNOSTIC_MAX_BYTES
   ) result.diagnostic_bytes = bytes;
+
+  // Signal-death detail is carried only when the classification claims it, so a
+  // backend failure can never grow signal fields and start reading like a host
+  // kill.
+  if (classification === SIGNAL_DEATH_CLASSIFICATION) {
+    const signal = record.signal;
+    if (typeof signal === 'number' && Number.isSafeInteger(signal) && signal >= 1) result.signal = signal;
+    const name = record.signal_name;
+    if (name === null || (typeof name === 'string' && name.length > 0 && name.length <= SIGNAL_NAME_MAX_CHARS)) {
+      result.signal_name = name;
+    }
+    const evidence = record.oom_evidence;
+    if (evidence === null || (typeof evidence === 'string' && (OOM_EVIDENCE_VALUES as readonly string[]).includes(evidence))) {
+      result.oom_evidence = evidence as never;
+    }
+    for (const key of ['oom_delta', 'oom_kill_delta'] as const) {
+      const delta = record[key];
+      if (typeof delta === 'number' && Number.isSafeInteger(delta) && delta >= 0) result[key] = delta;
+    }
+    const lifetime = record.lifetime_seconds;
+    if (typeof lifetime === 'number' && Number.isFinite(lifetime) && lifetime >= 0) {
+      result.lifetime_seconds = lifetime;
+    }
+  }
   return result;
 }

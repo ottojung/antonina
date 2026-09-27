@@ -94,6 +94,35 @@ describe('board shell height chain', () => {
     }
   });
 
+  it('gives every grid track an explicit floor instead of an automatic one', () => {
+    // A bare `1fr` is `minmax(auto, 1fr)`, and `auto` is a floor: the track
+    // cannot be sized below what its items' minimum contributions ask for.
+    // Measured in Chromium 147 against this stylesheet, the band rule's bare
+    // `1fr` happened to resolve to free space anyway, because `.thread` is a
+    // scroll container and a scroll container's minimum contribution is zero.
+    // That is a real safety net, but it is a property of the *item*, not of the
+    // track: the 760px block already sets `overflow-y: visible` on `.thread`,
+    // so the track was one stylesheet edit away from a min-content floor with
+    // nothing in the rule itself saying so. Spelling the floor out costs
+    // nothing measurable and is what the other two workspace rules already do.
+    for (const rule of rules) {
+      const columns = rule.declarations['grid-template-columns'];
+      if (columns === undefined) continue;
+      const bare = columns.trim().split(/\s+(?![^()]*\))/).filter((track) => /^1fr$/.test(track));
+      expect(bare, `${rule.media ?? 'no media'} ${rule.selector}: ${columns}`).toEqual([]);
+    }
+  });
+
+  it('keeps the band-width workspace split free of a second-track floor', () => {
+    // The band is the only width range where the workspace is two columns and
+    // this rule is the one that decides the split, so the floor-free second
+    // track has to be stated here explicitly rather than inherited.
+    const band = rules.filter((rule) => rule.media?.includes('max-width: 860px') && rule.selector === '.workspace');
+    expect(band.length, 'no band-width rule for .workspace').toBeGreaterThan(0);
+    expect(Object.assign({}, ...band.map((rule) => rule.declarations))['grid-template-columns'])
+      .toBe('minmax(310px, 43%) minmax(0, 1fr)');
+  });
+
   it('returns to a single scrolling document on a phone', () => {
     expect(mobile('.app-shell')).toMatchObject({ height: 'auto', overflow: 'visible' });
     expect(mobile('.workspace')).toMatchObject({ display: 'block' });

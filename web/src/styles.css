@@ -256,7 +256,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 
 @keyframes pulse { to { opacity: .25; } }
 @media (max-width: 860px) {
-  .workspace { grid-template-columns: minmax(310px, 43%) 1fr; }
+  .workspace { grid-template-columns: minmax(310px, 43%) minmax(0, 1fr); }
   .pane-heading, .issue-select { padding-left: 20px; padding-right: 20px; }
   .create-form, .access-callout, .filters { margin-left: 20px; margin-right: 20px; }
   .access-callout { align-items: flex-start; flex-direction: column; }

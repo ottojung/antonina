@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { createBrowserBoardApi, DEFAULT_FEED_LIMIT, type BoardFeedEntry, type BoardFeedPage, type BoardFeedRequest } from './api';
+import { createBrowserBoardApi, type BoardFeedEntry, type BoardFeedPage } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, boardReadOutcome, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, trustRequired, untrackedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
+import { COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, appendFeedPage, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, boardReadOutcome, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, trustRequired, untrackedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -477,31 +477,6 @@ function ResourcesView({ board, issues, access, onOpenIssue, onAdd, onRemove, on
 function AddDependency({ resource, issues, add }: { resource: BoardResource; issues: BoardIssue[]; add: (host: string, path: string, number: number) => Promise<unknown> }) { const options = issues.filter((issue) => issue.state === 'open' && !resource.issueNumbers.includes(issue.number)); if (!options.length) return null; return <form className="dependency-add" onSubmit={async (event) => { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await add(resource.host, resource.path, Number(data.get('issue'))); if (result) form.reset(); }}><select name="issue" required defaultValue=""><option value="" disabled>Add open issue dependency…</option>{options.map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add</button></form>; }
 
 /**
- * The request the feed tab opens with. It asks the core projection for its own
- * default page — 50 entries — rather than naming a number here, so the browser
- * and `antonina board feed` have one default rather than two that can drift.
- */
-export function feedFirstPageRequest(): BoardFeedRequest {
-  return { limit: DEFAULT_FEED_LIMIT };
-}
-
-/**
- * One page back, using the token the previous page returned.
- *
- * The cursor is handed to the projection exactly as it arrived. It is a position
- * in the append-only log, not an offset, so the page this returns is the set of
- * operations committed before that position — a walk that neither skips nor
- * repeats an entry, and that still works for a position whose entry the board no
- * longer holds. The merged page keeps the token for its own next call, so a
- * reader can keep walking until the projection returns `null` and the feed is
- * exhausted.
- */
-export async function appendFeedPage(readFeed: (request?: BoardFeedRequest) => Promise<BoardFeedPage>, current: BoardFeedPage, cursor: string): Promise<BoardFeedPage> {
-  const older = await readFeed({ limit: DEFAULT_FEED_LIMIT, cursor });
-  return { ...older, entries: [...current.entries, ...older.entries] };
-}
-
-/**
  * The feed tab's container. It owns nothing but the page it last read: every
  * entry, the order, the total and the continuation token come from the core
  * projection, which is the same one `antonina board feed` reads. The container
@@ -510,7 +485,7 @@ export async function appendFeedPage(readFeed: (request?: BoardFeedRequest) => P
  * the token the backend returned, never with an offset the browser computed.
  */
 export function FeedView({ readFeed, issues, generation, onOpenIssue }: {
-  readFeed: (request?: BoardFeedRequest) => Promise<BoardFeedPage>;
+  readFeed: FeedRead;
   issues: BoardIssue[];
   generation: number;
   onOpenIssue: (number: number) => void;
@@ -524,7 +499,7 @@ export function FeedView({ readFeed, issues, generation, onOpenIssue }: {
     setLoading(true);
     void (async () => {
       try {
-        const newest = await read(feedFirstPageRequest());
+        const newest = await readFeedFirstPage(read);
         if (!live) return;
         setPage(newest);
         setError(undefined);

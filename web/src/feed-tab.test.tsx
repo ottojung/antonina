@@ -11,15 +11,10 @@ import { describe, expect, it, vi } from 'vitest';
 process.env.XDG_STATE_HOME = '/nonexistent-antonina-web-feed-tab-state';
 process.env.XDG_CONFIG_HOME = '/nonexistent-antonina-web-feed-tab-config';
 
-import {
-  appendFeedPage,
-  feedFirstPageRequest,
-  FeedThread,
-  type FeedThreadProps,
-} from './App';
+import { FeedThread, type FeedThreadProps } from './App';
 import { DEFAULT_FEED_LIMIT, type BoardFeedEntry, type BoardFeedEntryKind, type BoardFeedPage, type BoardFeedRequest } from './api';
 import type { BoardIssue } from './model';
-import { FEED_COUNT_LABEL, FEED_MORE_LABEL } from './ui-state';
+import { appendFeedPage, feedFirstPageRequest, FEED_COUNT_LABEL, FEED_MORE_LABEL } from './ui-state';
 
 // The web suite runs in a node environment with no document and no layout
 // engine, so nothing here can be scrolled, hovered or clicked by a browser.

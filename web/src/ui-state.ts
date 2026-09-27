@@ -1,5 +1,5 @@
-import { BoardDeletedError, BoardTrustRequiredError } from './api';
-import type { BoardFeedEntry, BoardFeedEntryKind } from './api';
+import { BoardDeletedError, BoardTrustRequiredError, DEFAULT_FEED_LIMIT } from './api';
+import type { BoardFeedEntry, BoardFeedEntryKind, BoardFeedPage, BoardFeedRequest } from './api';
 import type { Board, BoardIssue, BoardResource, VerifiedBoardState } from './model';
 
 export type IssueFilter = 'open' | 'closed' | 'all';
@@ -373,6 +373,52 @@ export const FEED_EMPTY = {
 export const FEED_MORE_LABEL = 'Show older entries';
 
 export const FEED_COUNT_LABEL = (shown: number, total: number) => `${shown} of ${total} recorded entries`;
+
+/**
+ * The one shape the feed is read through, wherever it is called from.
+ *
+ * It is a bare function and not a method on the session, because the tab
+ * receives the session's read as a prop and calls it on its own: whatever is
+ * handed to this type has to be callable without a receiver. A session method
+ * that reads `this` therefore does not satisfy this type honestly, even though
+ * TypeScript would accept it, so the session's own read is bound to its session
+ * before it is passed here.
+ */
+export type FeedRead = (request?: BoardFeedRequest) => Promise<BoardFeedPage>;
+
+/**
+ * The request the feed tab opens with. It asks the core projection for its own
+ * default page — 50 entries — rather than naming a number here, so the browser
+ * and `antonina board feed` have one default rather than two that can drift.
+ */
+export function feedFirstPageRequest(): BoardFeedRequest {
+  return { limit: DEFAULT_FEED_LIMIT };
+}
+
+/**
+ * The one read the tab opens with, named so the path a detached read has to
+ * survive is a function that can be called and tested rather than an effect
+ * body. The read is taken as the prop hands it over and called on its own.
+ */
+export async function readFeedFirstPage(readFeed: FeedRead): Promise<BoardFeedPage> {
+  return readFeed(feedFirstPageRequest());
+}
+
+/**
+ * One page back, using the token the previous page returned.
+ *
+ * The cursor is handed to the projection exactly as it arrived. It is a position
+ * in the append-only log, not an offset, so the page this returns is the set of
+ * operations committed before that position — a walk that neither skips nor
+ * repeats an entry, and that still works for a position whose entry the board no
+ * longer holds. The merged page keeps the token for its own next call, so a
+ * reader can keep walking until the projection returns `null` and the feed is
+ * exhausted.
+ */
+export async function appendFeedPage(readFeed: FeedRead, current: BoardFeedPage, cursor: string): Promise<BoardFeedPage> {
+  const older = await readFeed({ limit: DEFAULT_FEED_LIMIT, cursor });
+  return { ...older, entries: [...current.entries, ...older.entries] };
+}
 
 /**
  * The two kinds the board genuinely cannot report, said out loud where a reader

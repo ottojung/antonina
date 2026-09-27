@@ -98,6 +98,8 @@ Before starting new substantive work on an unowned issue:
 3. immediately read the issue again;
 4. if a later conflicting `working` claim from another orchestrator now exists, yield before launching duplicate work.
 
+A `working` claim must declare the resources this work is taking ownership of or reserving in its `resources:` field. Before launch, name the concrete path/worktree or other reservation already chosen; after launch, append a fresh status comment with the real agent IDs/names and any other resources that became concrete.
+
 After a claim survives that reread, perform the concrete launch promptly. Do not spend the rest of the pass scouting while an admitted issue exists only as a promise to create a worktree or agent later. Once the agent is launched, append its real ID and worktree before relying on it for handoff. If execution cannot actually be launched this pass, record the issue as `handoff` or `blocked` rather than leaving a misleading execution claim.
 
 The latest coordination comment in the issue history is the current declared status, but objective state can prove that declaration stale.
@@ -118,10 +120,23 @@ state: working | handoff | blocked | completed
 owner: <stable orchestrator identity>
 run: <short run identifier>
 summary: <what materially changed or what is being continued>
-artifacts: <agent IDs, host paths, branches, PRs, jobs, or "none">
+artifacts: <durable outputs such as branches, commits, PRs, jobs, or "none">
+resources: <resources currently owned/reserved by this work, or "none">
 validation: <relevant checks already established, or "pending">
 next: <single concrete next action, or "none">
 ```
+
+The `resources:` field is required in every orchestrator status comment. It is a concise collision-avoidance and handoff declaration, not a rigid taxonomy. The orchestrator should name the resources that matter for concurrent work, choosing the useful level of detail for the task.
+
+For `working` comments, include at minimum:
+
+- the exact working directory or worktree being used or reserved;
+- every agent ID/name or other subordinate-worker handle currently being used for the issue;
+- any shared or exclusive dependency that another worker could collide with or must deliberately share, such as a branch/checkout, deployment slot, long-lived service, test environment, database namespace, device, or other scarce mutable state.
+
+Use `resources: none` only when the work genuinely owns or reserves nothing relevant. When the resource set materially changes — for example an agent is launched, a worktree changes, or a shared dependency is released — append a new status comment with the current resource declaration.
+
+This comment-level declaration does not replace Antonina's durable host-resource registry. A durable host path that needs board-level protection or handoff must still be registered through `antonina board resource ...`; the status comment should identify it as part of the work's current resource set as well.
 
 The fields are a coordination convention, not a reason to add a parser or schema to Antonina.
 
@@ -151,7 +166,7 @@ antonina agent prompt --id ID '...'
 antonina agent new --id ID --cwd /absolute/worktree
 ```
 
-Record a new agent ID and its worktree in the issue comment before relying on them for handoff. Use separate worktrees for materially independent repository work.
+Record a new agent ID/name and its worktree in the issue comment's `resources:` field before relying on them for handoff. Use separate worktrees for materially independent repository work.
 
 Parallel agents are useful for genuinely independent fronts and for complementary roles on the same substantial issue. Favor broad, clearly independent work first; then add proven same-project or intra-issue parallelism. Do not spawn duplicates just to fill capacity.
 

@@ -47,6 +47,7 @@ import {
   queueSlots,
   REJECTED_CREDENTIAL_COPY,
   trustRequired,
+  unplacedIssueNumbers,
   untrackedIssueNumbers,
   visibleIssues,
   TRUST_COPY,
@@ -413,6 +414,27 @@ describe('the feed, as the browser presents it', () => {
     expect(FEED_TRUNCATED_COPY([1])).toContain('#1');
     expect(FEED_TRUNCATED_COPY([1, 2])).toContain('#1, #2');
     expect(FEED_TRUNCATED_COPY([1])).toContain('already on the board when the signed log began');
+    // The sentence names the exhaustion it depends on, so it cannot be quoted
+    // as a claim made from a partial walk.
+    expect(FEED_TRUNCATED_COPY([1])).toContain('read the whole feed');
+  });
+
+  it('makes the claim only once the whole log is in hand', () => {
+    const sixty = Array.from({ length: 60 }, (_, index) => issue(index + 1));
+    const firstFifty = Array.from({ length: 50 }, (_, index) => feedEntry({ issueNumber: 50 - index }));
+
+    // The set difference itself still holds: the first page mentions 50 issues.
+    expect(untrackedIssueNumbers(sixty, firstFifty)).toHaveLength(10);
+    // A token outstanding means the walk is unfinished, so the claim is withheld
+    // even though the difference is ten issues long.
+    expect(unplacedIssueNumbers(sixty, firstFifty, 'v1.more', 55)).toEqual([]);
+    // And a walk that came up short against the total the page reported is no
+    // more complete than one with a token left.
+    expect(unplacedIssueNumbers(sixty, firstFifty, null, 55)).toEqual([]);
+    // Only with no token and every counted entry held does the difference
+    // become a fact about the log.
+    expect(unplacedIssueNumbers(sixty, firstFifty, null, 50)).toEqual([51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
+    expect(unplacedIssueNumbers([issue(1)], [feedEntry({ issueNumber: 1 })], null, 1)).toEqual([]);
   });
 
   it('names the two kinds the board does not record, without implying a row for them', () => {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createBrowserBoardApi, type BoardFeedEntry, type BoardFeedPage } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, appendFeedPage, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, boardReadOutcome, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, trustRequired, untrackedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
+import { COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, appendFeedPage, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, boardReadOutcome, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -570,7 +570,7 @@ export interface FeedThreadProps {
 
 export function FeedThread({ entries, nextCursor, total, issues, loading, error, onShowMore, onOpenIssue }: FeedThreadProps) {
   const date = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-  const untracked = untrackedIssueNumbers(issues, entries);
+  const untracked = unplacedIssueNumbers(issues, entries, nextCursor, total);
   return <div className="feed-view-inner">
     {error && <p className="feed-error" role="alert">{error}</p>}
     {entries.length > 0 && <p className="feed-count">{FEED_COUNT_LABEL(entries.length, total)}</p>}

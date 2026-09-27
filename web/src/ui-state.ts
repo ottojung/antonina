@@ -431,25 +431,61 @@ export const FEED_UNTRACKED_COPY =
   'The board does not record edits to messages, or which field an issue edit changed, so neither appears here.';
 
 /**
- * The issues the board view knows about that the feed reports nothing for.
+ * The issues the board view knows about that the entries in hand report nothing
+ * for. This is the set difference and nothing else: a pure function of what it
+ * is given, with no opinion about whether the claim built on it is yet true.
  *
  * The feed is a projection over the operation log, and an issue that was already
  * in the `board.initialize` snapshot predates that log: no operation ever named
  * its creation, so the projection cannot place it and does not. The CLI cannot
  * tell that apart from an empty board and prints an empty feed, but a browser
- * can, because it holds both the board view and the feed. The difference is a
- * set of issue numbers and nothing more — no entry is invented for them, and
- * they are not ordered or timestamped here, because the board recorded no such
- * facts. It only reports that these issues are not in the stream, so the reader
- * is never shown a confidently empty feed that is really a truncated one.
+ * can, because it holds both the board view and the feed. No entry is invented
+ * for such an issue, and it is not ordered or timestamped here, because the
+ * board recorded no such facts.
+ *
+ * What this cannot say on its own is that the issue predates the log. It can
+ * only say the entries it was handed do not mention it, and on a paged feed
+ * that is exactly as true of an issue created ten operations ago and left off
+ * the first page. `unplacedIssueNumbers` is the gated form.
  */
 export function untrackedIssueNumbers(issues: BoardIssue[], entries: BoardFeedEntry[]): number[] {
   const tracked = new Set(entries.map((entry) => entry.issueNumber));
   return issues.filter((issue) => !tracked.has(issue.number)).map((issue) => issue.number).sort((left, right) => left - right);
 }
 
+/**
+ * The issues the feed cannot place, or none at all while any page is unread.
+ *
+ * The claim is only true about a log the reader has read to the end. An issue
+ * that appears in no entry of a partial walk may simply be waiting on the next
+ * page, and saying it "predates the log" then would be a statement about a log
+ * nobody has read — a caveat that fires on healthy, heavily-active boards and
+ * teaches the reader to ignore it, which is worse than saying nothing.
+ *
+ * So the caveat waits for exhaustion. The projection reports a continuation
+ * token while entries remain, and hands back `null` only at the end of the log;
+ * the count of what is in hand then has to cover the `total` the same page
+ * reported, so a merged walk that somehow came up short does not make the claim
+ * either. Once the walk is complete the difference above is real: every issue on
+ * the board that the whole log never names was in the initialize snapshot.
+ *
+ * While a continuation token is outstanding the answer is no issues, and the
+ * view says nothing rather than something weaker. A board that is entirely
+ * untracked is still reported, as soon as the reader has walked the feed to its
+ * end and can honestly be told the log holds nothing for those issues.
+ */
+export function unplacedIssueNumbers(issues: BoardIssue[], entries: BoardFeedEntry[], nextCursor: string | null, total: number): number[] {
+  if (nextCursor !== null || entries.length < total) return [];
+  return untrackedIssueNumbers(issues, entries);
+}
+
+/**
+ * The caveat for a log read to its end, and only then. The wording names the
+ * exhaustion it depends on, so the sentence cannot be read as a claim made from
+ * a partial walk.
+ */
 export const FEED_TRUNCATED_COPY = (numbers: number[]) =>
-  `These issues were already on the board when the signed log began, so the log recorded no operation for them and the feed cannot show when they were created or changed: ${numbers.map((number) => `#${number}`).join(', ')}.`;
+  `You have read the whole feed, and the log records no operation for these issues. They were already on the board when the signed log began, so the feed cannot show when they were created or changed: ${numbers.map((number) => `#${number}`).join(', ')}.`;
 
 export function formatUpdatedAt(timestamp: string, now = new Date()): string {
   const date = new Date(timestamp);

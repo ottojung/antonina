@@ -225,6 +225,50 @@ describe('the feed tab', () => {
 
       expect(markup).not.toContain('already on the board');
     });
+
+    it('says nothing at all about the issues a first page has not reached yet', () => {
+      // The case the caveat used to get wrong: 60 issues, a 50-entry first
+      // page, and a continuation token. The log demonstrably created issues 51
+      // to 60 — they are on the board — but their operations are in the pages
+      // still unread, so calling them pre-log issues would be a statement about
+      // a log nobody has read. The board is healthy here and the caveat must be
+      // silent.
+      const entries = Array.from({ length: 50 }, (_, index) => entry('issue-created', 50 - index));
+      const issues = Array.from({ length: 60 }, (_, index) => issue(index + 1));
+      const markup = renderToStaticMarkup(<FeedThread {...props({ entries, nextCursor: 'v1.more', total: 55, issues })} />);
+
+      expect(entries).toHaveLength(50);
+      expect(issues).toHaveLength(60);
+      expect(markup).toContain(FEED_MORE_LABEL);
+      expect(markup).not.toContain('already on the board');
+      expect(markup).not.toContain('#51');
+      expect(markup).not.toContain('.feed-caveat');
+    });
+
+    it('names the same ten once the walk has read the log to its end', () => {
+      // The claim is not dropped, it is deferred: with no token left and every
+      // entry the projection counted in hand, the difference is real and the
+      // caveat says so — and says that the whole feed was read, because that is
+      // what it now depends on.
+      const entries = Array.from({ length: 50 }, (_, index) => entry('issue-created', 50 - index));
+      const issues = Array.from({ length: 60 }, (_, index) => issue(index + 1));
+      const markup = renderToStaticMarkup(<FeedThread {...props({ entries, nextCursor: null, total: 50, issues })} />);
+
+      expect(markup).toContain('read the whole feed');
+      expect(markup).toContain('#51, #52, #53, #54, #55, #56, #57, #58, #59, #60');
+      expect(markup).not.toContain('#50, #51');
+    });
+
+    it('stays silent when the entries in hand fall short of what the log holds', () => {
+      // The token is gone but the walk came up short, so the reader still
+      // cannot tell a pre-log issue from an unread one. No continuation token is
+      // offered either — the backend issued none — and the caveat stays off.
+      const entries = [entry('issue-created', 1)];
+      const markup = renderToStaticMarkup(<FeedThread {...props({ entries, nextCursor: null, total: 9, issues: [issue(1), issue(2)] })} />);
+
+      expect(markup).not.toContain('already on the board');
+      expect(markup).not.toContain('read the whole feed');
+    });
   });
 });
 

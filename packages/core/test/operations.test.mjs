@@ -44,6 +44,33 @@ function clone(value) {
   return structuredClone(value);
 }
 
+test('v2-signed initialization verifies unchanged and replays as current v3 state', async () => {
+  const { root, anchor, log } = await setup();
+  const legacyBoard = {
+    schemaVersion: 2,
+    nextIssueNumber: 2,
+    issues: [{
+      number: 1, title: 'Legacy', body: 'signed v2 state', state: 'open',
+      createdAt: timestamp(0), updatedAt: timestamp(0), messages: [],
+    }],
+    resources: [],
+  };
+  const initialize = await append(log, root, 'board.initialize', { board: legacyBoard }, 0);
+  assert.equal(initialize.payload.board.schemaVersion, 2);
+  assert.equal(Object.hasOwn(initialize.payload.board, 'targets'), false);
+  await append(log, root, 'issue.create', { number: 2, title: 'Current', body: '' }, 1);
+
+  const replayed = await verifyAndReplayOperationLog(log, anchor);
+  assert.equal(replayed.board.schemaVersion, 3);
+  assert.deepEqual(replayed.board.targets, []);
+  assert.deepEqual(replayed.board.dispatches, []);
+  assert.deepEqual(replayed.board.issues.map((issue) => issue.title), ['Legacy', 'Current']);
+
+  const tampered = clone(log);
+  tampered.operations[0].payload.board.issues[0].title = 'Tampered';
+  await assert.rejects(() => verifyAndReplayOperationLog(tampered, anchor), /(identity hash|signature)/);
+});
+
 test('valid root operations verify and replay deterministically', async () => {
   const { root, anchor, log } = await initialized();
   await append(log, root, 'issue.create', { number: 1, title: 'First', body: 'body' }, 1);

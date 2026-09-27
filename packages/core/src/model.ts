@@ -1,4 +1,5 @@
 export const BOARD_SCHEMA_VERSION = 3 as const;
+export const LEGACY_BOARD_SCHEMA_VERSION = 2 as const;
 export const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 
 export type IssueState = 'open' | 'closed';
@@ -109,6 +110,15 @@ export interface Board {
   targets: BoardExecutionTarget[];
   dispatches: BoardDispatch[];
 }
+
+export interface LegacyBoardV2 {
+  schemaVersion: typeof LEGACY_BOARD_SCHEMA_VERSION;
+  nextIssueNumber: number;
+  issues: BoardIssue[];
+  resources: BoardResource[];
+}
+
+export type PersistedBoard = Board | LegacyBoardV2;
 
 export interface ResourceDependencyView {
   number: number;
@@ -391,6 +401,39 @@ function isResource(value: unknown, issueNumbers: Set<number>): value is BoardRe
     && value.issueNumbers.every((number, index, all) => index === 0 || number > all[index - 1])
     && isTimestamp(value.createdAt)
     && isTimestamp(value.updatedAt);
+}
+
+export function parseLegacyBoardV2(value: unknown): LegacyBoardV2 {
+  if (!isRecord(value)
+      || !hasExactKeys(value, ['schemaVersion', 'nextIssueNumber', 'issues', 'resources'])
+      || value.schemaVersion !== LEGACY_BOARD_SCHEMA_VERSION
+      || !isPositiveSafeInteger(value.nextIssueNumber)
+      || !Array.isArray(value.issues)
+      || !value.issues.every(isIssue)
+      || !Array.isArray(value.resources)) {
+    throw new Error('Antonina legacy board object is incompatible or malformed');
+  }
+  const board = value as unknown as LegacyBoardV2;
+  const numbers = new Set<number>();
+  for (const issue of board.issues) {
+    if (numbers.has(issue.number)) throw new Error('Antonina board issue number counter is inconsistent with its issues');
+    numbers.add(issue.number);
+  }
+  if (board.nextIssueNumber <= Math.max(0, ...numbers)) throw new Error('Antonina board issue number counter is inconsistent with its issues');
+  for (const resource of board.resources) {
+    if (!isResource(resource, numbers)) throw new Error('Antonina board contains an incompatible or malformed resource');
+  }
+  return structuredClone(board);
+}
+
+export function parsePersistedBoard(value: unknown): PersistedBoard {
+  if (isRecord(value) && value.schemaVersion === LEGACY_BOARD_SCHEMA_VERSION) return parseLegacyBoardV2(value);
+  return parseCanonicalBoard(value);
+}
+
+export function upgradePersistedBoard(board: PersistedBoard): Board {
+  if (board.schemaVersion === BOARD_SCHEMA_VERSION) return parseCanonicalBoard(board);
+  return parseCanonicalBoard({ ...board, schemaVersion: BOARD_SCHEMA_VERSION, targets: [], dispatches: [] });
 }
 
 export function parseCanonicalBoard(value: unknown): Board {

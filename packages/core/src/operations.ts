@@ -5,11 +5,14 @@ import {
   canonicalTargetId,
   executionTargetDefect,
   parseBoard,
+  parsePersistedBoard,
+  upgradePersistedBoard,
   parseExecutionTargetBackend,
   parseExecutionTargetCapability,
   parseExecutionTargetKind,
   parseExecutionTargetStatus,
   type Board,
+  type PersistedBoard,
   type BoardIssue,
   type ExecutionTargetBackend,
   type ExecutionTargetCapability,
@@ -74,7 +77,7 @@ export interface BoardTrustAnchor {
 }
 
 export interface InitializePayload {
-  board: Board;
+  board: PersistedBoard;
 }
 
 export interface DelegatePayload {
@@ -261,7 +264,7 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
   switch (kind) {
     case 'board.initialize': {
       if (!hasExactKeys(value, ['board'])) throw new Error('Initialize payload is malformed');
-      return { board: parseBoard(value.board) };
+      return { board: parsePersistedBoard(value.board) };
     }
     case 'authority.delegate': {
       if (!hasExactKeys(value, ['childKeyId', 'childPublicKey', 'capabilities'])
@@ -855,7 +858,7 @@ export async function verifyAndReplayOperationLog(
           || operation.previous !== null) {
         throw new OperationLogVerificationError('First operation must initialize the board under the root authority');
       }
-      board = cloneBoard((operation.payload as InitializePayload).board);
+      board = upgradePersistedBoard((operation.payload as InitializePayload).board);
       queue = board.issues.filter((issue) => issue.state === 'open').map((issue) => issue.number);
       previous = operation.opId;
       previousTimestamp = operation.timestamp;

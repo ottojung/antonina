@@ -596,6 +596,7 @@ test('an unreachable owner is never treated as dead', async (t) => {
     stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(async () => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
     const reaped = new Promise((resolve) => child.once('exit', () => resolve(true)));
     try { child.kill('SIGKILL'); } catch {}
     await reaped;
@@ -611,7 +612,12 @@ test('an unreachable owner is never treated as dead', async (t) => {
     t.skip('could not hold a live child on this host');
     return;
   }
-  process.kill(child.pid, 0);
+  try {
+    process.kill(child.pid, 0);
+  } catch {
+    t.skip('held child is no longer running on this host');
+    return;
+  }
   const realKill = process.kill;
   process.kill = (pid, signal) => {
     if (pid === child.pid) throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });

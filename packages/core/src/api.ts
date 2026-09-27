@@ -353,10 +353,12 @@ export class BoardApi {
   /**
    * One page of the unified chronological board feed, newest first, with the
    * continuation token for the entries after it. The page is a projection over
-   * the verified board, so it needs no credential and writes nothing.
+   * the verified operation log rather than over the collapsed board view, so
+   * every entry names an operation the log actually recorded. It needs no
+   * credential and writes nothing.
    */
   async readFeed(request: BoardFeedRequest = {}): Promise<BoardFeedPage> {
-    return boardFeed(await this.loadBoard(), request);
+    return boardFeed((await this.readStored()).log, request);
   }
 
   async getQueue(): Promise<number[]> {

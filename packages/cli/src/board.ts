@@ -644,8 +644,11 @@ function humanSelection(selection: TargetSelection): string[] {
  */
 const FEED_VERB: { readonly [K in BoardFeedEntry['kind']]: string } = {
   'issue-created': 'created',
-  'issue-updated': 'updated',
+  'issue-edited': 'edited',
   'comment-added': 'commented',
+  'issue-closed': 'closed',
+  'issue-reopened': 'reopened',
+  'issue-deleted': 'deleted',
 };
 
 function humanFeedEntry(entry: BoardFeedEntry): string {

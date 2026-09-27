@@ -3,6 +3,13 @@ import test from 'node:test';
 import { BoardApi } from '../dist/packages/core/src/api.js';
 import { runBoardCommand } from '../dist/packages/cli/src/board.js';
 
+// Test safety: no command in this file may read or mutate the operator's Antonina
+// state, so `XDG_STATE_HOME` and `XDG_CONFIG_HOME` are pointed at unreachable
+// test-owned paths. `home` is unreachable too and the client is injected, so
+// nothing here can resolve to the operator's configuration.
+process.env.XDG_STATE_HOME = '/nonexistent-antonina-feed-test-state';
+process.env.XDG_CONFIG_HOME = '/nonexistent-antonina-feed-test-config';
+
 const TEST_HOME = '/nonexistent-antonina-feed-test-home';
 
 function jsonResponse(value, status = 200, etag) {
@@ -81,21 +88,25 @@ async function boardWithActivity() {
   await owner.comment(1, 'ada', 'first');
   await owner.editIssueBody(1, 'the body, edited');
   await owner.close(1);
+  await owner.reopen(1);
   return client(server, { trustAnchor: initialized.trustAnchor });
 }
 
-test('board feed prints the newest activity first and names the continuation', async () => {
+test('board feed prints every recorded operation, newest first, and names the continuation', async () => {
   const reader = await boardWithActivity();
   const { code, out, err } = await run(['feed'], reader);
 
   assert.equal(code, 0);
   assert.deepEqual(err, []);
-  // Every operation in this fixture shares one instant, so the lines come back
-  // in the documented tie order: created, then updated, then commented.
-  assert.equal(out.length, 3);
-  assert.match(out[0], /^\d{4}-\d\d-\d\dT[\d:.]+Z {2}#1 \[closed\] created {2}Feed me$/);
-  assert.match(out[1], /\[closed\] updated {2}Feed me$/);
-  assert.match(out[2], /commented by ada: first$/);
+  // Every operation in this fixture shares one instant, so the only order that
+  // can separate these lines is the order the log committed them, read newest
+  // first. Creation, comment, edit, closure and reopen are five events, not one.
+  assert.equal(out.length, 5);
+  assert.match(out[0], /^\d{4}-\d\d-\d\dT[\d:.]+Z {2}#1 \[open\] reopened {2}Feed me$/);
+  assert.match(out[1], /\[closed\] closed {2}Feed me$/);
+  assert.match(out[2], /\[open\] edited {2}Feed me$/);
+  assert.match(out[3], /\[open\] commented by ada: first$/);
+  assert.match(out[4], /\[open\] created {2}Feed me$/);
   // The whole feed fits the default page, so there is nothing to continue to.
   assert.equal(out.filter((line) => line.startsWith('next: ')).length, 0);
 
@@ -116,18 +127,25 @@ test('board feed --json is the whole page, machine readable, and a reader needs 
 
   assert.equal(code, 0);
   const page = JSON.parse(out[0]);
-  assert.equal(page.total, 3);
+  assert.equal(page.total, 5);
   assert.equal(page.limit, 50);
   assert.equal(page.nextCursor, null);
   assert.deepEqual(page.entries.map((entry) => entry.kind), [
-    'issue-created', 'issue-updated', 'comment-added',
+    'issue-reopened', 'issue-closed', 'issue-edited', 'comment-added', 'issue-created',
   ]);
-  const comment = page.entries[2];
-  assert.equal(comment.id, 'comment-added:1:' + comment.messageId);
+  const comment = page.entries[3];
+  // Entry identity is the identity of the operation that produced it.
+  assert.match(comment.id, /^sha256:[A-Za-z0-9_-]{43}$/);
+  assert.equal(comment.messageId, comment.id);
   assert.equal(comment.author, 'ada');
   assert.equal(comment.body, 'first');
   assert.equal(comment.issueNumber, 1);
-  assert.equal(comment.state, 'closed');
+  // The state each entry reports is the state its own operation left, not the
+  // board's final state: the comment was written while the issue was open.
+  assert.equal(comment.state, 'open');
+  assert.equal(page.entries[1].state, 'closed');
+  // The closure and the reopen are two entries, not one "updated" line.
+  assert.equal(page.entries.filter((entry) => entry.at === comment.at).length, 5);
 });
 
 test('board feed pages with --cursor and --limit without loss or repeat', async () => {

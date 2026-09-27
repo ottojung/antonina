@@ -87,7 +87,7 @@ describe('board shell height chain', () => {
     // A view that drops out of the grid loses the pinned row, and a
     // content-sized workspace is exactly what puts a blank region under the
     // board. A tab that is not in this stylesheet yet has to keep the grid.
-    for (const selector of ['.workspace.resources-view']) {
+    for (const selector of ['.workspace.resources-view', '.workspace.feed-view']) {
       const declarations = desktop(selector);
       expect(declarations.display, selector).toBe('grid');
       expect(declarations['grid-template-columns'], selector).toBe('minmax(0, 1fr)');
@@ -97,9 +97,14 @@ describe('board shell height chain', () => {
   it('returns to a single scrolling document on a phone', () => {
     expect(mobile('.app-shell')).toMatchObject({ height: 'auto', overflow: 'visible' });
     expect(mobile('.workspace')).toMatchObject({ display: 'block' });
-    // The desktop rule is more specific than the phone-wide `.workspace` rule,
-    // so the phone-width block has to name the view itself to undo it.
-    expect(mobile('.workspace.resources-view')).toMatchObject({ display: 'block' });
+    // Each desktop view rule is (0,2,0) and so beats the phone-wide
+    // `.workspace { display: block }` at its own (0,1,0). The phone-width block
+    // therefore has to name every single-column view itself to undo it; a new
+    // view that adds the desktop rule without adding this one is silently a
+    // clipped grid on a phone, which is the trap issue 51 pinned for resources.
+    for (const selector of ['.workspace.resources-view', '.workspace.feed-view']) {
+      expect(mobile(selector), selector).toMatchObject({ display: 'block' });
+    }
     expect(mobile('.issue-pane')).toMatchObject({ 'overflow-y': 'visible' });
     expect(mobile('.thread')).toMatchObject({ 'overflow-y': 'visible' });
   });

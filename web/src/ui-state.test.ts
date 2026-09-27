@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BoardDeletedError, BoardTrustRequiredError } from './api';
+import { BOARD_FEED_ENTRY_KINDS, type BoardFeedEntry } from './api';
 import { emptyBoard, type Board, type BoardIssue, type VerifiedBoardState } from './model';
 import {
   accessCallout,
@@ -17,6 +18,11 @@ import {
   FIRST_RUN_COPY,
   firstRunResolved,
   firstRunUnresolved,
+  feedEntrySummary,
+  FEED_KIND_LABEL,
+  FEED_TRUNCATED_COPY,
+  FEED_UNTRACKED_COPY,
+  FEED_VERB,
   formatUpdatedAt,
   groupResources,
   ISSUE_FORM_HINT,
@@ -41,6 +47,8 @@ import {
   queueSlots,
   REJECTED_CREDENTIAL_COPY,
   trustRequired,
+  unplacedIssueNumbers,
+  untrackedIssueNumbers,
   visibleIssues,
   TRUST_COPY,
   READ_ONLY_CALLOUT,
@@ -351,5 +359,86 @@ describe('board load state', () => {
     expect(boardLoadFailed({ status: 'uninitialized' }, 'boom')).toEqual({ status: 'failed', message: 'boom' });
     expect(boardLoadFailed({ status: 'failed', message: 'old' }, 'new')).toEqual({ status: 'failed', message: 'new' });
     expect(loadedBoard({ status: 'failed', message: 'boom' })).toBeUndefined();
+  });
+});
+
+describe('the feed, as the browser presents it', () => {
+  const STAMP = '2026-09-25T12:00:00.000Z';
+  const feedEntry = (overrides: Partial<BoardFeedEntry> = {}): BoardFeedEntry => ({
+    id: 'op-1', kind: 'issue-created', at: STAMP, position: 3, issueNumber: 4, title: 'Issue 4',
+    state: 'open', messageId: null, author: null, body: null, ...overrides,
+  });
+  const issue = (number: number): BoardIssue => ({
+    number, title: 'Issue ' + number, body: '', state: 'open', createdAt: STAMP, updatedAt: STAMP, messages: [],
+  });
+
+  it('names every kind the projection can produce, and no other', () => {
+    // The mappings are total over the vocabulary, so a kind added to the core
+    // feed is a compile error here rather than a row that silently reads as
+    // the last case.
+    expect(Object.keys(FEED_VERB).sort()).toEqual([...BOARD_FEED_ENTRY_KINDS].sort());
+    expect(Object.keys(FEED_KIND_LABEL).sort()).toEqual([...BOARD_FEED_ENTRY_KINDS].sort());
+  });
+
+  it('says the same verb the CLI prints for each kind', () => {
+    expect(FEED_VERB).toEqual({
+      'issue-created': 'created',
+      'issue-edited': 'edited',
+      'comment-added': 'commented',
+      'issue-closed': 'closed',
+      'issue-reopened': 'reopened',
+      'issue-deleted': 'deleted',
+    });
+  });
+
+  it('summarises each kind from the fields that kind actually has', () => {
+    expect(feedEntrySummary(feedEntry())).toBe('created — Issue 4');
+    expect(feedEntrySummary(feedEntry({ kind: 'issue-closed', state: 'closed' }))).toBe('closed — Issue 4');
+    expect(feedEntrySummary(feedEntry({ kind: 'issue-reopened' }))).toBe('reopened — Issue 4');
+    expect(feedEntrySummary(feedEntry({ kind: 'issue-edited' }))).toBe('edited — Issue 4');
+    expect(feedEntrySummary(feedEntry({ kind: 'issue-deleted' }))).toBe('deleted — Issue 4');
+    // The author and the body are the comment payload's, and are read only
+    // there: no other kind carries them, and none is invented for one.
+    expect(feedEntrySummary(feedEntry({ kind: 'comment-added', author: 'Lubko', body: 'on it' }))).toBe('commented by Lubko: on it');
+  });
+
+  it('reports the issues the log never named, and only those', () => {
+    expect(untrackedIssueNumbers([issue(1), issue(2)], [feedEntry({ issueNumber: 2 })])).toEqual([1]);
+    expect(untrackedIssueNumbers([issue(1)], [feedEntry({ issueNumber: 1 })])).toEqual([]);
+    // A deleted issue is one the log did record, at its deletion.
+    expect(untrackedIssueNumbers([], [feedEntry({ kind: 'issue-deleted', issueNumber: 9 })])).toEqual([]);
+    expect(untrackedIssueNumbers([issue(2), issue(1)], [])).toEqual([1, 2]);
+  });
+
+  it('says the predates-the-log caveat in terms of the issues it cannot place', () => {
+    expect(FEED_TRUNCATED_COPY([1])).toContain('#1');
+    expect(FEED_TRUNCATED_COPY([1, 2])).toContain('#1, #2');
+    expect(FEED_TRUNCATED_COPY([1])).toContain('already on the board when the signed log began');
+    // The sentence names the exhaustion it depends on, so it cannot be quoted
+    // as a claim made from a partial walk.
+    expect(FEED_TRUNCATED_COPY([1])).toContain('read the whole feed');
+  });
+
+  it('makes the claim only once the whole log is in hand', () => {
+    const sixty = Array.from({ length: 60 }, (_, index) => issue(index + 1));
+    const firstFifty = Array.from({ length: 50 }, (_, index) => feedEntry({ issueNumber: 50 - index }));
+
+    // The set difference itself still holds: the first page mentions 50 issues.
+    expect(untrackedIssueNumbers(sixty, firstFifty)).toHaveLength(10);
+    // A token outstanding means the walk is unfinished, so the claim is withheld
+    // even though the difference is ten issues long.
+    expect(unplacedIssueNumbers(sixty, firstFifty, 'v1.more', 55)).toEqual([]);
+    // And a walk that came up short against the total the page reported is no
+    // more complete than one with a token left.
+    expect(unplacedIssueNumbers(sixty, firstFifty, null, 55)).toEqual([]);
+    // Only with no token and every counted entry held does the difference
+    // become a fact about the log.
+    expect(unplacedIssueNumbers(sixty, firstFifty, null, 50)).toEqual([51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
+    expect(unplacedIssueNumbers([issue(1)], [feedEntry({ issueNumber: 1 })], null, 1)).toEqual([]);
+  });
+
+  it('names the two kinds the board does not record, without implying a row for them', () => {
+    expect(FEED_UNTRACKED_COPY).toContain('edits to messages');
+    expect(FEED_UNTRACKED_COPY).toContain('which field an issue edit changed');
   });
 });

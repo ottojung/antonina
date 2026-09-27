@@ -1,14 +1,24 @@
 import { describe, expect, it } from 'vitest';
+
+// Test safety: nothing here may read or mutate the operator's Antonina state.
+// Every board in this file is the in-memory fake Skrynia below, and the XDG
+// roots are pointed at paths that cannot exist so no code under test can reach
+// the real `$XDG_STATE_HOME` or the real `trust.json` / `credential.json`.
+process.env.XDG_STATE_HOME = '/nonexistent-antonina-web-feed-state';
+process.env.XDG_CONFIG_HOME = '/nonexistent-antonina-web-feed-config';
+
 import { generateSigningKey } from '../../packages/core/src/canonical';
 import {
   BrowserBoardSession,
   BoardTrustRequiredError,
   createBrowserBoardApi,
+  DEFAULT_FEED_LIMIT,
   serializeBoardCredential,
   serializeBoardTrustAnchor,
   type BoardCredential,
   type BoardKeyStorage,
 } from './api';
+import { appendFeedPage, readFeedFirstPage, type FeedRead } from './ui-state';
 
 const STAMP = '2026-09-25T12:00:00.000Z';
 
@@ -409,5 +419,174 @@ describe('the shared priority queue through the session', () => {
     expect((await client.readState())?.queue).toEqual([1, 3]);
     await client.api.reopen(2);
     expect((await client.readState())?.queue).toEqual([1, 3, 2]);
+  });
+});
+
+describe('the board feed through the session', () => {
+  /** A board with one of every event the projection reports, in commit order. */
+  async function boardWithActivity() {
+    const server = fakeSkrynia();
+    const storage = memoryStorage();
+    const owner = session(server, storage);
+    await owner.initialize();
+    await owner.api.createIssue('First', 'the first body');
+    await owner.api.comment(1, 'Lubko', 'on it');
+    await owner.api.createIssue('Second');
+    await owner.api.close(2);
+    await owner.api.reopen(2);
+    await owner.api.editIssueBody(1, 'an edited body');
+    return { server, storage, writer: session(server, storage) };
+  }
+
+  it('projects the signed log itself, newest first, with each operation as its own entry', async () => {
+    const { server, writer } = await boardWithActivity();
+    const log = server.signed as { operations: Array<{ opId: string; timestamp: string; kind: string }> };
+
+    const page = await writer.readFeed();
+    // The entries are the log's own operations, in reverse commit order, each
+    // carrying that operation's instant. A view-derived list could not do this:
+    // the board view holds one `updatedAt` per issue, so it can say an issue
+    // exists but not that a comment, a closure and a reopen were three separate
+    // recorded events at three separate instants.
+    expect(page.entries.map((entry) => entry.id)).toEqual([...log.operations].filter((operation) => operation.kind !== 'board.initialize').reverse().map((operation) => operation.opId));
+    expect(page.entries.map((entry) => entry.kind)).toEqual([
+      'issue-edited', 'issue-reopened', 'issue-closed', 'issue-created', 'comment-added', 'issue-created',
+    ]);
+    expect(page.entries[0].at).toBe(log.operations[log.operations.length - 1].timestamp);
+    // Log positions are unique, so the order is total even when two operations
+    // share a millisecond: no entry can share a position, and the walk is
+    // strictly decreasing.
+    const positions = page.entries.map((entry) => entry.position);
+    expect(new Set(positions).size).toBe(positions.length);
+    expect(positions).toEqual([...positions].sort((left, right) => right - left));
+    expect(page.total).toBe(6);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it('keeps a close, a reopen and an edit apart, and does not infer one from an updatedAt', async () => {
+    const { server, writer } = await boardWithActivity();
+    const log = server.signed as { operations: Array<{ kind: string }> };
+
+    expect(log.operations.filter((operation) => operation.kind === 'issue.close' || operation.kind === 'issue.reopen')
+      .map((operation) => operation.kind)).toEqual(['issue.close', 'issue.reopen']);
+
+    const page = await writer.readFeed();
+    const forIssueTwo = page.entries.filter((entry) => entry.issueNumber === 2 && (entry.kind === 'issue-closed' || entry.kind === 'issue-reopened'));
+
+    // Two entries, two different kinds, two different instants — and the state
+    // each left behind, which is how a reader can tell a reopened issue from a
+    // closed one without consulting the board view at all.
+    expect(forIssueTwo.map((entry) => [entry.kind, entry.state])).toEqual([
+      ['issue-reopened', 'open'],
+      ['issue-closed', 'closed'],
+    ]);
+    // This board's clock is frozen, so both operations share an instant and the
+    // log position is the only thing that orders them. That is the case the
+    // projection is built for: two distinct entries, ordered by the log, and
+    // never merged into one "last changed" line.
+    expect(forIssueTwo.map((entry) => entry.at)).toEqual([STAMP, STAMP]);
+    expect(forIssueTwo[0].position).toBeGreaterThan(forIssueTwo[1].position);
+  });
+
+  it('reads the newest 50 entries by default and hands back the token for the rest', async () => {
+    const server = fakeSkrynia();
+    const owner = session(server);
+    await owner.initialize();
+    for (let index = 1; index <= 55; index += 1) await owner.api.createIssue(`Issue ${index}`);
+
+    const page = await owner.readFeed();
+
+    expect(page.limit).toBe(50);
+    expect(page.entries).toHaveLength(50);
+    expect(page.total).toBe(55);
+    expect(page.nextCursor).not.toBeNull();
+    // The 50 kept are the 50 newest, and the top of the page is the last
+    // operation the log committed.
+    expect(page.entries[0].title).toBe('Issue 55');
+    expect(page.entries[49].title).toBe('Issue 6');
+  });
+
+  it('walks the whole feed through the backend cursor without skipping or repeating an entry', async () => {
+    const server = fakeSkrynia();
+    const owner = session(server);
+    await owner.initialize();
+    for (let index = 1; index <= 12; index += 1) await owner.api.createIssue(`Issue ${index}`);
+
+    const reader = owner;
+    const first = await reader.readFeed({ limit: 5 });
+    const second = await reader.readFeed({ limit: 5, cursor: first.nextCursor });
+    const third = await reader.readFeed({ limit: 5, cursor: second.nextCursor });
+    const whole = await reader.readFeed();
+
+    expect([first.entries.length, second.entries.length, third.entries.length]).toEqual([5, 5, 2]);
+    expect([...first.entries, ...second.entries, ...third.entries].map((entry) => entry.id))
+      .toEqual(whole.entries.map((entry) => entry.id));
+    // The continuation token names a position, not an offset, so every page
+    // starts strictly earlier than the one before it and the walk ends exactly
+    // where the single-page read ends.
+    expect(third.nextCursor).toBeNull();
+    expect([...first.entries, ...second.entries, ...third.entries]).toHaveLength(whole.total);
+  });
+
+  it('refuses a cursor it did not issue instead of silently paging from the top', async () => {
+    const { writer } = await boardWithActivity();
+
+    await expect(writer.readFeed({ cursor: 'v1.not-base64' })).rejects.toThrow('cursor is malformed');
+    await expect(writer.readFeed({ cursor: 'v9.eyJhdCI6IiJ9' })).rejects.toThrow('cursor is malformed');
+    await expect(writer.readFeed({ limit: 0 })).rejects.toThrow('limit must be a positive integer');
+  });
+
+  it('hands the tab a read that still has its session once the view has detached it', async () => {
+    // The feed tab receives the session's read as a bare function prop and calls
+    // it on its own, so `owner.readFeed` below is the exact value the view
+    // holds: no receiver, nothing to fall back on. Every other read in this
+    // file is called as a method, which is why a read that lost its session
+    // passed the whole suite and threw only in the app.
+    const server = fakeSkrynia();
+    const owner = session(server);
+    await owner.initialize();
+    for (let index = 1; index <= 55; index += 1) await owner.api.createIssue(`Issue ${index}`);
+
+    const detached: FeedRead = owner.readFeed;
+    const first = await readFeedFirstPage(detached);
+    const second = await appendFeedPage(detached, first, first.nextCursor!);
+
+    expect(first.limit).toBe(DEFAULT_FEED_LIMIT);
+    expect(first.entries).toHaveLength(50);
+    expect(first.nextCursor).not.toBeNull();
+    // The walk still reaches the whole log through the same detached read, and
+    // the newest entry is still the top of the page.
+    expect(second.entries).toHaveLength(55);
+    expect(second.nextCursor).toBeNull();
+    expect(first.entries[0].title).toBe('Issue 55');
+  });
+
+  it('keeps its read off the prototype, so it cannot be handed over unbound', () => {
+    // The cheap structural half of the same guard: a read on the prototype is
+    // exactly the shape that detaches to nothing, so its absence here is what
+    // makes the test above a property of the class rather than of one fixture.
+    expect((BrowserBoardSession.prototype as { readFeed?: unknown }).readFeed).toBeUndefined();
+  });
+
+  it('reads the feed without a credential and without writing anything', async () => {
+    const server = fakeSkrynia();
+    const storage = memoryStorage();
+    const owner = session(server, storage);
+    const initialized = await owner.initialize();
+    await owner.api.createIssue('Readable');
+    const before = server.signed;
+    const methods: Array<string | undefined> = [];
+    const reader = new BrowserBoardSession(memoryStorage(), {
+      fetch: async (input, init) => { methods.push(init?.method); return server.fetch(String(input), init); },
+      now: () => new Date(STAMP),
+    });
+    await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
+
+    const page = await reader.readFeed();
+
+    expect(page.entries.map((entry) => entry.kind)).toEqual(['issue-created']);
+    expect(reader.hasCredential()).toBe(false);
+    expect(server.signed).toBe(before);
+    expect(methods.every((method) => method === undefined)).toBe(true);
   });
 });

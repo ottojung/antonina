@@ -16,6 +16,7 @@ import {
   type BoardCredential,
 } from '../../packages/core/src/credential';
 import type { BoardTrustAnchor, VerifiedBoardState } from '../../packages/core/src/operations';
+import type { BoardFeedPage, BoardFeedRequest } from '../../packages/core/src/feed';
 
 export {
   parseBoardCredentialText,
@@ -29,6 +30,18 @@ export interface BoardKeyStorage {
   set(key: string, value: string): void;
   remove(key: string): void;
 }
+
+/**
+ * The one shape a feed read has, and the reason `BrowserBoardSession.readFeed`
+ * is a bound property rather than a method.
+ *
+ * The feed tab is handed the session's read as a prop and calls it on its own,
+ * so anything this type admits has to be callable with no receiver. TypeScript
+ * cannot enforce that: a prototype method satisfies a bare function type and
+ * only throws once it is detached. Naming the shape here, on the session that
+ * provides it, is what makes the obligation visible to the compiler's callers.
+ */
+export type FeedRead = (request?: BoardFeedRequest) => Promise<BoardFeedPage>;
 
 export function browserStorage(): BoardKeyStorage {
   return {
@@ -77,6 +90,26 @@ export class BrowserBoardSession {
       throw error;
     }
   }
+
+  /**
+   * One page of the unified board activity stream, newest first.
+   *
+   * This is the same projection `antonina board feed` reads: it hands the
+   * request straight to the core `BoardApi.readFeed`, which derives the page
+   * from the verified operation log and returns the backend's own continuation
+   * token. Nothing here derives, orders, re-limits or re-tokenizes anything —
+   * a second implementation of the feed in the browser is exactly the failure
+   * mode this app avoids, so the cursor in `page.nextCursor` is the one the next
+   * call must be given back unchanged.
+   *
+   * It is an arrow-function property and not a `readonly` method on purpose.
+   * The feed tab takes this as a bare function prop and calls it on its own, so
+   * a method that reads `this` would throw `Cannot read properties of undefined`
+   * the moment it was detached, and TypeScript cannot catch that: a method value
+   * satisfies a bare function type. Binding it to the session here means the
+   * declared type and the runtime agree, for this caller and every future one.
+   */
+  readonly readFeed: FeedRead = async (request = {}) => this.api.readFeed(request);
 
   /**
    * Adopts a board trust anchor so this browser can read it, and returns the

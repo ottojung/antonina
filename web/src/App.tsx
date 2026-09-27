@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { createBrowserBoardApi } from './api';
+import { createBrowserBoardApi, type BoardFeedEntry, type BoardFeedPage } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, boardReadOutcome, canMoveInQueue, DELETED_COPY, emptyIssueList, filterLabel, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, formatUpdatedAt, groupResources, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, trustRequired, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
+import { COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, appendFeedPage, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, boardReadOutcome, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
-type View = 'issues' | 'resources';
+type View = 'issues' | 'resources' | 'feed';
+const TABS: readonly View[] = ['issues', 'resources', 'feed'];
+const TAB_TITLE: { readonly [V in View]: string } = { issues: 'Issues', resources: 'Resources', feed: 'Feed' };
+const TAB_PANE_LABEL: { readonly [V in View]: string } = {
+  issues: 'Shared issue list',
+  resources: 'Registered resources',
+  feed: 'Board activity feed',
+};
 
 export default function App() {
   const session = useMemo(() => createBrowserBoardApi(), []);
@@ -23,6 +30,11 @@ export default function App() {
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [initializing, setInitializing] = useState(false);
+  // Bumped by every successful board read, so the feed tab re-reads the log on
+  // the same cadence as the rest of the board instead of holding a page of it
+  // indefinitely. The key carries no entries of its own: the feed is always
+  // whatever the core projection last returned.
+  const [feedGeneration, setFeedGeneration] = useState(0);
 
   const refresh = useCallback(async () => {
     try {
@@ -33,6 +45,7 @@ export default function App() {
         setError(undefined);
         return;
       }
+      setFeedGeneration((current) => current + 1);
       const access = api.accessState();
       setAccess(session.hasCredential() ? boardAccess(access.canEdit, access.credentialRejection !== null) : 'read-only');
       setError(undefined);
@@ -165,20 +178,22 @@ export default function App() {
   return <div className="app-shell">
     <header className="topbar">
       <button className="brand" onClick={() => { setView('issues'); setSelectedNumber(undefined); }} aria-label="Back to all Antonina issues"><span className="brand-mark" aria-hidden="true">A</span><span><strong>Antonina</strong><small>Shared issue board</small></span></button>
-      <nav className="main-nav" aria-label="Main navigation">{(['issues', 'resources'] as const).map((item) => <button key={item} className={view === item ? 'active' : ''} aria-current={view === item ? 'page' : undefined} onClick={() => { setView(item); setSelectedNumber(undefined); }}>{item}</button>)}</nav>
+      <nav className="main-nav" aria-label="Main navigation">{TABS.map((item) => <button key={item} className={view === item ? 'active' : ''} aria-current={view === item ? 'page' : undefined} onClick={() => { setView(item); setSelectedNumber(undefined); }}>{item}</button>)}</nav>
       <div className="top-actions"><span className={`access-pill ${hasWriteAccess ? 'writable' : ''}`}><span aria-hidden="true" />{hasWriteAccess ? 'Can edit' : 'Read only'}</span><button className="quiet" onClick={() => void refresh()}>Refresh</button><button className="quiet" onClick={() => setSettingsOpen(true)}>Settings</button></div>
     </header>
     {error && <div className="notice error" role="alert"><span>{error}</span><button onClick={() => setError(undefined)} aria-label="Dismiss error">Dismiss</button></div>}
     {notice && <div className="notice success" role="status"><span>{notice}</span><button onClick={() => setNotice(undefined)} aria-label="Dismiss message">Dismiss</button></div>}
     <main className={`workspace ${view}-view ${selected ? 'has-selection' : ''}`}>
-      <aside className="issue-pane" aria-label={view === 'issues' ? 'Shared issue list' : 'Registered resources'}>
-        <div className="pane-heading"><div><p className="eyebrow">One board, everyone’s work</p><h1>{view === 'issues' ? 'Issues' : 'Resources'}</h1><p>{view === 'issues' ? <>{QUEUE_HINT} Track what needs attention and discuss the details together.</> : 'Registered paths are protected while at least one dependent Antonina issue remains open.'}</p></div></div>
+      <aside className="issue-pane" aria-label={TAB_PANE_LABEL[view]}>
+        <div className="pane-heading"><div><p className="eyebrow">One board, everyone’s work</p><h1>{TAB_TITLE[view]}</h1><p>{view === 'issues' ? <>{QUEUE_HINT} Track what needs attention and discuss the details together.</> : view === 'resources' ? 'Registered paths are protected while at least one dependent Antonina issue remains open.' : FEED_HINT}</p></div></div>
         {view === 'issues' ? <>
           {hasWriteAccess ? <CreateIssueForm onSubmit={createIssue} />
             : <AccessNotice access={access} className="access-callout" onAction={() => setSettingsOpen(true)} />}
           <nav className="filters" aria-label="Filter issues">{(['open', 'closed', 'all'] as const).map((value) => <button key={value} className={filter === value ? 'active' : ''} aria-pressed={filter === value} onClick={() => setFilter(value)}>{filterLabel(value)}<span>{counts[value]}</span></button>)}</nav>
           <div className="issue-list" aria-label="Issues"><IssueQueue issues={visible} queue={load.queue} hasWriteAccess={hasWriteAccess} selectedNumber={selectedNumber} onSelect={setSelectedNumber} onReorder={reorderQueue} empty={empty} /></div>
-        </> : <ResourcesView board={board!} issues={board!.issues} access={access} onOpenIssue={openIssue} onAdd={(host, path, number) => run(() => api.addResourceDependency(host, path, number), 'Resource dependency added')} onRemove={(resource, number) => run(() => api.removeResourceDependency(resource.host, resource.path, number), resource.issueNumbers.length === 1 ? 'Dependency removed; resource unregistered' : 'Resource dependency removed')} onEnableEditing={() => setSettingsOpen(true)} />}
+        </> : view === 'resources'
+          ? <ResourcesView board={board!} issues={board!.issues} access={access} onOpenIssue={openIssue} onAdd={(host, path, number) => run(() => api.addResourceDependency(host, path, number), 'Resource dependency added')} onRemove={(resource, number) => run(() => api.removeResourceDependency(resource.host, resource.path, number), resource.issueNumbers.length === 1 ? 'Dependency removed; resource unregistered' : 'Resource dependency removed')} onEnableEditing={() => setSettingsOpen(true)} />
+          : <FeedView readFeed={session.readFeed} issues={board!.issues} generation={feedGeneration} onOpenIssue={openIssue} />}
       </aside>
       {view === 'issues' ? selected ? <Thread issue={selected} access={access} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.number, body), 'Description updated')} close={() => void run(() => api.close(selected.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.number), 'Issue reopened')} back={() => setSelectedNumber(undefined)} />
         : <section className="thread welcome"><div className="welcome-mark" aria-hidden="true">A</div><p className="eyebrow">Shared issue board</p><h2>Choose an issue to join the conversation.</h2></section> : null}
@@ -460,6 +475,125 @@ function ResourcesView({ board, issues, access, onOpenIssue, onAdd, onRemove, on
   </div>;
 }
 function AddDependency({ resource, issues, add }: { resource: BoardResource; issues: BoardIssue[]; add: (host: string, path: string, number: number) => Promise<unknown> }) { const options = issues.filter((issue) => issue.state === 'open' && !resource.issueNumbers.includes(issue.number)); if (!options.length) return null; return <form className="dependency-add" onSubmit={async (event) => { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await add(resource.host, resource.path, Number(data.get('issue'))); if (result) form.reset(); }}><select name="issue" required defaultValue=""><option value="" disabled>Add open issue dependency…</option>{options.map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add</button></form>; }
+
+/**
+ * The feed tab's container. It owns nothing but the page it last read: every
+ * entry, the order, the total and the continuation token come from the core
+ * projection, which is the same one `antonina board feed` reads. The container
+ * decides only when to read — on open, on every verified board read, and again
+ * when the reader asks for the next page — and the next page is requested with
+ * the token the backend returned, never with an offset the browser computed.
+ */
+export function FeedView({ readFeed, issues, generation, onOpenIssue }: {
+  readFeed: FeedRead;
+  issues: BoardIssue[];
+  generation: number;
+  onOpenIssue: (number: number) => void;
+}) {
+  const [page, setPage] = useState<BoardFeedPage | null>(null);
+  const [error, setError] = useState<string>();
+  const [loading, setLoading] = useState(true);
+  const read = useCallback(readFeed, [readFeed]);
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    void (async () => {
+      try {
+        const newest = await readFeedFirstPage(read);
+        if (!live) return;
+        setPage(newest);
+        setError(undefined);
+      } catch (cause) {
+        if (!live) return;
+        setError(cause instanceof Error ? cause.message : 'The board feed could not be read');
+      } finally {
+        if (live) setLoading(false);
+      }
+    })();
+    return () => { live = false; };
+  }, [read, generation]);
+  async function showMore() {
+    if (page === null || page.nextCursor === null) return;
+    setLoading(true);
+    try {
+      // The backend's own token, carried unchanged: it names a position in the
+      // append-only log, so this page is the entries committed before it and a
+      // walk neither skips nor repeats an entry.
+      setPage(await appendFeedPage(read, page, page.nextCursor));
+      setError(undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Older entries could not be read');
+    } finally {
+      setLoading(false);
+    }
+  }
+  return <FeedThread
+    entries={page?.entries ?? []}
+    nextCursor={page?.nextCursor ?? null}
+    total={page?.total ?? 0}
+    issues={issues}
+    loading={loading}
+    error={error}
+    onShowMore={() => void showMore()}
+    onOpenIssue={onOpenIssue}
+  />;
+}
+
+/**
+ * The feed, rendered exactly as the core projection reported it.
+ *
+ * Nothing here sorts, filters, groups or re-limits: the page arrives newest
+ * first and is drawn in that order, so the top entry is the operation the log
+ * committed last. The continuation token is the backend's, so the control that
+ * asks for older entries is offered only while that token exists — when it is
+ * `null` the backend says the feed is exhausted, and this view says so rather
+ * than inviting a request that could only return the same page.
+ *
+ * The two kinds the board does not record are named in place, in a line of its
+ * own, because a reader who has seen an "Edited" entry could otherwise wonder
+ * where the field-level history went.
+ */
+export interface FeedThreadProps {
+  /** The page the projection returned, in the order it returned it. */
+  entries: BoardFeedEntry[];
+  /** The backend's own continuation token, or `null` when the feed is exhausted. */
+  nextCursor: string | null;
+  /** How many entries the whole feed holds, per the same page. */
+  total: number;
+  /** The board view, used only to report the issues the log never recorded. */
+  issues: BoardIssue[];
+  loading: boolean;
+  error: string | undefined;
+  onShowMore: () => void;
+  onOpenIssue: (number: number) => void;
+}
+
+export function FeedThread({ entries, nextCursor, total, issues, loading, error, onShowMore, onOpenIssue }: FeedThreadProps) {
+  const date = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  const untracked = unplacedIssueNumbers(issues, entries, nextCursor, total);
+  return <div className="feed-view-inner">
+    {error && <p className="feed-error" role="alert">{error}</p>}
+    {entries.length > 0 && <p className="feed-count">{FEED_COUNT_LABEL(entries.length, total)}</p>}
+    <ol className="feed-list" aria-label="Board activity, newest first">{entries.map((entry) => <li className={`feed-entry feed-${entry.kind}`} key={entry.id} data-feed-id={entry.id} data-feed-kind={entry.kind}>
+      <span className={`feed-kind feed-kind-${entry.kind}`}>{FEED_KIND_LABEL[entry.kind]}</span>
+      <span className="feed-detail">
+        {/* A deleted issue is an event about something the board no longer
+            holds, so its row names the issue and offers no way to open it. Every
+            other kind names an issue that is still on the board, and clicking it
+            goes to that issue's own thread. */}
+        {entry.kind === 'issue-deleted'
+          ? <span className="feed-issue">#{entry.issueNumber} {entry.title}</span>
+          : <button className="feed-issue" onClick={() => onOpenIssue(entry.issueNumber)}>#{entry.issueNumber} {entry.title}</button>}
+        <span className="feed-summary">{feedEntrySummary(entry)}</span>
+      </span>
+      <time className="feed-at" dateTime={entry.at}>{date.format(new Date(entry.at))}</time>
+    </li>)}</ol>
+    {!entries.length && !loading && <div className="empty-state"><h2>{FEED_EMPTY.title}</h2><p>{FEED_EMPTY.body}</p></div>}
+    {untracked.length > 0 && <p className="feed-caveat" role="note">{FEED_TRUNCATED_COPY(untracked)}</p>}
+    <p className="feed-untracked">{FEED_UNTRACKED_COPY}</p>
+    {nextCursor !== null && <button className="feed-more" disabled={loading} onClick={onShowMore}>{FEED_MORE_LABEL}</button>}
+  </div>;
+}
 
 function Thread({ issue, access, displayName, setDisplayName, saveDisplayName, openSettings, comment, editBody, close, reopen, back }: { issue: BoardIssue; access: BoardAccess; displayName: string; setDisplayName: (value: string) => void; saveDisplayName: (event?: FormEvent<HTMLFormElement>) => void; openSettings: () => void; comment: (event: FormEvent<HTMLFormElement>) => Promise<void>; editBody: (body: string) => Promise<unknown>; close: () => void; reopen: () => void; back: () => void }) {
   const [editing, setEditing] = useState(false); const [body, setBody] = useState(issue.body);

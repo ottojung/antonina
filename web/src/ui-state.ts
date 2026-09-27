@@ -1,4 +1,5 @@
-import { BoardDeletedError, BoardTrustRequiredError } from './api';
+import { BoardDeletedError, BoardTrustRequiredError, DEFAULT_FEED_LIMIT } from './api';
+import type { BoardFeedEntry, BoardFeedEntryKind, BoardFeedPage, BoardFeedRequest, FeedRead } from './api';
 import type { Board, BoardIssue, BoardResource, VerifiedBoardState } from './model';
 
 export type IssueFilter = 'open' | 'closed' | 'all';
@@ -319,6 +320,172 @@ export function groupResources(resources: BoardResource[]): Array<[string, Board
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([host, entries]) => [host, entries.sort((left, right) => left.path.localeCompare(right.path))]);
 }
+
+export const FEED_HINT = 'Everything the signed board recorded, newest first: creations, edits, comments, closures and reopenings, each at the moment it was committed.';
+
+/**
+ * How each feed entry kind reads on one line. A mapping over the whole
+ * vocabulary rather than a chain of comparisons, so a kind added to
+ * `BOARD_FEED_ENTRY_KINDS` is a type error here instead of silently rendering
+ * as the last case. These are the same six verbs `antonina board feed` prints,
+ * so the browser and the CLI name the same event the same way.
+ */
+export const FEED_VERB: { readonly [K in BoardFeedEntryKind]: string } = {
+  'issue-created': 'created',
+  'issue-edited': 'edited',
+  'comment-added': 'commented',
+  'issue-closed': 'closed',
+  'issue-reopened': 'reopened',
+  'issue-deleted': 'deleted',
+};
+
+/**
+ * The badge that tells the six kinds apart at a glance, and as a class name the
+ * row is styled from. Also total over the vocabulary, for the same reason.
+ */
+export const FEED_KIND_LABEL: { readonly [K in BoardFeedEntryKind]: string } = {
+  'issue-created': 'Created',
+  'issue-edited': 'Edited',
+  'comment-added': 'Comment',
+  'issue-closed': 'Closed',
+  'issue-reopened': 'Reopened',
+  'issue-deleted': 'Deleted',
+};
+
+/**
+ * One line describing the operation the entry names. The author's name and the
+ * body appear only for a comment, because the log records them only there: no
+ * other kind has them, and inventing one from the collapsed view would be an
+ * event the board never committed.
+ */
+export function feedEntrySummary(entry: BoardFeedEntry): string {
+  if (entry.kind === 'comment-added' && entry.author !== null) {
+    return `${FEED_VERB['comment-added']} by ${entry.author}: ${entry.body ?? ''}`;
+  }
+  return `${FEED_VERB[entry.kind]} — ${entry.title}`;
+}
+
+export const FEED_EMPTY = {
+  title: 'No activity recorded yet',
+  body: 'Entries appear here as soon as the board records its first operation.',
+} as const;
+
+export const FEED_MORE_LABEL = 'Show older entries';
+
+export const FEED_COUNT_LABEL = (shown: number, total: number) => `${shown} of ${total} recorded entries`;
+
+/**
+ * The one shape the feed is read through, wherever it is called from: the bare
+ * function the tab receives as a prop. It is `FeedRead` from the session module
+ * rather than a second declaration, so the tab and the thing that hands it a
+ * read cannot drift apart into two shapes that each look right.
+ */
+export type { FeedRead } from './api';
+
+/**
+ * The request the feed tab opens with. It asks the core projection for its own
+ * default page — 50 entries — rather than naming a number here, so the browser
+ * and `antonina board feed` have one default rather than two that can drift.
+ */
+export function feedFirstPageRequest(): BoardFeedRequest {
+  return { limit: DEFAULT_FEED_LIMIT };
+}
+
+/**
+ * The one read the tab opens with, named so the path a detached read has to
+ * survive is a function that can be called and tested rather than an effect
+ * body. The read is taken as the prop hands it over and called on its own.
+ */
+export async function readFeedFirstPage(readFeed: FeedRead): Promise<BoardFeedPage> {
+  return readFeed(feedFirstPageRequest());
+}
+
+/**
+ * One page back, using the token the previous page returned.
+ *
+ * The cursor is handed to the projection exactly as it arrived. It is a position
+ * in the append-only log, not an offset, so the page this returns is the set of
+ * operations committed before that position — a walk that neither skips nor
+ * repeats an entry, and that still works for a position whose entry the board no
+ * longer holds. The merged page keeps the token for its own next call, so a
+ * reader can keep walking until the projection returns `null` and the feed is
+ * exhausted.
+ */
+export async function appendFeedPage(readFeed: FeedRead, current: BoardFeedPage, cursor: string): Promise<BoardFeedPage> {
+  const older = await readFeed({ limit: DEFAULT_FEED_LIMIT, cursor });
+  return { ...older, entries: [...current.entries, ...older.entries] };
+}
+
+/**
+ * The two kinds the board genuinely cannot report, said out loud where a reader
+ * would otherwise assume they are merely missing.
+ *
+ * A message edit is inexpressible because a board message is immutable and there
+ * is no message-edit operation to project, and a per-field issue-edit history is
+ * not recorded because an edit operation names the issue, not the field it
+ * changed. An `issue-edited` entry says an edit was committed at that instant;
+ * it does not and cannot say which part of the issue it changed. Nothing here
+ * renders a placeholder that would imply either exists.
+ */
+export const FEED_UNTRACKED_COPY =
+  'The board does not record edits to messages, or which field an issue edit changed, so neither appears here.';
+
+/**
+ * The issues the board view knows about that the entries in hand report nothing
+ * for. This is the set difference and nothing else: a pure function of what it
+ * is given, with no opinion about whether the claim built on it is yet true.
+ *
+ * The feed is a projection over the operation log, and an issue that was already
+ * in the `board.initialize` snapshot predates that log: no operation ever named
+ * its creation, so the projection cannot place it and does not. The CLI cannot
+ * tell that apart from an empty board and prints an empty feed, but a browser
+ * can, because it holds both the board view and the feed. No entry is invented
+ * for such an issue, and it is not ordered or timestamped here, because the
+ * board recorded no such facts.
+ *
+ * What this cannot say on its own is that the issue predates the log. It can
+ * only say the entries it was handed do not mention it, and on a paged feed
+ * that is exactly as true of an issue created ten operations ago and left off
+ * the first page. `unplacedIssueNumbers` is the gated form.
+ */
+export function untrackedIssueNumbers(issues: BoardIssue[], entries: BoardFeedEntry[]): number[] {
+  const tracked = new Set(entries.map((entry) => entry.issueNumber));
+  return issues.filter((issue) => !tracked.has(issue.number)).map((issue) => issue.number).sort((left, right) => left - right);
+}
+
+/**
+ * The issues the feed cannot place, or none at all while any page is unread.
+ *
+ * The claim is only true about a log the reader has read to the end. An issue
+ * that appears in no entry of a partial walk may simply be waiting on the next
+ * page, and saying it "predates the log" then would be a statement about a log
+ * nobody has read — a caveat that fires on healthy, heavily-active boards and
+ * teaches the reader to ignore it, which is worse than saying nothing.
+ *
+ * So the caveat waits for exhaustion. The projection reports a continuation
+ * token while entries remain, and hands back `null` only at the end of the log;
+ * the count of what is in hand then has to cover the `total` the same page
+ * reported, so a merged walk that somehow came up short does not make the claim
+ * either. Once the walk is complete the difference above is real: every issue on
+ * the board that the whole log never names was in the initialize snapshot.
+ *
+ * While a continuation token is outstanding the answer is no issues, and the
+ * view says nothing rather than something weaker. A board that is entirely
+ * untracked is still reported, as soon as the reader has walked the feed to its
+ * end and can honestly be told the log holds nothing for those issues.
+ */
+export function unplacedIssueNumbers(issues: BoardIssue[], entries: BoardFeedEntry[], nextCursor: string | null, total: number): number[] {
+  if (nextCursor !== null || entries.length < total) return [];
+  return untrackedIssueNumbers(issues, entries);
+}
+
+/**
+ * The caveat for a log read to its end, and only then. The wording names the
+ * exhaustion it depends on, so the sentence cannot be read as a claim made from
+ * a partial walk.
+ */
+export const FEED_TRUNCATED_COPY = (numbers: number[]) =>
+  `You have read the whole feed, and the log records no operation for these issues. They were already on the board when the signed log began, so the feed cannot show when they were created or changed: ${numbers.map((number) => `#${number}`).join(', ')}.`;
 
 export function formatUpdatedAt(timestamp: string, now = new Date()): string {
   const date = new Date(timestamp);

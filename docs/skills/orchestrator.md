@@ -162,9 +162,11 @@ When Antonina's managed agent runtime is appropriate, use the CLI:
 antonina agent list
 antonina agent status --id ID
 antonina agent log --id ID
-antonina agent prompt --id ID '...'
+antonina agent prompt --id ID --detach '...'
 antonina agent new --id ID --cwd /absolute/worktree
 ```
+
+Launch newly delegated work with `--detach`; do not keep the orchestrator attached to a subordinate agent while it works.
 
 Record a new agent ID/name and its worktree in the issue comment's `resources:` field before relying on them for handoff. Use separate worktrees for materially independent repository work.
 

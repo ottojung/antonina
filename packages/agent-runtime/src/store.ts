@@ -178,10 +178,12 @@ export function writeMeta(agentId: string, meta: AgentMetadata, options: StatePa
   const directory = dirname(destination);
   const temporary = join(directory, `.meta-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
   let fd: number | null = null;
+  let created = false;
   try {
     // The directory must already exist. Never recreate it here: a missing
     // directory means deletion won the race and durable authority is gone.
     fd = fs.openSync(temporary, 'wx', 0o600);
+    created = true;
     fs.writeFileSync(fd, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
     fs.fsyncSync(fd);
     fs.closeSync(fd);
@@ -192,7 +194,12 @@ export function writeMeta(agentId: string, meta: AgentMetadata, options: StatePa
     if (fd !== null) {
       try { fs.closeSync(fd); } catch {}
     }
-    try { fs.unlinkSync(temporary); } catch {}
+    // Only remove the temporary path if this call created it. The exclusive
+    // create refuses to adopt a path that already exists, and a path we did not
+    // create is somebody else's file, not our authority to delete.
+    if (created) {
+      try { fs.unlinkSync(temporary); } catch {}
+    }
     if (error instanceof MetadataWriteError) throw error;
     if (hasCode(error, 'ENOENT') && agentDirectoryMissing(agentId, options, fs, 'write')) {
       throw new AgentStateMissingError(`agent state disappeared while writing metadata for ${agentId}`, { cause: error });
@@ -265,8 +272,13 @@ function sameAcquisition(left: LockOwner, right: LockOwner): boolean {
 function lockOwnerAlive(owner: LockOwner): boolean {
   try {
     process.kill(owner.pid, 0);
-  } catch {
-    return false;
+  } catch (error) {
+    // Only ESRCH proves the owner is gone. Any other failure (EPERM for a live
+    // owner under a different uid, EINTR, an injected error) has not established
+    // death, and treating it as death would let this process unlink a live
+    // owner's lock and enter the critical section alongside it.
+    if (hasCode(error, 'ESRCH')) return false;
+    return true;
   }
   if (owner.startTicks === null) return true;
   return procStartTicks(owner.pid) === owner.startTicks;

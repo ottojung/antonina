@@ -17,6 +17,11 @@ import {
 } from '../../core/src/credential.js';
 import { canonicalJson, type CanonicalValue } from '../../core/src/canonical.js';
 import {
+  type BoardFeedEntry,
+  type BoardFeedPage,
+  type BoardFeedRequest,
+} from '../../core/src/feed.js';
+import {
   parseExecutionTargetBackend,
   parseExecutionTargetCapability,
   parseExecutionTargetKind,
@@ -98,6 +103,7 @@ type CommandValue =
   | VerifiedAuthority[]
   | CollectListEntry[]
   | CollectDeleteReportBase
+  | BoardFeedPage
   | number[]
   | null;
 
@@ -351,6 +357,18 @@ async function execute(
         return { mode: 'queue', value: await client.reorderQueue(args.map((arg) => parsePositiveInteger(arg, 'ISSUE'))) };
       }
       throw new AntoninaApiError('queue requires list or reorder');
+    }
+    case 'feed': {
+      const limitOption = option(parsed.args, '--limit');
+      const cursorOption = option(limitOption.rest, '--cursor');
+      if (cursorOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for feed');
+      const request: BoardFeedRequest = cursorOption.value === null && limitOption.value === undefined
+        ? {}
+        : {
+          ...(limitOption.value === undefined ? {} : { limit: parsePositiveInteger(limitOption.value, '--limit') }),
+          cursor: cursorOption.value ?? null,
+        };
+      return { mode: 'feed', value: await client.readFeed(request) };
     }
     case 'list': {
       const stateOption = option(parsed.args, '--state');
@@ -619,6 +637,38 @@ function humanSelection(selection: TargetSelection): string[] {
   return lines;
 }
 
+/**
+ * How each feed entry kind reads on one line. A mapping over the whole
+ * vocabulary rather than a chain of comparisons, so a kind added to the feed is
+ * a type error here instead of silently rendering as the last case.
+ */
+const FEED_VERB: { readonly [K in BoardFeedEntry['kind']]: string } = {
+  'issue-created': 'created',
+  'issue-edited': 'edited',
+  'comment-added': 'commented',
+  'issue-closed': 'closed',
+  'issue-reopened': 'reopened',
+  'issue-deleted': 'deleted',
+};
+
+function humanFeedEntry(entry: BoardFeedEntry): string {
+  const head = entry.at + '  #' + entry.issueNumber + ' [' + entry.state + '] ' + FEED_VERB[entry.kind];
+  if (entry.author !== null) {
+    return head + ' by ' + entry.author + ': ' + (entry.body ?? '');
+  }
+  return head + '  ' + entry.title;
+}
+
+function humanFeed(page: BoardFeedPage): string[] {
+  const lines = page.entries.length === 0
+    ? ['The board feed is empty.']
+    : page.entries.map(humanFeedEntry);
+  // The continuation token is printed rather than left implicit: a human paging
+  // back through the feed needs the same token the JSON form hands a program.
+  if (page.nextCursor !== null) lines.push('next: ' + page.nextCursor);
+  return lines;
+}
+
 function humanLines(result: CommandResult): string[] {
   if (result.mode === 'initialize') {
     const initialized = result.value as BoardInitialization;
@@ -656,6 +706,7 @@ function humanLines(result: CommandResult): string[] {
   if (result.mode === 'queue') {
     return [(result.value as number[]).map((number) => '#' + number).join(' ')];
   }
+  if (result.mode === 'feed') return humanFeed(result.value as BoardFeedPage);
   if (result.mode === 'deleted-issue') return ['Issue deleted.'];
   if (result.mode === 'deleted-board') return ['Board deleted.'];
 

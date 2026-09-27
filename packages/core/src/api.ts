@@ -23,6 +23,18 @@ import {
   type CredentialRejection,
 } from './credential.js';
 import {
+  BOARD_FEED_ENTRY_KINDS,
+  DEFAULT_FEED_LIMIT,
+  MAX_FEED_LIMIT,
+  boardFeed,
+  feedEntries,
+  parseFeedCursor,
+  type BoardFeedEntry,
+  type BoardFeedEntryKind,
+  type BoardFeedPage,
+  type BoardFeedRequest,
+} from './feed.js';
+import {
   MAX_SAFE_INTEGER,
   canonicalHost,
   canonicalPath,
@@ -336,6 +348,17 @@ export class BoardApi {
 
   async getIssue(number: number): Promise<BoardIssue> {
     return clone(this.requireIssue((await this.loadBoard()).issues, number));
+  }
+
+  /**
+   * One page of the unified chronological board feed, newest first, with the
+   * continuation token for the entries after it. The page is a projection over
+   * the verified operation log rather than over the collapsed board view, so
+   * every entry names an operation the log actually recorded. It needs no
+   * credential and writes nothing.
+   */
+  async readFeed(request: BoardFeedRequest = {}): Promise<BoardFeedPage> {
+    return boardFeed((await this.readStored()).log, request);
   }
 
   async getQueue(): Promise<number[]> {
@@ -696,6 +719,16 @@ export class BoardApi {
 
 export { BOARD_CAPABILITIES } from './operations.js';
 export { emptyBoard, parseBoard } from './model.js';
+export {
+  BOARD_FEED_ENTRY_KINDS,
+  DEFAULT_FEED_LIMIT,
+  MAX_FEED_LIMIT,
+  boardFeed,
+  feedEntries,
+  feedLimit,
+  parseFeedCursor,
+} from './feed.js';
+export type { BoardFeedEntry, BoardFeedEntryKind, BoardFeedPage, BoardFeedRequest } from './feed.js';
 export {
   EXECUTION_TARGET_BACKENDS,
   EXECUTION_TARGET_CAPABILITIES,

@@ -77,7 +77,11 @@ test('the traced make target comes from a run step, not from a comment', (t) => 
   // instead of `build` would have emptied the input set rather than kept it. The
   // count is the traced bundle inputs this revision actually has, so adding a
   // `web/**` source file is expected to move it and this number with it.
-  assert.match(result.stdout, /traced bundle inputs: 31/);
+  // 32, not 31: `web/vite.config.ts` became a traced input when a wildcard-free
+  // tsconfig `include` that names a file stopped being read as a directory
+  // prefix. Not a lowered bound on purpose -- a range would hide the very
+  // regression this count is here to catch.
+  assert.match(result.stdout, /traced bundle inputs: 32/);
 });
 
 test('an ambiguous make target fails instead of guessing', (t) => {

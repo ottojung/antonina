@@ -94,15 +94,33 @@ function globMatches(glob, path) {
   return globToRegExp(glob).test(path);
 }
 
+// An `include` that names no repository file at all. Such an entry cannot be an
+// input the check reasoned about: whatever it was meant to cover is simply absent
+// from the traced set, and an absent input can never be reported UNCOVERED, so
+// the run would still print PASS. That is the exact failure shape this check
+// exists to prevent, so the entry is named instead of being dropped in silence.
+const unmatchedIncludes = [];
+
 // `include`/`files` entries are relative to the tsconfig that declares them.
-function expandGlob(glob, baseDir) {
+function expandGlob(glob, baseDir, owner = '?') {
   const prefix = baseDir === '.' ? '' : `${baseDir}/`;
   if (glob === '.') return files.filter((f) => f.startsWith(prefix));
   if (glob.endsWith('/**')) return files.filter((f) => f.startsWith(`${prefix}${glob.slice(0, -3)}/`));
   if (glob.endsWith('/**/*')) return files.filter((f) => f.startsWith(`${prefix}${glob.slice(0, -4)}/`));
   if (!glob.includes('*')) {
+    const exact = `${prefix}${glob}`;
+    // A wildcard-free include names either one file or a directory, and the
+    // repository has both: `web/tsconfig.app.json` says "src" and
+    // `web/tsconfig.node.json` says "vite.config.ts". Treating one as the other
+    // is silent either way, so the repository file list decides: an include that
+    // names a tracked file is that file, and only otherwise is it a directory
+    // prefix. Guessing the other way round is what left `web/vite.config.ts` --
+    // the file that registers this repository's build plugins -- untraced.
+    if (isFile(exact)) return [exact];
+    const under = files.filter((f) => f.startsWith(`${exact}/`));
+    if (under.length === 0) unmatchedIncludes.push({ include: glob, tsconfig: owner });
     // bare directory include, e.g. "src"
-    return files.filter((f) => f.startsWith(`${prefix}${glob}/`));
+    return under;
   }
   return files.filter((f) => globMatches(`${prefix}${glob}`, f));
 }
@@ -258,7 +276,7 @@ function readTsconfig(file, projectReferences, kind) {
     readTsconfig(target, projectReferences, kind);
   }
   for (const include of config.include ?? []) {
-    for (const matched of expandGlob(include, dirname(file))) mark(matched, kind);
+    for (const matched of expandGlob(include, dirname(file), file)) mark(matched, kind);
   }
   if (config.files) {
     for (const f of config.files) mark(relative(repoRoot, resolve(repoRoot, dirname(file), f)).split(sep).join('/'), kind);
@@ -480,6 +498,21 @@ if (untracedBundleSpecifiers.length) {
 }
 
 let failed = false;
+
+// An include that names nothing is not a stale declaration to be tidied up: it
+// means a tsconfig input the trace never saw. Reported before the result line,
+// and it fails, because a run that could not read one of its own declared inputs
+// has not earned a PASS. This is the only behaviour change that can turn a
+// currently-green build red, and it is the one this issue was filed about.
+if (unmatchedIncludes.length) {
+  for (const { include, tsconfig } of unmatchedIncludes) {
+    console.error(`  ERROR: include "${include}" in ${tsconfig} matches no repository file.`);
+    console.error(`         Nothing it was meant to cover entered the traced set, so nothing it was meant`);
+    console.error(`         to protect can be reported UNCOVERED. Correct the include, or the config,`);
+    console.error(`         before treating any result below as coverage.`);
+  }
+  failed = true;
+}
 if (trigger.deployEveryPush) {
   console.log(`  RESULT: PASS (no paths filter: every push to main rebuilds the web bundle)`);
 } else {

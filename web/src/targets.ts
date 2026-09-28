@@ -40,7 +40,7 @@ export const TARGET_PERSISTENCE_LABEL: { readonly [P in ExecutionTargetAccess['p
 };
 
 export const TARGET_CLEANUP_LABEL: { readonly [G in ExecutionTargetAccess['garbageCollection']]: string } = {
-  'host-local-collector': 'Host-local collector, by hand, with --confirm',
+  'host-local-collector-available': 'Host-local collector available; it collects by hand, with --confirm',
   'provider-managed': 'The provider expires it; Antonina has no part in it',
   none: 'Nothing removes it',
 };
@@ -76,8 +76,20 @@ export interface TargetStateLine {
   value: string;
   /** Rendered as the page's muted unknown state rather than as a measurement. */
   absent: boolean;
-  /** Why the value is absent, in the page's own words. */
+  /**
+   * Why the value is absent, in the page's own words. It belongs to a value
+   * that is not there, so it is only rendered when the value is absent: under a
+   * real measurement it reads as a muted explanation of something the reader
+   * can already see, and a host that is online is not a mystery.
+   */
   reason?: string;
+  /**
+   * Provenance for a value that *is* there — when it was observed, not why it is
+   * missing. This is a different thing from {@link reason} and is kept apart
+   * from it, because dropping it to make the reason behave would lose a fact the
+   * reader has to have.
+   */
+  note?: string;
 }
 
 /** A line stating that a value is not knowable here, rather than a value of zero. */
@@ -120,12 +132,17 @@ export function hostStateLines(host: DaemonHostView | undefined): TargetStateLin
     label: 'Host',
     value: host.hostId + ' · ' + host.liveness.status,
     absent: host.liveness.status !== 'online',
-    reason: host.liveness.reason,
+    // The liveness explanation belongs to a host that is not online. An online
+    // host has a real value here, and printing the reason that it is online
+    // under it is a muted apology for a measurement nobody asked to excuse.
+    ...(host.liveness.status === 'online' ? {} : { reason: host.liveness.reason }),
   }, {
     label: 'Daemon health',
     value: host.health === null ? 'unknown (never reported)' : host.health,
     absent: host.health === null,
-    ...(host.observedAt === null ? {} : { reason: 'last report at ' + host.observedAt }),
+    // When the report was seen is provenance for a reported health value, so
+    // it travels as a note rather than as the reason a value is missing.
+    ...(host.observedAt === null ? {} : { note: 'last report at ' + host.observedAt }),
   }];
   if (host.telemetry === null) {
     return [...lines, absentLine('Capacity', 'unknown', 'The last report carried no telemetry.')];

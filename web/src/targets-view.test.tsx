@@ -106,7 +106,7 @@ describe('the execution target overview', () => {
     expect(page).toContain('Persistent host');
     expect(page).toContain('Lubko transport');
     expect(page).toContain('Durable — the filesystem survives the job');
-    expect(page).toContain('Host-local collector, by hand, with --confirm');
+    expect(page).toContain('Host-local collector available; it collects by hand, with --confirm');
     expect(page).toContain('network-egress, persistent-filesystem');
   });
 
@@ -117,14 +117,37 @@ describe('the execution target overview', () => {
   });
 
   it('renders the live capacity of a daemon-backed persistent host', () => {
+    // This case proves the *view*, not the shipped app. `App.tsx` hands
+    // `TargetsView` `hosts={[]}` on purpose, because a browser cannot read a
+    // host's daemon report, so the shipped page states `unknown` for every
+    // persistent host. Nothing here is evidence that the board page shows
+    // capacity; it is the rendering a caller with host reports would get, and
+    // the reason `target list --telemetry` exists.
     const page = markup([persistentTarget()], [daemonHost()]);
     expect(page).toContain('phoebe-dev · online');
-    expect(page).toContain('published inside the stale threshold');
     expect(page).toContain('9.0 GiB free of 32.0 GiB');
     expect(page).toContain('214.0 GiB free of 512.0 GiB');
     expect(page).toContain('16 logical cores');
     expect(page).toContain('0.4 / 0.5 / 0.6');
     expect(page).toContain('not applicable');
+  });
+
+  it('explains an absent value and leaves a reported one unexcused', () => {
+    // An online host has a real liveness value, so the reason it is online is
+    // not rendered under it: a muted explanation belongs to a value that is
+    // missing, and a host that is present is not a mystery.
+    const online = markup([persistentTarget()], [daemonHost()]);
+    expect(online).toContain('phoebe-dev · online');
+    expect(online).not.toContain('published inside the stale threshold');
+    // What is true of a reported value — when it was seen — is still shown.
+    expect(online).toContain('last report at');
+
+    // An offline host is the case the reason is for, and it is still shown.
+    const offline = markup([persistentTarget()], [daemonHost({
+      liveness: { status: 'offline', ageMs: 900_000, reason: 'the last report is past the stale threshold' },
+    })]);
+    expect(offline).toContain('phoebe-dev · offline');
+    expect(offline).toContain('the last report is past the stale threshold');
   });
 
   it('states unknown capacity for a persistent host that reported nothing, and never a zero', () => {

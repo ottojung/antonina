@@ -155,3 +155,35 @@ request are four distinguishable results. The rationale travels with the
 decision: the dispatch record on the board carries the reason the target was
 chosen, so the board itself explains a routing choice rather than leaving it
 to be reconstructed.
+
+$id-5090620393758907
+title: What a target states about itself is a fact, not a promise
+date: 2026/09/28
+source: issue-95
+kind: constraint
+
+The descriptive fields of an execution target state what is true of it, and none
+of them states what a job will cause to happen. The access method and the
+persistence are closed vocabularies, one member each, so a target narrows them
+to nothing and widens them to nothing: a target that states a value its backend
+or kind does not have is refused rather than reconciled. Cleanup is the same
+rule with a narrower range still: a target may narrow cleanup to nothing and
+never widen it into the other side of the world, so no ephemeral environment
+claims a host-local collector and no persistent host claims that a provider
+expires it. A collector is named as what the host offers rather than as
+something that will run, because a collector with no configured managed roots is
+refused by name and never proceeds, and a registration cannot see a host's
+managed-roots configuration. The released spelling of that value keeps
+verifying and reads as the current one, so a signed log does not become
+unreadable because a name was made honest.
+
+A list of notes is absent or non-empty, and an absent list is not the same
+statement as an empty one. Limitations and guidance are claims, so an empty
+list is refused at parse time and a list carried as empty by an operation
+retracts the field rather than storing a claim that there is nothing to say.
+Guidance that a target does not name is its backend's own document, so a
+retracted guidance reference returns the target to the documented default
+instead of to a target that presents as having no guidance document at all. A
+retraction is named as its own act rather than as a reserved word inside the
+list, so that a note that happens to read like a sentinel is still stored as the
+note it is.

@@ -656,7 +656,8 @@ export function TargetsView({ targets, hosts, onOpenIssue }: {
         <h3>Live state</h3>
         <dl>{state.map((line) => <div key={line.label} data-state={line.absent ? 'absent' : 'reported'}><dt>{line.label}</dt>
           <dd><span className={line.absent ? 'state-unknown' : 'state-value'}>{line.value}</span>
-            {line.reason !== undefined && <small>{line.reason}</small>}</dd></div>)}</dl>
+            {line.absent && line.reason !== undefined && <small>{line.reason}</small>}
+            {line.note !== undefined && <small>{line.note}</small>}</dd></div>)}</dl>
       </section>
       {access.limitations.length > 0 && <section className="target-caveats"><h3>Caveats</h3><ul>{access.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}</ul></section>}
       <section className="target-guidance"><h3>Guidance</h3><ul>{access.guidance.map((path) => <li key={path}><code>{path}</code></li>)}</ul></section>

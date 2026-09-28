@@ -646,7 +646,7 @@ function humanLines(result: CommandResult): string[] {
   if (result.mode === 'initialize') {
     const initialized = result.value as BoardInitialization;
     return [
-      'Antonina signed board initialized.',
+      'Antonina board initialized.',
       'Integrity anchor (public; does not grant board access):',
       serializeBoardTrustAnchor(initialized.trustAnchor),
       'Board credential (secret; grants full access):',

@@ -370,7 +370,7 @@ export function groupResources(resources: BoardResource[]): Array<[string, Board
     .map(([host, entries]) => [host, entries.sort((left, right) => left.path.localeCompare(right.path))]);
 }
 
-export const FEED_HINT = 'Everything the signed board recorded, newest first: creations, edits, comments, closures and reopenings, each at the moment it was committed.';
+export const FEED_HINT = 'Materialized board activity, newest first: creations, edits, comments, closures and reopenings, each at the moment it was committed.';
 
 /**
  * How each feed entry kind reads on one line. A mapping over the whole
@@ -453,9 +453,9 @@ export async function readFeedFirstPage(readFeed: FeedRead): Promise<BoardFeedPa
  * One page back, using the token the previous page returned.
  *
  * The cursor is handed to the projection exactly as it arrived. It is a position
- * in the append-only log, not an offset, so the page this returns is the set of
- * operations committed before that position — a walk that neither skips nor
- * repeats an entry, and that still works for a position whose entry the board no
+ * in the materialized feed, not an offset, so the page this returns is the set
+ * of entries committed before that position — a walk that neither skips nor
+ * repeats an entry, and that still works for a position whose issue the board no
  * longer holds. The merged page keeps the token for its own next call, so a
  * reader can keep walking until the projection returns `null` and the feed is
  * exhausted.
@@ -484,13 +484,12 @@ export const FEED_UNTRACKED_COPY =
  * for. This is the set difference and nothing else: a pure function of what it
  * is given, with no opinion about whether the claim built on it is yet true.
  *
- * The feed is a projection over the operation log, and an issue that was already
- * in the `board.initialize` snapshot predates that log: no operation ever named
- * its creation, so the projection cannot place it and does not. The CLI cannot
- * tell that apart from an empty board and prints an empty feed, but a browser
- * can, because it holds both the board view and the feed. No entry is invented
- * for such an issue, and it is not ordered or timestamped here, because the
- * board recorded no such facts.
+ * An issue already present when the materialized feed begins has no creation
+ * entry: no feed event ever named its creation, so the feed cannot place it and
+ * does not. The CLI cannot tell that apart from an empty board and prints an
+ * empty feed, but a browser can, because it holds both the board view and the
+ * feed. No entry is invented for such an issue, and it is not ordered or
+ * timestamped here, because the board recorded no such feed event.
  *
  * What this cannot say on its own is that the issue predates the log. It can
  * only say the entries it was handed do not mention it, and on a paged feed
@@ -534,7 +533,7 @@ export function unplacedIssueNumbers<T extends Pick<BoardIssue, 'number'>>(issue
  * a partial walk.
  */
 export const FEED_TRUNCATED_COPY = (numbers: number[]) =>
-  `You have read the whole feed, and the log records no operation for these issues. They were already on the board when the signed log began, so the feed cannot show when they were created or changed: ${numbers.map((number) => `#${number}`).join(', ')}.`;
+  `You have read the whole feed, and it records no activity for these issues. They were already on the board when the materialized feed began, so the feed cannot show when they were created or changed: ${numbers.map((number) => `#${number}`).join(', ')}.`;
 
 export function formatUpdatedAt(timestamp: string, now = new Date()): string {
   const date = new Date(timestamp);

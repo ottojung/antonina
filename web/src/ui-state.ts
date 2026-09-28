@@ -19,19 +19,19 @@ export type BoardLoad =
 
 export const FIRST_RUN_COPY = {
   title: 'No Antonina board yet',
-  body: 'Initializing the board makes this browser its first editor and stores the board’s root signing credential in this browser. Copy that credential and the board’s public trust anchor from Settings and share them with the other browsers and agents that need to read or edit the board.',
+  body: 'Initializing the board creates its shared board credential and stores it in this browser. Copy that credential from Settings and share it only with browsers and agents that should have full board access.',
   action: 'Initialize board',
   recheck: 'Check again',
-  raced: 'Another browser initialized the board first; this browser is read-only.',
-  initialized: 'Board initialized; this browser holds the root signing credential',
+  raced: 'Another browser initialized the board first; enter its board credential to continue.',
+  initialized: 'Board initialized; this browser holds the board credential',
   readFailed: 'The board was created but could not be read back',
 } as const;
 
-export const TRUST_COPY = {
-  title: 'This board needs its trust anchor',
-  body: 'The signed board already exists, and this browser cannot verify its history without the board’s public trust anchor. Paste the anchor to read the board read-only; editing still needs a credential.',
-  action: 'Trust this board',
-  hint: 'The trust anchor is public and comes from the browser or agent that initialized the board.',
+export const BOARD_KEY_COPY = {
+  title: 'Enter the board credential',
+  body: 'This Antonina board is private to people who have its shared credential. The credential grants full read and write access.',
+  action: 'Open board',
+  hint: 'Paste the full Antonina board credential JSON shared by another browser or agent.',
 } as const;
 
 export const DELETED_COPY = {
@@ -46,21 +46,21 @@ export type ReadOnlyAccess = 'read-only' | 'rejected';
 export type BoardAccess = 'editable' | ReadOnlyAccess;
 
 export const READ_ONLY_CALLOUT = {
-  title: 'Read-only board',
-  body: 'You can read every issue and resource. Enable editing in this browser to make changes.',
-  action: 'Enable editing',
+  title: 'Board credential required',
+  body: 'Enter the board credential to access this board.',
+  action: 'Enter credential',
 } as const;
 
 export const COMPOSER_READ_ONLY_CALLOUT = {
-  title: 'Want to join the conversation?',
-  body: 'Enable editing in this browser to make changes.',
-  action: 'Enable editing',
+  title: 'Board credential required',
+  body: 'Enter the board credential to access this board.',
+  action: 'Enter credential',
 } as const;
 
 export const REJECTED_CREDENTIAL_COPY = {
   title: 'This board rejected the credential in this browser',
-  body: 'The board credential stored in this browser was rejected, so the board is read-only. Paste a fresh credential that this board still accepts.',
-  action: 'Paste a fresh credential',
+  body: 'The board credential stored in this browser was rejected. Paste a valid credential to access the board.',
+  action: 'Paste a valid credential',
 } as const;
 
 export const ISSUE_FORM_HINT = 'The description holds the task context; the conversation holds updates and questions.';
@@ -73,7 +73,7 @@ export const ISSUE_FORM_SUBMIT_HINT = 'Ctrl+Enter or Cmd+Enter creates the issue
  */
 export const COMPOSER_SUBMIT_HINT = 'Ctrl+Enter or Cmd+Enter posts this message.';
 
-export const WRITE_ACCESS_SUMMARY = 'Write access allows issue, description, dependency, status, and priority order changes.';
+export const WRITE_ACCESS_SUMMARY = 'The board credential grants full read and write access to Antonina.';
 
 export const QUEUE_HINT = 'Issues are listed in the board’s shared priority order. Select an issue to place it at any position in one commit.';
 

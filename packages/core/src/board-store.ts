@@ -328,6 +328,31 @@ export class SignedBoardStore {
     }
   }
 
+  async appendFast(
+    credentialValue: BoardCredential,
+    request: AppendOperationRequest,
+    previouslyAcceptedHead?: string | null,
+  ): Promise<StoredSignedBoard> {
+    const credential = await verifyBoardCredential(credentialValue);
+    if (request.kind === 'authority.delegate' || request.kind === 'authority.revoke') {
+      throw new SignedBoardStoreError('Antonina uses one shared board key; delegated authorities are disabled');
+    }
+
+    if (await this.sharded.readPointer() === null) {
+      const migrated = await this.readWithCredential(credential, previouslyAcceptedHead);
+      if (migrated === null) throw new BoardMissingError();
+    }
+    try {
+      return await this.sharded.appendFast(credential, request);
+    } catch (error) {
+      if (error instanceof ShardedBoardStoreError) {
+        if (error.message === 'Antonina board has been deleted') throw new BoardDeletedError();
+        throw fromShardedError(error);
+      }
+      throw error;
+    }
+  }
+
   private async ensureMaterialized(
     credential: BoardCredential,
     previouslyAcceptedHead?: string | null,

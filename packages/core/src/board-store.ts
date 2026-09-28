@@ -6,7 +6,7 @@ import {
   verifyBoardCredential,
   type BoardCredential,
 } from './credential.js';
-import { emptyBoard, parseBoard, type Board } from './model.js';
+import { emptyBoard, parseBoard, type Board, type BoardIssue, type IssueState } from './model.js';
 import {
   createTrustAnchor,
   emptyOperationLog,
@@ -19,6 +19,12 @@ import {
   type SignedBoardOperation,
   type VerifiedBoardState,
 } from './operations.js';
+import { boardFeed, type BoardFeedPage, type BoardFeedRequest } from './feed.js';
+import {
+  ShardedBoardStore,
+  ShardedBoardStoreError,
+  type IssueListPage,
+} from './board-v3-store.js';
 
 export const ANTONINA_NAMESPACE = 'antonina';
 export const SIGNED_BOARD_KEY = 'board-v2';
@@ -128,6 +134,7 @@ export class SignedBoardStore {
   private readonly maxAttempts: number;
   private readonly now: () => Date;
   private readonly newId: () => string;
+  private readonly sharded: ShardedBoardStore;
 
   constructor(options: SignedBoardStoreOptions = {}) {
     if (options.maxAttempts !== undefined && options.maxAttempts < 1) {
@@ -139,9 +146,24 @@ export class SignedBoardStore {
     this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     this.now = options.now ?? (() => new Date());
     this.newId = options.newId ?? defaultId;
+    this.sharded = new ShardedBoardStore(options);
   }
 
   async read(anchor: BoardTrustAnchor, previouslyAcceptedHead?: string | null): Promise<StoredSignedBoard | null> {
+    if (await this.sharded.exists()) {
+      try {
+        return await this.sharded.read(anchor, previouslyAcceptedHead);
+      } catch (error) {
+        if (error instanceof ShardedBoardStoreError) {
+          throw new SignedBoardStoreError(error.message, {
+            cause: error,
+            status: error.status ?? undefined,
+            method: error.method ?? undefined,
+          });
+        }
+        throw error;
+      }
+    }
     const response = await this.fetcher(this.url, { cache: 'no-store' });
     if (response.status === 404) return null;
     if (response.status !== 200) throw this.httpError('GET', SIGNED_BOARD_KEY, response);
@@ -176,6 +198,7 @@ export class SignedBoardStore {
   }
 
   async signedBoardExists(): Promise<boolean> {
+    if (await this.sharded.exists()) return true;
     const response = await this.fetcher(this.url, { cache: 'no-store' });
     if (response.status === 404) return false;
     if (response.status === 200) return true;
@@ -231,52 +254,76 @@ export class SignedBoardStore {
   ): Promise<StoredSignedBoard> {
     const credential = await verifyBoardCredential(credentialValue);
     const anchor = credentialTrustAnchor(credential);
-    const signer = credentialSigningKey(credential);
-    const requestedTimestamp = request.timestamp ?? this.now().toISOString();
-    const nonce = request.nonce ?? this.newId();
-    let stored = await this.requireAppendable(anchor, previouslyAcceptedHead);
 
-    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const timestamp = canonicalTimestampAtOrAfter(
-        requestedTimestamp,
-        stored.log.operations.at(-1)?.timestamp,
-      );
-      const payload = typeof request.payload === 'function'
-        ? request.payload(stored.state)
-        : request.payload;
-      const operation = await signBoardOperation({
-        boardId: anchor.boardId,
-        previous: stored.log.head,
-        timestamp,
-        nonce,
-        kind: request.kind,
-        payload,
-      }, signer);
-      const candidate = appendToLog(stored.log, operation);
-      await verifyAndReplayOperationLog(candidate, anchor, {
-        previouslyAcceptedHead: stored.state.head,
-      });
-
-      const response = await this.fetcher(this.url, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Skrynia-Capability': credential.storageCapability,
-          'If-Match': stored.etag,
-        },
-        body: JSON.stringify(candidate),
-      });
-      if (response.status === 412) {
-        stored = await this.requireAppendable(anchor, stored.state.head);
-        continue;
+    if (!await this.sharded.exists()) {
+      const legacy = await this.requireAppendable(anchor, previouslyAcceptedHead);
+      try {
+        await this.sharded.migrate(legacy);
+      } catch (error) {
+        if (error instanceof ShardedBoardStoreError) {
+          throw new SignedBoardStoreError(error.message, {
+            cause: error,
+            status: error.status ?? undefined,
+            method: error.method ?? undefined,
+          });
+        }
+        throw error;
       }
-      if (response.status !== 200) throw this.httpError('PUT', SIGNED_BOARD_KEY, response);
-
-      const committed = await this.require(anchor, operation.opId);
-      return committed;
     }
 
-    throw new SignedBoardStoreError('Antonina board changed too often; signed operation was not committed');
+    try {
+      return await this.sharded.append(credential, request, previouslyAcceptedHead);
+    } catch (error) {
+      if (error instanceof ShardedBoardStoreError) {
+        throw new SignedBoardStoreError(error.message, {
+          cause: error,
+          status: error.status ?? undefined,
+          method: error.method ?? undefined,
+        });
+      }
+      throw error;
+    }
+  }
+
+  async getIssue(
+    anchor: BoardTrustAnchor,
+    number: number,
+    previouslyAcceptedHead?: string | null,
+  ): Promise<BoardIssue | null> {
+    if (await this.sharded.exists()) return this.sharded.getIssue(anchor, number);
+    const stored = await this.read(anchor, previouslyAcceptedHead);
+    return stored?.state.board.issues.find((issue) => issue.number === number) ?? null;
+  }
+
+  async readIssuePage(
+    anchor: BoardTrustAnchor,
+    state: IssueState,
+    page: number,
+  ): Promise<IssueListPage | null> {
+    if (!await this.sharded.exists()) return null;
+    return this.sharded.readIssuePage(anchor, state, page);
+  }
+
+  async getQueue(
+    anchor: BoardTrustAnchor,
+    previouslyAcceptedHead?: string | null,
+  ): Promise<number[] | null> {
+    if (await this.sharded.exists()) return this.sharded.getQueue(anchor);
+    const stored = await this.read(anchor, previouslyAcceptedHead);
+    return stored === null ? null : [...stored.state.queue];
+  }
+
+  async readFeed(
+    anchor: BoardTrustAnchor,
+    request: BoardFeedRequest = {},
+    previouslyAcceptedHead?: string | null,
+  ): Promise<BoardFeedPage | null> {
+    if (await this.sharded.exists()) {
+      const page = await this.sharded.readFeed(anchor, request);
+      if (page !== null) return page;
+    }
+    const stored = await this.read(anchor, previouslyAcceptedHead);
+    return stored === null ? null : boardFeed(stored.log, request);
   }
 
   private async parseJson(response: Response, context: string): Promise<unknown> {

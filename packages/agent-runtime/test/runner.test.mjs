@@ -8,7 +8,7 @@ import test from 'node:test';
 import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
 import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import { runManagedRunner } from '../dist/packages/agent-runtime/src/runner.js';
-import { createAgentDirectory, readMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
+import { createAgentDirectory, metaPath, readMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
 
 const REPO_FIXTURE_PARENT = resolve('.antonina-test-tmp');
 const PROBE_SENTINEL = 'ANTONINA-RUNNER-FIXTURE-EXEC-OK';
@@ -293,6 +293,80 @@ test('a. the runner refuses to spawn below the threshold and records the refusal
   assert.match(after.error, /refusing to launch managed agent/);
   assert.match(after.error, /1\.00 GiB is below the required minimum 2\.00 GiB/);
   assert.match(after.error, /ANTONINA_AGENT_IGNORE_CAPACITY=1/);
+  // A refusal is not a delivery, so the accepted prompt survives it. Claiming
+  // the prompt before the capacity read destroyed it: `pending_prompt` was
+  // already null, there was no invocation and no log, and the prompt existed
+  // only in a local variable when the process exited.
+  assert.equal(after.pending_prompt, 'work');
+});
+
+// Records an operator intent into the agent metadata mid-invocation, the way
+// `antonina agent stop`/`kill` does, and optionally marks the synthetic OOM
+// drift marker on the way. It cannot be seeded into the metadata up front
+// instead: `claimPendingPrompt` refuses to claim a prompt for a stop-like
+// agent, so a pre-seeded intent would stop the invocation from ever starting,
+// and the two cases below are precisely about what happens when the intent
+// lands while an invocation is already live. `die` selects whether the fixture
+// then SIGKILLs itself; it is the whole difference between the two cases.
+function intentFixture(t, id, options, { intent, marker = '', die = false } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'antonina-intent-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const helper = join(root, 'record-intent.mjs');
+  writeFileSync(helper, [
+    "import { readFileSync, writeFileSync } from 'node:fs';",
+    'const [path, intent, marker, die] = process.argv.slice(2);',
+    'const meta = JSON.parse(readFileSync(path, "utf8"));',
+    'meta.intent = intent;',
+    'meta.stop_reason = intent;',
+    'writeFileSync(path, JSON.stringify(meta));',
+    'if (marker !== "") writeFileSync(marker, "");',
+    'if (die === "1") process.kill(process.pid, "SIGKILL");',
+    'else setInterval(() => {}, 1000);',
+  ].join('\n'));
+  const argv = [helper, metaPath(id, options), intent, marker, die ? '1' : '0']
+    .map((value) => JSON.stringify(value))
+    .join(' ');
+  return `node ${argv}`;
+}
+
+// A fake backend whose first act is to record an operator intent and then either
+// die on its own or wait to be signalled. `exec` keeps the recorded pid as the
+// process group leader, so the runner signals the very process the fixture is.
+function intentBackend(t, id, options, config) {
+  return fakeBackend(t, `#!/bin/sh\necho "starting"\nexec ${intentFixture(t, id, options, config)}\n`);
+}
+
+test('a. a capacity refusal does not consume a queued steer', async (t) => {
+  if (!requireProc(t)) return;
+  // The steer path is the case the pre-claim fix exists for. It reaches
+  // `runInvocation` with a prompt popped out of the steer queue and had no
+  // pre-check of its own, so a refusal on a full host consumed the steer and
+  // dropped it. This guard is refusing constantly while the ceiling holds, so
+  // that is the common case and not a corner.
+  const backend = fakeBackend(t);
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const id = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    prompt_count: 1,
+    steer_seq: 1,
+    steer_queue: [{ seq: 1, prompt: 'redirect the run', queued_at: 1 }],
+  });
+
+  await runManagedRunner(id, 'new', 7, { ...options, capacity: { readText: cgroup(29), env: {} } });
+
+  const after = readMeta(id, options);
+  assert.equal(after.state, 'failed');
+  assert.match(after.error, /refusing to launch managed agent/);
+  // The popped steer is back in the agent's hands, and the queue is empty
+  // because the item was consumed once and restored once, not lost and not
+  // delivered twice.
+  assert.equal(after.pending_prompt, 'redirect the run');
+  assert.deepEqual(after.steer_queue, []);
+  assert.equal(after.pid, null);
+  assert.equal(after.exit_signal, null);
+  assert.equal(after.backend_error, null);
 });
 
 test('a. the runner spawns and succeeds above the threshold', async (t) => {
@@ -522,6 +596,88 @@ test('e. a steer the runner itself signalled is still recorded as a clean stoppe
   assert.equal(after.stop_reason, 'steer');
   // An operator-requested termination is not an external kill, and saying so
   // would point the next reader at the host instead of at their own steer.
+  assert.equal(after.backend_error, null);
+  assert.equal(after.error, null);
+});
+
+test('e. a kill intent does not excuse a host kill that beat the control poll', async (t) => {
+  if (!requireProc(t)) return;
+  // A persisted kill intent is not evidence that the operator's signal reached
+  // the invocation. This invocation records the intent and then SIGKILLs itself
+  // in the same process, so it dies before the 200 ms control poll can run again
+  // and observe what it wrote. The death is the host's, and the classification
+  // has to say so. Keying the classification off the intent instead recorded a
+  // null `backend_error` and no death classification at all, which is the exact
+  // failure this classification exists to remove, and the reason the steer case
+  // needed `operatorSignalled` in the first place.
+  // The agent record has to exist before the fixture can be told where to write
+  // the intent, so the backend is bound after `scratch` and re-pointed here.
+  const options = scratch(t, '/nonexistent/backend');
+  const id = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    pending_prompt: 'work',
+  });
+  const marker = join(mkdtempSync(join(tmpdir(), 'antonina-oom-')), 'died');
+  t.after(() => rmSync(join(marker, '..'), { recursive: true, force: true }));
+  const backend = intentBackend(t, id, options, { intent: 'kill', marker, die: true });
+  if (backend === null) return;
+  const run = { ...options, env: { ...options.env, ANTONINA_OPENCODE_BIN: backend } };
+
+  await runManagedRunner(id, 'new', 7, {
+    ...run,
+    capacity: { readText: cgroupWithOomDrift(1, marker), env: {} },
+  });
+
+  const after = readMeta(id, run);
+  // The operator's own kill request is still on the record, and `state` still
+  // answers "what did the operator ask for", because the durable intent is a
+  // real operator-authored fact and discarding it would contradict the very
+  // stop/kill coherence this repository treats as non-negotiable. What changed
+  // is the other half: the death itself is now classified. Before the fix this
+  // was a null `backend_error` with no death classification and a null `error`,
+  // which is a host OOM kill indistinguishable from a clean operator kill.
+  assert.equal(after.stop_reason, 'kill');
+  assert.equal(after.state, 'killed');
+  assert.equal(after.exit_signal, 9);
+  assert.equal(after.backend_error.classification, 'external_signal_kill');
+  assert.equal(after.backend_error.signal_name, 'SIGKILL');
+  assert.equal(after.backend_error.oom_evidence, 'observed');
+  assert.equal(after.backend_error.oom_kill_delta, 1);
+  // A host kill is not a retryable model failure, and this one is nobody's
+  // request, so it must not be advertised as safe to retry.
+  assert.equal(after.backend_error.transient, false);
+  assert.equal(after.backend_error.automatic_retry_safe, false);
+  assert.match(after.error, /SIGKILL \(signal 9\)/);
+  assert.match(after.error, /OOM killer fired inside the agent lifetime/);
+});
+
+test('e. a stop intent the runner itself signalled is still a clean stopped', async (t) => {
+  if (!requireProc(t)) return;
+  // The complement of the case above, and the guard against over-correcting it.
+  // The invocation is still alive when the control poll runs, so the poll really
+  // does send the signal and the death is the operator's. Reporting it as a host
+  // kill would point the next reader at the host instead of at their own stop.
+  // The agent record has to exist before the fixture can be told where to write
+  // the intent, so the backend is bound after `scratch` and re-pointed here.
+  const options = scratch(t, '/nonexistent/backend');
+  const id = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    pending_prompt: 'work',
+  });
+  const backend = intentBackend(t, id, options, { intent: 'stop' });
+  if (backend === null) return;
+  const run = { ...options, env: { ...options.env, ANTONINA_OPENCODE_BIN: backend } };
+
+  await runManagedRunner(id, 'new', 7, {
+    ...run,
+    capacity: { readText: cgroup(1), env: {} },
+  });
+
+  const after = readMeta(id, run);
+  assert.equal(after.stop_reason, 'stop');
+  assert.equal(after.state, 'stopped');
   assert.equal(after.backend_error, null);
   assert.equal(after.error, null);
 });

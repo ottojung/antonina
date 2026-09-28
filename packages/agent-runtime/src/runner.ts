@@ -157,6 +157,29 @@ async function claimPendingPrompt(agentId: string, prompt: string, options: Runn
   return claimed;
 }
 
+async function refuseForLaunchCapacity(
+  agentId: string,
+  prompt: string,
+  reason: string,
+  options: RunnerOptions,
+): Promise<void> {
+  await updateMeta(agentId, (meta) => {
+    // A refusal is not a delivery, so it must never consume the prompt. When
+    // the guard runs before the claim the prompt is still in `pending_prompt`
+    // and this is a no-op; when it runs on a retry inside the spawn loop the
+    // prompt has already been claimed by this runner, so it goes back under the
+    // same guards `claimPendingPrompt` used. Either way the operator's accepted
+    // prompt is still owned by the agent when this runner exits, instead of
+    // existing only in a local variable with no invocation, no log and no
+    // durable trace.
+    if (meta.pending_prompt === null && !stopLikeOrMalformed(meta)) {
+      meta.pending_prompt = prompt;
+    }
+    finalizeTerminal(meta, 'failed', Date.now() / 1000, null, null, reason);
+    setActiveRunner(meta, false);
+  }, options);
+}
+
 async function reclaimOrStop(agentId: string, options: RunnerOptions): Promise<boolean> {
   let busy = false;
   await updateMeta(agentId, (meta) => {
@@ -235,16 +258,19 @@ async function finalizeInvocation(
     if (intent.malformed || stopReason.malformed) return;
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);
-    // A stop and a kill are operator requests by construction. A steer is an
-    // operator request too, but it is a *redirect*: the invocation is signalled
-    // because this runner sent a signal for it, and `operatorSignalled` is the
-    // only evidence separating that death from a host kill that happened to land
-    // while the steer was still pending. Keying this off the persisted intent
-    // alone made those two indistinguishable, which is what recorded a long
-    // steered session killed by the OOM killer as a clean `stopped`.
-    const operatorSignalled = intent.value === 'stop'
-      || intent.value === 'kill'
-      || (intent.value === 'steer' && result.operatorSignalled);
+    // Every operator intent that ends an invocation does so because *this*
+    // runner sent a signal for it, and the flag is set in the same poll that
+    // sends it. So the flag is the evidence for all three intents, and the
+    // persisted intent is not: an intent can be recorded and then lose the race
+    // to a host SIGKILL landing inside a poll interval, in which case the
+    // intent says the operator asked for this death and the flag says nobody
+    // did. Keying stop and kill off the intent alone therefore still recorded a
+    // host OOM kill as a clean `stopped` or `killed` with a null backend_error,
+    // which is the exact failure this classification exists to remove. A
+    // reparented runner does not weaken this argument: the poll belongs to the
+    // process that spawned the child, and a reparented runner polls the *next*
+    // invocation, never the one that just died under this process.
+    const operatorSignalled = result.operatorSignalled;
     const externalSignalDeath = signal !== null && !operatorSignalled;
     let state: 'succeeded' | 'failed' | 'stopped' | 'killed';
     if (intent.value === 'stop') state = 'stopped';
@@ -302,19 +328,29 @@ async function runInvocation(
     }, options);
     return false;
   }
+  // Read the host *before* the prompt is claimed, not after. The point of this
+  // guard is that an operator learns the host is full *instead of* learning it
+  // from a SIGKILL and an empty log twenty minutes later, and a prompt that is
+  // still in `pending_prompt` is one a later pass can retry once the host has
+  // room. Refusing below the claim destroyed the accepted prompt instead: the
+  // claim had already nulled `pending_prompt`, so at that instant the prompt
+  // lived only in a local variable. The steer path reached that refusal with no
+  // pre-check at all, so a queued steer was consumed and lost.
+  const preflight = checkHostLaunchCapacity({ env: options.env, ...options.capacity });
+  if (preflight.outcome === 'refused') {
+    await refuseForLaunchCapacity(agentId, prompt, preflight.reason, options);
+    return false;
+  }
   if (!await claimPendingPrompt(agentId, prompt, options)) return false;
 
   let attempt = 0;
   while (true) {
-    // Read the host before spawning, not after: the point of this guard is
-    // that an operator learns the host is full *instead of* learning it from a
-    // SIGKILL and an empty log twenty minutes later.
+    // Repeat the same read at the spawn boundary, which is what covers a retry
+    // that runs after a backend backoff, when the host may have filled up since
+    // the preflight. A refusal here restores the claimed prompt.
     const decision = checkHostLaunchCapacity({ env: options.env, ...options.capacity });
     if (decision.outcome === 'refused') {
-      await updateMeta(agentId, (current) => {
-        finalizeTerminal(current, 'failed', Date.now() / 1000, null, null, decision.reason);
-        setActiveRunner(current, false);
-      }, options);
+      await refuseForLaunchCapacity(agentId, prompt, decision.reason, options);
       return false;
     }
     const invocationId = randomBytes(16).toString('hex');

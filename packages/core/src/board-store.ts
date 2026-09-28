@@ -263,9 +263,14 @@ export class SignedBoardStore {
       try {
         await this.sharded.migrate(legacy);
       } catch (error) {
-        if (error instanceof ShardedBoardStoreError) {
-          throw fromShardedError(error);
+        // Keep the old path usable against a Skrynia deployment (and test
+        // double) that does not yet understand the public-write v3 objects.
+        // No v3 metadata was committed, so board-v2 remains authoritative.
+        if (error instanceof ShardedBoardStoreError
+            && (error.status === 404 || error.status === 405)) {
+          return this.appendLegacy(credential, request, previouslyAcceptedHead);
         }
+        if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
         throw error;
       }
     }
@@ -273,11 +278,62 @@ export class SignedBoardStore {
     try {
       return await this.sharded.append(credential, request, previouslyAcceptedHead);
     } catch (error) {
-      if (error instanceof ShardedBoardStoreError) {
-        throw fromShardedError(error);
-      }
+      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
       throw error;
     }
+  }
+
+  private async appendLegacy(
+    credential: BoardCredential,
+    request: AppendOperationRequest,
+    previouslyAcceptedHead?: string | null,
+  ): Promise<StoredSignedBoard> {
+    const anchor = credentialTrustAnchor(credential);
+    const signer = credentialSigningKey(credential);
+    const requestedTimestamp = request.timestamp ?? this.now().toISOString();
+    const nonce = request.nonce ?? this.newId();
+    let stored = await this.requireAppendable(anchor, previouslyAcceptedHead);
+
+    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
+      const timestamp = canonicalTimestampAtOrAfter(
+        requestedTimestamp,
+        stored.log.operations.at(-1)?.timestamp,
+      );
+      const payload = typeof request.payload === 'function'
+        ? request.payload(stored.state)
+        : request.payload;
+      const operation = await signBoardOperation({
+        boardId: anchor.boardId,
+        previous: stored.log.head,
+        timestamp,
+        nonce,
+        kind: request.kind,
+        payload,
+      }, signer);
+      const candidate = appendToLog(stored.log, operation);
+      await verifyAndReplayOperationLog(candidate, anchor, {
+        previouslyAcceptedHead: stored.state.head,
+      });
+
+      const response = await this.fetcher(this.url, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Skrynia-Capability': credential.storageCapability,
+          'If-Match': stored.etag,
+        },
+        body: JSON.stringify(candidate),
+      });
+      if (response.status === 412) {
+        stored = await this.requireAppendable(anchor, stored.state.head);
+        continue;
+      }
+      if (response.status !== 200) throw this.httpError('PUT', SIGNED_BOARD_KEY, response);
+
+      return this.require(anchor, operation.opId);
+    }
+
+    throw new SignedBoardStoreError('Antonina board changed too often; signed operation was not committed');
   }
 
   async getIssue(

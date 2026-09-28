@@ -1,4 +1,9 @@
-import { generateSigningKey } from './canonical.js';
+import {
+  canonicalBytes,
+  generateSigningKey,
+  sha256Id,
+  type CanonicalValue,
+} from './canonical.js';
 import {
   createBoardCredential,
   credentialTrustAnchor,
@@ -8,14 +13,11 @@ import {
 import { emptyBoard, parseBoard, type Board, type BoardIssue, type IssueState } from './model.js';
 import {
   createTrustAnchor,
-  emptyOperationLog,
-  signBoardOperation,
   verifyAndReplayOperationLog,
   type BoardOperationKind,
   type BoardOperationLog,
   type BoardOperationPayload,
   type BoardTrustAnchor,
-  type SignedBoardOperation,
   type VerifiedBoardState,
 } from './operations.js';
 import { type BoardFeedPage, type BoardFeedRequest } from './feed.js';
@@ -96,18 +98,6 @@ function defaultId(): string {
   return typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-}
-
-function cloneLog(log: BoardOperationLog): BoardOperationLog {
-  return structuredClone(log);
-}
-
-function appendToLog(log: BoardOperationLog, operation: SignedBoardOperation): BoardOperationLog {
-  return {
-    ...cloneLog(log),
-    head: operation.opId,
-    operations: [...log.operations, operation],
-  };
 }
 
 function canonicalTimestampAtOrAfter(value: string, floor?: string): string {
@@ -247,25 +237,45 @@ export class SignedBoardStore {
     const root = await generateSigningKey();
     const boardId = this.newId();
     const anchor = await createTrustAnchor(boardId, root);
-    const log = emptyOperationLog(anchor);
-    const operation = await signBoardOperation({
+    const timestamp = canonicalTimestampAtOrAfter(
+      this.now().toISOString(),
+      boardTimestampFloor(board),
+    );
+    const nonce = this.newId();
+    const head = await sha256Id('sha256', canonicalBytes({
       boardId,
-      previous: null,
-      timestamp: canonicalTimestampAtOrAfter(this.now().toISOString(), boardTimestampFloor(board)),
-      nonce: this.newId(),
-      kind: 'board.initialize',
-      payload: { board },
-    }, root);
-    const initialized = appendToLog(log, operation);
-    const state = await verifyAndReplayOperationLog(initialized, anchor);
+      rootKeyId: anchor.rootKeyId,
+      timestamp,
+      nonce,
+      board: board as unknown as CanonicalValue,
+    } as unknown as CanonicalValue));
+    const state: VerifiedBoardState = {
+      board,
+      queue: board.issues
+        .filter((issue) => issue.state === 'open')
+        .map((issue) => issue.number),
+      authorities: [],
+      deleted: false,
+      head,
+    };
 
+    // The capability has to come from Skrynia before shard locators can be
+    // derived from it. Create only a tiny bootstrap record here; no operation
+    // log is created or replayed for a new board.
+    const bootstrap = {
+      schemaVersion: 3,
+      format: 'materializing-snapshots',
+      boardId,
+      rootKeyId: anchor.rootKeyId,
+      head,
+    };
     const response = await this.fetcher(this.url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Skrynia-Mode': 'capability-write',
       },
-      body: JSON.stringify(initialized),
+      body: JSON.stringify(bootstrap),
     });
     if (response.status === 409) {
       throw new SignedBoardStoreError('Antonina board already exists; refusing to replace its trust root');
@@ -279,13 +289,17 @@ export class SignedBoardStore {
         || typeof created.capability !== 'string') {
       throw new SignedBoardStoreError('Skrynia did not return the storage capability for Antonina board-v2');
     }
-
     const credential = await createBoardCredential(anchor, root, created.capability);
-    // POST responses do not have to expose the object ETag, so read the legacy
-    // object exactly once to obtain the CAS token used by migration.
-    const readableLegacy = await this.readLegacy(anchor, operation.opId);
-    if (readableLegacy === null) throw new BoardMissingError();
-    const materialized = await this.sharded.migrate(readableLegacy, credential);
+
+    // POST does not guarantee an ETag in the response, so read the bootstrap
+    // once to obtain the CAS token that atomically replaces it with the final
+    // materialized pointer.
+    const current = await this.fetcher(this.url, { cache: 'no-store' });
+    if (current.status !== 200) throw this.httpError('GET', SIGNED_BOARD_KEY, current);
+    const etag = current.headers.get('ETag');
+    if (!etag) throw new SignedBoardStoreError('Skrynia GET antonina/board-v2 returned no ETag');
+
+    const materialized = await this.sharded.migrate({ log: null, state, etag }, credential);
     return { ...materialized, credential };
   }
 

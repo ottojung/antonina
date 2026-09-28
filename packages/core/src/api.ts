@@ -614,7 +614,7 @@ export class BoardApi {
   private async fastReadCredential(): Promise<BoardCredential> {
     if (this.credential === null) {
       if (!await this.store.signedBoardExists()) throw new BoardMissingError();
-      throw new AntoninaApiError('Antonina board credential is required');
+      throw new BoardTrustRequiredError('Antonina board exists; this client has no board credential');
     }
     if (!this.credentialAccepted) await this.verifyCredential(this.credential);
     return this.requireCredential();

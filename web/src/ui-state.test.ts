@@ -302,7 +302,7 @@ describe('board load state', () => {
 
   it('reports a lost first-run race as read-only, with no error', () => {
     const outcome = firstRunOutcome(
-      { failure: new Error('The Antonina signed board already exists') },
+      { failure: new Error('The Antonina board already exists') },
       { state: verified },
     );
     expect(outcome.load).toEqual(ready);
@@ -428,7 +428,7 @@ describe('the feed, as the browser presents it', () => {
   it('says the predates-the-log caveat in terms of the issues it cannot place', () => {
     expect(FEED_TRUNCATED_COPY([1])).toContain('#1');
     expect(FEED_TRUNCATED_COPY([1, 2])).toContain('#1, #2');
-    expect(FEED_TRUNCATED_COPY([1])).toContain('already on the board when the signed log began');
+    expect(FEED_TRUNCATED_COPY([1])).toContain('already on the board when the materialized feed began');
     // The sentence names the exhaustion it depends on, so it cannot be quoted
     // as a claim made from a partial walk.
     expect(FEED_TRUNCATED_COPY([1])).toContain('read the whole feed');

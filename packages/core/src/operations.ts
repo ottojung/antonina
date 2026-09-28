@@ -587,7 +587,7 @@ function cloneBoard(board: Board): Board {
   return structuredClone(board);
 }
 
-function applyBoardMutation(
+export function applyBoardMutation(
   operation: SignedBoardOperation,
   board: Board,
   queue: number[],

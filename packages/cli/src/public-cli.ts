@@ -53,7 +53,6 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--id': 'Identifier for the selected command.',
   '--issue': 'Board issue number.',
   '--json': 'Emit JSON.',
-  '--key-id': 'Credential authority key ID.',
   '--killed': 'Show killed agents only.',
   '--kind': 'Execution-target kind.',
   '--limit': 'Maximum number of records.',
@@ -122,25 +121,6 @@ const BOARD_SPECS: readonly CommandSpec[] = [
     path: ['credential', 'verify'],
     summary: 'Verify the configured credential.',
     normalize: (p) => ['credential', 'verify', ...jsonArg(p)],
-  }),
-  withJson({
-    path: ['credential', 'delegate'],
-    summary: 'Delegate one or more board capabilities.',
-    repeated: ['--capability'],
-    requireRepeated: ['--capability'],
-    normalize: (p) => ['credential', 'delegate', ...(p.repeated.get('--capability') ?? []), ...jsonArg(p)],
-  }),
-  withJson({
-    path: ['credential', 'revoke'],
-    summary: 'Revoke a delegated credential authority.',
-    values: ['--key-id'],
-    required: ['--key-id'],
-    normalize: (p) => ['credential', 'revoke', p.values.get('--key-id')!, ...jsonArg(p)],
-  }),
-  withJson({
-    path: ['authority', 'list'],
-    summary: 'List credential authorities.',
-    normalize: (p) => ['authority', 'list', ...jsonArg(p)],
   }),
   withJson({
     path: ['queue', 'list'],

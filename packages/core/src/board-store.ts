@@ -283,6 +283,14 @@ export class SignedBoardStore {
     const credential = await verifyBoardCredential(credentialValue);
     const anchor = credentialTrustAnchor(credential);
 
+    // A fresh client may attach after another client has already migrated the
+    // board. Probe once while availability is unknown; a client that already
+    // read legacy v2 has cached false and keeps the legacy mutation's original
+    // single-read failure semantics.
+    if (this.shardedAvailable === null) {
+      this.shardedAvailable = await this.sharded.exists();
+    }
+
     if (this.shardedAvailable !== true) {
       // Do not add a v3 probe in front of the mutation's authoritative v2
       // read. This preserves the old fail-closed behavior (and one-read error

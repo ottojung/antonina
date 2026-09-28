@@ -102,7 +102,15 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
    has to keep doing to inherit the same behaviour. */
 .workspace.resources-view { display: grid; grid-template-columns: minmax(0, 1fr); background: var(--paper); }
 .workspace.resources-view .issue-pane { border-right: 0; }
-.workspace.resources-view .resources-view { max-width: 1100px; margin: 0 auto; padding: 0 32px; }
+/* The bottom padding is the same one the feed and targets views carry, and it
+   is what keeps the last resource card off the bottom edge of the viewport.
+   It belongs here, on the scrolling pane, rather than on `.resource-card`:
+   the card is the thing whose height we are trying to fit, so padding it to
+   "make room" would be trading the visible gap for the space the card
+   occupies. The pane is already the only element that scrolls in this view, so
+   padding it adds to the scrollable length, not to the height of the viewport
+   box, and no content is clipped to get there. */
+.workspace.resources-view .resources-view { max-width: 1100px; margin: 0 auto; padding: 0 32px 32px; }
 /* The feed tab is a third single-column view, so it keeps the same pinned row
    and the same single scrolling pane the resources view settled on. The two
    rules above are not edited: this tab inherits that behaviour by declaring the
@@ -350,8 +358,8 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
   .issue-pane { min-height: 0; overflow-y: visible; }
   .thread { min-height: calc(100vh - 66px); overflow-y: visible; }
   .composer-area { position: sticky; bottom: 0; }
-  .workspace.resources-view .resources-view { padding: 0 20px; }
-  .workspace.resources-view { display: block; padding-bottom: 32px; }
+  .workspace.resources-view .resources-view { padding: 0 20px 28px; }
+  .workspace.resources-view { display: block; }
   .issue-pane { border-right: 0; }
   .has-selection .issue-pane { display: none; }
   .pane-heading { padding-top: 24px; }

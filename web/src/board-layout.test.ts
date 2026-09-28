@@ -94,6 +94,31 @@ describe('board shell height chain', () => {
     }
   });
 
+  it('leaves the last resource card clear of the bottom edge of the viewport', () => {
+    // A resource card is sized by its own content, so it is not made to fit the
+    // viewport by being shrunk; the room below the last one has to come from the
+    // box that contains it. `.resources-view` is the view's scroll content and
+    // every `article.resource-card` sits inside it, so a bottom pad declared
+    // there is padding inside that scroller: it lengthens the scroll range and
+    // leaves the last card standing off the bottom edge, and it cannot grow the
+    // outer document because the shell still clips. Pinning the top at 0 as well
+    // is the other half of it — the heading above the first card must not move
+    // down. The phone-width rule is checked too, because it re-declares the same
+    // shorthand and a `0 <x>` value there would quietly put the narrow layout
+    // back to no bottom gap.
+    //
+    // What this does not prove: any of it is a pixel. This suite has no layout
+    // engine, so it pins the declaration that creates the gap and the
+    // relationship to the card, not the gap a reader would see.
+    for (const [scope, pad] of [[desktop, '32px'], [mobile, '28px']] as [typeof desktop, string][]) {
+      const padding = scope('.workspace.resources-view .resources-view').padding;
+      expect(padding, String(pad)).toBeDefined();
+      const [top, , bottom] = padding!.split(/\s+/);
+      expect(Number.parseFloat(top!), 'top pad must stay 0').toBe(0);
+      expect(bottom!, 'bottom pad').toBe(pad);
+    }
+  });
+
   it('returns to a single scrolling document on a phone', () => {
     expect(mobile('.app-shell')).toMatchObject({ height: 'auto', overflow: 'visible' });
     expect(mobile('.workspace')).toMatchObject({ display: 'block' });

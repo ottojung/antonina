@@ -66,7 +66,12 @@ export interface ShardedBoardMeta {
   rootKeyId: string;
   head: string;
   operationCount: number;
+  /** Number of immutable, full log chunks preceding tailOperations. */
   logChunkCount: number;
+  /** The committed mutable tail; bounded to V3_LOG_CHUNK_SIZE operations. */
+  tailOperations: SignedBoardOperation[];
+  /** Highest committed revision fully reflected in all materialized caches. */
+  materializedRevision: number;
   nextIssueNumber: number;
   issueCount: number;
   openIssueCount: number;
@@ -245,6 +250,10 @@ function parseMeta(value: unknown): ShardedBoardMeta {
     head: value.head,
     operationCount: requireSafeCount(value.operationCount, 'operation count'),
     logChunkCount: requireSafeCount(value.logChunkCount, 'log chunk count'),
+    tailOperations: Array.isArray(value.tailOperations)
+      ? value.tailOperations.map(parseSignedBoardOperation)
+      : (() => { throw new ShardedBoardStoreError('Antonina v3 tail operations are malformed'); })(),
+    materializedRevision: requireSafeCount(value.materializedRevision, 'materialized revision'),
     nextIssueNumber: requireSafeCount(value.nextIssueNumber, 'next issue number'),
     issueCount: requireSafeCount(value.issueCount, 'issue count'),
     openIssueCount: requireSafeCount(value.openIssueCount, 'open issue count'),
@@ -386,17 +395,24 @@ function metaFor(
   log: BoardOperationLog,
   state: VerifiedBoardState,
   migratedFrom: string,
+  materializedRevision: number,
 ): ShardedBoardMeta {
   const feedCount = feedEntries(log).length;
   const open = state.board.issues.filter((issue) => issue.state === 'open').length;
   const closed = state.board.issues.filter((issue) => issue.state === 'closed').length;
+  // Keep at least one committed operation in the CAS-controlled tail. Full
+  // chunks before it are immutable once sealed.
+  const logChunkCount = Math.floor((log.operations.length - 1) / V3_LOG_CHUNK_SIZE);
+  const tailOperations = log.operations.slice(logChunkCount * V3_LOG_CHUNK_SIZE);
   return {
     schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
     boardId: log.boardId,
     rootKeyId: log.rootKeyId,
     head: state.head,
     operationCount: log.operations.length,
-    logChunkCount: Math.ceil(log.operations.length / V3_LOG_CHUNK_SIZE),
+    logChunkCount,
+    tailOperations,
+    materializedRevision,
     nextIssueNumber: state.board.nextIssueNumber,
     issueCount: state.board.issues.length,
     openIssueCount: open,
@@ -554,12 +570,23 @@ export class ShardedBoardStore {
   }
 
   private async readLog(meta: ShardedBoardMeta): Promise<BoardOperationLog> {
+    if (meta.tailOperations.length < 1 || meta.tailOperations.length > V3_LOG_CHUNK_SIZE) {
+      throw new ShardedBoardStoreError('Antonina v3 log tail size is malformed');
+    }
     const chunks = await Promise.all(
       Array.from({ length: meta.logChunkCount }, (_, index) => this.readChunk(meta.boardId, index + 1)),
     );
-    const operations = chunks.flatMap((chunk) => chunk.value.operations).slice(0, meta.operationCount);
+    for (const chunk of chunks) {
+      if (chunk.value.operations.length !== V3_LOG_CHUNK_SIZE) {
+        throw new ShardedBoardStoreError('Antonina v3 sealed log chunk is not full');
+      }
+    }
+    const operations = [
+      ...chunks.flatMap((chunk) => chunk.value.operations),
+      ...meta.tailOperations,
+    ];
     if (operations.length !== meta.operationCount) {
-      throw new ShardedBoardStoreError('Antonina v3 log is shorter than its committed operation count');
+      throw new ShardedBoardStoreError('Antonina v3 log length does not match its committed operation count');
     }
     if (operations.at(-1)?.opId !== meta.head) {
       throw new ShardedBoardStoreError('Antonina v3 metadata head does not match its committed log');

@@ -202,3 +202,52 @@ test('v3 writes keep using the existing signing key even if the old storage capa
   assert.equal(commented.state.board.issues[0].messages.length, 1);
   assert.equal(commented.state.board.issues[0].messages[0].body, 'still the same signing identity');
 });
+
+
+test('concurrent v3 writers serialize through metadata CAS without losing either operation', async () => {
+  const server = fakeSkrynia();
+  const first = deterministicStore(server);
+  const initialized = await first.initialize();
+
+  const seed = await first.append(initialized.credential, {
+    kind: 'issue.create',
+    payload: { number: 1, title: 'Seed', body: '' },
+  }, initialized.state.head);
+
+  const left = deterministicStore(server);
+  const right = deterministicStore(server);
+  await Promise.all([
+    left.append(initialized.credential, {
+      kind: 'issue.create',
+      payload: (state) => ({
+        number: state.board.nextIssueNumber,
+        title: 'Left',
+        body: '',
+      }),
+    }, seed.state.head),
+    right.append(initialized.credential, {
+      kind: 'issue.create',
+      payload: (state) => ({
+        number: state.board.nextIssueNumber,
+        title: 'Right',
+        body: '',
+      }),
+    }, seed.state.head),
+  ]);
+
+  const final = await first.read(credentialTrustAnchor(initialized.credential), seed.state.head);
+  assert.ok(final);
+  assert.equal(final.state.board.issues.length, 3);
+  assert.deepEqual(
+    final.state.board.issues.map((issue) => issue.number),
+    [1, 2, 3],
+  );
+  assert.deepEqual(
+    new Set(final.state.board.issues.map((issue) => issue.title)),
+    new Set(['Seed', 'Left', 'Right']),
+  );
+  const meta = server.objects.get('board-v3-meta').value;
+  assert.equal(meta.operationCount, 4);
+  assert.equal(meta.materializedRevision, 4);
+  assert.equal(meta.tailOperations.length, 4);
+});

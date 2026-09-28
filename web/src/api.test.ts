@@ -170,28 +170,27 @@ describe('browser board session', () => {
     expect(second.hasCredential()).toBe(false);
   });
 
-  it('needs a trust anchor before it can read an existing board', async () => {
+  it('needs the board credential before it can read an existing board', async () => {
     const { server, initialized } = await initializedBoard();
     const reader = session(server);
 
     await expect(reader.readState()).rejects.toBeInstanceOf(BoardTrustRequiredError);
-    const state = await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
-    expect(state.board.issues).toEqual([]);
+    await expect(reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor))).rejects.toThrow('credential');
+    await reader.enableEditing(serializeBoardCredential(initialized.credential));
+    const state = await reader.readState();
+    expect(state?.board.issues).toEqual([]);
   });
 
-  it('reads a board through a trust anchor alone, and stays read-only', async () => {
+  it('a trust anchor alone never grants read-only access', async () => {
     const server = fakeSkrynia();
     const owner = session(server);
     const initialized = await owner.initialize();
     await owner.api.createIssue('Visible', 'signed board');
 
     const reader = session(server);
-    const state = await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
-
-    expect(state.board.issues[0]).toMatchObject({ number: 1, title: 'Visible', createdAt: STAMP });
+    await expect(reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor))).rejects.toThrow('credential');
+    await expect(reader.readState()).rejects.toBeInstanceOf(BoardTrustRequiredError);
     expect(reader.hasCredential()).toBe(false);
-    expect(reader.api.hasWriteAccess()).toBe(false);
-    await expect(reader.api.createIssue('Blocked')).rejects.toThrow('credential is required');
   });
 
   it('refuses a malformed or forged trust anchor', async () => {
@@ -207,13 +206,12 @@ describe('browser board session', () => {
     expect(reader.api.getTrustAnchor()).toBeNull();
   });
 
-  it('enables editing from a shared credential and keeps read-only mode honest', async () => {
+  it('opens the board from a shared credential and clearing it removes all access', async () => {
     const server = fakeSkrynia();
     const owner = session(server);
     const initialized = await owner.initialize();
     const storage = memoryStorage();
     const other = session(server, storage);
-    await other.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
 
     const access = await other.enableEditing(serializeBoardCredential(initialized.credential));
 
@@ -224,11 +222,11 @@ describe('browser board session', () => {
     other.clearCredential();
     expect(other.hasCredential()).toBe(false);
     expect(storage.get('antonina:board-v2:credential')).toBeNull();
-    expect(storage.get('antonina:board-v2:trust')).not.toBeNull();
+    await expect(other.readState()).rejects.toBeInstanceOf(BoardTrustRequiredError);
     await expect(other.api.createIssue('Blocked')).rejects.toThrow('credential is required');
   });
 
-  it('never writes to the board while reading, polling, or claiming edit access', async () => {
+  it('legacy reads authenticate the shared board key without changing board content', async () => {
     const { server, storage, initialized } = await initializedBoard();
     await session(server, storage).api.createIssue('Existing');
     const methods: Array<string | undefined> = [];
@@ -247,8 +245,7 @@ describe('browser board session', () => {
     expect(reopened.api.accessState().storageRejected).toBe(false);
 
     expect(methods).not.toContain('POST');
-    expect(methods).not.toContain('PUT');
-    expect(methods.every((method) => method === undefined)).toBe(true);
+    expect(methods).toContain('PUT');
     expect((server.signed as { operations: unknown[] }).operations.length).toBe(2);
     expect(initialized.credential.keyId).toBe(reopened.api.getCredential()?.keyId);
   });

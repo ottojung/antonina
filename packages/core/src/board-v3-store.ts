@@ -194,6 +194,7 @@ interface StateBundle {
   state: VerifiedBoardState;
   issueRefs: Map<number, string>;
   issueSnapshots: Map<number, IssueSnapshot>;
+  messageCounts: Map<number, number>;
   closedAt: Map<number, string>;
   directoryPages: Map<number, DirectoryPage>;
 }
@@ -401,6 +402,7 @@ function orderedSummaries(
   state: VerifiedBoardState,
   closedAt: Map<number, string>,
   issueState: IssueState,
+  messageCounts?: Map<number, number>,
 ): IssueListSummary[] {
   const byNumber = new Map(state.board.issues.map((issue) => [issue.number, issue]));
   const ordered = issueState === 'open'
@@ -422,9 +424,23 @@ function orderedSummaries(
     createdAt: issue.createdAt,
     updatedAt: issue.updatedAt,
     closedAt: issue.state === 'closed' ? (closedAt.get(issue.number) ?? issue.updatedAt) : null,
-    messageCount: issue.messages.length,
+    messageCount: messageCounts?.get(issue.number) ?? issue.messages.length,
     hasBody: issue.body.length > 0,
   }));
+}
+
+function issueFromSummary(summary: IssueListSummary): BoardIssue {
+  return {
+    number: summary.number,
+    title: summary.title,
+    // Mutation validation only needs to preserve whether a body exists for
+    // untouched issues. The real body is loaded only for the issue being edited.
+    body: summary.hasBody ? 'materialized' : '',
+    state: summary.state,
+    createdAt: summary.createdAt,
+    updatedAt: summary.updatedAt,
+    messages: [],
+  };
 }
 
 function paginate<T>(entries: T[], size: number): T[][] {

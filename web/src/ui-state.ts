@@ -1,6 +1,14 @@
 import { BoardDeletedError, BoardTrustRequiredError, DEFAULT_FEED_LIMIT } from './api';
-import type { BoardFeedEntry, BoardFeedEntryKind, BoardFeedPage, BoardFeedRequest, FeedRead } from './api';
-import type { Board, BoardIssue, BoardResource, VerifiedBoardState } from './model';
+import type {
+  BoardFeedEntry,
+  BoardFeedEntryKind,
+  BoardFeedPage,
+  BoardFeedRequest,
+  BoardOverview,
+  FeedRead,
+  IssueListSummary,
+} from './api';
+import type { BoardIssue, BoardResource, VerifiedBoardState } from './model';
 
 export type IssueFilter = 'open' | 'closed' | 'all';
 
@@ -9,12 +17,14 @@ export type IssueFilter = 'open' | 'closed' | 'all';
  * status here without a queue: a board whose order has not been read is a
  * `failed` load, never a list quietly sorted some other way.
  */
+export type BoardSummary = Pick<BoardOverview, 'issues' | 'resources' | 'targets' | 'dispatches'>;
+
 export type BoardLoad =
   | { status: 'loading' }
   | { status: 'uninitialized' }
   | { status: 'untrusted' }
   | { status: 'deleted' }
-  | { status: 'ready'; board: Board; queue: number[] }
+  | { status: 'ready'; board: BoardSummary; queue: number[]; head: string }
   | { status: 'failed'; message: string };
 
 export const FIRST_RUN_COPY = {
@@ -120,12 +130,51 @@ export function emptyIssueList(filter: IssueFilter, hasWriteAccess: boolean): { 
   };
 }
 
-export function loadedBoard(load: BoardLoad): Board | undefined {
+export function loadedBoard(load: BoardLoad): BoardSummary | undefined {
   return load.status === 'ready' ? load.board : undefined;
 }
 
+function summarizeIssue(issue: BoardIssue): IssueListSummary {
+  return {
+    number: issue.number,
+    title: issue.title,
+    state: issue.state,
+    createdAt: issue.createdAt,
+    updatedAt: issue.updatedAt,
+    closedAt: issue.state === 'closed' ? issue.updatedAt : null,
+    messageCount: issue.messages.length,
+    hasBody: issue.body.length > 0,
+  };
+}
+
 export function boardLoaded(state: VerifiedBoardState | null): BoardLoad {
-  return state ? { status: 'ready', board: state.board, queue: state.queue } : { status: 'uninitialized' };
+  if (state === null) return { status: 'uninitialized' };
+  return {
+    status: 'ready',
+    board: {
+      issues: state.board.issues.map(summarizeIssue),
+      resources: state.board.resources,
+      targets: state.board.targets,
+      dispatches: state.board.dispatches,
+    },
+    queue: state.queue,
+    head: state.head,
+  };
+}
+
+export function overviewLoaded(overview: BoardOverview | null): BoardLoad {
+  if (overview === null) return { status: 'uninitialized' };
+  return {
+    status: 'ready',
+    board: {
+      issues: overview.issues,
+      resources: overview.resources,
+      targets: overview.targets,
+      dispatches: overview.dispatches,
+    },
+    queue: overview.queue,
+    head: overview.head,
+  };
 }
 
 /**
@@ -210,7 +259,7 @@ export function firstRunOutcome(created: BoardRead, afterRefusal?: BoardRead): F
  * result is the board's order, never one the browser invented. There is no
  * other order to fall back to, so nothing is sorted or appended here.
  */
-export function openQueueOrder(issues: BoardIssue[], queue: number[]): number[] {
+export function openQueueOrder<T extends Pick<BoardIssue, 'number' | 'state'>>(issues: readonly T[], queue: readonly number[]): number[] {
   const open = new Set(issues.filter((issue) => issue.state === 'open').map((issue) => issue.number));
   return queue.filter((number) => open.has(number));
 }
@@ -221,7 +270,7 @@ export function openQueueOrder(issues: BoardIssue[], queue: number[]): number[] 
  * number: oldest closed work first, a stable order that does not shuffle as
  * timestamps move.
  */
-export function closedIssueOrder(issues: BoardIssue[]): number[] {
+export function closedIssueOrder<T extends Pick<BoardIssue, 'number' | 'state'>>(issues: readonly T[]): number[] {
   return issues.filter((issue) => issue.state === 'closed').map((issue) => issue.number).sort((left, right) => left - right);
 }
 
@@ -230,7 +279,7 @@ export function closedIssueOrder(issues: BoardIssue[]): number[] {
  * unqueued tail, and `all` is the queue first with the closed tail after it, so
  * the open work a reader came for is always at the top in priority order.
  */
-export function visibleIssues(issues: BoardIssue[], queue: number[], filter: IssueFilter): BoardIssue[] {
+export function visibleIssues<T extends Pick<BoardIssue, 'number' | 'state'>>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
   const byNumber = new Map(issues.map((issue) => [issue.number, issue]));
   const open = openQueueOrder(issues, queue).map((number) => byNumber.get(number)!);
   if (filter === 'open') return open;
@@ -307,7 +356,7 @@ export function priorityLabel(position: number): string {
   return position > 0 ? `Priority ${position}` : 'Not in the queue';
 }
 
-export function issueCounts(issues: BoardIssue[]): Record<IssueFilter, number> {
+export function issueCounts<T extends Pick<BoardIssue, 'state'>>(issues: readonly T[]): Record<IssueFilter, number> {
   const open = issues.filter((issue) => issue.state === 'open').length;
   const closed = issues.length - open;
   return { open, closed, all: issues.length };
@@ -448,7 +497,7 @@ export const FEED_UNTRACKED_COPY =
  * that is exactly as true of an issue created ten operations ago and left off
  * the first page. `unplacedIssueNumbers` is the gated form.
  */
-export function untrackedIssueNumbers(issues: BoardIssue[], entries: BoardFeedEntry[]): number[] {
+export function untrackedIssueNumbers<T extends Pick<BoardIssue, 'number'>>(issues: readonly T[], entries: BoardFeedEntry[]): number[] {
   const tracked = new Set(entries.map((entry) => entry.issueNumber));
   return issues.filter((issue) => !tracked.has(issue.number)).map((issue) => issue.number).sort((left, right) => left - right);
 }
@@ -474,7 +523,7 @@ export function untrackedIssueNumbers(issues: BoardIssue[], entries: BoardFeedEn
  * untracked is still reported, as soon as the reader has walked the feed to its
  * end and can honestly be told the log holds nothing for those issues.
  */
-export function unplacedIssueNumbers(issues: BoardIssue[], entries: BoardFeedEntry[], nextCursor: string | null, total: number): number[] {
+export function unplacedIssueNumbers<T extends Pick<BoardIssue, 'number'>>(issues: readonly T[], entries: BoardFeedEntry[], nextCursor: string | null, total: number): number[] {
   if (nextCursor !== null || entries.length < total) return [];
   return untrackedIssueNumbers(issues, entries);
 }

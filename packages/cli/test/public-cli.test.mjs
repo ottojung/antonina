@@ -55,6 +55,17 @@ test('option values can contain whitespace, newlines, punctuation and leading da
   );
 });
 
+test('agent prompt is not retained as an alias for run', () => {
+  assert.throws(
+    () => preparePublicCommand('agent', ['prompt', '--id', 'a11d', '--prompt', 'work']),
+    (error) => error instanceof PublicCliUsageError && /unknown agent command: prompt/.test(error.message),
+  );
+  const help = preparePublicCommand('agent', ['--help']);
+  assert.equal(help.kind, 'help');
+  assert.match(help.text, /\brun\b/);
+  assert.doesNotMatch(help.text, /\bprompt\b/);
+});
+
 test('board create never accepts a caller-supplied issue id', () => {
   assert.throws(
     () => preparePublicCommand('board', ['create', '--id', '9', '--title', 'title']),

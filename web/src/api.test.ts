@@ -145,37 +145,27 @@ async function initializedBoard(storage: BoardKeyStorage = memoryStorage()) {
 }
 
 describe('browser board session', () => {
-  it('verifies the stored log once per trust and once per initialize', async () => {
-    // Both of these calls read and verify the whole operation log, and both hand
-    // back the state that read verified, so nothing has to read the log again
-    // for the queue. What must never happen is a second verification inside
-    // either of them, so the count after each call is that call's whole budget.
+  it('initializes and reopens the board entirely from materialized snapshots', async () => {
     const server = fakeSkrynia();
     const storage = memoryStorage();
-    let gets = 0;
-    const counting = () => new BrowserBoardSession(storage, {
-      fetch: async (input, init) => {
-        if ((init?.method ?? 'GET') === 'GET') gets += 1;
-        return server.fetch(String(input), init);
-      },
-      now: () => new Date(STAMP),
-    });
-    const owner = counting();
+    const owner = session(server, storage);
     const initialized = await owner.initialize();
-    // A fresh client checks v3 and then legacy v2 before creating the board,
-    // followed by one read-back of the board it created. There is no duplicate
-    // v3 probe on that read-back.
-    expect(gets).toBe(3);
+
     expect(initialized.state.board.issues).toEqual([]);
     expect(initialized.state.queue).toEqual([]);
+    expect(server.signed).toMatchObject({
+      schemaVersion: 3,
+      format: 'materialized-snapshots',
+      revision: 1,
+    });
+    for (const entry of server.objects.values()) {
+      expect(Array.isArray((entry.value as { operations?: unknown[] })?.operations)).toBe(false);
+    }
 
-    const reader = counting();
-    const state = await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
-    // A fresh reader probes v3 once, then reads/verifies legacy v2 once. It
-    // returns that verified state directly, so no third read follows it.
-    expect(gets).toBe(5);
-    expect(state.board.issues).toEqual([]);
-    expect(state.queue).toEqual([]);
+    const reader = session(server, storage);
+    const state = await reader.readState();
+    expect(state?.board.issues).toEqual([]);
+    expect(state?.queue).toEqual([]);
   });
 
   it('reports a missing board on a plain page load without creating it', async () => {
@@ -279,10 +269,11 @@ describe('browser board session', () => {
     await expect(other.api.createIssue('Blocked')).rejects.toThrow('credential is required');
   });
 
-  it('legacy reads authenticate the shared board key without changing board content', async () => {
+  it('materialized reads never write or reconstruct history', async () => {
     const { server, storage, initialized } = await initializedBoard();
     await session(server, storage).api.createIssue('Existing');
     const methods: Array<string | undefined> = [];
+    const before = JSON.stringify(server.signed);
     const reopened = new BrowserBoardSession(storage, {
       fetch: async (input, init) => {
         methods.push(init?.method);
@@ -296,10 +287,8 @@ describe('browser board session', () => {
     expect(reopened.hasCredential()).toBe(true);
     expect(reopened.api.hasWriteAccess()).toBe(true);
     expect(reopened.api.accessState().storageRejected).toBe(false);
-
-    expect(methods).not.toContain('POST');
-    expect(methods).toContain('PUT');
-    expect((server.signed as { operations: unknown[] }).operations.length).toBe(2);
+    expect(methods.every((method) => (method ?? 'GET') === 'GET')).toBe(true);
+    expect(JSON.stringify(server.signed)).toBe(before);
     expect(initialized.credential.keyId).toBe(reopened.api.getCredential()?.keyId);
   });
 
@@ -310,9 +299,9 @@ describe('browser board session', () => {
     const other = session(server);
     const stale = { ...initialized.credential, storageCapability: 'b'.repeat(64) };
 
-    await expect(other.enableEditing(serializeBoardCredential(stale))).rejects.toThrow('403');
+    await expect(other.enableEditing(serializeBoardCredential(stale))).rejects.toThrow('board key');
     expect(other.api.hasWriteAccess()).toBe(false);
-    expect((server.signed as { operations: unknown[] }).operations.length).toBe(1);
+    expect((server.signed as { revision: number }).revision).toBe(1);
   });
 
   it('refuses a credential whose key ID does not match its public key', async () => {
@@ -359,19 +348,24 @@ describe('browser board session', () => {
     expect(reopened.api.hasWriteAccess()).toBe(false);
   });
 
-  it('remembers the accepted head so a replaced history is refused after a reload', async () => {
+  it('reads whichever materialized snapshot the board key currently points at', async () => {
     const server = fakeSkrynia();
     const storage = memoryStorage();
     const owner = session(server, storage);
-    await owner.initialize();
+    const initialized = await owner.initialize();
+    const initialPointer = structuredClone(server.signed);
     await owner.api.createIssue('Kept');
 
     const reopened = session(server, storage);
     await expect(reopened.readState()).resolves.toMatchObject({ board: { issues: [{ title: 'Kept' }] } });
 
-    const log = server.signed as { head: string; operations: Array<{ opId: string }> };
-    server.signed = { ...log, head: log.operations[0].opId, operations: log.operations.slice(0, 1) };
-    await expect(reopened.readState()).rejects.toThrow('previously accepted head');
+    // Whoever has the one board key is intentionally fully trusted. Repointing
+    // the single mutable pointer is therefore authoritative; v3 keeps no replay
+    // history for ancestry checks.
+    server.signed = initialPointer;
+    const reset = session(server, memoryStorage());
+    await reset.enableEditing(serializeBoardCredential(initialized.credential));
+    expect((await reset.readState())?.board.issues).toEqual([]);
   });
 
   it('ignores unreadable stored keys instead of failing the whole page load', () => {
@@ -424,7 +418,7 @@ describe('the shared priority queue through the session', () => {
 
     expect(committed).toEqual([2, 3, 1]);
     const reader = session(server);
-    await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
+    await reader.enableEditing(serializeBoardCredential(initialized.credential));
     expect((await reader.readState())?.queue).toEqual([2, 3, 1]);
     expect(await reader.api.getQueue()).toEqual([2, 3, 1]);
   });
@@ -444,7 +438,7 @@ describe('the shared priority queue through the session', () => {
 
     expect(reader.api.hasWriteAccess()).toBe(false);
     await expect(reader.api.reorderQueue([3, 2, 1])).rejects.toThrow('credential');
-    expect((server.signed as { operations: unknown[] }).operations.length).toBe(4);
+    expect((server.signed as { revision: number }).revision).toBe(4);
   });
 
   it('keeps a newly opened issue in the queue a client re-reads after a close', async () => {
@@ -473,24 +467,14 @@ describe('the board feed through the session', () => {
     return { server, storage, writer: session(server, storage) };
   }
 
-  it('projects the signed log itself, newest first, with each operation as its own entry', async () => {
-    const { server, writer } = await boardWithActivity();
-    const log = server.signed as { operations: Array<{ opId: string; timestamp: string; kind: string }> };
+  it('reads directly materialized feed entries newest first', async () => {
+    const { writer } = await boardWithActivity();
 
     const page = await writer.readFeed();
-    // The entries are the log's own operations, in reverse commit order, each
-    // carrying that operation's instant. A view-derived list could not do this:
-    // the board view holds one `updatedAt` per issue, so it can say an issue
-    // exists but not that a comment, a closure and a reopen were three separate
-    // recorded events at three separate instants.
-    expect(page.entries.map((entry) => entry.id)).toEqual([...log.operations].filter((operation) => operation.kind !== 'board.initialize').reverse().map((operation) => operation.opId));
     expect(page.entries.map((entry) => entry.kind)).toEqual([
       'issue-edited', 'issue-reopened', 'issue-closed', 'issue-created', 'comment-added', 'issue-created',
     ]);
-    expect(page.entries[0].at).toBe(log.operations[log.operations.length - 1].timestamp);
-    // Log positions are unique, so the order is total even when two operations
-    // share a millisecond: no entry can share a position, and the walk is
-    // strictly decreasing.
+    expect(page.entries.every((entry) => entry.at === STAMP)).toBe(true);
     const positions = page.entries.map((entry) => entry.position);
     expect(new Set(positions).size).toBe(positions.length);
     expect(positions).toEqual([...positions].sort((left, right) => right - left));
@@ -498,29 +482,20 @@ describe('the board feed through the session', () => {
     expect(page.nextCursor).toBeNull();
   });
 
-  it('keeps a close, a reopen and an edit apart, and does not infer one from an updatedAt', async () => {
-    const { server, writer } = await boardWithActivity();
-    const log = server.signed as { operations: Array<{ kind: string }> };
-
-    expect(log.operations.filter((operation) => operation.kind === 'issue.close' || operation.kind === 'issue.reopen')
-      .map((operation) => operation.kind)).toEqual(['issue.close', 'issue.reopen']);
-
+  it('keeps close, reopen, and edit as distinct materialized feed entries', async () => {
+    const { writer } = await boardWithActivity();
     const page = await writer.readFeed();
-    const forIssueTwo = page.entries.filter((entry) => entry.issueNumber === 2 && (entry.kind === 'issue-closed' || entry.kind === 'issue-reopened'));
+    const forIssueTwo = page.entries.filter(
+      (entry) => entry.issueNumber === 2
+        && (entry.kind === 'issue-closed' || entry.kind === 'issue-reopened'),
+    );
 
-    // Two entries, two different kinds, two different instants — and the state
-    // each left behind, which is how a reader can tell a reopened issue from a
-    // closed one without consulting the board view at all.
     expect(forIssueTwo.map((entry) => [entry.kind, entry.state])).toEqual([
       ['issue-reopened', 'open'],
       ['issue-closed', 'closed'],
     ]);
-    // This board's clock is frozen, so both operations share an instant and the
-    // log position is the only thing that orders them. That is the case the
-    // projection is built for: two distinct entries, ordered by the log, and
-    // never merged into one "last changed" line.
     expect(forIssueTwo.map((entry) => entry.at)).toEqual([STAMP, STAMP]);
-    expect(forIssueTwo[0].position).toBeGreaterThan(forIssueTwo[1].position);
+    expect(forIssueTwo[0]?.position).toBeGreaterThan(forIssueTwo[1]?.position ?? -1);
   });
 
   it('reads the newest 50 entries by default and hands back the token for the rest', async () => {

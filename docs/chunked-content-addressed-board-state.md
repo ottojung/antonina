@@ -3,7 +3,10 @@
 - **Status:** Proposed (design only; nothing here is implemented)
 - **Date:** 2026-09-27
 - **Related issue:** #70
-- **Base commit:** `0c96127` (`origin/release/2026-09-27`, identical to `origin/main`)
+- **Base commit:** `0c96127`, which was `origin/main` when this document was
+  written. The branch carrying this document is integrated into
+  `origin/release/2026-09-27-5`; the bare `origin/release/2026-09-27` named in
+  earlier revisions of this line is retired and is not a merge target.
 - **Related issue:** #73 (migration framework) — see §7 and §8, this document
   is written to be consistent with its stated security constraint and says so
   where it is not.
@@ -398,8 +401,11 @@ in this design.
 The fanout and byte bounds hold exactly as for a sequence. The gap is that a map
 *key* is not covered by either bound, because the two bounds constrain the
 container, not the key's length. This is not hypothetical in this repository:
-`canonicalTargetId` caps a target id at 63 characters via the `TARGET_ID` regex
-(`model.ts`), so targets are safe by construction — but `isValidHost`
+`canonicalTargetId` caps a target id at 64 characters via the `TARGET_ID` regex
+`/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/` (`model.ts`) — a leading character,
+then optionally up to 62 middle characters and a trailing character, so the
+admitted length is 1 or 2 through 64 — so targets are safe by construction —
+but `isValidHost`
 (`/^lubko:\/\/[^/\s?#\\]+$/`) and `pathFormDefect` impose **no length bound at
 all**, so a resource key `(host, path)` is an unbounded string. A single hostile
 or merely enormous resource can make a single map entry exceed `MAXBYTES`, and
@@ -428,10 +434,12 @@ and this document does not pretend otherwise.
 
 `root` is the one node that could reintroduce unboundedness, because it names one
 child per top-level collection. It is bounded because that set is a **fixed,
-closed field set**: `Board` in `model.ts` has exactly five collections plus
-`nextIssueNumber`, and the canonical form requires exact keys. A `root` with a
-sixth collection is a schema change, not growth, and it is rejected by the
-exact-key check like any other malformed value.
+closed field set**: `Board` in `model.ts` has exactly four collections — `issues`,
+`resources`, `targets`, `dispatches` — plus the `schemaVersion` and
+`nextIssueNumber` scalars, and the canonical form requires exact keys
+(`hasExactKeys` with that six-name list). A `root` with a fifth collection is a
+schema change, not growth, and it is rejected by the exact-key check like any
+other malformed value.
 
 The rule this implies, stated so it survives future features: **the root's field
 set is closed and may not grow with the number of anything.** Any collection that

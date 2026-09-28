@@ -611,13 +611,15 @@ function refusalOf(value: unknown): Error {
 const timestamp = '2026-09-24T00:00:00.000Z';
 
 // Every version below is derived. The browser only ever sees boards through
-// `parseBoard`, so the interesting case is a board at the oldest version this
-// build can still read — that is the one a superseded Antonina really did write,
-// and `parseBoard` must refuse it by name. Naming the constant that holds that
-// version is not available in this directory: the gate in
+// `parseBoard`, so the interesting case is a board stamped at a version this
+// build does not read, which `parseBoard` must refuse by name. The fixture is
+// the six-key canonical shape carrying that stamp, not a board of that older
+// version's own shape: this suite needs a version `parseBoard` refuses, and
+// nothing here turns on the key set. Naming the constant that holds the oldest
+// readable version is not available in this directory — the gate in
 // `packages/core/test/migrations.test.mjs` fails any `.ts` file under
-// `web/src` whose text refers to it, so the version is derived from the list
-// the build publishes instead.
+// `web/src` whose text refers to the legacy version constant — so the version is
+// derived from the list the build publishes instead.
 const SUPERSEDED_BOARD_SCHEMA_VERSION = Math.min(...PERSISTED_BOARD_VERSIONS);
 
 const board = (overrides: Record<string, unknown> = {}) => ({
@@ -644,6 +646,17 @@ describe('a failed board read is classified, not just stringified', () => {
     expect(failure.message).toContain(
       `schema version is ${SUPERSEDED_BOARD_SCHEMA_VERSION}, but this build reads schema version ${BOARD_SCHEMA_VERSION}`,
     );
+    // Every assertion above is derived from the fixture's own stamp, so it
+    // cannot tell a correct stamp from a wrong one. This one compares that stamp
+    // against the version the canonical reader accepts rather than restating
+    // it: `parseBoard` reads `BOARD_SCHEMA_VERSION` and nothing else, so the
+    // stamp being any other number is the whole premise of the case, and this
+    // goes red if the derivation ever hands back the version the reader reads.
+    expect(SUPERSEDED_BOARD_SCHEMA_VERSION).not.toBe(BOARD_SCHEMA_VERSION);
+    expect(SUPERSEDED_BOARD_SCHEMA_VERSION).toBeLessThan(BOARD_SCHEMA_VERSION);
+    // And it is a version the build publishes as readable through the gate, so
+    // the case is a superseded board rather than an arbitrary number.
+    expect(PERSISTED_BOARD_VERSIONS).toContain(SUPERSEDED_BOARD_SCHEMA_VERSION);
   });
 
   it('names the field and the index of a malformed record', () => {

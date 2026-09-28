@@ -3,13 +3,21 @@ import test from 'node:test';
 
 import {
   BoardIncompatibilityError,
+  BOARD_SCHEMA_VERSION,
   canonicalHost,
   canonicalPath,
   emptyBoard,
+  LEGACY_BOARD_SCHEMA_VERSION,
   parseBoard,
   pathFormDefect,
   resourceViews,
 } from '../dist/model.js';
+
+// Every board version in this file is derived, so a schema bump moves the
+// expected value with the reader instead of stranding it. A version this build
+// cannot read at all sits one below the oldest version it still reads, which is
+// how the refusal below stays a refusal after a bump.
+const UNREADABLE_BOARD_SCHEMA_VERSION = LEGACY_BOARD_SCHEMA_VERSION - 1;
 
 const timestamp = '2026-09-24T00:00:00.000Z';
 const issue = (number, state = 'open') => ({
@@ -26,17 +34,17 @@ test('canonical board parser rejects incompatible schemas and unknown issue fiel
   // Still refused, and refused as a version mismatch rather than as a shape
   // complaint: this is the 0.1.0 -> 0.1.1 rollout failure named as one.
   assert.throws(
-    () => parseBoard({ schemaVersion: 1, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] }),
+    () => parseBoard({ schemaVersion: UNREADABLE_BOARD_SCHEMA_VERSION, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] }),
     (error) => {
       assert.ok(error instanceof BoardIncompatibilityError);
       assert.equal(error.defect.kind, 'schema-version-mismatch');
-      assert.equal(error.defect.found, '1');
-      assert.equal(error.defect.expected, '3');
-      return /schema version is 1, but this build reads schema version 3/.test(error.message);
+      assert.equal(error.defect.found, String(UNREADABLE_BOARD_SCHEMA_VERSION));
+      assert.equal(error.defect.expected, String(BOARD_SCHEMA_VERSION));
+      return new RegExp(`schema version is ${UNREADABLE_BOARD_SCHEMA_VERSION}, but this build reads schema version ${BOARD_SCHEMA_VERSION}`).test(error.message);
     },
   );
   assert.throws(() => parseBoard({
-    schemaVersion: 3,
+    schemaVersion: BOARD_SCHEMA_VERSION,
     nextIssueNumber: 2,
     issues: [{ ...issue(1), assignee: 'agent' }],
     resources: [],
@@ -53,7 +61,7 @@ test('canonical board parser rejects incompatible schemas and unknown issue fiel
 
 test('canonical board parser rejects unsafe counters and out-of-order messages', () => {
   assert.throws(() => parseBoard({
-    schemaVersion: 3,
+    schemaVersion: BOARD_SCHEMA_VERSION,
     nextIssueNumber: Number.MAX_SAFE_INTEGER + 1,
     issues: [],
     resources: [],
@@ -65,7 +73,7 @@ test('canonical board parser rejects unsafe counters and out-of-order messages',
     return /malformed field nextIssueNumber/.test(error.message);
   });
   assert.throws(() => parseBoard({
-    schemaVersion: 3,
+    schemaVersion: BOARD_SCHEMA_VERSION,
     nextIssueNumber: 2,
     issues: [{
       ...issue(1),
@@ -82,7 +90,7 @@ test('canonical board parser rejects unsafe counters and out-of-order messages',
 
 test('resource schema is strict and resource views derive protection from open dependencies', () => {
   const board = parseBoard({
-    schemaVersion: 3,
+    schemaVersion: BOARD_SCHEMA_VERSION,
     nextIssueNumber: 3,
     issues: [issue(1), issue(2, 'closed')],
     resources: [{

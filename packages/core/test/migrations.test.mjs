@@ -503,7 +503,7 @@ test('a stored board with no version at all is refused as malformed', () => {
 
 test('a malformed legacy board fails closed and produces no board', () => {
   const malformed = {
-    schemaVersion: 2,
+    schemaVersion: model.LEGACY_BOARD_SCHEMA_VERSION,
     nextIssueNumber: 2,
     issues: [{ number: 1, title: 'Broken', body: '', state: 'open', createdAt: at(1), updatedAt: at(1), messages: [] }],
     resources: [{ host: 'not-a-lubko-address', path: '/srv', issueNumbers: [1], createdAt: at(1), updatedAt: at(1) }],

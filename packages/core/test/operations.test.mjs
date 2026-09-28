@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { generateSigningKey } from '../dist/canonical.js';
-import { emptyBoard } from '../dist/model.js';
+import { BOARD_SCHEMA_VERSION, emptyBoard, LEGACY_BOARD_SCHEMA_VERSION } from '../dist/model.js';
 import {
   BOARD_CAPABILITIES,
   createTrustAnchor,
@@ -44,10 +44,10 @@ function clone(value) {
   return structuredClone(value);
 }
 
-test('v2-signed initialization verifies unchanged and replays as current v3 state', async () => {
+test('legacy-signed initialization verifies unchanged and replays as current state', async () => {
   const { root, anchor, log } = await setup();
   const legacyBoard = {
-    schemaVersion: 2,
+    schemaVersion: LEGACY_BOARD_SCHEMA_VERSION,
     nextIssueNumber: 2,
     issues: [{
       number: 1, title: 'Legacy', body: 'signed v2 state', state: 'open',
@@ -56,12 +56,12 @@ test('v2-signed initialization verifies unchanged and replays as current v3 stat
     resources: [],
   };
   const initialize = await append(log, root, 'board.initialize', { board: legacyBoard }, 0);
-  assert.equal(initialize.payload.board.schemaVersion, 2);
+  assert.equal(initialize.payload.board.schemaVersion, LEGACY_BOARD_SCHEMA_VERSION);
   assert.equal(Object.hasOwn(initialize.payload.board, 'targets'), false);
   await append(log, root, 'issue.create', { number: 2, title: 'Current', body: '' }, 1);
 
   const replayed = await verifyAndReplayOperationLog(log, anchor);
-  assert.equal(replayed.board.schemaVersion, 3);
+  assert.equal(replayed.board.schemaVersion, BOARD_SCHEMA_VERSION);
   assert.deepEqual(replayed.board.targets, []);
   assert.deepEqual(replayed.board.dispatches, []);
   assert.deepEqual(replayed.board.issues.map((issue) => issue.title), ['Legacy', 'Current']);
@@ -259,7 +259,7 @@ test('history from another board or root cannot be spliced in', async () => {
 test('initialization attests a non-empty starting board as root-signed state', async () => {
   const { root, anchor, log } = await setup();
   const initial = {
-    schemaVersion: 3,
+    schemaVersion: BOARD_SCHEMA_VERSION,
     nextIssueNumber: 2,
     issues: [{
       number: 1,

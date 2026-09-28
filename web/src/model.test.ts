@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { canonicalHost, canonicalPath, parseBoard, resourceState, type Board, type BoardIssue, type BoardResource } from './model';
+import { BOARD_SCHEMA_VERSION, canonicalHost, canonicalPath, parseBoard, PERSISTED_BOARD_VERSIONS, resourceState, type Board, type BoardIssue, type BoardResource } from './model';
+
+// Derived so a schema bump moves the expected value with the reader. A version
+// this build cannot read at all sits one below the oldest version it still
+// reads, which keeps the refusal a refusal after a bump. This file derives from
+// the readable set rather than from the legacy constant on purpose: the gate in
+// packages/core/test/migrations.test.mjs fails any web source whose text names
+// the legacy version constant, so a web file may not ask which version is
+// legacy, only which versions this build reads.
+const UNREADABLE_BOARD_SCHEMA_VERSION = PERSISTED_BOARD_VERSIONS[0] - 1;
 
 const timestamp = '2026-09-24T00:00:00.000Z';
 function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue {
@@ -11,11 +20,11 @@ function resource(overrides: Partial<BoardResource> = {}): BoardResource {
 
 describe('board schema', () => {
   it('rejects non-canonical schemas', () => {
-    expect(() => parseBoard({ schemaVersion: 1, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] })).toThrow('schema version is 1, but this build reads schema version 3');
+    expect(() => parseBoard({ schemaVersion: UNREADABLE_BOARD_SCHEMA_VERSION, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] })).toThrow(`schema version is ${UNREADABLE_BOARD_SCHEMA_VERSION}, but this build reads schema version ${BOARD_SCHEMA_VERSION}`);
   });
 
   it('enforces exact keys, canonical resources, and referenced issues', () => {
-    const valid: Board = { schemaVersion: 3, nextIssueNumber: 3, issues: [issue(1), issue(2, 'closed')], resources: [resource({ issueNumbers: [1, 2] })], targets: [], dispatches: [] };
+    const valid: Board = { schemaVersion: BOARD_SCHEMA_VERSION, nextIssueNumber: 3, issues: [issue(1), issue(2, 'closed')], resources: [resource({ issueNumbers: [1, 2] })], targets: [], dispatches: [] };
     expect(parseBoard(valid)).toEqual(valid);
     expect(() => parseBoard({ ...valid, resources: [resource({ issueNumbers: [3] })] })).toThrow('issueNumbers index 0: found a number, expected an issue number that exists on this board');
     expect(() => parseBoard({ ...valid, resources: [resource(), resource()] })).toThrow('duplicate resource');

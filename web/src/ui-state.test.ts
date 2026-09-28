@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { BoardDeletedError, BoardTrustRequiredError } from './api';
 import { BOARD_FEED_ENTRY_KINDS, type BoardFeedEntry } from './api';
-import { emptyBoard, type Board, type BoardIssue, type VerifiedBoardState } from './model';
+import { BOARD_SCHEMA_VERSION, emptyBoard, type Board, type BoardIssue, type VerifiedBoardState } from './model';
 import {
   accessCallout,
   boardAccess,
@@ -66,7 +66,9 @@ function state(overrides: Partial<VerifiedBoardState> = {}): VerifiedBoardState 
     authorities: [],
     deleted: false,
     head: 'head',
-    migration: { persistedVersion: 3, throughVersions: [] },
+    // Derived: the board above is as current as this build can read, so the
+    // migration record must be the as-current one and stay that way at a bump.
+    migration: { persistedVersion: BOARD_SCHEMA_VERSION, throughVersions: [] },
     ...overrides,
   };
 }

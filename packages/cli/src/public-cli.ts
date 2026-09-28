@@ -98,7 +98,7 @@ function jsonArg(parsed: ParsedOptions): string[] {
 const BOARD_SPECS: readonly CommandSpec[] = [
   withJson({
     path: ['initialize'],
-    summary: 'Initialize the signed board.',
+    summary: 'Initialize the board.',
     flags: ['--credential', '--trust-anchor'],
     normalize: (p) => ['initialize', ...flagArgs(p, ['--credential', '--trust-anchor']), ...jsonArg(p)],
   }),

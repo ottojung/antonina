@@ -271,7 +271,11 @@ export class SignedBoardStore {
       throw new SignedBoardStoreError('Skrynia did not return the storage capability for Antonina board-v2');
     }
     const credential = await createBoardCredential(anchor, root, created.capability);
-    const stored = await this.require(anchor, operation.opId);
+    // We have just created board-v2 and already know v3 was absent from the
+    // existence check. Read the object we created directly rather than probing
+    // v3 again before its first migration.
+    const stored = await this.readLegacy(anchor, operation.opId);
+    if (stored === null) throw new BoardMissingError();
     return { ...stored, credential };
   }
 

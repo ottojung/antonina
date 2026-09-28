@@ -333,6 +333,38 @@ export class BoardApi {
     return clone((await this.readStored()).state.board);
   }
 
+  async listIssueSummaries(state?: IssueState): Promise<IssueListSummary[]> {
+    const credential = await this.fastReadCredential();
+    const states: IssueState[] = state === undefined ? ['open', 'closed'] : [state];
+    const summaries: IssueListSummary[] = [];
+    for (const issueState of states) {
+      let listedCount = 0;
+      for (let page = 1; ; page += 1) {
+        const listed = await this.store.readIssuePage(credential, issueState, page);
+        if (listed === null) {
+          const issues = (await this.loadBoard()).issues;
+          return issues
+            .filter((issue) => state === undefined || issue.state === state)
+            .map((issue) => ({
+              number: issue.number,
+              title: issue.title,
+              state: issue.state,
+              createdAt: issue.createdAt,
+              updatedAt: issue.updatedAt,
+              closedAt: issue.state === 'closed' ? issue.updatedAt : null,
+              messageCount: issue.messages.length,
+              hasBody: issue.body.length > 0,
+            }))
+            .sort((left, right) => left.number - right.number);
+        }
+        summaries.push(...listed.entries);
+        listedCount += listed.entries.length;
+        if (listed.entries.length === 0 || listedCount >= listed.total) break;
+      }
+    }
+    return summaries.map(clone);
+  }
+
   async listIssues(state?: IssueState): Promise<BoardIssue[]> {
     const credential = await this.fastReadCredential();
     const states: IssueState[] = state === undefined ? ['open', 'closed'] : [state];

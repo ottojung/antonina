@@ -47,9 +47,12 @@ The object at `GET /store/antonina/board-v2` is a `BoardOperationLog`
 `operations[]` is a fully signed operation. The `Board` (the materialized view)
 is *not* the stored object; it is recovered by replaying the log. A legacy
 `schemaVersion: 2` board can appear nested inside the very first operation's
-`board.initialize` payload, and `upgradePersistedBoard` (`model.ts`) promotes it
-to version 3 **in memory only** — it splices `schemaVersion: 3` with empty
-`targets`/`dispatches` and re-parses. Nothing persists that promotion.
+`board.initialize` payload. The migration gate (`migrations.ts`,
+`migratePersistedBoard`, called from `verifyAndReplayOperationLog`) selects and
+applies the registered `2 -> 3` chain and lifts it **in memory only** — it splices
+`schemaVersion: 3` with empty `targets`/`dispatches` and re-parses. Nothing
+persists that promotion, and the stored v2 payload and its signature are left
+exactly as they were signed.
 
 The body also says "the current client is board-v3". That conflates the storage
 key name with the nested board schema version. They are different axes and they
@@ -887,7 +890,7 @@ order on two machines. Under content addressing it becomes fatal — an importer
 a machine with a different ICU locale produces different chunk bytes, a different
 `stateRoot`, and an import whose `stateRoot` does not reproduce. It is also not
 something this design can route around: the resource order is *inside* the value
-being chunked, and the legacy v2→v3 promotion in `upgradePersistedBoard` is
+being chunked, and the legacy v2→v3 promotion in the migration gate is
 applied to the same value.
 
 **Replacing `localeCompare` with code-unit comparison in anything reachable from

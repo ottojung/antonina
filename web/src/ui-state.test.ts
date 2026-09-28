@@ -60,7 +60,15 @@ function issue(number: number, state: 'open' | 'closed', updatedAt = timestamp):
   return { number, title: `Issue ${number}`, body: '', state, createdAt: updatedAt, updatedAt, messages: [] };
 }
 function state(overrides: Partial<VerifiedBoardState> = {}): VerifiedBoardState {
-  return { board: emptyBoard(), queue: [], authorities: [], deleted: false, head: 'head', ...overrides };
+  return {
+    board: emptyBoard(),
+    queue: [],
+    authorities: [],
+    deleted: false,
+    head: 'head',
+    migration: { persistedVersion: 3, throughVersions: [] },
+    ...overrides,
+  };
 }
 
 describe('issue UI state', () => {

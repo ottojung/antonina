@@ -6,7 +6,6 @@ import {
   executionTargetDefect,
   parseBoard,
   parsePersistedBoard,
-  upgradePersistedBoard,
   parseExecutionTargetBackend,
   parseExecutionTargetAccessMethod,
   parseExecutionTargetCapability,
@@ -25,6 +24,11 @@ import {
   type ExecutionTargetPersistence,
   type ExecutionTargetStatus,
 } from './model.js';
+import {
+  migratePersistedBoard,
+  requirePersistedBoardCompatibility,
+  type PersistedBoardVersion,
+} from './migrations.js';
 
 export const OPLOG_SCHEMA_VERSION = 1 as const;
 
@@ -633,12 +637,27 @@ export interface VerifiedAuthority {
   revoked: boolean;
 }
 
+/**
+ * What the migration gate did to open this state, reported on the state itself
+ * so a caller never has to ask whether it is looking at migrated or original
+ * data. An empty `throughVersions` means the stored board was already current
+ * and nothing was changed.
+ */
+export interface BoardMigrationReport {
+  /** The version the board was persisted at, as read from the stored log. */
+  persistedVersion: PersistedBoardVersion;
+  /** The versions the migration chain stepped through, in order. */
+  throughVersions: number[];
+}
+
 export interface VerifiedBoardState {
   board: Board;
   queue: number[];
   authorities: VerifiedAuthority[];
   deleted: boolean;
   head: string;
+  /** How the stored state reached the current format. */
+  migration: BoardMigrationReport;
 }
 
 export interface VerifyOperationLogOptions {
@@ -930,6 +949,13 @@ export async function verifyAndReplayOperationLog(
     throw new OperationLogVerificationError('Root trust anchor key ID does not match its public key');
   }
 
+  // The compatibility gate runs before anything parses the log, so a board
+  // written by a newer Antonina, or by an older one this build has no
+  // migration for, fails with a version an operator can act on instead of a
+  // parse symptom. It reads the stored version and selects the migration chain;
+  // it never writes, so a refusal leaves the board exactly as it was found.
+  requirePersistedBoardCompatibility(value);
+
   const log = parseOperationLog(value);
   if (log.boardId !== anchor.boardId || log.rootKeyId !== anchor.rootKeyId) {
     throw new OperationLogVerificationError('Operation log does not match the configured board trust anchor');
@@ -952,6 +978,7 @@ export async function verifyAndReplayOperationLog(
   let board: Board | undefined;
   let queue: number[] = [];
   let deleted = false;
+  let migrated: ReturnType<typeof migratePersistedBoard> | undefined;
   const seen = new Set<string>();
 
   for (let index = 0; index < log.operations.length; index += 1) {
@@ -987,7 +1014,13 @@ export async function verifyAndReplayOperationLog(
           || operation.previous !== null) {
         throw new OperationLogVerificationError('First operation must initialize the board under the root authority');
       }
-      board = upgradePersistedBoard((operation.payload as InitializePayload).board);
+      // The gate. The board is verified above exactly as it was persisted, and
+      // this is the only place the legacy representation is lifted into the
+      // current one. The result stays in memory: the stored log keeps the
+      // signed bytes it has always had, so the signature above still means
+      // what it meant before migration support existed.
+      migrated = migratePersistedBoard((operation.payload as InitializePayload).board);
+      board = migrated.board;
       queue = board.issues.filter((issue) => issue.state === 'open').map((issue) => issue.number);
       previous = operation.opId;
       previousTimestamp = operation.timestamp;
@@ -1049,7 +1082,9 @@ export async function verifyAndReplayOperationLog(
     previousTimestamp = operation.timestamp;
   }
 
-  if (!board || previous === null) throw new OperationLogVerificationError('Operation log has no initialized board state');
+  if (!board || previous === null || !migrated) {
+    throw new OperationLogVerificationError('Operation log has no initialized board state');
+  }
   if (log.head !== previous) throw new OperationLogVerificationError('Operation log head does not match its signed history');
 
   const remembered = options.previouslyAcceptedHead;
@@ -1063,5 +1098,9 @@ export async function verifyAndReplayOperationLog(
     authorities: publicAuthorities(authorities),
     deleted,
     head: previous,
+    migration: {
+      persistedVersion: migrated.fromVersion as PersistedBoardVersion,
+      throughVersions: [...migrated.throughVersions],
+    },
   };
 }

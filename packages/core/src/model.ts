@@ -680,14 +680,15 @@ export function parseLegacyBoardV2(value: unknown): LegacyBoardV2 {
   return structuredClone(board);
 }
 
+/**
+ * The board as it may be found on disk or in a signature: the current format, or
+ * one this build still knows how to read. Which one it is decides nothing here
+ * — reading a persisted board is the migration gate's job, in `migrations.ts`,
+ * and this module deliberately exposes no way to lift an old board without it.
+ */
 export function parsePersistedBoard(value: unknown): PersistedBoard {
   if (isRecord(value) && value.schemaVersion === LEGACY_BOARD_SCHEMA_VERSION) return parseLegacyBoardV2(value);
   return parseCanonicalBoard(value);
-}
-
-export function upgradePersistedBoard(board: PersistedBoard): Board {
-  if (board.schemaVersion === BOARD_SCHEMA_VERSION) return parseCanonicalBoard(board);
-  return parseCanonicalBoard({ ...board, schemaVersion: BOARD_SCHEMA_VERSION, targets: [], dispatches: [] });
 }
 
 export function parseCanonicalBoard(value: unknown): Board {

@@ -1,0 +1,284 @@
+{
+  "schemaVersion": 1,
+  "boardId": "board-fixture-v2-populated",
+  "rootKeyId": "ed25519:-y9TTfl1XE8ZeROsfH-JZx-XgILqwoN0V4jl7itnTR8",
+  "head": "sha256:RSHnraJ7x2k_RPC_o0JdrEt1Lvbqp3gLB7qnEhE7MD0",
+  "operations": [
+    {
+      "schemaVersion": 1,
+      "boardId": "board-fixture-v2-populated",
+      "previous": null,
+      "signerKeyId": "ed25519:-y9TTfl1XE8ZeROsfH-JZx-XgILqwoN0V4jl7itnTR8",
+      "timestamp": "2026-09-20T09:00:00.000Z",
+      "nonce": "fixture-board.initialize-0",
+      "kind": "board.initialize",
+      "payload": {
+        "board": {
+          "schemaVersion": 2,
+          "nextIssueNumber": 5,
+          "issues": [
+            {
+              "number": 1,
+              "title": "Migrate the persisted board format",
+              "body": "Signed by 0.1.0 and never rewritten since.",
+              "state": "open",
+              "createdAt": "2026-09-20T09:01:00.000Z",
+              "updatedAt": "2026-09-20T09:01:00.000Z",
+              "messages": []
+            },
+            {
+              "number": 2,
+              "title": "Collect the finished archive",
+              "body": "Closed before the signing that carries it.",
+              "state": "closed",
+              "createdAt": "2026-09-20T09:02:00.000Z",
+              "updatedAt": "2026-09-20T09:03:00.000Z",
+              "messages": [
+                {
+                  "id": "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                  "author": "71a1",
+                  "body": "closing this one; the resource can be collected",
+                  "createdAt": "2026-09-20T09:03:00.000Z"
+                }
+              ]
+            },
+            {
+              "number": 3,
+              "title": "Rehearse the reopen path",
+              "body": "Closed and reopened by the operations below.",
+              "state": "open",
+              "createdAt": "2026-09-20T09:04:00.000Z",
+              "updatedAt": "2026-09-20T09:04:00.000Z",
+              "messages": []
+            },
+            {
+              "number": 4,
+              "title": "Write the migration fixtures",
+              "body": "This board is one of them.",
+              "state": "open",
+              "createdAt": "2026-09-20T09:05:00.000Z",
+              "updatedAt": "2026-09-20T09:05:00.000Z",
+              "messages": []
+            }
+          ],
+          "resources": [
+            {
+              "host": "lubko://gpu-01",
+              "path": "/srv/work",
+              "issueNumbers": [
+                1,
+                3
+              ],
+              "createdAt": "2026-09-20T09:06:00.000Z",
+              "updatedAt": "2026-09-20T09:06:00.000Z"
+            },
+            {
+              "host": "lubko://gpu-02",
+              "path": "/srv/archive",
+              "issueNumbers": [
+                2
+              ],
+              "createdAt": "2026-09-20T09:07:00.000Z",
+              "updatedAt": "2026-09-20T09:07:00.000Z"
+            }
+          ]
+        }
+      },
+      "opId": "sha256:4zEaF3hyw8HF1DHSRmH3QoA6uef0nwh0wJ9kNrw80fo",
+      "signature": "TET7vJWlhpLvDlljv5HnbXlWd46xa1uTfI9cpWJUEdy-uFkjmfQAfxZ1lnOXQfd7uqNQFBcD4_MjZaRlTPBzAQ"
+    },
+    {
+      "schemaVersion": 1,
+      "boardId": "board-fixture-v2-populated",
+      "previous": "sha256:4zEaF3hyw8HF1DHSRmH3QoA6uef0nwh0wJ9kNrw80fo",
+      "signerKeyId": "ed25519:-y9TTfl1XE8ZeROsfH-JZx-XgILqwoN0V4jl7itnTR8",
+      "timestamp": "2026-09-20T09:01:00.000Z",
+      "nonce": "fixture-authority.delegate-1",
+      "kind": "authority.delegate",
+      "payload": {
+        "childKeyId": "ed25519:Vp2GP2F7SOLExy7wSO_56Z0FcZuyCyve-CgikP1aC44",
+        "childPublicKey": "tE0Mll0deXE5eP8RvAzLGisdds3jouum6bMtTLJ9DBk",
+        "capabilities": [
+          "issue.comment",
+          "issue.create",
+          "resource.modify"
+        ]
+      },
+      "opId": "sha256:bOAhFlXBFBq-TQhPb9wWeBFOETU8jJN_fMJ1f0lftck",
+      "signature": "h5fS7ocOUYJHJgf-1g5rmeb0duchrU3-e7JgAaAIJkHGJRJOv4_zo5XVCQYJ89SNDWIeVnZ9aRuUnAgN8KL5DQ"
+    },
+    {
+      "schemaVersion": 1,
+      "boardId": "board-fixture-v2-populated",
+      "previous": "sha256:bOAhFlXBFBq-TQhPb9wWeBFOETU8jJN_fMJ1f0lftck",
+      "signerKeyId": "ed25519:Vp2GP2F7SOLExy7wSO_56Z0FcZuyCyve-CgikP1aC44",
+      "timestamp": "2026-09-20T09:02:00.000Z",
+      "nonce": "fixture-issue.create-2",
+      "kind": "issue.create",
+      "payload": {
+        "number": 5,
+        "title": "Collect from the closed issue",
+        "body": "Created by a delegated key."
+      },
+      "opId": "sha256:sDjKwHaPMpGgAyyj9V2htbqTBFwNJe5qj6fWBA-DOdk",
+      "signature": "bJfy9P2FP85XfR4PD-y1wEaM2nSYAwtvFaEE_XxVNR119PHTlroQNyFCSOEaKMR8A-y2VTJBcLe709wUs_CPBw"
+    },
+    {
+      "schemaVersion": 1,
+      "boardId": "board-fixture-v2-populated",
+      "previous": "sha256:sDjKwHaPMpGgAyyj9V2htbqTBFwNJe5qj6fWBA-DOdk",
+      "signerKeyId": "ed25519:-y9TTfl1XE8ZeROsfH-JZx-XgILqwoN0V4jl7itnTR8",
+      "timestamp": "2026-09-20T09:03:00.000Z",
+      "nonce": "fixture-issue.edit-3",
+      "kind": "issue.edit",
+      "payload": {
+        "number": 1,
+        "title": null,
+        "body": "Signed by 0.1.0, edited by 0.1.0, and never rewritten since."
+      },
+      "opId": "sha256:aj2Dr7AhkZwzXQuc4LQcuEKziWYhSk8HU8aKYijitNo",
+      "signature": "xUBo7NAZBxuR4kuGZPyQ4RV1WML6RbycVZTvkCJh4A0DDy3oJw7gtPQibqBiPNek0CsZX-E1kJKsGcC73SWRCg"
+    },
+    {
+      "schemaVersion": 1,
+      "boardId": "board-fixture-v2-populated",
+      "previous": "sha256:aj2Dr7AhkZwzXQuc4LQcuEKziWYhSk8HU8aKYijitNo",
+      "signerKeyId": "ed25519:Vp2GP2F7SOLExy7wSO_56Z0FcZuyCyve-CgikP1aC44",
+      "timestamp": "2026-09-20T09:04:00.000Z",
+      "nonce": "fixture-issue.comment-4",
+      "kind": "issue.comment",
+      "payload": {
+        "number": 1,
+        "author": "73a1",
+        "body": "comment from the delegated key"
+      },
+      "opId": "sha256:nE6Fpg6XaiwDL2gouhZ2BuaWS_VGO2tmoaGpOi-o2x4",
+      "signature": "X1kfSNnM4aBTXm3syxiXmOlR9SvblX-sqgXleXXIe8BRe7g3A7o3ztYJPourfT8Oz_79U7UIsEzkxfNW5UWyCA"
+    },
+    {
+      "schemaVersion": 1,
+      "boardId": "board-fixture-v2-populated",
+      "previous": "sha256:nE6Fpg6XaiwDL2gouhZ2BuaWS_VGO2tmoaGpOi-o2x4",
+      "signerKeyId": "ed25519:-y9TTfl1XE8ZeROsfH-JZx-XgILqwoN0V4jl7itnTR8",
+      "timestamp": "2026-09-20T09:05:00.000Z",
+      "nonce": "fixture-issue.comment-5",
+      "kind": "issue.comment",
+      "payload": {
+        "number": 1,
+        "author": "71a1",
+        "body": "comment from the root key"
+      },
+      "opId": "sha256:mAIzEhdg30VTWodHxguCZ6P75MJ-GRWt6qbDHEv14BE",
+      "signature": "Q0Vvf-aApXYjI-dokeD-zEkk7vlar2erhkX0MIX2HcUlzdlMbUPely0QCgoPzuRtvuqbktvBMvte2XkUnstuBA"
+    },
+    {
+      "schemaVersion": 1,
+      "boardId": "board-fixture-v2-populated",
+      "previous": "sha256:mAIzEhdg30VTWodHxguCZ6P75MJ-GRWt6qbDHEv14BE",
+      "signerKeyId": "ed25519:-y9TTfl1XE8ZeROsfH-JZx-XgILqwoN0V4jl7itnTR8",
+      "timestamp": "2026-09-20T09:06:00.000Z",
+      "nonce": "fixture-issue.close-6",
+      "kind": "issue.close",
+      "payload": {
+        "number": 3
+      },
+      "opId": "sha256:mY6ZpxinqrRafpMsXmh1cyhQvI7mKDX8uw9biCqu5NQ",
+      "signature": "KW11dHxQKdcOhpNHV3Yqwf6jNx3CCfgkIrqEY45Bq-DuQ7t-G2aI-C1RpNK-FhbTm0yTwRY4l0ZcA2oe9F-uBg"
+    },
+    {
+      "schemaVersion": 1,
+      "boardId": "board-fixture-v2-populated",
+      "previous": "sha256:mY6ZpxinqrRafpMsXmh1cyhQvI7mKDX8uw9biCqu5NQ",
+      "signerKeyId": "ed25519:-y9TTfl1XE8ZeROsfH-JZx-XgILqwoN0V4jl7itnTR8",
+      "timestamp": "2026-09-20T09:07:00.000Z",
+      "nonce": "fixture-issue.reopen-7",
+      "kind": "issue.reopen",
+      "payload": {
+        "number": 3
+      },
+      "opId": "sha256:hz5LNzaq6T-Z5TvRtBgeHXYClcoMsIi21ToaHZ3RrHg",
+      "signature": "aUHMSjWt5Q9Ju2422Ew75-NhNhfnPRMcz1y5U4ufqeg9TRk1OweNUCNiEnEJef8yx7JE_VAqVx8yoqySJRftDw"
+    },
+    {
+      "schemaVersion": 1,
+      "boardId": "board-fixture-v2-populated",
+      "previous": "sha256:hz5LNzaq6T-Z5TvRtBgeHXYClcoMsIi21ToaHZ3RrHg",
+      "signerKeyId": "ed25519:Vp2GP2F7SOLExy7wSO_56Z0FcZuyCyve-CgikP1aC44",
+      "timestamp": "2026-09-20T09:08:00.000Z",
+      "nonce": "fixture-resource.add-8",
+      "kind": "resource.add",
+      "payload": {
+        "number": 5,
+        "host": "lubko://gpu-01",
+        "path": "/srv/work"
+      },
+      "opId": "sha256:UcwDwqtgJqFVelZHTIf4wW3StFKkTR4P8T3M7wXogH8",
+      "signature": "S2_8FDxJZdVGCv7Q-TIi78bAe0SqGOuVlUHSUjgQ-vZG4aHsKrW7xlbFP8jNZGaqH0EY7BcRIunZvrL7xwm5Bg"
+    },
+    {
+      "schemaVersion": 1,
+      "boardId": "board-fixture-v2-populated",
+      "previous": "sha256:UcwDwqtgJqFVelZHTIf4wW3StFKkTR4P8T3M7wXogH8",
+      "signerKeyId": "ed25519:-y9TTfl1XE8ZeROsfH-JZx-XgILqwoN0V4jl7itnTR8",
+      "timestamp": "2026-09-20T09:09:00.000Z",
+      "nonce": "fixture-resource.remove-9",
+      "kind": "resource.remove",
+      "payload": {
+        "number": 2,
+        "host": "lubko://gpu-02",
+        "path": "/srv/archive"
+      },
+      "opId": "sha256:1n2sVLDiBXT69ADRc7UdKOI39LZ8T17qWTQcaMKOvS4",
+      "signature": "PuT30VaIK_xr0y40XMRdoo8j9Lkfn96T7teMEXRUmTSHRY5mwANMGkVltxPOVVQeWPlAyg-Cs1G_LeXyYNT_Dg"
+    },
+    {
+      "schemaVersion": 1,
+      "boardId": "board-fixture-v2-populated",
+      "previous": "sha256:1n2sVLDiBXT69ADRc7UdKOI39LZ8T17qWTQcaMKOvS4",
+      "signerKeyId": "ed25519:-y9TTfl1XE8ZeROsfH-JZx-XgILqwoN0V4jl7itnTR8",
+      "timestamp": "2026-09-20T09:10:00.000Z",
+      "nonce": "fixture-queue.reorder-10",
+      "kind": "queue.reorder",
+      "payload": {
+        "numbers": [
+          5,
+          1,
+          3,
+          4
+        ]
+      },
+      "opId": "sha256:nans5_6vz3dQDJZ2Vo6FS1BgwTdG3goEBm9jQNqYg0c",
+      "signature": "dTSg5WDSSoiIMt7TkiXSdyWZgDOfRFfbAHD8hlqDSSI7vpmQ6F8ztWaimhvBY6MoCKFXf1GDynqnABrUo4TLDg"
+    },
+    {
+      "schemaVersion": 1,
+      "boardId": "board-fixture-v2-populated",
+      "previous": "sha256:nans5_6vz3dQDJZ2Vo6FS1BgwTdG3goEBm9jQNqYg0c",
+      "signerKeyId": "ed25519:-y9TTfl1XE8ZeROsfH-JZx-XgILqwoN0V4jl7itnTR8",
+      "timestamp": "2026-09-20T09:11:00.000Z",
+      "nonce": "fixture-authority.revoke-11",
+      "kind": "authority.revoke",
+      "payload": {
+        "keyId": "ed25519:Vp2GP2F7SOLExy7wSO_56Z0FcZuyCyve-CgikP1aC44"
+      },
+      "opId": "sha256:wpD2ApRTUkAvLsKombus4cZpfGm2dGvoPWMPzQQjcAk",
+      "signature": "YUe-7pl1uA9HSPeirYm7Ft5hZbcYVAksMuALnfImYE6QNLaVU5lQhyUnzzzw4YTJTWl2GwOFDTutNpIf9yY5DQ"
+    },
+    {
+      "schemaVersion": 1,
+      "boardId": "board-fixture-v2-populated",
+      "previous": "sha256:wpD2ApRTUkAvLsKombus4cZpfGm2dGvoPWMPzQQjcAk",
+      "signerKeyId": "ed25519:-y9TTfl1XE8ZeROsfH-JZx-XgILqwoN0V4jl7itnTR8",
+      "timestamp": "2026-09-20T09:12:00.000Z",
+      "nonce": "fixture-issue.create-12",
+      "kind": "issue.create",
+      "payload": {
+        "number": 6,
+        "title": "After the revocation",
+        "body": "Root-signed tail."
+      },
+      "opId": "sha256:RSHnraJ7x2k_RPC_o0JdrEt1Lvbqp3gLB7qnEhE7MD0",
+      "signature": "1rdifOdfz27Cj_6sau8CDhAF7Y44IMG2egZ9IIP8FUfxi7HKwNZkgH6CkfncZh1st06A6p_SDGjIqi2eatPvBw"
+    }
+  ]
+}

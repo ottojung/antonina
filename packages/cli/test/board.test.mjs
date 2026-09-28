@@ -166,7 +166,7 @@ test('a client on an existing board with no credential is told exactly that', as
   for (const command of [['access'], ['create', 'Mine']]) {
     const { code, err } = await run(command, { createClient: () => reader });
     assert.equal(code, 1, command.join(' '));
-    assert.equal(err[0], 'antonina board: Antonina board credential is required', command.join(' '));
+    assert.equal(err[0], 'antonina board: Antonina board exists; this client has no board credential; save the shared board credential as $XDG_CONFIG_HOME/antonina/credential.json', command.join(' '));
   }
 
   assert.equal(server.signed.revision, 1);
@@ -553,6 +553,6 @@ test('board CLI queue reorder requires a credential and leaves the board alone',
   const { code, err } = await run(['queue', 'reorder', '3', '2', '1'], { createClient: () => reader });
 
   assert.equal(code, 1);
-  assert.equal(err[0], 'antonina board: Antonina board credential is required');
+  assert.equal(err[0], 'antonina board: Antonina board exists; this client has no board credential; save the shared board credential as $XDG_CONFIG_HOME/antonina/credential.json');
   assert.equal(board.server.signed, stored);
 });

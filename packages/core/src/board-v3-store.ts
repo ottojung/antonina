@@ -1,6 +1,11 @@
-import { base64UrlEncode, sha256, type CanonicalValue } from './canonical.js';
 import {
-  credentialSigningKey,
+  base64UrlEncode,
+  canonicalBytes,
+  sha256,
+  sha256Id,
+  type CanonicalValue,
+} from './canonical.js';
+import {
   credentialTrustAnchor,
   verifyBoardCredential,
   type BoardCredential,
@@ -15,23 +20,19 @@ import {
 } from './feed.js';
 import {
   type Board,
-  type BoardIssue,
-  type BoardMessage,
   type BoardDispatch,
   type BoardExecutionTarget,
+  type BoardIssue,
+  type BoardMessage,
   type BoardResource,
   type IssueState,
 } from './model.js';
 import {
   OPLOG_SCHEMA_VERSION,
-  parseSignedBoardOperation,
-  signBoardOperation,
-  verifyAndReplayOperationLog,
-  type BoardOperationLog,
+  applyBoardMutation,
   type BoardOperationPayload,
   type BoardTrustAnchor,
   type SignedBoardOperation,
-  type VerifiedAuthority,
   type VerifiedBoardState,
 } from './operations.js';
 import type {
@@ -40,30 +41,30 @@ import type {
   StoredSignedBoard,
 } from './board-store.js';
 
-export const SHARDED_BOARD_SCHEMA_VERSION = 1 as const;
-export const SHARDED_META_KEY = 'board-v3-meta';
-export const SHARDED_PRESENT_KEY = 'board-v3-present';
-export const SHARDED_LOG_PREFIX = 'board-v3-log';
-export const SHARDED_ISSUE_PREFIX = 'board-v3-issue';
-export const SHARDED_COMMENT_PREFIX = 'board-v3-comments';
-export const SHARDED_OPEN_PREFIX = 'board-v3-issues-open';
-export const SHARDED_CLOSED_PREFIX = 'board-v3-issues-closed';
-export const SHARDED_QUEUE_KEY = 'board-v3-queue';
-export const SHARDED_CATALOG_KEY = 'board-v3-catalog';
-export const SHARDED_AUTHORITIES_KEY = 'board-v3-authorities';
-export const SHARDED_FEED_PREFIX = 'board-v3-feed';
-
-export const V3_LOG_CHUNK_SIZE = 100;
+export const SHARDED_BOARD_SCHEMA_VERSION = 2 as const;
 export const V3_ISSUE_PAGE_SIZE = 50;
 export const V3_COMMENT_PAGE_SIZE = 50;
 export const V3_FEED_PAGE_SIZE = 50;
 
+const POINTER_FORMAT = 'materialized-snapshots' as const;
+const POINTER_KEY = 'board-v2';
+const DIRECTORY_PAGE_SIZE = 50;
 const DEFAULT_MAX_ATTEMPTS = 6;
 const textEncoder = new TextEncoder();
 
-async function objectLocator(storageCapability: string, logicalKey: string): Promise<string> {
-  const bytes = textEncoder.encode(storageCapability + ':' + logicalKey);
-  return 'board-v3-' + base64UrlEncode(await sha256(bytes));
+interface JsonObject<T> {
+  value: T;
+  etag: string;
+}
+
+export interface ShardedBoardPointer {
+  schemaVersion: 3;
+  format: typeof POINTER_FORMAT;
+  boardId: string;
+  rootKeyId: string;
+  head: string;
+  revision: number;
+  metaRef: string;
 }
 
 export interface ShardedBoardMeta {
@@ -71,30 +72,34 @@ export interface ShardedBoardMeta {
   boardId: string;
   rootKeyId: string;
   head: string;
-  operationCount: number;
-  /** Number of immutable, full log chunks preceding tailOperations. */
-  logChunkCount: number;
-  /** The committed mutable tail; bounded to V3_LOG_CHUNK_SIZE operations. */
-  tailOperations: SignedBoardOperation[];
-  /** Highest committed revision fully reflected in all materialized caches. */
-  materializedRevision: number;
+  revision: number;
+  updatedAt: string;
+  migratedFrom: string | null;
   nextIssueNumber: number;
   issueCount: number;
   openIssueCount: number;
   closedIssueCount: number;
-  openPageCount: number;
-  closedPageCount: number;
+  directoryRefs: Array<string | null>;
+  openPageRefs: string[];
+  closedPageRefs: string[];
+  queueRef: string;
+  catalogRef: string;
+  feedPageRefs: string[];
   feedCount: number;
-  feedPageCount: number;
   deleted: boolean;
-  migratedFrom: string;
 }
 
-interface ShardedLogChunk {
+interface DirectoryEntry {
+  number: number;
+  ref: string;
+}
+
+interface DirectoryPage {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;
-  chunk: number;
-  operations: SignedBoardOperation[];
+  page: number;
+  revision: number;
+  entries: DirectoryEntry[];
 }
 
 interface IssueCore {
@@ -106,18 +111,18 @@ interface IssueCore {
   updatedAt: string;
 }
 
-interface ShardedIssueRecord {
+interface IssueSnapshot {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;
   number: number;
   revision: number;
-  deleted: boolean;
-  issue: IssueCore | null;
+  issue: IssueCore;
+  closedAt: string | null;
   messageCount: number;
-  commentPageCount: number;
+  commentRefs: string[];
 }
 
-interface ShardedCommentPage {
+interface CommentPage {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;
   number: number;
@@ -147,14 +152,14 @@ export interface IssueListPage {
   entries: IssueListSummary[];
 }
 
-interface ShardedQueue {
+interface QueueSnapshot {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;
   revision: number;
   numbers: number[];
 }
 
-interface ShardedCatalog {
+interface CatalogSnapshot {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;
   revision: number;
@@ -163,14 +168,7 @@ interface ShardedCatalog {
   dispatches: BoardDispatch[];
 }
 
-interface ShardedAuthorities {
-  schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
-  boardId: string;
-  revision: number;
-  authorities: VerifiedAuthority[];
-}
-
-interface ShardedFeedPage {
+interface FeedPage {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;
   page: number;
@@ -178,9 +176,13 @@ interface ShardedFeedPage {
   entries: BoardFeedEntry[];
 }
 
-interface JsonObject<T> {
-  value: T;
-  etag: string;
+interface StateBundle {
+  meta: ShardedBoardMeta;
+  state: VerifiedBoardState;
+  issueRefs: Map<number, string>;
+  issueSnapshots: Map<number, IssueSnapshot>;
+  closedAt: Map<number, string>;
+  directoryPages: Map<number, DirectoryPage>;
 }
 
 export class ShardedBoardStoreError extends Error {
@@ -200,30 +202,6 @@ function defaultId(): string {
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-function padded(value: number): string {
-  return String(value).padStart(9, '0');
-}
-
-function logKey(chunk: number): string {
-  return `${SHARDED_LOG_PREFIX}-${padded(chunk)}`;
-}
-
-function issueKey(number: number): string {
-  return `${SHARDED_ISSUE_PREFIX}-${padded(number)}`;
-}
-
-function commentKey(number: number, page: number): string {
-  return `${SHARDED_COMMENT_PREFIX}-${padded(number)}-${padded(page)}`;
-}
-
-function issuePageKey(state: IssueState, page: number): string {
-  return `${state === 'open' ? SHARDED_OPEN_PREFIX : SHARDED_CLOSED_PREFIX}-${padded(page)}`;
-}
-
-function feedPageKey(page: number): string {
-  return `${SHARDED_FEED_PREFIX}-${padded(page)}`;
-}
-
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
@@ -239,37 +217,96 @@ function requireSafeCount(value: unknown, name: string): number {
   return value as number;
 }
 
+function requireText(value: unknown, name: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new ShardedBoardStoreError(`Antonina v3 ${name} is malformed`);
+  }
+  return value;
+}
+
+function canonicalTimestampAtOrAfter(value: string, floor: string): string {
+  const millis = Date.parse(value);
+  const floorMillis = Date.parse(floor);
+  if (!Number.isFinite(millis) || new Date(millis).toISOString() !== value || !Number.isFinite(floorMillis)) {
+    throw new ShardedBoardStoreError('Antonina v3 timestamp is malformed');
+  }
+  return new Date(Math.max(millis, floorMillis)).toISOString();
+}
+
+function pointerOf(value: unknown): ShardedBoardPointer | null {
+  if (!isRecord(value)
+      || value.schemaVersion !== 3
+      || value.format !== POINTER_FORMAT
+      || typeof value.boardId !== 'string'
+      || typeof value.rootKeyId !== 'string'
+      || typeof value.head !== 'string'
+      || !Number.isSafeInteger(value.revision)
+      || (value.revision as number) < 1
+      || typeof value.metaRef !== 'string') {
+    return null;
+  }
+  return {
+    schemaVersion: 3,
+    format: POINTER_FORMAT,
+    boardId: value.boardId,
+    rootKeyId: value.rootKeyId,
+    head: value.head,
+    revision: value.revision as number,
+    metaRef: value.metaRef,
+  };
+}
+
+export function parseShardedBoardPointer(value: unknown): ShardedBoardPointer | null {
+  return pointerOf(value);
+}
+
 function parseMeta(value: unknown): ShardedBoardMeta {
   if (!isRecord(value)
       || value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
       || typeof value.boardId !== 'string'
       || typeof value.rootKeyId !== 'string'
       || typeof value.head !== 'string'
-      || typeof value.deleted !== 'boolean'
-      || typeof value.migratedFrom !== 'string') {
+      || typeof value.updatedAt !== 'string'
+      || (value.migratedFrom !== null && typeof value.migratedFrom !== 'string')
+      || !Array.isArray(value.directoryRefs)
+      || !Array.isArray(value.openPageRefs)
+      || !Array.isArray(value.closedPageRefs)
+      || typeof value.queueRef !== 'string'
+      || typeof value.catalogRef !== 'string'
+      || !Array.isArray(value.feedPageRefs)
+      || typeof value.deleted !== 'boolean') {
     throw new ShardedBoardStoreError('Antonina v3 metadata is malformed');
   }
+  const directoryRefs = value.directoryRefs.map((entry) => {
+    if (entry !== null && typeof entry !== 'string') {
+      throw new ShardedBoardStoreError('Antonina v3 directory references are malformed');
+    }
+    return entry;
+  });
+  const strings = (entries: unknown[], name: string): string[] => entries.map((entry) => {
+    if (typeof entry !== 'string') throw new ShardedBoardStoreError(`Antonina v3 ${name} are malformed`);
+    return entry;
+  });
   return {
     schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
     boardId: value.boardId,
     rootKeyId: value.rootKeyId,
     head: value.head,
-    operationCount: requireSafeCount(value.operationCount, 'operation count'),
-    logChunkCount: requireSafeCount(value.logChunkCount, 'log chunk count'),
-    tailOperations: Array.isArray(value.tailOperations)
-      ? value.tailOperations.map(parseSignedBoardOperation)
-      : (() => { throw new ShardedBoardStoreError('Antonina v3 tail operations are malformed'); })(),
-    materializedRevision: requireSafeCount(value.materializedRevision, 'materialized revision'),
+    revision: requireSafeCount(value.revision, 'revision'),
+    updatedAt: value.updatedAt,
+    migratedFrom: value.migratedFrom,
     nextIssueNumber: requireSafeCount(value.nextIssueNumber, 'next issue number'),
     issueCount: requireSafeCount(value.issueCount, 'issue count'),
     openIssueCount: requireSafeCount(value.openIssueCount, 'open issue count'),
     closedIssueCount: requireSafeCount(value.closedIssueCount, 'closed issue count'),
-    openPageCount: requireSafeCount(value.openPageCount, 'open page count'),
-    closedPageCount: requireSafeCount(value.closedPageCount, 'closed page count'),
+    directoryRefs,
+    openPageRefs: strings(value.openPageRefs, 'open page references'),
+    closedPageRefs: strings(value.closedPageRefs, 'closed page references'),
+    queueRef: value.queueRef,
+    catalogRef: value.catalogRef,
+    feedPageRefs: strings(value.feedPageRefs, 'feed page references'),
     feedCount: requireSafeCount(value.feedCount, 'feed count'),
-    feedPageCount: requireSafeCount(value.feedPageCount, 'feed page count'),
     deleted: value.deleted,
-    migratedFrom: value.migratedFrom,
   };
 }
 
@@ -284,70 +321,68 @@ function coreOf(issue: BoardIssue): IssueCore {
   };
 }
 
-function issueRecord(boardId: string, issue: BoardIssue, revision: number): ShardedIssueRecord {
+function issueFromCore(core: IssueCore, messages: BoardMessage[]): BoardIssue {
   return {
-    schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-    boardId,
-    number: issue.number,
-    revision,
-    deleted: false,
-    issue: coreOf(issue),
-    messageCount: issue.messages.length,
-    commentPageCount: Math.ceil(issue.messages.length / V3_COMMENT_PAGE_SIZE),
+    number: core.number,
+    title: core.title,
+    body: core.body,
+    state: core.state,
+    createdAt: core.createdAt,
+    updatedAt: core.updatedAt,
+    messages,
   };
 }
 
-function deletedIssueRecord(boardId: string, number: number, revision: number): ShardedIssueRecord {
-  return {
-    schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-    boardId,
-    number,
-    revision,
-    deleted: true,
-    issue: null,
-    messageCount: 0,
-    commentPageCount: 0,
-  };
+function directoryPageNumber(issueNumber: number): number {
+  return Math.floor((issueNumber - 1) / DIRECTORY_PAGE_SIZE) + 1;
 }
 
-function closedAtByIssue(log: BoardOperationLog, board: Board): Map<number, string> {
-  const closed = new Map<number, string>();
+function pageRef(kind: string, head: string, page: number): string {
+  return `${kind}:${head}:${String(page).padStart(9, '0')}`;
+}
+
+function singletonRef(kind: string, head: string): string {
+  return `${kind}:${head}`;
+}
+
+function jsonSame(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function closedAtFromLegacy(log: NonNullable<StoredSignedBoard['log']>, board: Board): Map<number, string> {
+  const result = new Map<number, string>();
   for (const issue of board.issues) {
-    if (issue.state === 'closed') closed.set(issue.number, issue.updatedAt);
+    if (issue.state === 'closed') result.set(issue.number, issue.updatedAt);
   }
   for (const operation of log.operations) {
     if (operation.kind === 'issue.close') {
-      const payload = operation.payload as { number: number };
-      closed.set(payload.number, operation.timestamp);
+      result.set((operation.payload as { number: number }).number, operation.timestamp);
     } else if (operation.kind === 'issue.reopen' || operation.kind === 'issue.delete') {
-      const payload = operation.payload as { number: number };
-      closed.delete(payload.number);
+      result.delete((operation.payload as { number: number }).number);
     }
   }
-  return closed;
+  return result;
 }
 
-function orderedIssues(state: VerifiedBoardState, log: BoardOperationLog, issueState: IssueState): BoardIssue[] {
+function orderedSummaries(
+  state: VerifiedBoardState,
+  closedAt: Map<number, string>,
+  issueState: IssueState,
+): IssueListSummary[] {
   const byNumber = new Map(state.board.issues.map((issue) => [issue.number, issue]));
-  if (issueState === 'open') {
-    return state.queue.flatMap((number) => {
-      const issue = byNumber.get(number);
-      return issue?.state === 'open' ? [issue] : [];
-    });
-  }
-  const closedAt = closedAtByIssue(log, state.board);
-  return state.board.issues
-    .filter((issue) => issue.state === 'closed')
-    .sort((left, right) => {
-      const time = (closedAt.get(right.number) ?? right.updatedAt)
-        .localeCompare(closedAt.get(left.number) ?? left.updatedAt);
-      return time || right.number - left.number;
-    });
-}
-
-function summaries(state: VerifiedBoardState, log: BoardOperationLog, issueState: IssueState): IssueListSummary[] {
-  const closedAt = closedAtByIssue(log, state.board);
-  return orderedIssues(state, log, issueState).map((issue) => ({
+  const ordered = issueState === 'open'
+    ? state.queue.flatMap((number) => {
+        const issue = byNumber.get(number);
+        return issue?.state === 'open' ? [issue] : [];
+      })
+    : state.board.issues
+        .filter((issue) => issue.state === 'closed')
+        .sort((left, right) => {
+          const time = (closedAt.get(right.number) ?? right.updatedAt)
+            .localeCompare(closedAt.get(left.number) ?? left.updatedAt);
+          return time || right.number - left.number;
+        });
+  return ordered.map((issue) => ({
     number: issue.number,
     title: issue.title,
     state: issue.state,
@@ -359,105 +394,76 @@ function summaries(state: VerifiedBoardState, log: BoardOperationLog, issueState
   }));
 }
 
-function issuePages(
-  boardId: string,
-  state: VerifiedBoardState,
-  log: BoardOperationLog,
-  issueState: IssueState,
-  revision: number,
-): IssueListPage[] {
-  const entries = summaries(state, log, issueState);
-  const pages: IssueListPage[] = [];
-  for (let offset = 0; offset < entries.length; offset += V3_ISSUE_PAGE_SIZE) {
-    pages.push({
-      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-      boardId,
-      state: issueState,
-      page: Math.floor(offset / V3_ISSUE_PAGE_SIZE) + 1,
-      revision,
-      total: entries.length,
-      entries: entries.slice(offset, offset + V3_ISSUE_PAGE_SIZE),
-    });
+function paginate<T>(entries: T[], size: number): T[][] {
+  const pages: T[][] = [];
+  for (let offset = 0; offset < entries.length; offset += size) {
+    pages.push(entries.slice(offset, offset + size));
   }
   return pages;
-}
-
-function feedPages(boardId: string, log: BoardOperationLog, revision: number): ShardedFeedPage[] {
-  const ascending = [...feedEntries(log)].sort((left, right) => left.position - right.position);
-  const pages: ShardedFeedPage[] = [];
-  for (let offset = 0; offset < ascending.length; offset += V3_FEED_PAGE_SIZE) {
-    pages.push({
-      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-      boardId,
-      page: Math.floor(offset / V3_FEED_PAGE_SIZE) + 1,
-      revision,
-      entries: ascending.slice(offset, offset + V3_FEED_PAGE_SIZE),
-    });
-  }
-  return pages;
-}
-
-function metaFor(
-  log: BoardOperationLog,
-  state: VerifiedBoardState,
-  migratedFrom: string,
-  materializedRevision: number,
-): ShardedBoardMeta {
-  const feedCount = feedEntries(log).length;
-  const open = state.board.issues.filter((issue) => issue.state === 'open').length;
-  const closed = state.board.issues.filter((issue) => issue.state === 'closed').length;
-  // Keep at least one committed operation in the CAS-controlled tail. Full
-  // chunks before it are immutable once sealed.
-  const logChunkCount = Math.floor((log.operations.length - 1) / V3_LOG_CHUNK_SIZE);
-  const tailOperations = log.operations.slice(logChunkCount * V3_LOG_CHUNK_SIZE);
-  return {
-    schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-    boardId: log.boardId,
-    rootKeyId: log.rootKeyId,
-    head: state.head,
-    operationCount: log.operations.length,
-    logChunkCount,
-    tailOperations,
-    materializedRevision,
-    nextIssueNumber: state.board.nextIssueNumber,
-    issueCount: state.board.issues.length,
-    openIssueCount: open,
-    closedIssueCount: closed,
-    openPageCount: Math.ceil(open / V3_ISSUE_PAGE_SIZE),
-    closedPageCount: Math.ceil(closed / V3_ISSUE_PAGE_SIZE),
-    feedCount,
-    feedPageCount: Math.ceil(feedCount / V3_FEED_PAGE_SIZE),
-    deleted: state.deleted,
-    migratedFrom,
-  };
-}
-
-function appendToLog(log: BoardOperationLog, operation: SignedBoardOperation): BoardOperationLog {
-  return {
-    ...clone(log),
-    head: operation.opId,
-    operations: [...log.operations, operation],
-  };
-}
-
-function canonicalTimestampAtOrAfter(value: string, floor?: string): string {
-  const millis = Date.parse(value);
-  if (!Number.isFinite(millis) || new Date(millis).toISOString() !== value) {
-    throw new ShardedBoardStoreError('Signed board operation timestamp must be canonical ISO-8601 UTC');
-  }
-  if (floor === undefined) return value;
-  const floorMillis = Date.parse(floor);
-  if (!Number.isFinite(floorMillis)) throw new ShardedBoardStoreError('Signed board timestamp floor is malformed');
-  return new Date(Math.max(millis, floorMillis)).toISOString();
 }
 
 function feedCursor(entry: Pick<BoardFeedEntry, 'at' | 'position'>): string {
   return 'v1.' + base64UrlEncode(textEncoder.encode(JSON.stringify([entry.at, entry.position])));
 }
 
+function feedEntryForMutation(
+  kind: AppendOperationRequest['kind'],
+  payload: BoardOperationPayload,
+  before: BoardIssue | undefined,
+  after: BoardIssue | undefined,
+  id: string,
+  at: string,
+  position: number,
+): BoardFeedEntry | null {
+  let feedKind: BoardFeedEntry['kind'];
+  let issue: BoardIssue | undefined = after ?? before;
+  let author: string | null = null;
+  let body: string | null = null;
+  switch (kind) {
+    case 'issue.create':
+      feedKind = 'issue-created';
+      break;
+    case 'issue.edit':
+      feedKind = 'issue-edited';
+      break;
+    case 'issue.comment': {
+      feedKind = 'comment-added';
+      const comment = payload as { author: string; body: string };
+      author = comment.author;
+      body = comment.body;
+      break;
+    }
+    case 'issue.close':
+      feedKind = 'issue-closed';
+      break;
+    case 'issue.reopen':
+      feedKind = 'issue-reopened';
+      break;
+    case 'issue.delete':
+      feedKind = 'issue-deleted';
+      break;
+    default:
+      return null;
+  }
+  if (issue === undefined) throw new ShardedBoardStoreError('Issue mutation has no materialized issue');
+  return {
+    id,
+    kind: feedKind,
+    at,
+    position,
+    issueNumber: issue.number,
+    title: issue.title,
+    state: issue.state,
+    messageId: kind === 'issue.comment' ? id : null,
+    author,
+    body,
+  };
+}
+
 export class ShardedBoardStore {
   private readonly fetcher: typeof fetch;
   private readonly baseUrl: string;
+  private readonly pointerUrl: string;
   private readonly maxAttempts: number;
   private readonly now: () => Date;
   private readonly newId: () => string;
@@ -468,824 +474,1014 @@ export class ShardedBoardStore {
     }
     this.fetcher = options.fetch ?? fetch.bind(globalThis);
     this.baseUrl = (options.baseUrl ?? '/_skrynia').replace(/\/$/, '');
+    this.pointerUrl = `${this.baseUrl}/store/antonina/${encodeURIComponent(POINTER_KEY)}`;
     this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     this.now = options.now ?? (() => new Date());
     this.newId = options.newId ?? defaultId;
   }
 
-  private async url(key: string, storageCapability: string): Promise<string> {
-    const locator = await objectLocator(storageCapability, key);
-    return `${this.baseUrl}/store/antonina/${encodeURIComponent(locator)}`;
+  private async locator(storageCapability: string, logicalRef: string): Promise<string> {
+    const bytes = textEncoder.encode(storageCapability + ':' + logicalRef);
+    return 'board-v3-' + base64UrlEncode(await sha256(bytes));
+  }
+
+  private async url(storageCapability: string, logicalRef: string): Promise<string> {
+    return `${this.baseUrl}/store/antonina/${encodeURIComponent(await this.locator(storageCapability, logicalRef))}`;
   }
 
   private async parseJson(response: Response, context: string): Promise<unknown> {
     try {
       return await response.json();
-    } catch (error) {
-      throw new ShardedBoardStoreError(`${context} returned invalid JSON`, { cause: error });
+    } catch (cause) {
+      throw new ShardedBoardStoreError(`${context} returned invalid JSON`, { cause });
     }
   }
 
-  private httpError(method: string, key: string, response: Response): ShardedBoardStoreError {
+  private error(method: string, key: string, response: Response): ShardedBoardStoreError {
     return new ShardedBoardStoreError(
-      `Skrynia ${method} Antonina v3 object ${key} failed (${response.status})`,
+      `Skrynia ${method} Antonina ${key} failed (${response.status})`,
       { status: response.status, method },
     );
   }
 
-  private async getJson<T>(
-    key: string,
-    storageCapability: string,
-  ): Promise<JsonObject<T> | null> {
-    const response = await this.fetcher(await this.url(key, storageCapability), { cache: 'no-store' });
+  async readPointer(): Promise<JsonObject<ShardedBoardPointer> | null> {
+    const response = await this.fetcher(this.pointerUrl, { cache: 'no-store' });
     if (response.status === 404) return null;
-    if (response.status !== 200) throw this.httpError('GET', key, response);
+    if (response.status !== 200) throw this.error('GET', POINTER_KEY, response);
     const etag = response.headers.get('ETag');
-    if (!etag) throw new ShardedBoardStoreError(`Skrynia GET Antonina v3 object ${key} returned no ETag`);
-    return { value: await this.parseJson(response, `Skrynia GET Antonina v3 object ${key}`) as T, etag };
+    if (!etag) throw new ShardedBoardStoreError('Skrynia board pointer returned no ETag');
+    const value = await this.parseJson(response, 'Skrynia board pointer');
+    const pointer = pointerOf(value);
+    return pointer === null ? null : { value: pointer, etag };
   }
 
-  private async createPublic(
-    key: string,
-    value: unknown,
-    storageCapability: string,
-  ): Promise<boolean> {
-    const response = await this.fetcher(await this.url(key, storageCapability), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Skrynia-Mode': 'public-write',
-      },
-      body: JSON.stringify(value),
-    });
-    if (response.status === 409) return false;
-    if (response.status !== 201) throw this.httpError('POST', key, response);
-    return true;
-  }
-
-  private async putPublic(
-    key: string,
-    value: unknown,
-    storageCapability: string,
-    etag?: string,
-  ): Promise<boolean> {
-    const headers = new Headers({ 'Content-Type': 'application/json' });
-    if (etag !== undefined) headers.set('If-Match', etag);
-    const response = await this.fetcher(await this.url(key, storageCapability), {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify(value),
-    });
-    if (response.status === 412) return false;
-    if (response.status !== 200) throw this.httpError('PUT', key, response);
-    return true;
-  }
-
-  private async upsertPublic(
-    key: string,
-    value: unknown,
-    storageCapability: string,
-  ): Promise<void> {
-    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const current = await this.getJson<unknown>(key, storageCapability);
-      if (current === null) {
-        if (await this.createPublic(key, value, storageCapability)) return;
-      } else {
-        if (isRecord(current.value) && isRecord(value)
-            && Number.isSafeInteger(current.value.revision)
-            && Number.isSafeInteger(value.revision)
-            && (current.value.revision as number) > (value.revision as number)) {
-          return;
-        }
-        if (await this.putPublic(key, value, storageCapability, current.etag)) return;
-      }
-    }
-    throw new ShardedBoardStoreError(`Antonina v3 object ${key} changed too often`);
-  }
-
-  async exists(storageCapability: string): Promise<boolean> {
-    return (await this.getJson<unknown>(SHARDED_META_KEY, storageCapability)) !== null;
-  }
-
-  /**
-   * Public marker contains no board contents. It only prevents a client with a
-   * wrong board key from silently falling back to the frozen public board-v2
-   * snapshot after the board has migrated.
-   */
-  async migrationMarker(): Promise<{ boardId: string; rootKeyId: string } | null> {
-    const response = await this.fetcher(
-      `${this.baseUrl}/store/antonina/${encodeURIComponent(SHARDED_PRESENT_KEY)}`,
-      { cache: 'no-store' },
-    );
+  private async getJson<T>(storageCapability: string, logicalRef: string): Promise<JsonObject<T> | null> {
+    const response = await this.fetcher(await this.url(storageCapability, logicalRef), { cache: 'no-store' });
     if (response.status === 404) return null;
-    if (response.status !== 200) throw this.httpError('GET', SHARDED_PRESENT_KEY, response);
-    const value = await this.parseJson(response, 'Skrynia GET Antonina v3 migration marker');
-    if (!isRecord(value) || typeof value.boardId !== 'string' || typeof value.rootKeyId !== 'string') {
-      throw new ShardedBoardStoreError('Antonina v3 migration marker is malformed');
-    }
-    return { boardId: value.boardId, rootKeyId: value.rootKeyId };
+    if (response.status !== 200) throw this.error('GET', logicalRef, response);
+    const etag = response.headers.get('ETag');
+    if (!etag) throw new ShardedBoardStoreError(`Skrynia v3 object ${logicalRef} returned no ETag`);
+    return {
+      value: await this.parseJson(response, `Skrynia v3 object ${logicalRef}`) as T,
+      etag,
+    };
   }
 
-  private async ensureMigrationMarker(boardId: string, rootKeyId: string): Promise<void> {
-    const url = `${this.baseUrl}/store/antonina/${encodeURIComponent(SHARDED_PRESENT_KEY)}`;
-    const response = await this.fetcher(url, {
+  private async requireJson<T>(storageCapability: string, logicalRef: string): Promise<JsonObject<T>> {
+    const value = await this.getJson<T>(storageCapability, logicalRef);
+    if (value === null) {
+      throw new ShardedBoardStoreError('Antonina board key does not open the current materialized snapshot');
+    }
+    return value;
+  }
+
+  private async writeImmutable(storageCapability: string, logicalRef: string, value: unknown): Promise<void> {
+    const response = await this.fetcher(await this.url(storageCapability, logicalRef), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Skrynia-Mode': 'immutable',
       },
-      body: JSON.stringify({ boardId, rootKeyId }),
+      body: JSON.stringify(value),
     });
     if (response.status === 201) return;
-    if (response.status !== 409) throw this.httpError('POST', SHARDED_PRESENT_KEY, response);
-    const existing = await this.migrationMarker();
-    if (existing?.boardId !== boardId || existing.rootKeyId !== rootKeyId) {
-      throw new ShardedBoardStoreError('Antonina v3 migration marker belongs to another board');
+    if (response.status !== 409) throw this.error('POST', logicalRef, response);
+    const current = await this.requireJson<unknown>(storageCapability, logicalRef);
+    if (!jsonSame(current.value, value)) {
+      throw new ShardedBoardStoreError(`Antonina immutable snapshot collision at ${logicalRef}`);
     }
   }
 
-  async loadMeta(
+  private async commitPointer(
     storageCapability: string,
-    anchor?: BoardTrustAnchor,
-  ): Promise<JsonObject<ShardedBoardMeta> | null> {
-    const stored = await this.getJson<unknown>(SHARDED_META_KEY, storageCapability);
-    if (stored === null) return null;
-    const meta = parseMeta(stored.value);
-    if (anchor !== undefined
-        && (meta.boardId !== anchor.boardId || meta.rootKeyId !== anchor.rootKeyId)) {
-      throw new ShardedBoardStoreError('Antonina v3 metadata does not match this board credential');
-    }
-    return { value: meta, etag: stored.etag };
-  }
-
-  private async readChunk(
-    boardId: string,
-    chunk: number,
-    storageCapability: string,
-  ): Promise<JsonObject<ShardedLogChunk>> {
-    const stored = await this.getJson<unknown>(logKey(chunk), storageCapability);
-    if (stored === null || !isRecord(stored.value)
-        || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
-        || stored.value.boardId !== boardId
-        || stored.value.chunk !== chunk
-        || !Array.isArray(stored.value.operations)) {
-      throw new ShardedBoardStoreError(`Antonina v3 log chunk ${chunk} is missing or malformed`);
-    }
-    return {
-      etag: stored.etag,
-      value: {
-        schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-        boardId,
-        chunk,
-        operations: stored.value.operations.map(parseSignedBoardOperation),
+    etag: string,
+    pointer: ShardedBoardPointer,
+  ): Promise<boolean> {
+    const response = await this.fetcher(this.pointerUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Skrynia-Capability': storageCapability,
+        'If-Match': etag,
       },
+      body: JSON.stringify(pointer),
+    });
+    if (response.status === 412) return false;
+    if (response.status !== 200) throw this.error('PUT', POINTER_KEY, response);
+    return true;
+  }
+
+  private async readMeta(
+    pointer: ShardedBoardPointer,
+    credential: BoardCredential,
+  ): Promise<ShardedBoardMeta> {
+    const anchor = credentialTrustAnchor(credential);
+    if (pointer.boardId !== anchor.boardId || pointer.rootKeyId !== anchor.rootKeyId) {
+      throw new ShardedBoardStoreError('Antonina board pointer does not match this credential');
+    }
+    const stored = await this.requireJson<unknown>(credential.storageCapability, pointer.metaRef);
+    const meta = parseMeta(stored.value);
+    if (meta.boardId !== pointer.boardId
+        || meta.rootKeyId !== pointer.rootKeyId
+        || meta.head !== pointer.head
+        || meta.revision !== pointer.revision) {
+      throw new ShardedBoardStoreError('Antonina materialized metadata does not match its board pointer');
+    }
+    return meta;
+  }
+
+  private async readDirectoryPage(
+    credential: BoardCredential,
+    meta: ShardedBoardMeta,
+    page: number,
+  ): Promise<DirectoryPage | null> {
+    const ref = meta.directoryRefs[page - 1];
+    if (ref === undefined || ref === null) return null;
+    const stored = await this.requireJson<unknown>(credential.storageCapability, ref);
+    const value = stored.value;
+    if (!isRecord(value)
+        || value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
+        || value.boardId !== meta.boardId
+        || value.page !== page
+        || !Array.isArray(value.entries)) {
+      throw new ShardedBoardStoreError('Antonina issue directory page is malformed');
+    }
+    const entries = value.entries.map((entry) => {
+      if (!isRecord(entry) || !Number.isSafeInteger(entry.number) || typeof entry.ref !== 'string') {
+        throw new ShardedBoardStoreError('Antonina issue directory entry is malformed');
+      }
+      return { number: entry.number as number, ref: entry.ref };
+    });
+    return {
+      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+      boardId: meta.boardId,
+      page,
+      revision: requireSafeCount(value.revision, 'directory revision'),
+      entries,
     };
   }
 
-  private async readLog(meta: ShardedBoardMeta, storageCapability: string): Promise<BoardOperationLog> {
-    if (meta.tailOperations.length < 1 || meta.tailOperations.length > V3_LOG_CHUNK_SIZE) {
-      throw new ShardedBoardStoreError('Antonina v3 log tail size is malformed');
+  private async readIssueSnapshot(
+    credential: BoardCredential,
+    meta: ShardedBoardMeta,
+    ref: string,
+    withMessages: boolean,
+  ): Promise<{ snapshot: IssueSnapshot; issue: BoardIssue }> {
+    const stored = await this.requireJson<unknown>(credential.storageCapability, ref);
+    const value = stored.value;
+    if (!isRecord(value)
+        || value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
+        || value.boardId !== meta.boardId
+        || !Number.isSafeInteger(value.number)
+        || !isRecord(value.issue)
+        || (value.closedAt !== null && typeof value.closedAt !== 'string')
+        || !Number.isSafeInteger(value.messageCount)
+        || !Array.isArray(value.commentRefs)) {
+      throw new ShardedBoardStoreError('Antonina issue snapshot is malformed');
     }
-    const chunks = await Promise.all(
-      Array.from(
-        { length: meta.logChunkCount },
-        (_, index) => this.readChunk(meta.boardId, index + 1, storageCapability),
-      ),
-    );
-    for (const chunk of chunks) {
-      if (chunk.value.operations.length !== V3_LOG_CHUNK_SIZE) {
-        throw new ShardedBoardStoreError('Antonina v3 sealed log chunk is not full');
+    const coreValue = value.issue;
+    if (!Number.isSafeInteger(coreValue.number)
+        || typeof coreValue.title !== 'string'
+        || typeof coreValue.body !== 'string'
+        || (coreValue.state !== 'open' && coreValue.state !== 'closed')
+        || typeof coreValue.createdAt !== 'string'
+        || typeof coreValue.updatedAt !== 'string') {
+      throw new ShardedBoardStoreError('Antonina issue core is malformed');
+    }
+    const commentRefs = value.commentRefs.map((entry) => requireText(entry, 'comment reference'));
+    const snapshot: IssueSnapshot = {
+      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+      boardId: meta.boardId,
+      number: value.number as number,
+      revision: requireSafeCount(value.revision, 'issue revision'),
+      issue: {
+        number: coreValue.number as number,
+        title: coreValue.title,
+        body: coreValue.body,
+        state: coreValue.state,
+        createdAt: coreValue.createdAt,
+        updatedAt: coreValue.updatedAt,
+      },
+      closedAt: value.closedAt,
+      messageCount: requireSafeCount(value.messageCount, 'message count'),
+      commentRefs,
+    };
+    if (snapshot.number !== snapshot.issue.number) {
+      throw new ShardedBoardStoreError('Antonina issue snapshot number mismatch');
+    }
+    if (!withMessages) return { snapshot, issue: issueFromCore(snapshot.issue, []) };
+
+    const pages = await Promise.all(commentRefs.map(async (commentRef, index) => {
+      const pageStored = await this.requireJson<unknown>(credential.storageCapability, commentRef);
+      const pageValue = pageStored.value;
+      if (!isRecord(pageValue)
+          || pageValue.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
+          || pageValue.boardId !== meta.boardId
+          || pageValue.number !== snapshot.number
+          || pageValue.page !== index + 1
+          || !Array.isArray(pageValue.messages)) {
+        throw new ShardedBoardStoreError('Antonina comment page is malformed');
       }
+      return clone(pageValue.messages as BoardMessage[]);
+    }));
+    const messages = pages.flat();
+    if (messages.length !== snapshot.messageCount) {
+      throw new ShardedBoardStoreError('Antonina issue message count does not match its comment pages');
     }
-    const operations = [
-      ...chunks.flatMap((chunk) => chunk.value.operations),
-      ...meta.tailOperations,
-    ];
-    if (operations.length !== meta.operationCount) {
-      throw new ShardedBoardStoreError('Antonina v3 log length does not match its committed operation count');
+    return { snapshot, issue: issueFromCore(snapshot.issue, messages) };
+  }
+
+  private async readQueue(credential: BoardCredential, meta: ShardedBoardMeta): Promise<number[]> {
+    const stored = await this.requireJson<unknown>(credential.storageCapability, meta.queueRef);
+    const value = stored.value;
+    if (!isRecord(value)
+        || value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
+        || value.boardId !== meta.boardId
+        || !Array.isArray(value.numbers)
+        || !value.numbers.every((number) => Number.isSafeInteger(number))) {
+      throw new ShardedBoardStoreError('Antonina queue snapshot is malformed');
     }
-    if (operations.at(-1)?.opId !== meta.head) {
-      throw new ShardedBoardStoreError('Antonina v3 metadata head does not match its committed log');
+    return [...value.numbers as number[]];
+  }
+
+  private async readCatalog(credential: BoardCredential, meta: ShardedBoardMeta): Promise<CatalogSnapshot> {
+    const stored = await this.requireJson<unknown>(credential.storageCapability, meta.catalogRef);
+    const value = stored.value;
+    if (!isRecord(value)
+        || value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
+        || value.boardId !== meta.boardId
+        || !Array.isArray(value.resources)
+        || !Array.isArray(value.targets)
+        || !Array.isArray(value.dispatches)) {
+      throw new ShardedBoardStoreError('Antonina catalog snapshot is malformed');
     }
     return {
-      schemaVersion: OPLOG_SCHEMA_VERSION,
+      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId: meta.boardId,
-      rootKeyId: meta.rootKeyId,
-      head: meta.head,
-      operations,
+      revision: requireSafeCount(value.revision, 'catalog revision'),
+      resources: clone(value.resources as BoardResource[]),
+      targets: clone(value.targets as BoardExecutionTarget[]),
+      dispatches: clone(value.dispatches as BoardDispatch[]),
     };
   }
 
-  async read(
-    anchor: BoardTrustAnchor,
-    storageCapability: string,
-    previouslyAcceptedHead?: string | null,
-  ): Promise<StoredSignedBoard | null> {
-    const metaStored = await this.loadMeta(storageCapability, anchor);
-    if (metaStored === null) return null;
-    const log = await this.readLog(metaStored.value, storageCapability);
-    const state = await verifyAndReplayOperationLog(
-      log,
-      anchor,
-      previouslyAcceptedHead === undefined ? {} : { previouslyAcceptedHead },
-    );
-    return { log, state, etag: metaStored.etag };
-  }
-
-  private async writeIssue(boardId: string, issue: BoardIssue, revision: number, storageCapability: string): Promise<void> {
-    await this.upsertPublic(issueKey(issue.number), issueRecord(boardId, issue, revision), storageCapability);
-    const changedPage = issue.messages.length === 0
-      ? 0
-      : Math.floor((issue.messages.length - 1) / V3_COMMENT_PAGE_SIZE) + 1;
-    if (changedPage > 0) {
-      const offset = (changedPage - 1) * V3_COMMENT_PAGE_SIZE;
-      const page: ShardedCommentPage = {
-        schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-        boardId,
-        number: issue.number,
-        page: changedPage,
-        revision,
-        messages: issue.messages.slice(offset, offset + V3_COMMENT_PAGE_SIZE),
-      };
-      await this.upsertPublic(commentKey(issue.number, changedPage), page, storageCapability);
+  private async readBundle(
+    credential: BoardCredential,
+    pointer: ShardedBoardPointer,
+  ): Promise<StateBundle> {
+    const meta = await this.readMeta(pointer, credential);
+    const directoryPages = new Map<number, DirectoryPage>();
+    const issueRefs = new Map<number, string>();
+    for (let page = 1; page <= meta.directoryRefs.length; page += 1) {
+      const directory = await this.readDirectoryPage(credential, meta, page);
+      if (directory === null) continue;
+      directoryPages.set(page, directory);
+      for (const entry of directory.entries) issueRefs.set(entry.number, entry.ref);
     }
+    const issueSnapshots = new Map<number, IssueSnapshot>();
+    const closedAt = new Map<number, string>();
+    const issues = await Promise.all([...issueRefs.entries()].map(async ([number, ref]) => {
+      const result = await this.readIssueSnapshot(credential, meta, ref, true);
+      issueSnapshots.set(number, result.snapshot);
+      if (result.snapshot.closedAt !== null) closedAt.set(number, result.snapshot.closedAt);
+      return result.issue;
+    }));
+    issues.sort((left, right) => left.number - right.number);
+    const queue = await this.readQueue(credential, meta);
+    const catalog = await this.readCatalog(credential, meta);
+    const board: Board = {
+      schemaVersion: 3,
+      nextIssueNumber: meta.nextIssueNumber,
+      issues,
+      resources: catalog.resources,
+      targets: catalog.targets,
+      dispatches: catalog.dispatches,
+    };
+    return {
+      meta,
+      state: {
+        board,
+        queue,
+        authorities: [],
+        deleted: meta.deleted,
+        head: meta.head,
+      },
+      issueRefs,
+      issueSnapshots,
+      closedAt,
+      directoryPages,
+    };
   }
 
-  private async writeAllComments(boardId: string, issue: BoardIssue, revision: number, storageCapability: string): Promise<void> {
-    await this.upsertPublic(issueKey(issue.number), issueRecord(boardId, issue, revision), storageCapability);
-    const pages = Math.ceil(issue.messages.length / V3_COMMENT_PAGE_SIZE);
-    await Promise.all(Array.from({ length: pages }, async (_, index) => {
-      const pageNumber = index + 1;
-      const page: ShardedCommentPage = {
+  private async materializeIssue(
+    credential: BoardCredential,
+    boardId: string,
+    revision: number,
+    head: string,
+    issue: BoardIssue,
+    closedAt: string | null,
+    previous?: IssueSnapshot,
+    commentsChanged = false,
+  ): Promise<string> {
+    let commentRefs = previous === undefined ? [] : [...previous.commentRefs];
+    if (commentsChanged) {
+      const pageNumber = Math.floor((issue.messages.length - 1) / V3_COMMENT_PAGE_SIZE) + 1;
+      const pageEntries = issue.messages.slice(
+        (pageNumber - 1) * V3_COMMENT_PAGE_SIZE,
+        pageNumber * V3_COMMENT_PAGE_SIZE,
+      );
+      const ref = pageRef(`comments:${issue.number}`, head, pageNumber);
+      const page: CommentPage = {
         schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
         boardId,
         number: issue.number,
         page: pageNumber,
         revision,
-        messages: issue.messages.slice(index * V3_COMMENT_PAGE_SIZE, (index + 1) * V3_COMMENT_PAGE_SIZE),
+        messages: clone(pageEntries),
       };
-      await this.upsertPublic(commentKey(issue.number, pageNumber), page, storageCapability);
-    }));
-  }
-
-  private async writeQueue(boardId: string, state: VerifiedBoardState, revision: number, storageCapability: string): Promise<void> {
-    const value: ShardedQueue = {
+      await this.writeImmutable(credential.storageCapability, ref, page);
+      if (commentRefs.length < pageNumber) commentRefs.push(ref);
+      else commentRefs[pageNumber - 1] = ref;
+    }
+    const ref = singletonRef(`issue:${issue.number}`, head);
+    const snapshot: IssueSnapshot = {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId,
+      number: issue.number,
       revision,
-      numbers: [...state.queue],
+      issue: coreOf(issue),
+      closedAt,
+      messageCount: issue.messages.length,
+      commentRefs,
     };
-    await this.upsertPublic(SHARDED_QUEUE_KEY, value, storageCapability);
+    await this.writeImmutable(credential.storageCapability, ref, snapshot);
+    return ref;
   }
 
-  private async writeCatalog(boardId: string, state: VerifiedBoardState, revision: number, storageCapability: string): Promise<void> {
-    const value: ShardedCatalog = {
-      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-      boardId,
-      revision,
-      resources: clone(state.board.resources),
-      targets: clone(state.board.targets),
-      dispatches: clone(state.board.dispatches),
-    };
-    await this.upsertPublic(SHARDED_CATALOG_KEY, value, storageCapability);
-  }
-
-  private async writeAuthorities(boardId: string, state: VerifiedBoardState, revision: number, storageCapability: string): Promise<void> {
-    const value: ShardedAuthorities = {
-      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-      boardId,
-      revision,
-      authorities: clone(state.authorities),
-    };
-    await this.upsertPublic(SHARDED_AUTHORITIES_KEY, value, storageCapability);
-  }
-
-  private async writeIssuePages(
+  private async writeDirectoryPage(
+    credential: BoardCredential,
     boardId: string,
-    state: VerifiedBoardState,
-    log: BoardOperationLog,
     revision: number,
+    head: string,
+    page: number,
+    entries: DirectoryEntry[],
+  ): Promise<string> {
+    const ref = pageRef('directory', head, page);
+    const value: DirectoryPage = {
+      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+      boardId,
+      page,
+      revision,
+      entries: [...entries].sort((left, right) => left.number - right.number),
+    };
+    await this.writeImmutable(credential.storageCapability, ref, value);
+    return ref;
+  }
+
+  private async writeIssueListPages(
+    credential: BoardCredential,
+    boardId: string,
+    revision: number,
+    head: string,
+    state: VerifiedBoardState,
+    closedAt: Map<number, string>,
     issueState: IssueState,
-    storageCapability: string,
-  ): Promise<void> {
-    const pages = issuePages(boardId, state, log, issueState, revision);
-    await Promise.all(pages.map((page) => this.upsertPublic(issuePageKey(issueState, page.page), page, storageCapability)));
-  }
-
-  private async writeIssuePageContaining(
-    boardId: string,
-    state: VerifiedBoardState,
-    log: BoardOperationLog,
-    revision: number,
-    number: number,
-    storageCapability: string,
-  ): Promise<void> {
-    const issue = state.board.issues.find((entry) => entry.number === number);
-    if (issue === undefined) {
-      throw new ShardedBoardStoreError('Issue disappeared while updating its v3 list page');
-    }
-    const entries = summaries(state, log, issue.state);
-    const index = entries.findIndex((entry) => entry.number === number);
-    if (index < 0) {
-      throw new ShardedBoardStoreError('Issue is missing from its v3 list projection');
-    }
-    const pageNumber = Math.floor(index / V3_ISSUE_PAGE_SIZE) + 1;
-    const page: IssueListPage = {
-      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-      boardId,
-      state: issue.state,
-      page: pageNumber,
-      revision,
-      total: entries.length,
-      entries: entries.slice(
-        (pageNumber - 1) * V3_ISSUE_PAGE_SIZE,
-        pageNumber * V3_ISSUE_PAGE_SIZE,
-      ),
-    };
-    await this.upsertPublic(issuePageKey(issue.state, pageNumber), page, storageCapability);
-  }
-
-  private async writeFeedPages(boardId: string, log: BoardOperationLog, revision: number, storageCapability: string): Promise<void> {
-    const pages = feedPages(boardId, log, revision);
-    await Promise.all(pages.map((page) => this.upsertPublic(feedPageKey(page.page), page, storageCapability)));
-  }
-
-  private async writeAllMaterialized(
-    state: VerifiedBoardState,
-    log: BoardOperationLog,
-    revision: number,
-    storageCapability: string,
-  ): Promise<void> {
-    const boardId = log.boardId;
-    await Promise.all(state.board.issues.map((issue) => this.writeAllComments(boardId, issue, revision, storageCapability)));
-    await this.writeQueue(boardId, state, revision, storageCapability);
-    await this.writeCatalog(boardId, state, revision, storageCapability);
-    await this.writeAuthorities(boardId, state, revision, storageCapability);
-    await this.writeIssuePages(boardId, state, log, revision, 'open', storageCapability);
-    await this.writeIssuePages(boardId, state, log, revision, 'closed', storageCapability);
-    await this.writeFeedPages(boardId, log, revision, storageCapability);
-  }
-
-  async migrate(stored: StoredSignedBoard, storageCapability: string): Promise<StoredSignedBoard> {
-    const existing = await this.loadMeta(storageCapability);
-    if (existing !== null) {
-      const anchor = {
-        boardId: stored.log.boardId,
-        rootKeyId: stored.log.rootKeyId,
-        rootPublicKey: '',
+    previousState: VerifiedBoardState | null,
+    previousClosedAt: Map<number, string> | null,
+    previousRefs: string[],
+  ): Promise<string[]> {
+    const nextPages = paginate(orderedSummaries(state, closedAt, issueState), V3_ISSUE_PAGE_SIZE);
+    const previousPages = previousState === null || previousClosedAt === null
+      ? []
+      : paginate(orderedSummaries(previousState, previousClosedAt, issueState), V3_ISSUE_PAGE_SIZE);
+    const refs: string[] = [];
+    for (let index = 0; index < nextPages.length; index += 1) {
+      const entries = nextPages[index]!;
+      const previous = previousPages[index];
+      if (previous !== undefined && jsonSame(previous, entries) && previousRefs[index] !== undefined) {
+        refs.push(previousRefs[index]!);
+        continue;
+      }
+      const page = index + 1;
+      const ref = pageRef(issueState === 'open' ? 'open' : 'closed', head, page);
+      const value: IssueListPage = {
+        schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+        boardId,
+        state: issueState,
+        page,
+        revision,
+        total: state.board.issues.filter((issue) => issue.state === issueState).length,
+        entries: clone(entries),
       };
-      if (existing.value.boardId !== anchor.boardId || existing.value.rootKeyId !== anchor.rootKeyId) {
-        throw new ShardedBoardStoreError('Existing Antonina v3 board belongs to another trust root');
-      }
-      return stored;
+      await this.writeImmutable(credential.storageCapability, ref, value);
+      refs.push(ref);
     }
-
-    const revision = stored.log.operations.length;
-    const sealedChunkCount = Math.floor((stored.log.operations.length - 1) / V3_LOG_CHUNK_SIZE);
-    const chunks: ShardedLogChunk[] = Array.from({ length: sealedChunkCount }, (_, index) => ({
-      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-      boardId: stored.log.boardId,
-      chunk: index + 1,
-      operations: stored.log.operations.slice(
-        index * V3_LOG_CHUNK_SIZE,
-        (index + 1) * V3_LOG_CHUNK_SIZE,
-      ),
-    }));
-
-    await Promise.all(chunks.map((chunk) => this.upsertPublic(logKey(chunk.chunk), chunk, storageCapability)));
-    await this.writeAllMaterialized(stored.state, stored.log, revision, storageCapability);
-
-    const meta = metaFor(stored.log, stored.state, stored.state.head, revision);
-    const created = await this.createPublic(SHARDED_META_KEY, meta, storageCapability);
-    if (!created) {
-      const winner = await this.loadMeta(storageCapability);
-      if (winner === null
-          || winner.value.boardId !== meta.boardId
-          || winner.value.rootKeyId !== meta.rootKeyId) {
-        throw new ShardedBoardStoreError('Concurrent Antonina v3 migration chose another trust root');
-      }
-    }
-    await this.ensureMigrationMarker(meta.boardId, meta.rootKeyId);
-    return stored;
+    return refs;
   }
 
-  private async ensureSealedTail(meta: ShardedBoardMeta, storageCapability: string): Promise<void> {
-    if (meta.tailOperations.length !== V3_LOG_CHUNK_SIZE) return;
-    const chunkNumber = meta.logChunkCount + 1;
-    const chunk: ShardedLogChunk = {
+  private async appendFeed(
+    credential: BoardCredential,
+    meta: ShardedBoardMeta,
+    revision: number,
+    head: string,
+    entry: BoardFeedEntry | null,
+  ): Promise<{ refs: string[]; count: number }> {
+    if (entry === null) return { refs: [...meta.feedPageRefs], count: meta.feedCount };
+    const refs = [...meta.feedPageRefs];
+    const pageNumber = Math.floor(meta.feedCount / V3_FEED_PAGE_SIZE) + 1;
+    let entries: BoardFeedEntry[] = [];
+    if (meta.feedCount % V3_FEED_PAGE_SIZE !== 0) {
+      const previousRef = refs[pageNumber - 1];
+      if (previousRef === undefined) throw new ShardedBoardStoreError('Antonina feed page reference is missing');
+      const previous = await this.requireJson<unknown>(credential.storageCapability, previousRef);
+      if (!isRecord(previous.value) || !Array.isArray(previous.value.entries)) {
+        throw new ShardedBoardStoreError('Antonina feed page is malformed');
+      }
+      entries = clone(previous.value.entries as BoardFeedEntry[]);
+    }
+    entries.push(entry);
+    const ref = pageRef('feed', head, pageNumber);
+    const page: FeedPage = {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId: meta.boardId,
-      chunk: chunkNumber,
-      operations: clone(meta.tailOperations),
+      page: pageNumber,
+      revision,
+      entries,
     };
-    const created = await this.createPublic(logKey(chunkNumber), chunk, storageCapability);
-    if (created) return;
-    const existing = await this.readChunk(meta.boardId, chunkNumber, storageCapability);
-    const existingIds = existing.value.operations.map((operation) => operation.opId);
-    const expectedIds = chunk.operations.map((operation) => operation.opId);
-    if (existingIds.length !== expectedIds.length
-        || existingIds.some((id, index) => id !== expectedIds[index])) {
-      throw new ShardedBoardStoreError('Antonina v3 sealed log chunk conflicts with committed tail');
-    }
+    await this.writeImmutable(credential.storageCapability, ref, page);
+    refs[pageNumber - 1] = ref;
+    return { refs, count: meta.feedCount + 1 };
   }
 
-  private async materializeOperation(
-    previous: VerifiedBoardState,
-    candidate: VerifiedBoardState,
-    log: BoardOperationLog,
-    operation: SignedBoardOperation,
+  private async writeQueueSnapshot(
+    credential: BoardCredential,
+    boardId: string,
     revision: number,
-    storageCapability: string,
-  ): Promise<void> {
-    const boardId = log.boardId;
-    const payload = operation.payload as { number?: number };
+    head: string,
+    numbers: number[],
+  ): Promise<string> {
+    const ref = singletonRef('queue', head);
+    const value: QueueSnapshot = {
+      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+      boardId,
+      revision,
+      numbers: [...numbers],
+    };
+    await this.writeImmutable(credential.storageCapability, ref, value);
+    return ref;
+  }
 
-    switch (operation.kind) {
-      case 'issue.create':
-      case 'issue.edit':
-      case 'issue.comment':
-      case 'issue.close':
-      case 'issue.reopen': {
-        const number = payload.number;
-        if (number === undefined) throw new ShardedBoardStoreError('Issue mutation has no issue number');
-        const issue = candidate.board.issues.find((entry) => entry.number === number);
-        if (!issue) throw new ShardedBoardStoreError('Issue disappeared while materializing v3');
-        await this.writeIssue(boardId, issue, revision, storageCapability);
+  private async writeCatalogSnapshot(
+    credential: BoardCredential,
+    boardId: string,
+    revision: number,
+    head: string,
+    board: Board,
+  ): Promise<string> {
+    const ref = singletonRef('catalog', head);
+    const value: CatalogSnapshot = {
+      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+      boardId,
+      revision,
+      resources: clone(board.resources),
+      targets: clone(board.targets),
+      dispatches: clone(board.dispatches),
+    };
+    await this.writeImmutable(credential.storageCapability, ref, value);
+    return ref;
+  }
 
-        if (operation.kind === 'issue.edit' || operation.kind === 'issue.comment') {
-          // These mutations do not change list membership or ordering, so only
-          // the one 50-entry page containing the issue needs a rewrite.
-          await this.writeIssuePageContaining(boardId, candidate, log, revision, number, storageCapability);
-        } else if (operation.kind === 'issue.create') {
-          // New issues are appended to the open queue. Only its final page can
-          // change; page totals are read from metadata, not trusted from older
-          // page snapshots.
-          await this.writeIssuePageContaining(boardId, candidate, log, revision, number, storageCapability);
-          await this.writeQueue(boardId, candidate, revision, storageCapability);
-        } else {
-          await this.writeIssuePages(boardId, candidate, log, revision, 'open', storageCapability);
-          await this.writeIssuePages(boardId, candidate, log, revision, 'closed', storageCapability);
-          await this.writeQueue(boardId, candidate, revision, storageCapability);
-        }
-        break;
-      }
-      case 'issue.delete': {
-        const number = payload.number;
-        if (number === undefined) throw new ShardedBoardStoreError('Issue delete has no issue number');
-        await this.upsertPublic(issueKey(number), deletedIssueRecord(boardId, number, revision), storageCapability);
-        await this.writeIssuePages(boardId, candidate, log, revision, 'open', storageCapability);
-        await this.writeIssuePages(boardId, candidate, log, revision, 'closed', storageCapability);
-        await this.writeQueue(boardId, candidate, revision, storageCapability);
-        await this.writeCatalog(boardId, candidate, revision, storageCapability);
-        break;
-      }
-      case 'queue.reorder':
-        await this.writeQueue(boardId, candidate, revision, storageCapability);
-        await this.writeIssuePages(boardId, candidate, log, revision, 'open', storageCapability);
-        break;
-      case 'resource.add':
-      case 'resource.remove':
-      case 'target.register':
-      case 'target.set':
-      case 'dispatch.record':
-        await this.writeCatalog(boardId, candidate, revision, storageCapability);
-        break;
-      case 'authority.delegate':
-      case 'authority.revoke':
-        await this.writeAuthorities(boardId, candidate, revision, storageCapability);
-        break;
-      case 'board.delete':
-        break;
-      case 'board.initialize':
-        throw new ShardedBoardStoreError('Antonina v3 cannot append a second board initialization');
-    }
+  private async writeMeta(
+    credential: BoardCredential,
+    head: string,
+    meta: ShardedBoardMeta,
+  ): Promise<string> {
+    const ref = singletonRef('meta', head);
+    await this.writeImmutable(credential.storageCapability, ref, meta);
+    return ref;
+  }
 
-    const beforeFeed = feedEntries({
-      schemaVersion: OPLOG_SCHEMA_VERSION,
-      boardId: log.boardId,
-      rootKeyId: log.rootKeyId,
-      head: previous.head,
-      operations: log.operations.slice(0, -1),
-    }).length;
-    const afterFeed = feedEntries(log);
-    if (afterFeed.length > beforeFeed) {
-      const newest = afterFeed[0];
-      if (newest !== undefined) {
-        const pageNumber = Math.floor(beforeFeed / V3_FEED_PAGE_SIZE) + 1;
-        const existing = await this.getJson<unknown>(feedPageKey(pageNumber), storageCapability);
-        let entries: BoardFeedEntry[] = [];
-        if (existing !== null && isRecord(existing.value) && Array.isArray(existing.value.entries)) {
-          entries = (existing.value.entries as BoardFeedEntry[]).filter((entry) => entry.position < newest.position);
-        }
-        const page: ShardedFeedPage = {
+  async migrate(
+    stored: StoredSignedBoard,
+    credentialValue: BoardCredential,
+  ): Promise<StoredSignedBoard> {
+    if (stored.log === null) return stored;
+    const credential = await verifyBoardCredential(credentialValue);
+    const anchor = credentialTrustAnchor(credential);
+    if (stored.state.deleted) throw new ShardedBoardStoreError('Antonina board has been deleted');
+
+    const revision = 1;
+    const head = stored.state.head;
+    const closedAt = closedAtFromLegacy(stored.log, stored.state.board);
+    const issueRefs = new Map<number, string>();
+    const directoryPages = new Map<number, DirectoryEntry[]>();
+
+    for (const issue of stored.state.board.issues) {
+      const commentRefs: string[] = [];
+      const pages = paginate(issue.messages, V3_COMMENT_PAGE_SIZE);
+      for (let index = 0; index < pages.length; index += 1) {
+        const page = index + 1;
+        const ref = pageRef(`comments:${issue.number}`, head, page);
+        const value: CommentPage = {
           schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-          boardId,
-          page: pageNumber,
+          boardId: anchor.boardId,
+          number: issue.number,
+          page,
           revision,
-          entries: [...entries, newest].sort((left, right) => left.position - right.position),
+          messages: clone(pages[index]!),
         };
-        await this.upsertPublic(feedPageKey(pageNumber), page, storageCapability);
+        await this.writeImmutable(credential.storageCapability, ref, value);
+        commentRefs.push(ref);
       }
+      const issueRef = singletonRef(`issue:${issue.number}`, head);
+      const snapshot: IssueSnapshot = {
+        schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+        boardId: anchor.boardId,
+        number: issue.number,
+        revision,
+        issue: coreOf(issue),
+        closedAt: closedAt.get(issue.number) ?? null,
+        messageCount: issue.messages.length,
+        commentRefs,
+      };
+      await this.writeImmutable(credential.storageCapability, issueRef, snapshot);
+      issueRefs.set(issue.number, issueRef);
+      const pageNumber = directoryPageNumber(issue.number);
+      const entries = directoryPages.get(pageNumber) ?? [];
+      entries.push({ number: issue.number, ref: issueRef });
+      directoryPages.set(pageNumber, entries);
     }
+
+    const maxDirectoryPage = stored.state.board.nextIssueNumber <= 1
+      ? 0
+      : directoryPageNumber(stored.state.board.nextIssueNumber - 1);
+    const directoryRefs: Array<string | null> = [];
+    for (let page = 1; page <= maxDirectoryPage; page += 1) {
+      const entries = directoryPages.get(page);
+      if (entries === undefined || entries.length === 0) {
+        directoryRefs.push(null);
+        continue;
+      }
+      directoryRefs.push(await this.writeDirectoryPage(
+        credential,
+        anchor.boardId,
+        revision,
+        head,
+        page,
+        entries,
+      ));
+    }
+
+    const queueRef = await this.writeQueueSnapshot(
+      credential,
+      anchor.boardId,
+      revision,
+      head,
+      stored.state.queue,
+    );
+    const catalogRef = await this.writeCatalogSnapshot(
+      credential,
+      anchor.boardId,
+      revision,
+      head,
+      stored.state.board,
+    );
+
+    const openPageRefs = await this.writeIssueListPages(
+      credential,
+      anchor.boardId,
+      revision,
+      head,
+      stored.state,
+      closedAt,
+      'open',
+      null,
+      null,
+      [],
+    );
+    const closedPageRefs = await this.writeIssueListPages(
+      credential,
+      anchor.boardId,
+      revision,
+      head,
+      stored.state,
+      closedAt,
+      'closed',
+      null,
+      null,
+      [],
+    );
+
+    const legacyFeed = feedEntries(stored.log).sort((left, right) => left.position - right.position);
+    const feedPageRefs: string[] = [];
+    const feedPages = paginate(legacyFeed, V3_FEED_PAGE_SIZE);
+    for (let index = 0; index < feedPages.length; index += 1) {
+      const pageNumber = index + 1;
+      const ref = pageRef('feed', head, pageNumber);
+      const page: FeedPage = {
+        schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+        boardId: anchor.boardId,
+        page: pageNumber,
+        revision,
+        entries: clone(feedPages[index]!),
+      };
+      await this.writeImmutable(credential.storageCapability, ref, page);
+      feedPageRefs.push(ref);
+    }
+
+    const updatedAt = stored.log.operations.at(-1)?.timestamp
+      ?? this.now().toISOString();
+    const meta: ShardedBoardMeta = {
+      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+      boardId: anchor.boardId,
+      rootKeyId: anchor.rootKeyId,
+      head,
+      revision,
+      updatedAt,
+      migratedFrom: head,
+      nextIssueNumber: stored.state.board.nextIssueNumber,
+      issueCount: stored.state.board.issues.length,
+      openIssueCount: stored.state.board.issues.filter((issue) => issue.state === 'open').length,
+      closedIssueCount: stored.state.board.issues.filter((issue) => issue.state === 'closed').length,
+      directoryRefs,
+      openPageRefs,
+      closedPageRefs,
+      queueRef,
+      catalogRef,
+      feedPageRefs,
+      feedCount: legacyFeed.length,
+      deleted: false,
+    };
+    const metaRef = await this.writeMeta(credential, head, meta);
+    const pointer: ShardedBoardPointer = {
+      schemaVersion: 3,
+      format: POINTER_FORMAT,
+      boardId: anchor.boardId,
+      rootKeyId: anchor.rootKeyId,
+      head,
+      revision,
+      metaRef,
+    };
+    if (!await this.commitPointer(credential.storageCapability, stored.etag, pointer)) {
+      throw new ShardedBoardStoreError('Antonina legacy board changed during migration', {
+        status: 412,
+        method: 'PUT',
+      });
+    }
+    return {
+      log: null,
+      state: {
+        ...clone(stored.state),
+        authorities: [],
+        head,
+      },
+      etag: `v3:${head}`,
+    };
+  }
+
+  async read(
+    credentialValue: BoardCredential,
+  ): Promise<StoredSignedBoard | null> {
+    const credential = await verifyBoardCredential(credentialValue);
+    const pointerStored = await this.readPointer();
+    if (pointerStored === null) return null;
+    const bundle = await this.readBundle(credential, pointerStored.value);
+    return {
+      log: null,
+      state: bundle.state,
+      etag: `v3:${pointerStored.value.head}`,
+    };
   }
 
   async append(
     credentialValue: BoardCredential,
     request: AppendOperationRequest,
-    previouslyAcceptedHead?: string | null,
   ): Promise<StoredSignedBoard> {
     const credential = await verifyBoardCredential(credentialValue);
-    const anchor = credentialTrustAnchor(credential);
     if (request.kind === 'authority.delegate' || request.kind === 'authority.revoke') {
-      throw new ShardedBoardStoreError('Antonina delegated credential operations are disabled');
+      throw new ShardedBoardStoreError('Antonina uses one shared board key; delegated authorities are disabled');
     }
-    const signer = credentialSigningKey(credential);
-    const requestedTimestamp = request.timestamp ?? this.now().toISOString();
-    const nonce = request.nonce ?? this.newId();
 
     for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const metaStored = await this.loadMeta(credential.storageCapability, anchor);
-      if (metaStored === null) throw new ShardedBoardStoreError('Antonina v3 metadata does not exist');
-      const meta = metaStored.value;
-      const log = await this.readLog(meta, credential.storageCapability);
-      const state = await verifyAndReplayOperationLog(
-        log,
-        anchor,
-        previouslyAcceptedHead === undefined ? {} : { previouslyAcceptedHead },
-      );
-      if (state.deleted) throw new ShardedBoardStoreError('Antonina board has been deleted');
-
-      // A prior canonical commit can survive a cache-write failure. Repair all
-      // projections before accepting another mutation; fast readers fall back
-      // to the signed log while materializedRevision trails operationCount.
-      if (meta.materializedRevision !== meta.operationCount) {
-        await this.writeAllMaterialized(state, log, meta.operationCount, credential.storageCapability);
-        const repaired = { ...meta, materializedRevision: meta.operationCount };
-        if (!await this.putPublic(SHARDED_META_KEY, repaired, credential.storageCapability, metaStored.etag)) continue;
-        continue;
-      }
+      const pointerStored = await this.readPointer();
+      if (pointerStored === null) throw new ShardedBoardStoreError('Antonina materialized board pointer does not exist');
+      const pointer = pointerStored.value;
+      const bundle = await this.readBundle(credential, pointer);
+      if (bundle.state.deleted) throw new ShardedBoardStoreError('Antonina board has been deleted');
 
       const payload = typeof request.payload === 'function'
-        ? request.payload(state)
+        ? request.payload(clone(bundle.state))
         : request.payload;
-      const operation = await signBoardOperation({
-        boardId: anchor.boardId,
-        previous: log.head,
-        timestamp: canonicalTimestampAtOrAfter(requestedTimestamp, log.operations.at(-1)?.timestamp),
+      const timestamp = canonicalTimestampAtOrAfter(
+        request.timestamp ?? this.now().toISOString(),
+        bundle.meta.updatedAt,
+      );
+      const nonce = request.nonce ?? this.newId();
+      const revision = pointer.revision + 1;
+      const head = await sha256Id('sha256', canonicalBytes({
+        boardId: pointer.boardId,
+        previous: pointer.head,
+        revision,
+        timestamp,
+        nonce,
+        kind: request.kind,
+        payload: payload as unknown as CanonicalValue,
+      }));
+
+      const beforeIssueNumber = isRecord(payload) && Number.isSafeInteger(payload.number)
+        ? payload.number as number
+        : null;
+      const beforeIssue = beforeIssueNumber === null
+        ? undefined
+        : bundle.state.board.issues.find((issue) => issue.number === beforeIssueNumber);
+
+      const pseudoOperation: SignedBoardOperation = {
+        schemaVersion: OPLOG_SCHEMA_VERSION,
+        boardId: pointer.boardId,
+        previous: pointer.head,
+        signerKeyId: credential.rootKeyId,
+        timestamp,
         nonce,
         kind: request.kind,
         payload,
-      }, signer);
-      const candidateLog = appendToLog(log, operation);
-      const candidateState = await verifyAndReplayOperationLog(candidateLog, anchor, {
-        previouslyAcceptedHead: state.head,
-      });
-
-      // When the bounded tail is full, publish it once as an immutable chunk.
-      // Both racing writers seal exactly the same committed tail, so a 409 is
-      // harmless only when the existing chunk has the same operation IDs.
-      await this.ensureSealedTail(meta, credential.storageCapability);
-
-      const revision = meta.operationCount + 1;
-      const committedMeta = metaFor(
-        candidateLog,
-        candidateState,
-        meta.migratedFrom,
-        meta.materializedRevision,
+        opId: head,
+        signature: '',
+      };
+      const applied = applyBoardMutation(
+        pseudoOperation,
+        bundle.state.board,
+        bundle.state.queue,
       );
-      if (!await this.putPublic(SHARDED_META_KEY, committedMeta, credential.storageCapability, metaStored.etag)) continue;
+      const candidate: VerifiedBoardState = {
+        board: applied.board,
+        queue: applied.queue,
+        authorities: [],
+        deleted: applied.deleted,
+        head,
+      };
 
-      // The signed operation is canonical now. Materialized objects are a
-      // repairable acceleration layer, never the commit point.
-      let materialized = false;
-      try {
-        await this.materializeOperation(state, candidateState, candidateLog, operation, revision, credential.storageCapability);
-        materialized = true;
-      } catch {
-        // Leave materializedRevision behind. Fast reads will fall back to the
-        // canonical signed log, and the next writer repairs all projections.
+      const afterIssue = beforeIssueNumber === null
+        ? candidate.board.issues.at(-1)
+        : candidate.board.issues.find((issue) => issue.number === beforeIssueNumber);
+      const nextClosedAt = new Map(bundle.closedAt);
+      if (request.kind === 'issue.close' && beforeIssueNumber !== null) {
+        nextClosedAt.set(beforeIssueNumber, timestamp);
+      } else if ((request.kind === 'issue.reopen' || request.kind === 'issue.delete')
+          && beforeIssueNumber !== null) {
+        nextClosedAt.delete(beforeIssueNumber);
       }
 
-      let finalMeta = await this.loadMeta(credential.storageCapability, anchor);
-      if (materialized
-          && finalMeta !== null
-          && finalMeta.value.head === operation.opId
-          && finalMeta.value.materializedRevision < revision) {
-        const repaired = { ...finalMeta.value, materializedRevision: revision };
-        if (await this.putPublic(SHARDED_META_KEY, repaired, credential.storageCapability, finalMeta.etag)) {
-          finalMeta = await this.loadMeta(credential.storageCapability, anchor);
+      const nextIssueRefs = new Map(bundle.issueRefs);
+      const nextDirectoryRefs = [...bundle.meta.directoryRefs];
+      const issueMutation = request.kind.startsWith('issue.');
+      if (issueMutation && beforeIssueNumber !== null) {
+        const directoryPage = directoryPageNumber(beforeIssueNumber);
+        const currentDirectory = bundle.directoryPages.get(directoryPage);
+        const entries = currentDirectory === undefined ? [] : clone(currentDirectory.entries);
+        const entryIndex = entries.findIndex((entry) => entry.number === beforeIssueNumber);
+
+        if (request.kind === 'issue.delete') {
+          nextIssueRefs.delete(beforeIssueNumber);
+          if (entryIndex >= 0) entries.splice(entryIndex, 1);
+        } else {
+          if (afterIssue === undefined) throw new ShardedBoardStoreError('Issue mutation produced no issue snapshot');
+          const previousSnapshot = bundle.issueSnapshots.get(beforeIssueNumber);
+          const issueRef = await this.materializeIssue(
+            credential,
+            pointer.boardId,
+            revision,
+            head,
+            afterIssue,
+            nextClosedAt.get(beforeIssueNumber) ?? null,
+            previousSnapshot,
+            request.kind === 'issue.comment',
+          );
+          nextIssueRefs.set(beforeIssueNumber, issueRef);
+          if (entryIndex >= 0) entries[entryIndex] = { number: beforeIssueNumber, ref: issueRef };
+          else entries.push({ number: beforeIssueNumber, ref: issueRef });
         }
+
+        if (entries.length === 0) {
+          nextDirectoryRefs[directoryPage - 1] = null;
+        } else {
+          nextDirectoryRefs[directoryPage - 1] = await this.writeDirectoryPage(
+            credential,
+            pointer.boardId,
+            revision,
+            head,
+            directoryPage,
+            entries,
+          );
+        }
+      } else if (request.kind === 'issue.create') {
+        // The create payload always names the new issue, but keep this branch
+        // for type clarity if the payload shape changes in the future.
+        throw new ShardedBoardStoreError('Issue-create payload has no issue number');
       }
-      if (finalMeta === null) {
-        throw new ShardedBoardStoreError('Antonina v3 metadata disappeared after commit');
+
+      while (nextDirectoryRefs.length > 0 && nextDirectoryRefs.at(-1) === null) {
+        nextDirectoryRefs.pop();
       }
-      return { log: candidateLog, state: candidateState, etag: finalMeta.etag };
+
+      const queueChanged = !jsonSame(bundle.state.queue, candidate.queue);
+      const queueRef = queueChanged
+        ? await this.writeQueueSnapshot(credential, pointer.boardId, revision, head, candidate.queue)
+        : bundle.meta.queueRef;
+
+      const beforeCatalog = {
+        resources: bundle.state.board.resources,
+        targets: bundle.state.board.targets,
+        dispatches: bundle.state.board.dispatches,
+      };
+      const afterCatalog = {
+        resources: candidate.board.resources,
+        targets: candidate.board.targets,
+        dispatches: candidate.board.dispatches,
+      };
+      const catalogRef = jsonSame(beforeCatalog, afterCatalog)
+        ? bundle.meta.catalogRef
+        : await this.writeCatalogSnapshot(credential, pointer.boardId, revision, head, candidate.board);
+
+      const openPageRefs = await this.writeIssueListPages(
+        credential,
+        pointer.boardId,
+        revision,
+        head,
+        candidate,
+        nextClosedAt,
+        'open',
+        bundle.state,
+        bundle.closedAt,
+        bundle.meta.openPageRefs,
+      );
+      const closedPageRefs = await this.writeIssueListPages(
+        credential,
+        pointer.boardId,
+        revision,
+        head,
+        candidate,
+        nextClosedAt,
+        'closed',
+        bundle.state,
+        bundle.closedAt,
+        bundle.meta.closedPageRefs,
+      );
+
+      const feedEntry = feedEntryForMutation(
+        request.kind,
+        payload,
+        beforeIssue,
+        afterIssue,
+        head,
+        timestamp,
+        bundle.meta.feedCount,
+      );
+      const feed = await this.appendFeed(
+        credential,
+        bundle.meta,
+        revision,
+        head,
+        feedEntry,
+      );
+
+      const meta: ShardedBoardMeta = {
+        schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+        boardId: pointer.boardId,
+        rootKeyId: pointer.rootKeyId,
+        head,
+        revision,
+        updatedAt: timestamp,
+        migratedFrom: bundle.meta.migratedFrom,
+        nextIssueNumber: candidate.board.nextIssueNumber,
+        issueCount: candidate.board.issues.length,
+        openIssueCount: candidate.board.issues.filter((issue) => issue.state === 'open').length,
+        closedIssueCount: candidate.board.issues.filter((issue) => issue.state === 'closed').length,
+        directoryRefs: nextDirectoryRefs,
+        openPageRefs,
+        closedPageRefs,
+        queueRef,
+        catalogRef,
+        feedPageRefs: feed.refs,
+        feedCount: feed.count,
+        deleted: candidate.deleted,
+      };
+      const metaRef = await this.writeMeta(credential, head, meta);
+      const nextPointer: ShardedBoardPointer = {
+        schemaVersion: 3,
+        format: POINTER_FORMAT,
+        boardId: pointer.boardId,
+        rootKeyId: pointer.rootKeyId,
+        head,
+        revision,
+        metaRef,
+      };
+      if (!await this.commitPointer(
+        credential.storageCapability,
+        pointerStored.etag,
+        nextPointer,
+      )) {
+        continue;
+      }
+      return {
+        log: null,
+        state: candidate,
+        etag: `v3:${head}`,
+      };
     }
 
-    throw new ShardedBoardStoreError('Antonina v3 board changed too often; signed operation was not committed');
+    throw new ShardedBoardStoreError('Antonina board changed too often; mutation was not committed');
   }
 
-  async getIssue(anchor: BoardTrustAnchor, storageCapability: string, number: number): Promise<BoardIssue | null> {
-    const metaStored = await this.loadMeta(storageCapability, anchor);
-    if (metaStored === null) return null;
-    if (metaStored.value.materializedRevision !== metaStored.value.operationCount) {
-      return this.getIssueFromCanonical(anchor, storageCapability, number);
-    }
-    const stored = await this.getJson<unknown>(issueKey(number), storageCapability);
-    if (stored === null || !isRecord(stored.value)) {
-      return this.getIssueFromCanonical(anchor, storageCapability, number);
-    }
-    const value = stored.value;
-    if (value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
-        || value.boardId !== metaStored.value.boardId
-        || value.number !== number
-        || !Number.isSafeInteger(value.revision)
-        || (value.revision as number) > metaStored.value.operationCount
-        || typeof value.deleted !== 'boolean') {
-      return this.getIssueFromCanonical(anchor, storageCapability, number);
-    }
-    if (value.deleted) return null;
-    if (!isRecord(value.issue)
-        || !Number.isSafeInteger(value.messageCount)
-        || !Number.isSafeInteger(value.commentPageCount)) {
-      return this.getIssueFromCanonical(anchor, storageCapability, number);
-    }
-
-    const pageCount = value.commentPageCount as number;
-    const pages = await Promise.all(Array.from({ length: pageCount }, (_, index) =>
-      this.getJson<unknown>(commentKey(number, index + 1), storageCapability)));
-    const messages: BoardMessage[] = [];
-    for (const [index, page] of pages.entries()) {
-      if (page === null || !isRecord(page.value)
-          || page.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
-          || page.value.boardId !== metaStored.value.boardId
-          || page.value.number !== number
-          || page.value.page !== index + 1
-          || !Number.isSafeInteger(page.value.revision)
-          || (page.value.revision as number) > metaStored.value.operationCount
-          || !Array.isArray(page.value.messages)) {
-        return this.getIssueFromCanonical(anchor, storageCapability, number);
-      }
-      messages.push(...(page.value.messages as BoardMessage[]));
-    }
-    if (messages.length !== value.messageCount) return this.getIssueFromCanonical(anchor, storageCapability, number);
-
-    const core = value.issue;
-    return {
-      number: core.number as number,
-      title: core.title as string,
-      body: core.body as string,
-      state: core.state as IssueState,
-      createdAt: core.createdAt as string,
-      updatedAt: core.updatedAt as string,
-      messages: clone(messages),
-    };
+  private async requirePointerForCredential(
+    credentialValue: BoardCredential,
+  ): Promise<{ credential: BoardCredential; pointer: ShardedBoardPointer; meta: ShardedBoardMeta }> {
+    const credential = await verifyBoardCredential(credentialValue);
+    const pointerStored = await this.readPointer();
+    if (pointerStored === null) throw new ShardedBoardStoreError('Antonina materialized board pointer does not exist');
+    const meta = await this.readMeta(pointerStored.value, credential);
+    return { credential, pointer: pointerStored.value, meta };
   }
 
-  private async getIssueFromCanonical(
-    anchor: BoardTrustAnchor,
-    storageCapability: string,
+  async getIssue(
+    credentialValue: BoardCredential,
     number: number,
   ): Promise<BoardIssue | null> {
-    const stored = await this.read(anchor, storageCapability);
-    return stored?.state.board.issues.find((issue) => issue.number === number) ?? null;
+    const { credential, meta } = await this.requirePointerForCredential(credentialValue);
+    const page = await this.readDirectoryPage(credential, meta, directoryPageNumber(number));
+    const entry = page?.entries.find((candidate) => candidate.number === number);
+    if (entry === undefined) return null;
+    return (await this.readIssueSnapshot(credential, meta, entry.ref, true)).issue;
   }
 
   async readIssuePage(
-    anchor: BoardTrustAnchor,
-    storageCapability: string,
+    credentialValue: BoardCredential,
     state: IssueState,
     page: number,
-  ): Promise<IssueListPage | null> {
+  ): Promise<IssueListPage> {
     if (!Number.isSafeInteger(page) || page < 1) {
       throw new ShardedBoardStoreError('Antonina issue page must be a positive integer');
     }
-    const metaStored = await this.loadMeta(storageCapability, anchor);
-    if (metaStored === null) return null;
-    if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
-    const maxPage = state === 'open' ? metaStored.value.openPageCount : metaStored.value.closedPageCount;
-    if (page > maxPage) {
+    const { credential, meta } = await this.requirePointerForCredential(credentialValue);
+    const refs = state === 'open' ? meta.openPageRefs : meta.closedPageRefs;
+    const total = state === 'open' ? meta.openIssueCount : meta.closedIssueCount;
+    const ref = refs[page - 1];
+    if (ref === undefined) {
       return {
         schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-        boardId: metaStored.value.boardId,
+        boardId: meta.boardId,
         state,
         page,
-        revision: metaStored.value.operationCount,
-        total: state === 'open' ? metaStored.value.openIssueCount : metaStored.value.closedIssueCount,
+        revision: meta.revision,
+        total,
         entries: [],
       };
     }
-    const stored = await this.getJson<unknown>(issuePageKey(state, page), storageCapability);
-    if (stored === null || !isRecord(stored.value)
-        || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
-        || stored.value.boardId !== metaStored.value.boardId
-        || stored.value.state !== state
-        || stored.value.page !== page
-        || !Number.isSafeInteger(stored.value.revision)
-        || (stored.value.revision as number) > metaStored.value.operationCount
-        || !Array.isArray(stored.value.entries)) {
-      return null;
+    const stored = await this.requireJson<unknown>(credential.storageCapability, ref);
+    const value = stored.value;
+    if (!isRecord(value)
+        || value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
+        || value.boardId !== meta.boardId
+        || value.state !== state
+        || value.page !== page
+        || !Array.isArray(value.entries)) {
+      throw new ShardedBoardStoreError('Antonina issue list page is malformed');
     }
-    const pageValue = clone(stored.value as unknown as IssueListPage);
-    // Membership changes can leave older unaffected pages with an older total.
-    // The CAS-committed metadata owns the current count.
-    pageValue.total = state === 'open'
-      ? metaStored.value.openIssueCount
-      : metaStored.value.closedIssueCount;
-    return pageValue;
+    return clone(value as unknown as IssueListPage);
   }
 
-  async getQueue(anchor: BoardTrustAnchor, storageCapability: string): Promise<number[] | null> {
-    const metaStored = await this.loadMeta(storageCapability, anchor);
-    if (metaStored === null) return null;
-    if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
-    const stored = await this.getJson<unknown>(SHARDED_QUEUE_KEY, storageCapability);
-    if (stored === null || !isRecord(stored.value)
-        || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
-        || stored.value.boardId !== metaStored.value.boardId
-        || !Number.isSafeInteger(stored.value.revision)
-        || (stored.value.revision as number) > metaStored.value.operationCount
-        || !Array.isArray(stored.value.numbers)) {
-      return null;
-    }
-    return [...stored.value.numbers as number[]];
+  async getQueue(credentialValue: BoardCredential): Promise<number[]> {
+    const { credential, meta } = await this.requirePointerForCredential(credentialValue);
+    return this.readQueue(credential, meta);
   }
 
-  async readFeed(anchor: BoardTrustAnchor, storageCapability: string, request: BoardFeedRequest = {}): Promise<BoardFeedPage | null> {
-    const metaStored = await this.loadMeta(storageCapability, anchor);
-    if (metaStored === null) return null;
-    if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
+  async readFeed(
+    credentialValue: BoardCredential,
+    request: BoardFeedRequest = {},
+  ): Promise<BoardFeedPage> {
+    const { credential, meta } = await this.requirePointerForCredential(credentialValue);
     const limit = feedLimit(request.limit);
     const cursor = request.cursor === undefined || request.cursor === null
       ? null
       : parseFeedCursor(request.cursor);
     const entries: BoardFeedEntry[] = [];
-
-    for (let page = metaStored.value.feedPageCount; page >= 1 && entries.length < limit + 1; page -= 1) {
-      const stored = await this.getJson<unknown>(feedPageKey(page), storageCapability);
-      if (stored === null || !isRecord(stored.value)
-          || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
-          || stored.value.boardId !== metaStored.value.boardId
-          || !Number.isSafeInteger(stored.value.revision)
-          || (stored.value.revision as number) > metaStored.value.operationCount
-          || !Array.isArray(stored.value.entries)) {
-        return null;
+    for (let page = meta.feedPageRefs.length; page >= 1 && entries.length < limit + 1; page -= 1) {
+      const ref = meta.feedPageRefs[page - 1]!;
+      const stored = await this.requireJson<unknown>(credential.storageCapability, ref);
+      if (!isRecord(stored.value) || !Array.isArray(stored.value.entries)) {
+        throw new ShardedBoardStoreError('Antonina feed page is malformed');
       }
       const pageEntries = [...stored.value.entries as BoardFeedEntry[]]
         .sort((left, right) => right.position - left.position)
         .filter((entry) => cursor === null || entry.position < cursor.position);
       entries.push(...pageEntries);
     }
-
     const pageEntries = entries.slice(0, limit);
     const last = pageEntries.at(-1);
     return {
       entries: clone(pageEntries),
       nextCursor: entries.length > limit && last !== undefined ? feedCursor(last) : null,
-      total: metaStored.value.feedCount,
+      total: meta.feedCount,
       limit,
-    };
-  }
-
-  async readAuthorities(anchor: BoardTrustAnchor, storageCapability: string): Promise<VerifiedAuthority[] | null> {
-    const metaStored = await this.loadMeta(storageCapability, anchor);
-    if (metaStored === null) return null;
-    if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
-    const stored = await this.getJson<unknown>(SHARDED_AUTHORITIES_KEY, storageCapability);
-    if (stored === null || !isRecord(stored.value)
-        || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
-        || stored.value.boardId !== metaStored.value.boardId
-        || !Number.isSafeInteger(stored.value.revision)
-        || (stored.value.revision as number) > metaStored.value.operationCount
-        || !Array.isArray(stored.value.authorities)) {
-      return null;
-    }
-    return clone(stored.value.authorities as VerifiedAuthority[]);
-  }
-
-  async readCatalog(anchor: BoardTrustAnchor, storageCapability: string): Promise<{
-    resources: BoardResource[];
-    targets: BoardExecutionTarget[];
-    dispatches: BoardDispatch[];
-  } | null> {
-    const metaStored = await this.loadMeta(storageCapability, anchor);
-    if (metaStored === null) return null;
-    if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
-    const stored = await this.getJson<unknown>(SHARDED_CATALOG_KEY, storageCapability);
-    if (stored === null || !isRecord(stored.value)
-        || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
-        || stored.value.boardId !== metaStored.value.boardId
-        || !Number.isSafeInteger(stored.value.revision)
-        || (stored.value.revision as number) > metaStored.value.operationCount
-        || !Array.isArray(stored.value.resources)
-        || !Array.isArray(stored.value.targets)
-        || !Array.isArray(stored.value.dispatches)) {
-      return null;
-    }
-    return {
-      resources: clone(stored.value.resources as BoardResource[]),
-      targets: clone(stored.value.targets as BoardExecutionTarget[]),
-      dispatches: clone(stored.value.dispatches as BoardDispatch[]),
     };
   }
 }

@@ -5,9 +5,27 @@ on:
     branches: [main]
     # Derived from the build input graph of `make build`; verified by the
     # `trigger-coverage` job below (.github/check-web-deploy-triggers.mjs).
+    # Keep this list free of comments: check-web-deploy-triggers.mjs stops
+    # reading `paths:` at the first line that is not a `- "..."` entry, so a
+    # comment in here silently truncates the filter and turns a real build input
+    # into an uncovered one.
+    #
+    # `scripts/**` is scripts/build-identity.mjs, which writes the version.json
+    # and the index.html meta tag that ship in the deployed bundle, so editing it
+    # changes the deployed artifact and must redeploy. The trigger checker cannot
+    # see it today: its expandGlob treats a bare filename include as a directory,
+    # so `web/tsconfig.node.json`'s `include: ["vite.config.ts"]` expands to
+    # nothing, web/vite.config.ts is never traced, and nothing it imports is
+    # traced either. That is why this entry is hand-maintained, and why the
+    # checker reports it as matching no traced build input. Teaching the checker
+    # to resolve bare filename includes would fix the trace properly, but it
+    # moves the traced-input count that
+    # .github/check-web-deploy-triggers.test.mjs asserts, and that file belongs to
+    # another front. Recorded on board issue 76.
     paths:
       - "web/**"
       - "packages/core/**"
+      - "scripts/**"
       - "package.json"
       - "Makefile"
       - ".github/workflows/web-deploy.yml"
@@ -30,10 +48,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # ANTONINA_BUILD_COMMIT is what makes the deployed artifact identifiable
+      # without a Git checkout. `make build` runs in the pinned builder container
+      # with the working tree bind-mounted; passing the revision explicitly means
+      # the identity does not depend on that container having a usable .git, and
+      # it cannot be satisfied by a stale or substituted commit. `build/version.json`
+      # in the deployed output carries this value, and the deploy step below reads
+      # it back out as the record of what was actually published.
       - name: Verify build
+        env:
+          ANTONINA_BUILD_COMMIT: ${{ github.sha }}
         run: |
-          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/app" -w /app ghcr.io/ottojung/skrynia-builder:1.0.0-122-g9829feb make build
-          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/app" -w /app ghcr.io/ottojung/skrynia-builder:1.0.0-122-g9829feb npm test --prefix web
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e ANTONINA_BUILD_COMMIT -v "$PWD:/app" -w /app ghcr.io/ottojung/skrynia-builder:1.0.0-122-g9829feb make build
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e ANTONINA_BUILD_COMMIT -v "$PWD:/app" -w /app ghcr.io/ottojung/skrynia-builder:1.0.0-122-g9829feb npm test --prefix web
+      - name: Verify deployed identity
+        run: |
+          set -euo pipefail
+          test -f build/version.json
+          commit="$(node -pe 'JSON.parse(require("fs").readFileSync("build/version.json","utf8")).commit')"
+          if [ "$commit" != "$GITHUB_SHA" ]; then
+            echo "ERROR: build/version.json names $commit but this workflow run is $GITHUB_SHA" >&2
+            exit 1
+          fi
+          echo "build identity: $commit" >> "$GITHUB_STEP_SUMMARY"
       - name: Deploy
         uses: ottojung/Skrynia/action/deploy@14ed0b8e154a3a74e614fd0b86e790fe346a5a74
         with:

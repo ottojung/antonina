@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { runManagedRunner } from '../../agent-runtime/src/runner.js';
 import { runAgentCommand, type AgentCommandContext } from './agent.js';
+import { versionFields, versionJson, versionLine } from './build-identity.js';
 import { runBoardCommand } from './board.js';
 import { runDaemonCommand } from './daemon.js';
 import {
@@ -32,6 +33,31 @@ function agentContext(): AgentCommandContext {
   };
 }
 
+/**
+ * `antonina --version`, and its `-V` short form.
+ *
+ * This is deliberately not routed through `runPublicNamespace`. That path
+ * reports a usage error, and routing a successful query through it is how the
+ * flag ended up reporting "expected agent, board or daemon command namespace"
+ * while exiting 0: the operator's query was answered by the error branch, so a
+ * script reading the exit code was told the query succeeded. Here the success
+ * case prints identity and returns 0 explicitly, and only a genuinely malformed
+ * invocation returns non-zero.
+ */
+function runVersionCommand(args: string[]): number {
+  const wantsJson = args.includes('--json');
+  const stray = args.filter((arg) => arg !== '--json');
+  if (stray.length > 0) {
+    process.stderr.write(`antonina: unexpected argument to --version: ${stray[0]}\n`);
+    process.stderr.write("Try 'antonina --version'.\n");
+    return 2;
+  }
+  process.stdout.write(
+    (wantsJson ? JSON.stringify(versionJson()) : [versionLine(), ...versionFields()].join('\n')) + '\n',
+  );
+  return 0;
+}
+
 async function runPublicNamespace(namespace: PublicNamespace, args: string[]): Promise<number> {
   let plan;
   try {
@@ -57,6 +83,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (namespace === '--help' || namespace === '-h') {
     process.stdout.write(TOP_LEVEL_HELP + '\n');
     return 0;
+  }
+  if (namespace === '--version' || namespace === '-V') {
+    return runVersionCommand(args);
   }
   if (namespace === '_runner') {
     const [agentId, mode, generationRaw] = args;

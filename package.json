@@ -7,6 +7,8 @@
   },
   "scripts": {
     "bootstrap": "npm ci --prefix web",
+    "generate:build-identity": "node scripts/build-identity.mjs",
+    "pretypecheck": "npm run generate:build-identity",
     "typecheck": "./web/node_modules/.bin/tsc -p packages/core/tsconfig.json && ./web/node_modules/.bin/tsc -p packages/agent-runtime/tsconfig.json && ./web/node_modules/.bin/tsc -p packages/host-daemon/tsconfig.json && npm run typecheck:conformance && ./web/node_modules/.bin/tsc -p packages/cli/tsconfig.json",
     "typecheck:conformance": "./web/node_modules/.bin/tsc -p packages/agent-runtime/tsconfig.conformance.json",
     "test:core": "node --test packages/core/test/*.test.mjs",
@@ -15,7 +17,8 @@
     "test:daemon": "node --test packages/host-daemon/test/*.test.mjs",
     "test:web": "npm test --prefix web",
     "test:workflow": "node --test .github/*.test.mjs",
-    "test": "npm run test:core && npm run test:runtime && npm run test:daemon && npm run test:cli && npm run test:web && npm run test:workflow",
+    "test:build-identity": "node --test scripts/*.test.mjs",
+    "test": "npm run test:core && npm run test:runtime && npm run test:daemon && npm run test:cli && npm run test:web && npm run test:workflow && npm run test:build-identity",
     "build:web": "npm run build --prefix web",
     "build": "npm run typecheck && npm run build:web",
     "pack:cli": "npm pack ./packages/cli"

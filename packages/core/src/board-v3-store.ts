@@ -527,8 +527,16 @@ export class ShardedBoardStore {
       const current = await this.getJson<unknown>(key);
       if (current === null) {
         if (await this.createPublic(key, value)) return;
-      } else if (await this.putPublic(key, value, current.etag)) {
-        return;
+      } else {
+        // Projection writes can overlap after the canonical metadata CAS.
+        // Never let an older committed revision overwrite a newer projection.
+        if (isRecord(current.value) && isRecord(value)
+            && Number.isSafeInteger(current.value.revision)
+            && Number.isSafeInteger(value.revision)
+            && (current.value.revision as number) > (value.revision as number)) {
+          return;
+        }
+        if (await this.putPublic(key, value, current.etag)) return;
       }
     }
     throw new ShardedBoardStoreError(`Antonina v3 object ${key} changed too often`);

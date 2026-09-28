@@ -1,4 +1,4 @@
-import { base64UrlEncode, type CanonicalValue } from './canonical.js';
+import { base64UrlEncode, sha256, type CanonicalValue } from './canonical.js';
 import {
   credentialSigningKey,
   credentialTrustAnchor,
@@ -59,6 +59,11 @@ export const V3_FEED_PAGE_SIZE = 50;
 
 const DEFAULT_MAX_ATTEMPTS = 6;
 const textEncoder = new TextEncoder();
+
+async function objectLocator(storageCapability: string, logicalKey: string): Promise<string> {
+  const bytes = textEncoder.encode(storageCapability + ':' + logicalKey);
+  return 'board-v3-' + base64UrlEncode(await sha256(bytes));
+}
 
 export interface ShardedBoardMeta {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
@@ -467,8 +472,9 @@ export class ShardedBoardStore {
     this.newId = options.newId ?? defaultId;
   }
 
-  private url(key: string): string {
-    return `${this.baseUrl}/store/antonina/${encodeURIComponent(key)}`;
+  private async url(key: string, storageCapability: string): Promise<string> {
+    const locator = await objectLocator(storageCapability, key);
+    return `${this.baseUrl}/store/antonina/${encodeURIComponent(locator)}`;
   }
 
   private async parseJson(response: Response, context: string): Promise<unknown> {
@@ -481,65 +487,50 @@ export class ShardedBoardStore {
 
   private httpError(method: string, key: string, response: Response): ShardedBoardStoreError {
     return new ShardedBoardStoreError(
-      `Skrynia ${method} antonina/${key} failed (${response.status})`,
+      `Skrynia ${method} Antonina v3 object ${key} failed (${response.status})`,
       { status: response.status, method },
     );
   }
 
-  private async getJson<T>(key: string): Promise<JsonObject<T> | null> {
-    const response = await this.fetcher(this.url(key), { cache: 'no-store' });
+  private async getJson<T>(
+    key: string,
+    storageCapability: string,
+  ): Promise<JsonObject<T> | null> {
+    const response = await this.fetcher(await this.url(key, storageCapability), { cache: 'no-store' });
     if (response.status === 404) return null;
     if (response.status !== 200) throw this.httpError('GET', key, response);
     const etag = response.headers.get('ETag');
-    if (!etag) throw new ShardedBoardStoreError(`Skrynia GET antonina/${key} returned no ETag`);
-    return { value: await this.parseJson(response, `Skrynia GET antonina/${key}`) as T, etag };
+    if (!etag) throw new ShardedBoardStoreError(`Skrynia GET Antonina v3 object ${key} returned no ETag`);
+    return { value: await this.parseJson(response, `Skrynia GET Antonina v3 object ${key}`) as T, etag };
   }
 
-  /**
-   * V3 keeps board contents public to read, but does not disable write
-   * authentication. Every shard is capability-write and reuses the exact
-   * storage capability already carried by every existing board credential.
-   */
-  private async createShared(
+  private async createPublic(
     key: string,
     value: unknown,
     storageCapability: string,
   ): Promise<boolean> {
-    const response = await this.fetcher(this.url(key), {
+    const response = await this.fetcher(await this.url(key, storageCapability), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Skrynia-Mode': 'capability-write',
-        'X-Skrynia-Capability': storageCapability,
+        'X-Skrynia-Mode': 'public-write',
       },
       body: JSON.stringify(value),
     });
     if (response.status === 409) return false;
     if (response.status !== 201) throw this.httpError('POST', key, response);
-    const created = await this.parseJson(response, `Skrynia POST antonina/${key}`);
-    if (!isRecord(created)
-        || created.mode !== 'capability-write'
-        || created.capability !== storageCapability) {
-      throw new ShardedBoardStoreError(
-        'Skrynia does not support creating several objects with one supplied capability',
-        { status: 501, method: 'POST' },
-      );
-    }
     return true;
   }
 
-  private async putShared(
+  private async putPublic(
     key: string,
     value: unknown,
     storageCapability: string,
     etag?: string,
   ): Promise<boolean> {
-    const headers = new Headers({
-      'Content-Type': 'application/json',
-      'X-Skrynia-Capability': storageCapability,
-    });
+    const headers = new Headers({ 'Content-Type': 'application/json' });
     if (etag !== undefined) headers.set('If-Match', etag);
-    const response = await this.fetcher(this.url(key), {
+    const response = await this.fetcher(await this.url(key, storageCapability), {
       method: 'PUT',
       headers,
       body: JSON.stringify(value),
@@ -549,80 +540,52 @@ export class ShardedBoardStore {
     return true;
   }
 
-  private async upsertShared(
+  private async upsertPublic(
     key: string,
     value: unknown,
     storageCapability: string,
   ): Promise<void> {
     for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const current = await this.getJson<unknown>(key);
+      const current = await this.getJson<unknown>(key, storageCapability);
       if (current === null) {
-        if (await this.createShared(key, value, storageCapability)) return;
+        if (await this.createPublic(key, value, storageCapability)) return;
       } else {
-        // Projection writes can overlap after the canonical metadata CAS.
-        // Never let an older committed revision overwrite a newer projection.
         if (isRecord(current.value) && isRecord(value)
             && Number.isSafeInteger(current.value.revision)
             && Number.isSafeInteger(value.revision)
             && (current.value.revision as number) > (value.revision as number)) {
           return;
         }
-        if (await this.putShared(key, value, storageCapability, current.etag)) return;
+        if (await this.putPublic(key, value, storageCapability, current.etag)) return;
       }
     }
     throw new ShardedBoardStoreError(`Antonina v3 object ${key} changed too often`);
   }
 
-  /**
-   * Old Skrynia versions always generated a fresh per-object capability.
-   * Probe once before migration so Antonina can keep using board-v2 unchanged
-   * until the storage server supports sharing the existing board capability.
-   */
-  async supportsSharedCapability(storageCapability: string): Promise<boolean> {
-    const suffix = this.newId().replace(/[^A-Za-z0-9_-]/g, '-');
-    const key = `board-v3-probe-${suffix}`;
-    const response = await this.fetcher(this.url(key), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Skrynia-Mode': 'capability-write',
-        'X-Skrynia-Capability': storageCapability,
-      },
-      body: '{}',
-    });
-    if (response.status !== 201) return false;
-    let returned: string | null = null;
-    try {
-      const created = await this.parseJson(response, `Skrynia POST antonina/${key}`);
-      if (isRecord(created) && typeof created.capability === 'string') returned = created.capability;
-    } catch {
-      returned = null;
-    }
-    const capability = returned ?? storageCapability;
-    await this.fetcher(this.url(key), {
-      method: 'DELETE',
-      headers: { 'X-Skrynia-Capability': capability },
-    });
-    return returned === storageCapability;
+  async exists(storageCapability: string): Promise<boolean> {
+    return (await this.getJson<unknown>(SHARDED_META_KEY, storageCapability)) !== null;
   }
 
-  async exists(): Promise<boolean> {
-    return (await this.getJson<unknown>(SHARDED_META_KEY)) !== null;
-  }
-
-  async loadMeta(anchor?: BoardTrustAnchor): Promise<JsonObject<ShardedBoardMeta> | null> {
-    const stored = await this.getJson<unknown>(SHARDED_META_KEY);
+  async loadMeta(
+    storageCapability: string,
+    anchor?: BoardTrustAnchor,
+  ): Promise<JsonObject<ShardedBoardMeta> | null> {
+    const stored = await this.getJson<unknown>(SHARDED_META_KEY, storageCapability);
     if (stored === null) return null;
     const meta = parseMeta(stored.value);
     if (anchor !== undefined
         && (meta.boardId !== anchor.boardId || meta.rootKeyId !== anchor.rootKeyId)) {
-      throw new ShardedBoardStoreError('Antonina v3 metadata does not match the configured trust anchor');
+      throw new ShardedBoardStoreError('Antonina v3 metadata does not match this board credential');
     }
     return { value: meta, etag: stored.etag };
   }
 
-  private async readChunk(boardId: string, chunk: number): Promise<JsonObject<ShardedLogChunk>> {
-    const stored = await this.getJson<unknown>(logKey(chunk));
+  private async readChunk(
+    boardId: string,
+    chunk: number,
+    storageCapability: string,
+  ): Promise<JsonObject<ShardedLogChunk>> {
+    const stored = await this.getJson<unknown>(logKey(chunk), storageCapability);
     if (stored === null || !isRecord(stored.value)
         || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
         || stored.value.boardId !== boardId
@@ -641,12 +604,15 @@ export class ShardedBoardStore {
     };
   }
 
-  private async readLog(meta: ShardedBoardMeta): Promise<BoardOperationLog> {
+  private async readLog(meta: ShardedBoardMeta, storageCapability: string): Promise<BoardOperationLog> {
     if (meta.tailOperations.length < 1 || meta.tailOperations.length > V3_LOG_CHUNK_SIZE) {
       throw new ShardedBoardStoreError('Antonina v3 log tail size is malformed');
     }
     const chunks = await Promise.all(
-      Array.from({ length: meta.logChunkCount }, (_, index) => this.readChunk(meta.boardId, index + 1)),
+      Array.from(
+        { length: meta.logChunkCount },
+        (_, index) => this.readChunk(meta.boardId, index + 1, storageCapability),
+      ),
     );
     for (const chunk of chunks) {
       if (chunk.value.operations.length !== V3_LOG_CHUNK_SIZE) {
@@ -672,10 +638,14 @@ export class ShardedBoardStore {
     };
   }
 
-  async read(anchor: BoardTrustAnchor, previouslyAcceptedHead?: string | null): Promise<StoredSignedBoard | null> {
-    const metaStored = await this.loadMeta(anchor);
+  async read(
+    anchor: BoardTrustAnchor,
+    storageCapability: string,
+    previouslyAcceptedHead?: string | null,
+  ): Promise<StoredSignedBoard | null> {
+    const metaStored = await this.loadMeta(storageCapability, anchor);
     if (metaStored === null) return null;
-    const log = await this.readLog(metaStored.value);
+    const log = await this.readLog(metaStored.value, storageCapability);
     const state = await verifyAndReplayOperationLog(
       log,
       anchor,
@@ -685,7 +655,7 @@ export class ShardedBoardStore {
   }
 
   private async writeIssue(boardId: string, issue: BoardIssue, revision: number, storageCapability: string): Promise<void> {
-    await this.upsertShared(issueKey(issue.number), issueRecord(boardId, issue, revision), storageCapability);
+    await this.upsertPublic(issueKey(issue.number), issueRecord(boardId, issue, revision), storageCapability);
     const changedPage = issue.messages.length === 0
       ? 0
       : Math.floor((issue.messages.length - 1) / V3_COMMENT_PAGE_SIZE) + 1;
@@ -699,12 +669,12 @@ export class ShardedBoardStore {
         revision,
         messages: issue.messages.slice(offset, offset + V3_COMMENT_PAGE_SIZE),
       };
-      await this.upsertShared(commentKey(issue.number, changedPage), page, storageCapability);
+      await this.upsertPublic(commentKey(issue.number, changedPage), page, storageCapability);
     }
   }
 
   private async writeAllComments(boardId: string, issue: BoardIssue, revision: number, storageCapability: string): Promise<void> {
-    await this.upsertShared(issueKey(issue.number), issueRecord(boardId, issue, revision), storageCapability);
+    await this.upsertPublic(issueKey(issue.number), issueRecord(boardId, issue, revision), storageCapability);
     const pages = Math.ceil(issue.messages.length / V3_COMMENT_PAGE_SIZE);
     await Promise.all(Array.from({ length: pages }, async (_, index) => {
       const pageNumber = index + 1;
@@ -716,7 +686,7 @@ export class ShardedBoardStore {
         revision,
         messages: issue.messages.slice(index * V3_COMMENT_PAGE_SIZE, (index + 1) * V3_COMMENT_PAGE_SIZE),
       };
-      await this.upsertShared(commentKey(issue.number, pageNumber), page, storageCapability);
+      await this.upsertPublic(commentKey(issue.number, pageNumber), page, storageCapability);
     }));
   }
 
@@ -727,7 +697,7 @@ export class ShardedBoardStore {
       revision,
       numbers: [...state.queue],
     };
-    await this.upsertShared(SHARDED_QUEUE_KEY, value, storageCapability);
+    await this.upsertPublic(SHARDED_QUEUE_KEY, value, storageCapability);
   }
 
   private async writeCatalog(boardId: string, state: VerifiedBoardState, revision: number, storageCapability: string): Promise<void> {
@@ -739,7 +709,7 @@ export class ShardedBoardStore {
       targets: clone(state.board.targets),
       dispatches: clone(state.board.dispatches),
     };
-    await this.upsertShared(SHARDED_CATALOG_KEY, value, storageCapability);
+    await this.upsertPublic(SHARDED_CATALOG_KEY, value, storageCapability);
   }
 
   private async writeAuthorities(boardId: string, state: VerifiedBoardState, revision: number, storageCapability: string): Promise<void> {
@@ -749,7 +719,7 @@ export class ShardedBoardStore {
       revision,
       authorities: clone(state.authorities),
     };
-    await this.upsertShared(SHARDED_AUTHORITIES_KEY, value, storageCapability);
+    await this.upsertPublic(SHARDED_AUTHORITIES_KEY, value, storageCapability);
   }
 
   private async writeIssuePages(
@@ -761,7 +731,7 @@ export class ShardedBoardStore {
     storageCapability: string,
   ): Promise<void> {
     const pages = issuePages(boardId, state, log, issueState, revision);
-    await Promise.all(pages.map((page) => this.upsertShared(issuePageKey(issueState, page.page), page, storageCapability)));
+    await Promise.all(pages.map((page) => this.upsertPublic(issuePageKey(issueState, page.page), page, storageCapability)));
   }
 
   private async writeIssuePageContaining(
@@ -794,12 +764,12 @@ export class ShardedBoardStore {
         pageNumber * V3_ISSUE_PAGE_SIZE,
       ),
     };
-    await this.upsertShared(issuePageKey(issue.state, pageNumber), page, storageCapability);
+    await this.upsertPublic(issuePageKey(issue.state, pageNumber), page, storageCapability);
   }
 
   private async writeFeedPages(boardId: string, log: BoardOperationLog, revision: number, storageCapability: string): Promise<void> {
     const pages = feedPages(boardId, log, revision);
-    await Promise.all(pages.map((page) => this.upsertShared(feedPageKey(page.page), page, storageCapability)));
+    await Promise.all(pages.map((page) => this.upsertPublic(feedPageKey(page.page), page, storageCapability)));
   }
 
   private async writeAllMaterialized(
@@ -819,7 +789,7 @@ export class ShardedBoardStore {
   }
 
   async migrate(stored: StoredSignedBoard, storageCapability: string): Promise<StoredSignedBoard> {
-    const existing = await this.loadMeta();
+    const existing = await this.loadMeta(storageCapability);
     if (existing !== null) {
       const anchor = {
         boardId: stored.log.boardId,
@@ -844,13 +814,13 @@ export class ShardedBoardStore {
       ),
     }));
 
-    await Promise.all(chunks.map((chunk) => this.upsertShared(logKey(chunk.chunk), chunk, storageCapability)));
+    await Promise.all(chunks.map((chunk) => this.upsertPublic(logKey(chunk.chunk), chunk, storageCapability)));
     await this.writeAllMaterialized(stored.state, stored.log, revision, storageCapability);
 
     const meta = metaFor(stored.log, stored.state, stored.state.head, revision);
-    const created = await this.createShared(SHARDED_META_KEY, meta, storageCapability);
+    const created = await this.createPublic(SHARDED_META_KEY, meta, storageCapability);
     if (!created) {
-      const winner = await this.loadMeta();
+      const winner = await this.loadMeta(storageCapability);
       if (winner === null
           || winner.value.boardId !== meta.boardId
           || winner.value.rootKeyId !== meta.rootKeyId) {
@@ -869,9 +839,9 @@ export class ShardedBoardStore {
       chunk: chunkNumber,
       operations: clone(meta.tailOperations),
     };
-    const created = await this.createShared(logKey(chunkNumber), chunk, storageCapability);
+    const created = await this.createPublic(logKey(chunkNumber), chunk, storageCapability);
     if (created) return;
-    const existing = await this.readChunk(meta.boardId, chunkNumber);
+    const existing = await this.readChunk(meta.boardId, chunkNumber, storageCapability);
     const existingIds = existing.value.operations.map((operation) => operation.opId);
     const expectedIds = chunk.operations.map((operation) => operation.opId);
     if (existingIds.length !== expectedIds.length
@@ -923,7 +893,7 @@ export class ShardedBoardStore {
       case 'issue.delete': {
         const number = payload.number;
         if (number === undefined) throw new ShardedBoardStoreError('Issue delete has no issue number');
-        await this.upsertShared(issueKey(number), deletedIssueRecord(boardId, number, revision), storageCapability);
+        await this.upsertPublic(issueKey(number), deletedIssueRecord(boardId, number, revision), storageCapability);
         await this.writeIssuePages(boardId, candidate, log, revision, 'open', storageCapability);
         await this.writeIssuePages(boardId, candidate, log, revision, 'closed', storageCapability);
         await this.writeQueue(boardId, candidate, revision, storageCapability);
@@ -963,7 +933,7 @@ export class ShardedBoardStore {
       const newest = afterFeed[0];
       if (newest !== undefined) {
         const pageNumber = Math.floor(beforeFeed / V3_FEED_PAGE_SIZE) + 1;
-        const existing = await this.getJson<unknown>(feedPageKey(pageNumber));
+        const existing = await this.getJson<unknown>(feedPageKey(pageNumber), storageCapability);
         let entries: BoardFeedEntry[] = [];
         if (existing !== null && isRecord(existing.value) && Array.isArray(existing.value.entries)) {
           entries = (existing.value.entries as BoardFeedEntry[]).filter((entry) => entry.position < newest.position);
@@ -975,7 +945,7 @@ export class ShardedBoardStore {
           revision,
           entries: [...entries, newest].sort((left, right) => left.position - right.position),
         };
-        await this.upsertShared(feedPageKey(pageNumber), page, storageCapability);
+        await this.upsertPublic(feedPageKey(pageNumber), page, storageCapability);
       }
     }
   }
@@ -987,9 +957,6 @@ export class ShardedBoardStore {
   ): Promise<StoredSignedBoard> {
     const credential = await verifyBoardCredential(credentialValue);
     const anchor = credentialTrustAnchor(credential);
-    if (credential.keyId !== anchor.rootKeyId || credential.publicKey !== anchor.rootPublicKey) {
-      throw new ShardedBoardStoreError('Antonina accepts only the shared root board credential');
-    }
     if (request.kind === 'authority.delegate' || request.kind === 'authority.revoke') {
       throw new ShardedBoardStoreError('Antonina delegated credential operations are disabled');
     }
@@ -998,10 +965,10 @@ export class ShardedBoardStore {
     const nonce = request.nonce ?? this.newId();
 
     for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const metaStored = await this.loadMeta(anchor);
+      const metaStored = await this.loadMeta(credential.storageCapability, anchor);
       if (metaStored === null) throw new ShardedBoardStoreError('Antonina v3 metadata does not exist');
       const meta = metaStored.value;
-      const log = await this.readLog(meta);
+      const log = await this.readLog(meta, credential.storageCapability);
       const state = await verifyAndReplayOperationLog(
         log,
         anchor,
@@ -1015,7 +982,7 @@ export class ShardedBoardStore {
       if (meta.materializedRevision !== meta.operationCount) {
         await this.writeAllMaterialized(state, log, meta.operationCount, credential.storageCapability);
         const repaired = { ...meta, materializedRevision: meta.operationCount };
-        if (!await this.putShared(SHARDED_META_KEY, repaired, credential.storageCapability, metaStored.etag)) continue;
+        if (!await this.putPublic(SHARDED_META_KEY, repaired, credential.storageCapability, metaStored.etag)) continue;
         continue;
       }
 
@@ -1047,7 +1014,7 @@ export class ShardedBoardStore {
         meta.migratedFrom,
         meta.materializedRevision,
       );
-      if (!await this.putShared(SHARDED_META_KEY, committedMeta, credential.storageCapability, metaStored.etag)) continue;
+      if (!await this.putPublic(SHARDED_META_KEY, committedMeta, credential.storageCapability, metaStored.etag)) continue;
 
       // The signed operation is canonical now. Materialized objects are a
       // repairable acceleration layer, never the commit point.
@@ -1060,14 +1027,14 @@ export class ShardedBoardStore {
         // canonical signed log, and the next writer repairs all projections.
       }
 
-      let finalMeta = await this.loadMeta(anchor);
+      let finalMeta = await this.loadMeta(credential.storageCapability, anchor);
       if (materialized
           && finalMeta !== null
           && finalMeta.value.head === operation.opId
           && finalMeta.value.materializedRevision < revision) {
         const repaired = { ...finalMeta.value, materializedRevision: revision };
-        if (await this.putShared(SHARDED_META_KEY, repaired, credential.storageCapability, finalMeta.etag)) {
-          finalMeta = await this.loadMeta(anchor);
+        if (await this.putPublic(SHARDED_META_KEY, repaired, credential.storageCapability, finalMeta.etag)) {
+          finalMeta = await this.loadMeta(credential.storageCapability, anchor);
         }
       }
       if (finalMeta === null) {
@@ -1079,15 +1046,15 @@ export class ShardedBoardStore {
     throw new ShardedBoardStoreError('Antonina v3 board changed too often; signed operation was not committed');
   }
 
-  async getIssue(anchor: BoardTrustAnchor, number: number): Promise<BoardIssue | null> {
-    const metaStored = await this.loadMeta(anchor);
+  async getIssue(anchor: BoardTrustAnchor, storageCapability: string, number: number): Promise<BoardIssue | null> {
+    const metaStored = await this.loadMeta(storageCapability, anchor);
     if (metaStored === null) return null;
     if (metaStored.value.materializedRevision !== metaStored.value.operationCount) {
-      return this.getIssueFromCanonical(anchor, number);
+      return this.getIssueFromCanonical(anchor, storageCapability, number);
     }
-    const stored = await this.getJson<unknown>(issueKey(number));
+    const stored = await this.getJson<unknown>(issueKey(number), storageCapability);
     if (stored === null || !isRecord(stored.value)) {
-      return this.getIssueFromCanonical(anchor, number);
+      return this.getIssueFromCanonical(anchor, storageCapability, number);
     }
     const value = stored.value;
     if (value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
@@ -1096,18 +1063,18 @@ export class ShardedBoardStore {
         || !Number.isSafeInteger(value.revision)
         || (value.revision as number) > metaStored.value.operationCount
         || typeof value.deleted !== 'boolean') {
-      return this.getIssueFromCanonical(anchor, number);
+      return this.getIssueFromCanonical(anchor, storageCapability, number);
     }
     if (value.deleted) return null;
     if (!isRecord(value.issue)
         || !Number.isSafeInteger(value.messageCount)
         || !Number.isSafeInteger(value.commentPageCount)) {
-      return this.getIssueFromCanonical(anchor, number);
+      return this.getIssueFromCanonical(anchor, storageCapability, number);
     }
 
     const pageCount = value.commentPageCount as number;
     const pages = await Promise.all(Array.from({ length: pageCount }, (_, index) =>
-      this.getJson<unknown>(commentKey(number, index + 1))));
+      this.getJson<unknown>(commentKey(number, index + 1), storageCapability)));
     const messages: BoardMessage[] = [];
     for (const [index, page] of pages.entries()) {
       if (page === null || !isRecord(page.value)
@@ -1118,11 +1085,11 @@ export class ShardedBoardStore {
           || !Number.isSafeInteger(page.value.revision)
           || (page.value.revision as number) > metaStored.value.operationCount
           || !Array.isArray(page.value.messages)) {
-        return this.getIssueFromCanonical(anchor, number);
+        return this.getIssueFromCanonical(anchor, storageCapability, number);
       }
       messages.push(...(page.value.messages as BoardMessage[]));
     }
-    if (messages.length !== value.messageCount) return this.getIssueFromCanonical(anchor, number);
+    if (messages.length !== value.messageCount) return this.getIssueFromCanonical(anchor, storageCapability, number);
 
     const core = value.issue;
     return {
@@ -1136,20 +1103,25 @@ export class ShardedBoardStore {
     };
   }
 
-  private async getIssueFromCanonical(anchor: BoardTrustAnchor, number: number): Promise<BoardIssue | null> {
-    const stored = await this.read(anchor);
+  private async getIssueFromCanonical(
+    anchor: BoardTrustAnchor,
+    storageCapability: string,
+    number: number,
+  ): Promise<BoardIssue | null> {
+    const stored = await this.read(anchor, storageCapability);
     return stored?.state.board.issues.find((issue) => issue.number === number) ?? null;
   }
 
   async readIssuePage(
     anchor: BoardTrustAnchor,
+    storageCapability: string,
     state: IssueState,
     page: number,
   ): Promise<IssueListPage | null> {
     if (!Number.isSafeInteger(page) || page < 1) {
       throw new ShardedBoardStoreError('Antonina issue page must be a positive integer');
     }
-    const metaStored = await this.loadMeta(anchor);
+    const metaStored = await this.loadMeta(storageCapability, anchor);
     if (metaStored === null) return null;
     if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
     const maxPage = state === 'open' ? metaStored.value.openPageCount : metaStored.value.closedPageCount;
@@ -1164,7 +1136,7 @@ export class ShardedBoardStore {
         entries: [],
       };
     }
-    const stored = await this.getJson<unknown>(issuePageKey(state, page));
+    const stored = await this.getJson<unknown>(issuePageKey(state, page), storageCapability);
     if (stored === null || !isRecord(stored.value)
         || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
         || stored.value.boardId !== metaStored.value.boardId
@@ -1184,11 +1156,11 @@ export class ShardedBoardStore {
     return pageValue;
   }
 
-  async getQueue(anchor: BoardTrustAnchor): Promise<number[] | null> {
-    const metaStored = await this.loadMeta(anchor);
+  async getQueue(anchor: BoardTrustAnchor, storageCapability: string): Promise<number[] | null> {
+    const metaStored = await this.loadMeta(storageCapability, anchor);
     if (metaStored === null) return null;
     if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
-    const stored = await this.getJson<unknown>(SHARDED_QUEUE_KEY);
+    const stored = await this.getJson<unknown>(SHARDED_QUEUE_KEY, storageCapability);
     if (stored === null || !isRecord(stored.value)
         || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
         || stored.value.boardId !== metaStored.value.boardId
@@ -1200,8 +1172,8 @@ export class ShardedBoardStore {
     return [...stored.value.numbers as number[]];
   }
 
-  async readFeed(anchor: BoardTrustAnchor, request: BoardFeedRequest = {}): Promise<BoardFeedPage | null> {
-    const metaStored = await this.loadMeta(anchor);
+  async readFeed(anchor: BoardTrustAnchor, storageCapability: string, request: BoardFeedRequest = {}): Promise<BoardFeedPage | null> {
+    const metaStored = await this.loadMeta(storageCapability, anchor);
     if (metaStored === null) return null;
     if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
     const limit = feedLimit(request.limit);
@@ -1211,7 +1183,7 @@ export class ShardedBoardStore {
     const entries: BoardFeedEntry[] = [];
 
     for (let page = metaStored.value.feedPageCount; page >= 1 && entries.length < limit + 1; page -= 1) {
-      const stored = await this.getJson<unknown>(feedPageKey(page));
+      const stored = await this.getJson<unknown>(feedPageKey(page), storageCapability);
       if (stored === null || !isRecord(stored.value)
           || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
           || stored.value.boardId !== metaStored.value.boardId
@@ -1236,11 +1208,11 @@ export class ShardedBoardStore {
     };
   }
 
-  async readAuthorities(anchor: BoardTrustAnchor): Promise<VerifiedAuthority[] | null> {
-    const metaStored = await this.loadMeta(anchor);
+  async readAuthorities(anchor: BoardTrustAnchor, storageCapability: string): Promise<VerifiedAuthority[] | null> {
+    const metaStored = await this.loadMeta(storageCapability, anchor);
     if (metaStored === null) return null;
     if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
-    const stored = await this.getJson<unknown>(SHARDED_AUTHORITIES_KEY);
+    const stored = await this.getJson<unknown>(SHARDED_AUTHORITIES_KEY, storageCapability);
     if (stored === null || !isRecord(stored.value)
         || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
         || stored.value.boardId !== metaStored.value.boardId
@@ -1252,15 +1224,15 @@ export class ShardedBoardStore {
     return clone(stored.value.authorities as VerifiedAuthority[]);
   }
 
-  async readCatalog(anchor: BoardTrustAnchor): Promise<{
+  async readCatalog(anchor: BoardTrustAnchor, storageCapability: string): Promise<{
     resources: BoardResource[];
     targets: BoardExecutionTarget[];
     dispatches: BoardDispatch[];
   } | null> {
-    const metaStored = await this.loadMeta(anchor);
+    const metaStored = await this.loadMeta(storageCapability, anchor);
     if (metaStored === null) return null;
     if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
-    const stored = await this.getJson<unknown>(SHARDED_CATALOG_KEY);
+    const stored = await this.getJson<unknown>(SHARDED_CATALOG_KEY, storageCapability);
     if (stored === null || !isRecord(stored.value)
         || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
         || stored.value.boardId !== metaStored.value.boardId

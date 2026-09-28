@@ -612,7 +612,10 @@ export class BoardApi {
 
   /** Fast materialized reads are addressed by the same one board key. */
   private async fastReadCredential(): Promise<BoardCredential> {
-    if (this.credential === null) throw new AntoninaApiError('Antonina board credential is required');
+    if (this.credential === null) {
+      if (!await this.store.signedBoardExists()) throw new BoardMissingError();
+      throw new AntoninaApiError('Antonina board credential is required');
+    }
     if (!this.credentialAccepted) await this.verifyCredential(this.credential);
     return this.requireCredential();
   }

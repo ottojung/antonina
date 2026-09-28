@@ -153,6 +153,18 @@ export interface IssueListPage {
   entries: IssueListSummary[];
 }
 
+export interface BoardOverview {
+  boardId: string;
+  head: string;
+  revision: number;
+  deleted: boolean;
+  queue: number[];
+  issues: IssueListSummary[];
+  resources: BoardResource[];
+  targets: BoardExecutionTarget[];
+  dispatches: BoardDispatch[];
+}
+
 interface QueueSnapshot {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;
@@ -1435,15 +1447,12 @@ export class ShardedBoardStore {
     return (await this.readIssueSnapshot(credential, meta, entry.ref, true)).issue;
   }
 
-  async readIssuePage(
-    credentialValue: BoardCredential,
+  private async readIssuePageFromMeta(
+    credential: BoardCredential,
+    meta: ShardedBoardMeta,
     state: IssueState,
     page: number,
   ): Promise<IssueListPage> {
-    if (!Number.isSafeInteger(page) || page < 1) {
-      throw new ShardedBoardStoreError('Antonina issue page must be a positive integer');
-    }
-    const { credential, meta } = await this.requirePointerForCredential(credentialValue);
     const refs = state === 'open' ? meta.openPageRefs : meta.closedPageRefs;
     const total = state === 'open' ? meta.openIssueCount : meta.closedIssueCount;
     const ref = refs[page - 1];
@@ -1465,10 +1474,50 @@ export class ShardedBoardStore {
         || value.boardId !== meta.boardId
         || value.state !== state
         || value.page !== page
+        || !Number.isSafeInteger(value.revision)
+        || value.revision !== meta.revision
         || !Array.isArray(value.entries)) {
       throw new ShardedBoardStoreError('Antonina issue list page is malformed');
     }
     return clone(value as unknown as IssueListPage);
+  }
+
+  async readIssuePage(
+    credentialValue: BoardCredential,
+    state: IssueState,
+    page: number,
+  ): Promise<IssueListPage> {
+    if (!Number.isSafeInteger(page) || page < 1) {
+      throw new ShardedBoardStoreError('Antonina issue page must be a positive integer');
+    }
+    const { credential, meta } = await this.requirePointerForCredential(credentialValue);
+    return this.readIssuePageFromMeta(credential, meta, state, page);
+  }
+
+  async readOverview(credentialValue: BoardCredential): Promise<BoardOverview> {
+    const { credential, pointer, meta } = await this.requirePointerForCredential(credentialValue);
+    const [queue, catalog, openPages, closedPages] = await Promise.all([
+      this.readQueue(credential, meta),
+      this.readCatalog(credential, meta),
+      Promise.all(meta.openPageRefs.map((_, index) =>
+        this.readIssuePageFromMeta(credential, meta, 'open', index + 1))),
+      Promise.all(meta.closedPageRefs.map((_, index) =>
+        this.readIssuePageFromMeta(credential, meta, 'closed', index + 1))),
+    ]);
+    return {
+      boardId: meta.boardId,
+      head: pointer.head,
+      revision: pointer.revision,
+      deleted: meta.deleted,
+      queue,
+      issues: [
+        ...openPages.flatMap((page) => page.entries),
+        ...closedPages.flatMap((page) => page.entries),
+      ],
+      resources: catalog.resources,
+      targets: catalog.targets,
+      dispatches: catalog.dispatches,
+    };
   }
 
   async getQueue(credentialValue: BoardCredential): Promise<number[]> {

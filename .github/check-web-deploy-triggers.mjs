@@ -101,8 +101,19 @@ function expandGlob(glob, baseDir) {
   if (glob.endsWith('/**')) return files.filter((f) => f.startsWith(`${prefix}${glob.slice(0, -3)}/`));
   if (glob.endsWith('/**/*')) return files.filter((f) => f.startsWith(`${prefix}${glob.slice(0, -4)}/`));
   if (!glob.includes('*')) {
-    // bare directory include, e.g. "src"
-    return files.filter((f) => f.startsWith(`${prefix}${glob}/`));
+    // A bare include with no wildcard names one path, and a path is either a file
+    // or a directory. The two forms look identical in the include list, so they are
+    // told apart by what the repository actually holds at that path: a bare *file*
+    // include such as "vite.config.ts" (web/tsconfig.node.json) must match that file
+    // itself, and expanding it as a directory prefix would trace nothing at all,
+    // shrinking the traced set while the check still reported PASS. A bare
+    // *directory* include, "src" in web/tsconfig.json or the packages/*/tsconfig.json
+    // projects, keeps matching everything under it. A name that is neither a
+    // tracked file nor a directory prefix is treated as a directory, which is the
+    // form every current declaration in this repository uses.
+    const exact = `${prefix}${glob}`;
+    if (isFile(exact)) return files.filter((f) => f === exact);
+    return files.filter((f) => f.startsWith(`${exact}/`));
   }
   return files.filter((f) => globMatches(`${prefix}${glob}`, f));
 }

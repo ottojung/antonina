@@ -77,10 +77,30 @@ test('the traced make target comes from a run step, not from a comment', (t) => 
   // instead of `build` would have emptied the input set rather than kept it. The
   // count is the traced bundle inputs this revision actually has, so adding a
   // `web/**` or `packages/core/src/**` source file is expected to move it and
-  // this number with it. 35 is this revision: 31 before, plus
-  // `packages/core/src/board-diagnostics.ts`, plus the `web/package.json`,
-  // `web/package-lock.json` and `web/vite.config.ts` the web suite needs.
-  assert.match(result.stdout, /traced bundle inputs: 35/);
+  // this number with it. 36 is this revision: 35 before, plus
+  // `web/vite.config.ts`, which `web/tsconfig.node.json` includes as a bare
+  // filename and which the bare-directory expansion could not see.
+  assert.match(result.stdout, /traced bundle inputs: 36/);
+});
+
+test('a bare filename include is traced as the file it names', (t) => {
+  // `web/tsconfig.node.json` declares `"include": ["vite.config.ts"]`. Expanded as
+  // if it were a directory, that asks for files under `web/vite.config.ts/`, matches
+  // nothing, and the run still says PASS over a traced set that has silently lost an
+  // input which changes the deployed bundle. The `web/**` paths entry already covers
+  // it, so the fix is visible only as the file appearing in the traced set at all.
+  const result = runChecker(t, original);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /covered {3}web\/vite\.config\.ts\b/);
+});
+
+test('a bare directory include still matches that directory\'s contents', (t) => {
+  // The other half of the same branch, and what `web/tsconfig.json` and the
+  // `packages/*/tsconfig.json` projects rely on: a name that is a directory keeps
+  // expanding to everything beneath it rather than matching only itself.
+  const result = runChecker(t, original);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /covered {3}web\/src\/main\.tsx\b/);
 });
 
 test('an ambiguous make target fails instead of guessing', (t) => {

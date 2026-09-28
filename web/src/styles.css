@@ -129,12 +129,50 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .feed-error { margin: 0 0 12px; color: #762e23; font-size: .85rem; }
 .feed-more { margin-top: 16px; border: 1px solid #bdc4bb; border-radius: 8px; background: #fff; color: var(--ink); padding: 9px 14px; font-weight: 750; }
 .feed-more:disabled { background: #e5e7e2; color: #969a92; border-color: #d2d5cf; cursor: not-allowed; }
+/* The target overview is a fourth single-column view, so it declares the same
+   pinned row and the same single scrolling pane the other two settled on. A
+   card is a bordered block rather than a machine diagram: a persistent host and
+   an ephemeral environment are drawn from the same template so neither is
+   presented as the more normal of the two. */
+.workspace.targets-view { display: grid; grid-template-columns: minmax(0, 1fr); background: var(--paper); }
+.workspace.targets-view .issue-pane { border-right: 0; }
+.workspace.targets-view .pane-heading { max-width: 1100px; margin: 0 auto; width: 100%; }
+.targets-view { max-width: 1100px; margin: 0 auto; padding: 0 32px 32px; }
+.targets-scope { margin: 0 0 18px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 9px; background: #f7f8f5; color: var(--muted); font-size: .8rem; line-height: 1.5; }
+.target-card { margin: 0 0 18px; padding: 20px 22px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.target-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.target-header h2 { margin: 2px 0 4px; }
+.target-identity { color: var(--muted); font-size: .8rem; }
+.target-status { flex: none; border-radius: 999px; padding: 4px 11px; font-size: .7rem; font-weight: 800; text-align: center; }
+.target-status.available { background: var(--green-soft); color: var(--green-dark); }
+.target-status.unavailable { background: var(--orange-soft); color: #765c4c; }
+.target-description { margin: 12px 0 0; color: var(--ink); font-size: .88rem; line-height: 1.5; }
+.target-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 20px; margin: 16px 0 0; }
+.target-facts div, .target-state dl div { display: flex; flex-direction: column; gap: 2px; }
+.target-facts dt, .target-state dt { color: var(--muted); font-size: .7rem; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.target-facts dd, .target-state dd { margin: 0; font-size: .86rem; }
+.target-state, .target-caveats, .target-guidance { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.target-state h3, .target-caveats h3, .target-guidance h3 { margin: 0 0 8px; font-size: .8rem; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.target-state dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 20px; margin: 0; }
+.target-state dd { display: flex; flex-direction: column; }
+/* An absent measurement is styled as a statement rather than as a value, so a
+   number that was measured never sits next to one that was not. */
+.state-unknown { color: var(--muted); font-style: italic; }
+.target-state small { color: var(--muted); font-size: .74rem; line-height: 1.45; }
+.target-caveats ul, .target-guidance ul { margin: 0; padding-left: 18px; font-size: .85rem; line-height: 1.55; }
+.target-links { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: .78rem; }
+.target-dispatched { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.target-dispatched button { border: 0; background: transparent; color: var(--green); padding: 0; font-weight: 750; }
 @media (max-width: 760px) {
 .workspace.feed-view { display: block; }
 .workspace.feed-view .issue-pane { border-right: 0; }
 .feed-view-inner { padding: 0 20px 28px; }
 .feed-entry { flex-wrap: wrap; gap: 6px; }
 .feed-at { white-space: normal; }
+.workspace.targets-view { display: block; }
+.workspace.targets-view .issue-pane { border-right: 0; }
+.targets-view { padding: 0 20px 28px; }
+.target-header { flex-direction: column; }
 }
 .resource-form, .resource-host { padding: 22px 24px; }
 .resource-form { display: grid; gap: 7px; border-bottom: 1px solid var(--line); }

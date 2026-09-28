@@ -305,7 +305,10 @@ export class SignedBoardStore {
     try {
       return await this.sharded.append(credential, request);
     } catch (error) {
-      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
+      if (error instanceof ShardedBoardStoreError) {
+        if (error.message === 'Antonina board has been deleted') throw new BoardDeletedError();
+        throw fromShardedError(error);
+      }
       throw error;
     }
   }

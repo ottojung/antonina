@@ -1178,6 +1178,22 @@ export type PersistedBoardVersion = (typeof PERSISTED_BOARD_VERSIONS)[number];
  * The board of one specific persisted version. Used to key a parser to the
  * version it reads, so a parser cannot be registered as the reader for a
  * version whose shape it does not produce.
+ *
+ * What a version bump owes here is bigger than a parser. `PersistedBoard` is a
+ * closed union — `Board | LegacyBoardV2` today — and `Board.schemaVersion` is
+ * `typeof BOARD_SCHEMA_VERSION`, so the *current* version's entry is satisfied
+ * by the interface it already has. The version a bump supersedes has no such
+ * entry: moving `BOARD_SCHEMA_VERSION` to 4 without first giving the v3 board an
+ * interface of its own makes `PersistedBoardOfVersion<3>` resolve to `never`, and
+ * the mapped type on {@link PERSISTED_BOARD_PARSERS} then demands a v3 parser
+ * returning `never`. It typechecks — with a parser that cannot be written
+ * honestly, and which the suite will then accept as "a reader for v3".
+ *
+ * So a bump owes the superseded version a persisted *type* as well as a parser:
+ * a `BoardV3` interface with `schemaVersion: 3`, added to the `PersistedBoard`
+ * union, before the v3 parser is registered. The cheapest-looking alternative,
+ * `[3]: (value: unknown) => value as never`, silences the compiler and the
+ * obligation at once; it is a hole in the table, not a reader.
  */
 type PersistedBoardOfVersion<V extends PersistedBoardVersion> = Extract<PersistedBoard, { schemaVersion: V }>;
 
@@ -1190,6 +1206,10 @@ type PersistedBoardOfVersion<V extends PersistedBoardVersion> = Extract<Persiste
  * failure rather than a runtime surprise. A version bump therefore cannot
  * merge with a board the previous release wrote that this build then refuses
  * to read on the operation-log parse path.
+ *
+ * The bump owes a *type* for the superseded version as well as a parser for it;
+ * see {@link PersistedBoardOfVersion} for why, and for what a parser registered
+ * against a `never` costs.
  *
  * Each parser returns the board of the version it is keyed by, so a v2 reader
  * cannot be filed as the v4 reader even when both typecheck.

@@ -154,9 +154,12 @@ test('every step a chain returns agrees with the version it was asked to leave',
  * so a rename in either module makes the probe fail to build rather than pass
  * vacuously.
  *
- * Nothing is derived from the literal v3 or v4 anywhere below: `SUPERSEDED` is
- * whatever this build currently writes, so the same probe covers the bump after
- * next without being edited.
+ * Nothing is derived from a literal version anywhere below: `SUPERSEDED` is
+ * whatever this build currently writes, and every string the probe searches the
+ * compiled text for is built from `SUPERSEDED` or `NEXT`, so the same probe
+ * covers the bump after next without being edited. (Before board issue 104's
+ * repair, the search string here was the literal `= 3;` and the bump after next
+ * could not be probed at all.)
  */
 async function buildNextVersionBumpProbe() {
   const NEXT = migrations.CURRENT_PERSISTED_BOARD_VERSION + 1;
@@ -178,13 +181,21 @@ async function buildNextVersionBumpProbe() {
   const modelPath = join(distDir(), 'model.next-version-bump.probe.js');
   const migrationsPath = join(distDir(), 'migrations.next-version-bump.probe.js');
   writeFileSync(modelPath, rewrite(readFileSync(join(distDir(), 'model.js'), 'utf8'), [
-    // v4 is what the bumped build writes.
-    ['export const BOARD_SCHEMA_VERSION = 3;', `export const BOARD_SCHEMA_VERSION = ${NEXT};`],
+    // v4 is what the bumped build writes. The string searched for is this
+    // build's *current* version, not a literal, so a bumped build is probed by
+    // the same line.
+    [`export const BOARD_SCHEMA_VERSION = ${SUPERSEDED};`, `export const BOARD_SCHEMA_VERSION = ${NEXT};`],
     [`import { BoardIncompatibilityError,`, `import { parseCanonicalBoard as parseSupersededBoard } from './model.js';\nimport { BoardIncompatibilityError,`],
     // the version this build writes today is still in the world and still needs
-    // reading, and the new version is what is written.
-    ['    LEGACY_BOARD_SCHEMA_VERSION,\n    BOARD_SCHEMA_VERSION,\n];',
-      `    LEGACY_BOARD_SCHEMA_VERSION,\n    ${SUPERSEDED},\n    ${NEXT},\n];`],
+    // reading, and the new version is what is written. The declared list already
+    // ends in the constant the rewrite above has just moved to `NEXT`, so the
+    // superseded version is *inserted* before that entry. Anchoring on the last
+    // entry rather than on the whole two-entry list is what lets a build that
+    // already declares three versions still be probed; a build whose list is not
+    // written that way still fails to build, loudly, rather than producing a
+    // probe that does not declare the version it claims to.
+    ['    BOARD_SCHEMA_VERSION,\n];',
+      `    ${SUPERSEDED},\n    BOARD_SCHEMA_VERSION,\n];`],
     ['    [BOARD_SCHEMA_VERSION]: parseCanonicalBoard,\n};',
       `    [${SUPERSEDED}]: parseSupersededBoard,\n    [BOARD_SCHEMA_VERSION]: parseCanonicalBoard,\n};`],
   ], 'model'));
@@ -244,18 +255,30 @@ test('a board at a supported version is readable, including at the next version 
   // The general form is the point: for every version this build declares it can
   // read, a board at that version parses, and a build whose current version has
   // moved on still parses a board at the version this build writes. Both are
-  // checked here so the bump after next is covered by construction rather than
-  // by a test someone has to remember to add.
+  // checked here.
+  //
+  // What each half derives, honestly: the *bumped* half below is general, and
+  // the next bump after next is covered by it without editing this file. The
+  // *current build's* half is not. It holds real boards, and a real board at a
+  // given version is data that cannot be derived — it is what some earlier
+  // release actually wrote. The current version's board is derived (an empty
+  // board is what this build writes) and the legacy board is the committed
+  // operation-log fixture, whose key is the legacy constant rather than a
+  // literal, so it follows the source. Any *further* declared version — which is
+  // exactly what a bump adds — still owes a board here, and the loop below fails
+  // loudly and by name if one is missing. That is a reminder the bump author
+  // must answer, not a defect the test hides, and the docstring no longer claims
+  // otherwise.
   assert.equal(model.everySupportedVersionHasAParser(), true);
   assert.deepEqual([...model.PERSISTED_BOARD_VERSIONS], [...migrations.SUPPORTED_PERSISTED_BOARD_VERSIONS]);
 
-  const boards = {
-    [migrations.CURRENT_PERSISTED_BOARD_VERSION]: model.emptyBoard(),
-    [2]: storedLog().operations[0].payload.board,
-  };
+  const boards = new Map([
+    [migrations.CURRENT_PERSISTED_BOARD_VERSION, model.emptyBoard()],
+    [model.LEGACY_BOARD_SCHEMA_VERSION, storedLog().operations[0].payload.board],
+  ]);
   for (const version of model.PERSISTED_BOARD_VERSIONS) {
-    const board = boards[version];
-    assert.ok(board !== undefined, `no board fixture at declared version ${version}`);
+    const board = boards.get(version);
+    assert.ok(board !== undefined, `no board fixture at declared version ${version}: this build reads a version with no board to read it with`);
     assert.equal(model.parsePersistedBoard(board).schemaVersion, version);
     // The gate agrees about which versions are readable, for the same list.
     assert.ok(migrations.SUPPORTED_PERSISTED_BOARD_VERSIONS.includes(version));
@@ -267,18 +290,28 @@ test('a board at a supported version is readable, including at the next version 
 
   // The concrete instance: at v4, a v3 board — the one the immediately
   // preceding release wrote — is readable, and refused no earlier than the gate.
-  const supersededBoard = boards[SUPERSEDED];
+  // This is where this build's own board at the version it writes today is used,
+  // and it is why that board is derived rather than hand-written: the bumped
+  // build is required to read the board this build writes, whatever version
+  // number that turns out to be.
+  const supersededBoard = boards.get(SUPERSEDED);
+  assert.ok(supersededBoard !== undefined, `this build has no board at the version it writes, ${SUPERSEDED}`);
   assert.equal(supersededBoard.schemaVersion, SUPERSEDED);
   assert.equal(bumpedModel.parsePersistedBoard(supersededBoard).schemaVersion, SUPERSEDED);
   assert.equal(bumped.migratePersistedBoard(supersededBoard).board.schemaVersion, NEXT);
   // And v2 is still readable at v4, through the v2 parser, not by accident.
-  assert.equal(bumpedModel.parsePersistedBoard(boards[2]).schemaVersion, 2);
+  const legacyBoard = boards.get(model.LEGACY_BOARD_SCHEMA_VERSION);
+  assert.equal(bumpedModel.parsePersistedBoard(legacyBoard).schemaVersion, model.LEGACY_BOARD_SCHEMA_VERSION);
 
   // Every version the bumped build claims is readable at v4, and every one that
-  // is superseded at v4 still migrates. The current version needs no fixture:
-  // an empty chain leaves the board exactly as it was found.
+  // is superseded at v4 still migrates. This half *is* general: the current
+  // version needs no fixture, because an empty chain leaves the board exactly as
+  // it was found, and the versions this build has boards for are used as they
+  // are. A version with no board behind it is stamped onto an empty one, which
+  // is enough to show it is readable and migrates, and is why the bumped half
+  // needs no fixture when the version after next is reached.
   for (const version of bumpedModel.PERSISTED_BOARD_VERSIONS) {
-    const board = boards[version] ?? model.emptyBoard();
+    const board = boards.get(version) ?? model.emptyBoard();
     assert.equal(bumpedModel.parsePersistedBoard({ ...board, schemaVersion: version }).schemaVersion, version);
     const migrated = bumped.migratePersistedBoard({ ...board, schemaVersion: version });
     assert.equal(migrated.board.schemaVersion, NEXT, `version ${version}`);

@@ -30,34 +30,87 @@ function jsonResponse(value: unknown, status = 200, etag?: string): Response {
 
 /** The CAS storage behaviour the signed board relies on. */
 function fakeSkrynia() {
+  type Entry = {
+    value: unknown;
+    mode: 'capability-write' | 'public-write' | 'immutable';
+    capability: string | null;
+    revision: number;
+  };
   const capability = 'a'.repeat(64);
-  let signed: unknown = null;
-  let revision = 0;
-  const etag = () => `"v${revision}"`;
+  const objects = new Map<string, Entry>();
+
+  const keyOf = (input: string | URL | Request) => {
+    const parts = String(input).split('/');
+    return decodeURIComponent(parts.at(-1) ?? '');
+  };
+  const etag = (entry: Entry) => `"v${entry.revision}"`;
+  const boardEntry = () => objects.get('board-v2');
 
   return {
     capability,
-    get signed() { return signed; },
-    set signed(value: unknown) { signed = value; },
+    objects,
+    get signed(): unknown { return boardEntry()?.value ?? null; },
+    set signed(value: unknown) {
+      if (value === null) {
+        objects.delete('board-v2');
+        return;
+      }
+      const current = boardEntry();
+      objects.set('board-v2', {
+        value,
+        mode: 'capability-write',
+        capability,
+        revision: (current?.revision ?? 0) + 1,
+      });
+    },
     async fetch(input: string | URL | Request, init: RequestInit = {}) {
       const method = init.method ?? 'GET';
-      if (!String(input).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
+      const key = keyOf(input);
+      const current = objects.get(key);
+
       if (method === 'GET') {
-        return signed === null ? new Response(null, { status: 404 }) : jsonResponse(signed, 200, etag());
+        return current === undefined
+          ? new Response(null, { status: 404 })
+          : jsonResponse(current.value, 200, etag(current));
       }
+
       if (method === 'POST') {
-        if (signed !== null) return new Response(null, { status: 409 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return jsonResponse({ mode: 'capability-write', capability }, 201);
+        if (current !== undefined) return new Response(null, { status: 409 });
+        const headers = new Headers(init.headers);
+        const mode = (headers.get('X-Skrynia-Mode') ?? 'capability-write') as Entry['mode'];
+        if (!['capability-write', 'public-write', 'immutable'].includes(mode)) {
+          return jsonResponse({ error: 'invalid_mode' }, 400);
+        }
+        const entry: Entry = {
+          value: JSON.parse(String(init.body)),
+          mode,
+          capability: mode === 'capability-write' ? capability : null,
+          revision: 1,
+        };
+        objects.set(key, entry);
+        return jsonResponse(
+          mode === 'capability-write' ? { mode, capability } : { mode },
+          201,
+        );
       }
+
       if (method === 'PUT') {
-        if (new Headers(init.headers).get('X-Skrynia-Capability') !== capability) return jsonResponse({ error: 'invalid capability' }, 403);
-        if (new Headers(init.headers).get('If-Match') !== etag()) return new Response(null, { status: 412 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return new Response(null, { status: 200 });
+        if (current === undefined) return new Response(null, { status: 404 });
+        if (current.mode === 'immutable') return jsonResponse({ error: 'immutable' }, 403);
+        const headers = new Headers(init.headers);
+        if (current.mode === 'capability-write'
+            && headers.get('X-Skrynia-Capability') !== current.capability) {
+          return jsonResponse({ error: 'invalid capability' }, 403);
+        }
+        const match = headers.get('If-Match');
+        if (match !== null && match !== etag(current)) {
+          return jsonResponse({ error: 'etag_mismatch' }, 412);
+        }
+        current.value = JSON.parse(String(init.body));
+        current.revision += 1;
+        return jsonResponse({ ok: true }, 200);
       }
+
       return new Response(null, { status: 405 });
     },
   };

@@ -208,7 +208,7 @@ describe('browser board session', () => {
     const log = server.signed;
     const second = session(server);
 
-    await expect(second.initialize()).rejects.toThrow('The Antonina signed board already exists');
+    await expect(second.initialize()).rejects.toThrow('The Antonina board already exists');
     expect(server.signed).toBe(log);
     expect(second.hasCredential()).toBe(false);
   });

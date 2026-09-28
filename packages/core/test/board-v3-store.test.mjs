@@ -270,11 +270,22 @@ test('feed entries are materialized directly and read without history', async ()
     payload: { number: 1, author: 'tester', body: 'feed message' },
   }, created.state.head);
 
+  const storedFeedEntry = [...server.objects.values()]
+    .flatMap((entry) => Array.isArray(entry.value?.entries) ? entry.value.entries : [])
+    .find((entry) => entry?.kind === 'comment-added');
+  assert.ok(storedFeedEntry);
+  assert.equal(Object.hasOwn(storedFeedEntry, 'author'), false);
+  assert.equal(Object.hasOwn(storedFeedEntry, 'body'), false);
+  assert.equal(typeof storedFeedEntry.commentRef, 'string');
+  assert.equal(storedFeedEntry.commentIndex, 0);
+
   server.clearRequests();
   const page = await store.readFeed(initialized.credential, { limit: 10 });
 
   assert.equal(page?.entries.length, 2);
   assert.equal(page?.entries[0].kind, 'comment-added');
+  assert.equal(page?.entries[0].author, 'tester');
+  assert.equal(page?.entries[0].body, 'feed message');
   assert.equal(page?.entries[1].kind, 'issue-created');
   assert.equal(server.requests.every((request) => request.method === 'GET'), true);
 });

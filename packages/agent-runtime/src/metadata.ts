@@ -64,6 +64,24 @@ const BACKEND_ERROR_FIELDS = [
   'diagnostic_bytes',
 ] as const;
 
+/**
+ * Optional, signal-death-only detail. Kept separate from
+ * `BACKEND_ERROR_FIELDS` because those nine are always present and
+ * `exactKeys` enforces that; these are validated when present so a record
+ * written by an older runtime still validates, while a present-but-wrong one
+ * is still rejected.
+ */
+const BACKEND_SIGNAL_FIELDS = [
+  'signal',
+  'signal_name',
+  'oom_evidence',
+  'oom_delta',
+  'oom_kill_delta',
+  'lifetime_seconds',
+] as const;
+
+const SIGNAL_DEATH_CLASSIFICATION = 'external_signal_kill';
+
 export class MalformedPendingPromptMetadataError extends Error {
   constructor() {
     super('persisted pending prompt authority is not canonical');
@@ -88,6 +106,25 @@ function exactKeys(record: Record<string, unknown>, fields: readonly string[]): 
   return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
 }
 
+/**
+ * Every required field is present, nothing is present beyond the required set
+ * plus the optional one, and no duplicates are possible in a JSON object. An
+ * unknown key is still a rejection: the top-level metadata shape is exact, and
+ * a backend error is a closed record rather than a bag of extras.
+ */
+function exactKeysWithOptional(
+  record: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  const allowed = new Set([...required, ...optional]);
+  const keys = Object.keys(record);
+  for (const key of keys) {
+    if (!allowed.has(key)) return false;
+  }
+  return required.every((key) => Object.hasOwn(record, key));
+}
+
 function nullableString(value: unknown, allowEmpty = false): boolean {
   return value === null || (typeof value === 'string' && (allowEmpty || value.length > 0));
 }
@@ -104,7 +141,7 @@ function canonicalBackendError(value: unknown): boolean {
   if (value === null) return true;
   if (typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  if (!exactKeys(record, BACKEND_ERROR_FIELDS)) return false;
+  if (!exactKeysWithOptional(record, BACKEND_ERROR_FIELDS, BACKEND_SIGNAL_FIELDS)) return false;
   if (typeof record.classification !== 'string' || record.classification.length === 0 || record.classification.length > 80) return false;
   for (const key of ['provider', 'model', 'reference', 'backend_scope'] as const) {
     if (!nullableString(record[key], false)) return false;
@@ -121,8 +158,24 @@ function canonicalBackendError(value: unknown): boolean {
     typeof record.diagnostic_bytes !== 'number'
     || !Number.isSafeInteger(record.diagnostic_bytes)
     || record.diagnostic_bytes < 0
-    || record.diagnostic_bytes > 16 * 1024
+    ||     record.diagnostic_bytes > 16 * 1024
   ) return false;
+  for (const key of BACKEND_SIGNAL_FIELDS) {
+    if (!Object.hasOwn(record, key)) continue;
+    const value = record[key];
+    if (value === null) continue;
+    if (key === 'signal_name') {
+      if (typeof value !== 'string' || value.length === 0 || value.length > 32) return false;
+    } else if (key === 'oom_evidence') {
+      if (value !== 'observed' && value !== 'unavailable') return false;
+    } else if (key === 'lifetime_seconds') {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return false;
+    } else if (key === 'signal') {
+      if (persistedProcessInteger(value, 1) === null) return false;
+    } else if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+      return false;
+    }
+  }
   return true;
 }
 

@@ -28,6 +28,11 @@ import {
   waitForInvocationGone,
 } from '../../agent-runtime/src/lifecycle.js';
 import {
+  formatBytes,
+  readHostCapacity,
+  type HostCapacity,
+} from '../../agent-runtime/src/host-capacity.js';
+import {
   TERMINAL_STATES,
   activeRunnerFlag,
   deletePendingFlag,
@@ -285,7 +290,32 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
   return EXIT_OK;
 }
 
-function statusJson(agentId: string, meta: AgentMetadata): Record<string, unknown> {
+/**
+ * Host memory as an observation, for an operator diagnosing a dead agent. It
+ * reports what the kernel said and nothing more: there is no outcome, no
+ * threshold and no refusal here, because Antonina does not decide whether a
+ * host has room to launch.
+ */
+function hostCapacityJson(capacity: HostCapacity): Record<string, unknown> {
+  return {
+    source: capacity.source,
+    cgroup_path: capacity.cgroupPath,
+    limit_bytes: capacity.limitBytes,
+    usage_bytes: capacity.usageBytes,
+    headroom_bytes: capacity.headroomBytes,
+    headroom: formatBytes(capacity.headroomBytes),
+    pressure_full_avg10: capacity.pressureFullAvg10,
+    oom: capacity.oom,
+    oom_kill: capacity.oomKill,
+    degraded_reason: capacity.degradedReason,
+  };
+}
+
+function statusJson(
+  agentId: string,
+  meta: AgentMetadata,
+  env: Record<string, string | undefined> = process.env,
+): Record<string, unknown> {
   const item = summary(meta);
   const sequence = steerSequence(meta);
   const steers = steerQueue(meta, sequence);
@@ -316,6 +346,8 @@ function statusJson(agentId: string, meta: AgentMetadata): Record<string, unknow
     model: 'opencode/space-bunny-free',
     variant: persistedVariant(meta),
     backend_error: sanitizeBackendError(meta.backend_error),
+    host_capacity: hostCapacityJson(readHostCapacity()),
+
     log: '',
   };
 }
@@ -326,7 +358,7 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
   const agentId = requireAgentId(parsed.values.get('--id'), 'status');
   await reconcileAgent(agentId, context);
   const meta = requireMeta(agentId, context);
-  const status = statusJson(agentId, meta);
+  const status = statusJson(agentId, meta, context.env);
   status.log = logPath(agentId, paths(context));
   if (parsed.flags.has('--json')) {
     context.io.stdout(JSON.stringify(status, null, 2));
@@ -340,6 +372,13 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
     context.io.stdout(`started:    ${shown(status.started_at)}`);
     context.io.stdout(`finished:   ${shown(status.finished_at)}`);
     context.io.stdout(`exit code:  ${shown(status.exit_code)}`);
+    // Host memory as reported by the kernel, so a pass can see the state a
+    // death happened in rather than inferring it from an empty log.
+    const capacity = status.host_capacity as Record<string, unknown>;
+    context.io.stdout(`headroom:   ${shown(capacity.headroom)} of ${shown(capacity.limit_bytes)} limit`);
+    if (capacity.degraded_reason !== null) {
+      context.io.stdout(`host:       ${String(capacity.degraded_reason)}`);
+    }
     context.io.stdout(`prompts:    ${shown(status.prompts, '0')}`);
     if (status.steer_metadata_error) {
       context.io.stdout(`steers:     ${String(status.steer_metadata_error)}`);
@@ -488,7 +527,6 @@ async function cmdPrompt(args: string[], context: AgentCommandContext): Promise<
   if (configuredModelAvailable(context.env) === false) {
     throw new Error('configured OpenCode model opencode/space-bunny-free is unavailable');
   }
-
   const decision: {
     action?: 'busy' | 'spawn' | 'reuse';
     mode?: 'new' | 'continue';

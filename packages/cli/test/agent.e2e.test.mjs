@@ -17,6 +17,9 @@ import test from 'node:test';
 
 const CLI = resolve('packages/cli/dist/packages/cli/src/main.js');
 const OPENCODE_BIN_ENV = 'ANTONINA_OPENCODE_BIN';
+// A setting the runtime no longer reads. The tests below set it deliberately, to
+// prove that host-capacity configuration can no longer affect a launch.
+const ANTONINA_MIN_HEADROOM_ENV = 'ANTONINA_AGENT_MIN_HEADROOM_BYTES';
 const REPO_FIXTURE_PARENT = resolve('.antonina-test-tmp');
 const PROBE_SENTINEL = 'ANTONINA-FIXTURE-EXEC-OK';
 
@@ -141,6 +144,13 @@ case "$1" in
       echo '{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_e2e"}}'
       exit 1
     fi
+    if [ "$last" = "die-by-signal" ]; then
+      # A backend killed from outside, with no provider error and a log that
+      # simply stops: the shape that used to be indistinguishable from a model
+      # crash, and from a host OOM kill.
+      echo "about to be killed"
+      kill -KILL $$
+    fi
     echo "FAKE:$last"
     exit 0
     ;;
@@ -159,6 +169,11 @@ esac
     XDG_CONFIG_HOME: join(root, 'config'),
     ANTONINA_TEST_CALLS: join(root, 'opencode-calls.log'),
     [OPENCODE_BIN_ENV]: opencode,
+    // The pre-launch capacity guard is exercised on its own, in the cases
+    // below. Pinning the threshold to 0 here keeps every other case in this
+    // suite independent of the host's live, constantly moving cgroup counters
+    // — without this, a launch on a busy host would refuse for real reasons
+    // and these tests would be asserting on the weather.
   };
   // Positive control: the fixture about to be used is exec-able and answers.
   const direct = spawnSync(opencode, ['models'], { env, encoding: 'utf8', timeout: 15_000 });
@@ -1241,3 +1256,84 @@ test('new refuses a --cwd that is not an existing directory and creates no state
   assert.equal(JSON.parse(accepted.stdout).cwd, work);
   assert.equal(existsSync(join(root, 'state', 'antonina', 'agents', '4ec3', 'meta.json')), true);
 });
+
+test('a/d. a full host still launches, because launch is not host-capacity policy', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', 'ca91', '--cwd', work], env).status, 0);
+
+  // A threshold no real host could satisfy was the previous branch's way of
+  // making a refusal deterministic. The setting no longer exists and setting it
+  // must not change anything, which is exactly what this asserts: the same
+  // launch that used to be refused now proceeds, and the host readings are
+  // reported rather than enforced.
+  const impossible = { ...env, [ANTONINA_MIN_HEADROOM_ENV]: '1099511627776' };
+
+  const launched = run(['agent', 'prompt', '--id', 'ca91', '--detach', 'work'], impossible);
+  assert.equal(launched.status, 0, launched.stderr);
+
+  const done = await waitFor(root, 'ca91', (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
+  assert.equal(done.state, 'succeeded');
+  // The prompt was really delivered, so this is a launch and not a no-op that
+  // merely avoided refusing.
+  assert.equal(done.pending_prompt, null);
+  assertFixtureInvoked(handle, 'work');
+});
+
+test('5. agent status exposes host headroom without a separate command', async (t) => {
+  const handle = fixture(t);
+  const { work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', 'ca93', '--cwd', work], env).status, 0);
+
+  const status = run(['agent', 'status', '--id', 'ca93', '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  const capacity = JSON.parse(status.stdout).host_capacity;
+  // The shape an operator reads after a death: what the kernel reported. There
+  // is no threshold, no verdict and no refusal field, because there is no
+  // decision to report: the intent record requires that the agent command not
+  // decide whether the host has room.
+  for (const gone of ['min_headroom_bytes', 'min_headroom', 'refused', 'outcome', 'reason', 'override_applied']) {
+    assert.equal(gone in capacity, false, `host_capacity must not report ${gone}: it is admission policy`);
+  }
+  // The limit and usage behind the headroom are exposed so a number in status
+  // can be checked against the readings that produced it. That identity holds
+  // only where the host really is in a limited cgroup; on a host with no hard
+  // limit the reading degrades to a stated reason instead (covered
+  // deterministically in the runtime suite). Assert whichever shape this host
+  // actually has, and never the weather.
+  if (capacity.degraded_reason === null) {
+    assert.equal(capacity.source, 'cgroup_v2');
+    assert.equal(typeof capacity.headroom_bytes, 'number');
+    assert.equal(capacity.limit_bytes, capacity.usage_bytes + capacity.headroom_bytes);
+    assert.notEqual(capacity.headroom, 'unknown');
+
+    // The human-readable form names the same reading.
+    const human = run(['agent', 'status', '--id', 'ca93'], env);
+    assert.equal(human.status, 0, human.stderr);
+    assert.match(human.stdout, /headroom:.*of .*limit/);
+    assert.doesNotMatch(human.stdout, /required/);
+  }
+});
+
+test('e. a signal-killed agent is reported as an external kill through status', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', 'ca94', '--cwd', work], env).status, 0);
+  const launched = run(['agent', 'prompt', '--id', 'ca94', '--detach', 'die-by-signal'], env);
+  assert.equal(launched.status, 0, launched.stderr);
+  await waitFor(root, 'ca94', (meta) => meta.state === 'failed' && meta.active_runner === false, 30_000);
+
+  const status = run(['agent', 'status', '--id', 'ca94', '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  const body = JSON.parse(status.stdout);
+  assert.equal(body.exit_signal, 9);
+  // The recorded cause is a host kill, not a model-backend failure: this is the
+  // exact confusion that made the OOM kill undiagnosable from the board.
+  assert.equal(body.backend_error.classification, 'external_signal_kill');
+  assert.notEqual(body.backend_error.classification, 'transient_backend_server_error');
+  assert.equal(body.backend_error.signal, 9);
+  assert.equal(body.backend_error.signal_name, 'SIGKILL');
+  assert.ok(['observed', 'unavailable'].includes(body.backend_error.oom_evidence));
+  assertFixtureInvoked(handle, 'die-by-signal');
+});
+

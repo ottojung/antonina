@@ -122,7 +122,7 @@ async function withWorkTree(body) {
   const writer = api(server);
   try {
     const initialized = await writer.initialize();
-    const reader = api(server, { trustAnchor: initialized.trustAnchor });
+    const reader = api(server, { credential: initialized.credential });
     const contexts = { root, stateHome, managed, worktree, server, writer, reader };
     const outcome = await body(contexts);
     if (outcome !== undefined) return outcome;
@@ -237,17 +237,22 @@ test('collect list refuses a host that is not a lubko host identity', async () =
   });
 });
 
-test('collect list needs no credential', async () => {
+test('collect list requires the board credential', async () => {
   await withWorkTree(async (context) => {
     await seededWorkTree(context);
-    // A reader with the trust anchor and nothing else: no credential, and no
-    // write capability of any kind, and the list is still complete.
     const { code, out, err } = await run(['collect', 'list', '--host', HOST], {
       createClient: () => context.reader,
     });
     assert.equal(code, 0);
     assert.deepEqual(err, []);
     assert.equal(out.length, 1);
+
+    const withoutKey = await run(['collect', 'list', '--host', HOST], {
+      createClient: () => api(context.server),
+    });
+    assert.equal(withoutKey.code, 1);
+    assert.deepEqual(withoutKey.out, []);
+    assert.match(withoutKey.err[0], /credential\.json|board credential/);
   });
 });
 
@@ -268,18 +273,15 @@ test('collect list surfaces a missing board as a failure and never as an empty l
   });
 });
 
-test('collect list surfaces an unverifiable board and names the trust anchor', async () => {
+test('collect list surfaces an inaccessible board and names the board credential', async () => {
   await withWorkTree(async (context) => {
     const { code, out, err } = await run(['collect', 'list', '--host', HOST], {
       createClient: () => api(context.server),
     });
     assert.equal(code, 1);
     assert.deepEqual(out, []);
-    assert.equal(
-      err[0],
-      'antonina board: Antonina signed board exists; this client has no trust anchor for it; '
-        + 'save the board trust anchor as $XDG_CONFIG_HOME/antonina/trust.json to read it',
-    );
+    assert.match(err[0], /board credential/);
+    assert.match(err[0], /credential\.json/);
   });
 });
 

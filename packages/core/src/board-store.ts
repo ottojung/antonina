@@ -174,18 +174,7 @@ export class SignedBoardStore {
         throw error;
       }
     }
-    const response = await this.fetcher(this.url, { cache: 'no-store' });
-    if (response.status === 404) return null;
-    if (response.status !== 200) throw this.httpError('GET', SIGNED_BOARD_KEY, response);
-    const etag = response.headers.get('ETag');
-    if (!etag) throw new SignedBoardStoreError('Skrynia GET antonina/board-v2 returned no ETag');
-    const value = await this.parseJson(response, 'Skrynia GET antonina/board-v2');
-    const state = await verifyAndReplayOperationLog(
-      value,
-      anchor,
-      previouslyAcceptedHead === undefined ? {} : { previouslyAcceptedHead },
-    );
-    return { log: value as BoardOperationLog, state, etag };
+    return this.readLegacy(anchor, previouslyAcceptedHead);
   }
 
   async require(anchor: BoardTrustAnchor, previouslyAcceptedHead?: string | null): Promise<StoredSignedBoard> {
@@ -203,6 +192,34 @@ export class SignedBoardStore {
     previouslyAcceptedHead?: string | null,
   ): Promise<StoredSignedBoard> {
     const stored = await this.require(anchor, previouslyAcceptedHead);
+    if (stored.state.deleted) throw new BoardDeletedError();
+    return stored;
+  }
+
+  private async readLegacy(
+    anchor: BoardTrustAnchor,
+    previouslyAcceptedHead?: string | null,
+  ): Promise<StoredSignedBoard | null> {
+    const response = await this.fetcher(this.url, { cache: 'no-store' });
+    if (response.status === 404) return null;
+    if (response.status !== 200) throw this.httpError('GET', SIGNED_BOARD_KEY, response);
+    const etag = response.headers.get('ETag');
+    if (!etag) throw new SignedBoardStoreError('Skrynia GET antonina/board-v2 returned no ETag');
+    const value = await this.parseJson(response, 'Skrynia GET antonina/board-v2');
+    const state = await verifyAndReplayOperationLog(
+      value,
+      anchor,
+      previouslyAcceptedHead === undefined ? {} : { previouslyAcceptedHead },
+    );
+    return { log: value as BoardOperationLog, state, etag };
+  }
+
+  private async requireLegacyAppendable(
+    anchor: BoardTrustAnchor,
+    previouslyAcceptedHead?: string | null,
+  ): Promise<StoredSignedBoard> {
+    const stored = await this.readLegacy(anchor, previouslyAcceptedHead);
+    if (stored === null) throw new BoardMissingError();
     if (stored.state.deleted) throw new BoardDeletedError();
     return stored;
   }
@@ -270,7 +287,7 @@ export class SignedBoardStore {
       // Do not add a v3 probe in front of the mutation's authoritative v2
       // read. This preserves the old fail-closed behavior (and one-read error
       // semantics) while migrate() itself detects a concurrently created v3.
-      const legacy = await this.requireAppendable(anchor, previouslyAcceptedHead);
+      const legacy = await this.requireLegacyAppendable(anchor, previouslyAcceptedHead);
       try {
         await this.sharded.migrate(legacy);
         this.shardedAvailable = true;
@@ -305,7 +322,7 @@ export class SignedBoardStore {
     const signer = credentialSigningKey(credential);
     const requestedTimestamp = request.timestamp ?? this.now().toISOString();
     const nonce = request.nonce ?? this.newId();
-    let stored = await this.requireAppendable(anchor, previouslyAcceptedHead);
+    let stored = await this.requireLegacyAppendable(anchor, previouslyAcceptedHead);
 
     for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
       const timestamp = canonicalTimestampAtOrAfter(
@@ -338,7 +355,7 @@ export class SignedBoardStore {
         body: JSON.stringify(candidate),
       });
       if (response.status === 412) {
-        stored = await this.requireAppendable(anchor, stored.state.head);
+        stored = await this.requireLegacyAppendable(anchor, stored.state.head);
         continue;
       }
       if (response.status !== 200) throw this.httpError('PUT', SIGNED_BOARD_KEY, response);

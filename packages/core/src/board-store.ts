@@ -1,7 +1,6 @@
 import { generateSigningKey } from './canonical.js';
 import {
   createBoardCredential,
-  credentialSigningKey,
   credentialTrustAnchor,
   verifyBoardCredential,
   type BoardCredential,
@@ -19,7 +18,7 @@ import {
   type SignedBoardOperation,
   type VerifiedBoardState,
 } from './operations.js';
-import { boardFeed, type BoardFeedPage, type BoardFeedRequest } from './feed.js';
+import { type BoardFeedPage, type BoardFeedRequest } from './feed.js';
 import {
   ShardedBoardStore,
   ShardedBoardStoreError,
@@ -75,7 +74,8 @@ export interface SignedBoardStoreOptions {
 }
 
 export interface StoredSignedBoard {
-  log: BoardOperationLog;
+  /** Present only while reading the legacy board-v2 format for one-time migration. */
+  log: BoardOperationLog | null;
   state: VerifiedBoardState;
   etag: string;
 }
@@ -164,6 +164,9 @@ export class SignedBoardStore {
    * credential's one shared key.
    */
   async read(anchor: BoardTrustAnchor, previouslyAcceptedHead?: string | null): Promise<StoredSignedBoard | null> {
+    if (await this.sharded.readPointer() !== null) {
+      throw new SignedBoardStoreError('Antonina materialized board requires its board credential');
+    }
     return this.readLegacy(anchor, previouslyAcceptedHead);
   }
 
@@ -172,73 +175,43 @@ export class SignedBoardStore {
     previouslyAcceptedHead?: string | null,
   ): Promise<StoredSignedBoard | null> {
     const credential = await verifyBoardCredential(credentialValue);
-    const anchor = credentialTrustAnchor(credential);
-    try {
-      if (await this.sharded.exists(credential.storageCapability)) {
-        this.shardedAvailable = true;
-        return await this.sharded.read(
-          anchor,
-          credential.storageCapability,
-          previouslyAcceptedHead,
-        );
+    const pointer = await this.sharded.readPointer();
+    if (pointer !== null) {
+      try {
+        return await this.sharded.read(credential);
+      } catch (error) {
+        if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
+        throw error;
       }
-      const marker = await this.sharded.migrationMarker();
-      if (marker !== null
-          && marker.boardId === anchor.boardId
-          && marker.rootKeyId === anchor.rootKeyId) {
-        throw new SignedBoardStoreError('Antonina board credential does not carry the board key');
-      }
-    } catch (error) {
-      if (error instanceof SignedBoardStoreError) throw error;
-      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
-      throw error;
     }
 
-    this.shardedAvailable = false;
-    let legacy = await this.readLegacy(anchor, previouslyAcceptedHead);
+    let legacy = await this.readLegacy(credentialTrustAnchor(credential), previouslyAcceptedHead);
     if (legacy === null) return null;
-    if (!legacy.state.authorities.some((authority) => authority.keyId === credential.keyId)) {
-      throw new SignedBoardStoreError('Antonina board credential was never issued for this board');
-    }
-    legacy = await this.authenticateLegacyKey(credential, legacy);
+    if (legacy.state.deleted) throw new BoardDeletedError();
 
-    // A valid board key opportunistically migrates on read. Old test doubles or
-    // older storage frontends that reject unknown shard objects stay on v2.
-    try {
-      await this.sharded.migrate(legacy, credential.storageCapability);
-      this.shardedAvailable = true;
-    } catch (error) {
-      if (error instanceof ShardedBoardStoreError
-          && (error.status === 404 || error.status === 405)) {
-        this.shardedAvailable = false;
-        return legacy;
+    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
+      try {
+        return await this.sharded.migrate(legacy, credential);
+      } catch (error) {
+        if (error instanceof ShardedBoardStoreError && error.status === 412) {
+          const refreshed = await this.readLegacy(
+            credentialTrustAnchor(credential),
+            legacy.state.head,
+          );
+          if (refreshed === null) throw new BoardMissingError();
+          legacy = refreshed;
+          continue;
+        }
+        if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
+        throw error;
       }
-      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
-      throw error;
     }
-    return this.sharded.read(
-      anchor,
-      credential.storageCapability,
-      previouslyAcceptedHead,
-    );
+    throw new SignedBoardStoreError('Antonina board changed too often during v3 migration');
   }
 
   async require(anchor: BoardTrustAnchor, previouslyAcceptedHead?: string | null): Promise<StoredSignedBoard> {
     const stored = await this.read(anchor, previouslyAcceptedHead);
     if (!stored) throw new BoardMissingError();
-    return stored;
-  }
-
-  /**
-   * The read an operation is built on. A board deleted since this client last
-   * read it can never carry another operation, whoever signed it.
-   */
-  private async requireAppendable(
-    anchor: BoardTrustAnchor,
-    previouslyAcceptedHead?: string | null,
-  ): Promise<StoredSignedBoard> {
-    const stored = await this.require(anchor, previouslyAcceptedHead);
-    if (stored.state.deleted) throw new BoardDeletedError();
     return stored;
   }
 
@@ -252,6 +225,9 @@ export class SignedBoardStore {
     const etag = response.headers.get('ETag');
     if (!etag) throw new SignedBoardStoreError('Skrynia GET antonina/board-v2 returned no ETag');
     const value = await this.parseJson(response, 'Skrynia GET antonina/board-v2');
+    if (await this.sharded.readPointer() !== null) {
+      throw new SignedBoardStoreError('Antonina materialized board requires its board credential');
+    }
     const state = await verifyAndReplayOperationLog(
       value,
       anchor,
@@ -260,51 +236,7 @@ export class SignedBoardStore {
     return { log: value as BoardOperationLog, state, etag };
   }
 
-  private async requireLegacyAppendable(
-    anchor: BoardTrustAnchor,
-    previouslyAcceptedHead?: string | null,
-  ): Promise<StoredSignedBoard> {
-    const stored = await this.readLegacy(anchor, previouslyAcceptedHead);
-    if (stored === null) throw new BoardMissingError();
-    if (stored.state.deleted) throw new BoardDeletedError();
-    return stored;
-  }
-
-  /**
-   * board-v2 is publicly readable, so before v3 exists we authenticate the one
-   * board key by conditionally writing the exact same bytes back. The content
-   * and ETag do not change; Skrynia merely proves that this credential carries
-   * the board's bearer write key.
-   */
-  private async authenticateLegacyKey(
-    credential: BoardCredential,
-    initial: StoredSignedBoard,
-  ): Promise<StoredSignedBoard> {
-    const anchor = credentialTrustAnchor(credential);
-    let stored = initial;
-    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const response = await this.fetcher(this.url, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Skrynia-Capability': credential.storageCapability,
-          'If-Match': stored.etag,
-        },
-        body: JSON.stringify(stored.log),
-      });
-      if (response.status === 412) {
-        stored = await this.requireLegacyAppendable(anchor, stored.state.head);
-        continue;
-      }
-      if (response.status !== 200) throw this.httpError('PUT', SIGNED_BOARD_KEY, response);
-      return stored;
-    }
-    throw new SignedBoardStoreError('Antonina board changed too often while authenticating its board key');
-  }
-
   async signedBoardExists(): Promise<boolean> {
-    // board-v2 is intentionally retained after migration, so existence can be
-    // checked without revealing any v3 shard locator.
     const response = await this.fetcher(this.url, { cache: 'no-store' });
     if (response.status === 404) return false;
     if (response.status === 200) return true;
@@ -326,7 +258,7 @@ export class SignedBoardStore {
       payload: { board },
     }, root);
     const initialized = appendToLog(log, operation);
-    await verifyAndReplayOperationLog(initialized, anchor);
+    const state = await verifyAndReplayOperationLog(initialized, anchor);
 
     const response = await this.fetcher(this.url, {
       method: 'POST',
@@ -337,7 +269,7 @@ export class SignedBoardStore {
       body: JSON.stringify(initialized),
     });
     if (response.status === 409) {
-      throw new SignedBoardStoreError('Antonina signed board already exists; refusing to replace its trust root');
+      throw new SignedBoardStoreError('Antonina board already exists; refusing to replace its trust root');
     }
     if (response.status !== 201) throw this.httpError('POST', SIGNED_BOARD_KEY, response);
 
@@ -348,13 +280,20 @@ export class SignedBoardStore {
         || typeof created.capability !== 'string') {
       throw new SignedBoardStoreError('Skrynia did not return the storage capability for Antonina board-v2');
     }
+
     const credential = await createBoardCredential(anchor, root, created.capability);
-    // We have just created board-v2 and already know v3 was absent from the
-    // existence check. Read the object we created directly rather than probing
-    // v3 again before its first migration.
-    const stored = await this.readLegacy(anchor, operation.opId);
-    if (stored === null) throw new BoardMissingError();
-    return { ...stored, credential };
+    const legacy: StoredSignedBoard = {
+      log: initialized,
+      state,
+      etag: response.headers.get('ETag') ?? '',
+    };
+
+    // POST responses do not have to expose the object ETag, so read the legacy
+    // object exactly once to obtain the CAS token used by migration.
+    const readableLegacy = await this.readLegacy(anchor, operation.opId);
+    if (readableLegacy === null) throw new BoardMissingError();
+    const materialized = await this.sharded.migrate(readableLegacy, credential);
+    return { ...materialized, credential };
   }
 
   async append(
@@ -363,101 +302,29 @@ export class SignedBoardStore {
     previouslyAcceptedHead?: string | null,
   ): Promise<StoredSignedBoard> {
     const credential = await verifyBoardCredential(credentialValue);
-    const anchor = credentialTrustAnchor(credential);
     if (request.kind === 'authority.delegate' || request.kind === 'authority.revoke') {
-      throw new SignedBoardStoreError('Antonina delegated credential operations are disabled');
+      throw new SignedBoardStoreError('Antonina uses one shared board key; delegated authorities are disabled');
     }
 
-    this.shardedAvailable = await this.sharded.exists(credential.storageCapability);
-
-    if (!this.shardedAvailable) {
-      const marker = await this.sharded.migrationMarker();
-      if (marker !== null
-          && marker.boardId === anchor.boardId
-          && marker.rootKeyId === anchor.rootKeyId) {
-        throw new SignedBoardStoreError('Antonina board credential does not carry the board key');
-      }
-
-      let legacy = await this.requireLegacyAppendable(anchor, previouslyAcceptedHead);
-      if (!legacy.state.authorities.some((authority) => authority.keyId === credential.keyId)) {
-        throw new SignedBoardStoreError('Antonina board credential was never issued for this board');
-      }
-      legacy = await this.authenticateLegacyKey(credential, legacy);
-      try {
-        await this.sharded.migrate(legacy, credential.storageCapability);
-        this.shardedAvailable = true;
-      } catch (error) {
-        if (error instanceof ShardedBoardStoreError
-            && (error.status === 404 || error.status === 405)) {
-          this.shardedAvailable = false;
-          return this.appendLegacy(credential, request, legacy.state.head);
-        }
-        if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
-        throw error;
-      }
+    if (await this.sharded.readPointer() === null) {
+      const migrated = await this.readWithCredential(credential, previouslyAcceptedHead);
+      if (migrated === null) throw new BoardMissingError();
     }
-
     try {
-      return await this.sharded.append(credential, request, previouslyAcceptedHead);
+      return await this.sharded.append(credential, request);
     } catch (error) {
       if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
       throw error;
     }
   }
 
-  private async appendLegacy(
+  private async ensureMaterialized(
     credential: BoardCredential,
-    request: AppendOperationRequest,
     previouslyAcceptedHead?: string | null,
-  ): Promise<StoredSignedBoard> {
-    const anchor = credentialTrustAnchor(credential);
-    const signer = credentialSigningKey(credential);
-    const requestedTimestamp = request.timestamp ?? this.now().toISOString();
-    const nonce = request.nonce ?? this.newId();
-    let stored = await this.requireLegacyAppendable(anchor, previouslyAcceptedHead);
-
-    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const timestamp = canonicalTimestampAtOrAfter(
-        requestedTimestamp,
-        stored.log.operations.at(-1)?.timestamp,
-      );
-      const payload = typeof request.payload === 'function'
-        ? request.payload(stored.state)
-        : request.payload;
-      const operation = await signBoardOperation({
-        boardId: anchor.boardId,
-        previous: stored.log.head,
-        timestamp,
-        nonce,
-        kind: request.kind,
-        payload,
-      }, signer);
-      const candidate = appendToLog(stored.log, operation);
-      await verifyAndReplayOperationLog(candidate, anchor, {
-        previouslyAcceptedHead: stored.state.head,
-      });
-
-      const response = await this.fetcher(this.url, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Skrynia-Capability': credential.storageCapability,
-          'If-Match': stored.etag,
-        },
-        body: JSON.stringify(candidate),
-      });
-      if (response.status === 412) {
-        stored = await this.requireLegacyAppendable(anchor, stored.state.head);
-        continue;
-      }
-      if (response.status !== 200) throw this.httpError('PUT', SIGNED_BOARD_KEY, response);
-
-      const committed = await this.readLegacy(anchor, operation.opId);
-      if (committed === null) throw new BoardMissingError();
-      return committed;
-    }
-
-    throw new SignedBoardStoreError('Antonina board changed too often; signed operation was not committed');
+  ): Promise<void> {
+    if (await this.sharded.readPointer() !== null) return;
+    const migrated = await this.readWithCredential(credential, previouslyAcceptedHead);
+    if (migrated === null) throw new BoardMissingError();
   }
 
   async getIssue(
@@ -466,14 +333,13 @@ export class SignedBoardStore {
     previouslyAcceptedHead?: string | null,
   ): Promise<BoardIssue | null> {
     const credential = await verifyBoardCredential(credentialValue);
-    const anchor = credentialTrustAnchor(credential);
-    if (await this.sharded.exists(credential.storageCapability)) {
-      this.shardedAvailable = true;
-      return this.sharded.getIssue(anchor, credential.storageCapability, number);
+    await this.ensureMaterialized(credential, previouslyAcceptedHead);
+    try {
+      return await this.sharded.getIssue(credential, number);
+    } catch (error) {
+      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
+      throw error;
     }
-    this.shardedAvailable = false;
-    const stored = await this.readLegacy(anchor, previouslyAcceptedHead);
-    return stored?.state.board.issues.find((issue) => issue.number === number) ?? null;
   }
 
   async readIssuePage(
@@ -482,10 +348,13 @@ export class SignedBoardStore {
     page: number,
   ): Promise<IssueListPage | null> {
     const credential = await verifyBoardCredential(credentialValue);
-    const anchor = credentialTrustAnchor(credential);
-    if (!await this.sharded.exists(credential.storageCapability)) return null;
-    this.shardedAvailable = true;
-    return this.sharded.readIssuePage(anchor, credential.storageCapability, state, page);
+    await this.ensureMaterialized(credential);
+    try {
+      return await this.sharded.readIssuePage(credential, state, page);
+    } catch (error) {
+      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
+      throw error;
+    }
   }
 
   async getQueue(
@@ -493,14 +362,13 @@ export class SignedBoardStore {
     previouslyAcceptedHead?: string | null,
   ): Promise<number[] | null> {
     const credential = await verifyBoardCredential(credentialValue);
-    const anchor = credentialTrustAnchor(credential);
-    if (await this.sharded.exists(credential.storageCapability)) {
-      this.shardedAvailable = true;
-      return this.sharded.getQueue(anchor, credential.storageCapability);
+    await this.ensureMaterialized(credential, previouslyAcceptedHead);
+    try {
+      return await this.sharded.getQueue(credential);
+    } catch (error) {
+      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
+      throw error;
     }
-    this.shardedAvailable = false;
-    const stored = await this.readLegacy(anchor, previouslyAcceptedHead);
-    return stored === null ? null : [...stored.state.queue];
   }
 
   async readFeed(
@@ -509,20 +377,13 @@ export class SignedBoardStore {
     previouslyAcceptedHead?: string | null,
   ): Promise<BoardFeedPage | null> {
     const credential = await verifyBoardCredential(credentialValue);
-    const anchor = credentialTrustAnchor(credential);
-    if (await this.sharded.exists(credential.storageCapability)) {
-      this.shardedAvailable = true;
-      const page = await this.sharded.readFeed(
-        anchor,
-        credential.storageCapability,
-        request,
-      );
-      if (page !== null) return page;
-    } else {
-      this.shardedAvailable = false;
+    await this.ensureMaterialized(credential, previouslyAcceptedHead);
+    try {
+      return await this.sharded.readFeed(credential, request);
+    } catch (error) {
+      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
+      throw error;
     }
-    const stored = await this.readLegacy(anchor, previouslyAcceptedHead);
-    return stored === null ? null : boardFeed(stored.log, request);
   }
 
   private async parseJson(response: Response, context: string): Promise<unknown> {

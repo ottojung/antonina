@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { BoardApi } from '../dist/api.js';
 import {
+  BOARD_SCHEMA_VERSION,
   EXECUTION_TARGET_GUIDANCE,
   defaultExecutionTargetAccessMethod,
   defaultExecutionTargetPersistence,
@@ -52,7 +53,9 @@ function ephemeralTarget(overrides = {}) {
 }
 
 function boardWith(targets) {
-  return parseBoard({ schemaVersion: 3, nextIssueNumber: 1, issues: [], resources: [], targets, dispatches: [] });
+  // The version is derived, not stamped: a target registered before this build
+  // still has to parse at whatever version the build currently reads.
+  return parseBoard({ schemaVersion: BOARD_SCHEMA_VERSION, nextIssueNumber: 1, issues: [], resources: [], targets, dispatches: [] });
 }
 
 /**

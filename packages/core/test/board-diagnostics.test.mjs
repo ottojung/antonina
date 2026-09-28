@@ -3,8 +3,10 @@ import test from 'node:test';
 
 import {
   BoardIncompatibilityError,
+  BOARD_SCHEMA_VERSION,
   executionTargetDefect,
   isBoardIncompatibilityError,
+  LEGACY_BOARD_SCHEMA_VERSION,
   parseBoard,
   parseLegacyBoardV2,
   parsePersistedBoard,
@@ -13,6 +15,15 @@ import { migratePersistedBoard } from '../dist/migrations.js';
 import * as model from '../dist/model.js';
 
 const timestamp = '2026-09-24T00:00:00.000Z';
+
+// Every version in this file is derived, so a schema bump cannot quietly turn a
+// refusal case into an acceptance case. The two directions are named: a board
+// from an older build sits at the legacy version, and a board this build cannot
+// read at all is one version ahead of this one, which is what
+// `FUTURE_BOARD_SCHEMA_VERSION` says. The version-looking literals further down
+// (`'3'` as a string, `null`, `Number.MAX_SAFE_INTEGER + 1`) are deliberately
+// not derived: they exist to test coercion, so each stays a literal on purpose.
+const FUTURE_BOARD_SCHEMA_VERSION = BOARD_SCHEMA_VERSION + 1;
 
 const issue = (number, state = 'open') => ({
   number,
@@ -57,7 +68,7 @@ const dispatch = (overrides = {}) => ({
 });
 
 const board = (overrides = {}) => ({
-  schemaVersion: 3,
+  schemaVersion: BOARD_SCHEMA_VERSION,
   nextIssueNumber: 2,
   issues: [issue(1)],
   resources: [resource()],
@@ -67,7 +78,7 @@ const board = (overrides = {}) => ({
 });
 
 const legacyBoard = (overrides = {}) => ({
-  schemaVersion: 2,
+  schemaVersion: LEGACY_BOARD_SCHEMA_VERSION,
   nextIssueNumber: 2,
   issues: [issue(1)],
   resources: [resource()],
@@ -201,7 +212,7 @@ const baseDispatchAccepts = (value, numbers) => isObject(value)
 
 const baseTopLevelAccepts = (value) => isObject(value)
   && exactKeys(value, ['schemaVersion', 'nextIssueNumber', 'issues', 'resources', 'targets', 'dispatches'])
-  && value.schemaVersion === 3
+  && value.schemaVersion === BOARD_SCHEMA_VERSION
   && positive(value.nextIssueNumber)
   && Array.isArray(value.issues) && value.issues.every(baseIssueAccepts)
   && Array.isArray(value.resources)
@@ -211,19 +222,22 @@ const baseTopLevelAccepts = (value) => isObject(value)
 test('a schemaVersion from another build is named, not merged into a shape complaint', () => {
   const v2 = refusal(() => parseBoard(legacyBoard()));
   assert.equal(v2.defect.kind, 'schema-version-mismatch');
-  assert.equal(v2.defect.found, '2');
-  assert.equal(v2.defect.expected, '3');
-  assert.match(v2.message, /schema version is 2, but this build reads schema version 3/);
+  assert.equal(v2.defect.found, String(LEGACY_BOARD_SCHEMA_VERSION));
+  assert.equal(v2.defect.expected, String(BOARD_SCHEMA_VERSION));
+  assert.match(
+    v2.message,
+    new RegExp(`schema version is ${LEGACY_BOARD_SCHEMA_VERSION}, but this build reads schema version ${BOARD_SCHEMA_VERSION}`),
+  );
   // The key set of a v2 board is wrong only because of its version, so the
   // diagnostic must not send the operator looking for `targets` and
   // `dispatches` as though they were accidentally dropped.
   assert.doesNotMatch(v2.message, /targets/);
   assert.doesNotMatch(v2.message, /dispatches/);
 
-  const future = refusal(() => parseBoard(board({ schemaVersion: 4 })));
+  const future = refusal(() => parseBoard(board({ schemaVersion: FUTURE_BOARD_SCHEMA_VERSION })));
   assert.equal(future.defect.kind, 'schema-version-mismatch');
-  assert.equal(future.defect.found, '4');
-  assert.match(future.message, /schema version is 4/);
+  assert.equal(future.defect.found, String(FUTURE_BOARD_SCHEMA_VERSION));
+  assert.match(future.message, new RegExp(`schema version is ${FUTURE_BOARD_SCHEMA_VERSION}`));
 
   const absent = refusal(() => parseBoard({ ...board(), schemaVersion: undefined }));
   assert.equal(absent.defect.found, 'a value that is not a schema version');
@@ -234,8 +248,8 @@ test('a schemaVersion from another build is named, not merged into a shape compl
   // asking for a migration. The upgrade is therefore the gate's job, so this
   // asserts it through the gate and separately pins the shim's absence, which
   // is what keeps a second bypass from being reintroduced here.
-  assert.equal(parsePersistedBoard(legacyBoard()).schemaVersion, 2);
-  assert.equal(migratePersistedBoard(legacyBoard()).board.schemaVersion, 3);
+  assert.equal(parsePersistedBoard(legacyBoard()).schemaVersion, LEGACY_BOARD_SCHEMA_VERSION);
+  assert.equal(migratePersistedBoard(legacyBoard()).board.schemaVersion, BOARD_SCHEMA_VERSION);
   assert.equal(model.upgradePersistedBoard, undefined);
 });
 
@@ -250,19 +264,19 @@ test('a version mismatch names the next step, and the right one in each directio
   // use a reader for the version they are on is advice they cannot act on and
   // have already tried. The migration clause names the target version (3) and
   // stays correct, so it is pinned separately.
-  assert.match(older.message, /use a client that reads schema version 2, or /,
+  assert.match(older.message, new RegExp(`use a client that reads schema version ${LEGACY_BOARD_SCHEMA_VERSION}, or `),
     'the older advice must name the version the board is written at');
-  assert.doesNotMatch(older.message, /use a client that reads schema version 3/,
+  assert.doesNotMatch(older.message, new RegExp(`use a client that reads schema version ${BOARD_SCHEMA_VERSION}`),
     'the older advice must not point the operator back at the version this build already reads');
-  assert.match(older.message, /migration to bring the board up to version 3/);
+  assert.match(older.message, new RegExp(`migration to bring the board up to version ${BOARD_SCHEMA_VERSION}`));
 
-  const newer = refusal(() => parseBoard(board({ schemaVersion: 4 })));
+  const newer = refusal(() => parseBoard(board({ schemaVersion: FUTURE_BOARD_SCHEMA_VERSION })));
   assert.match(newer.message, /newer Antonina than this one/);
   // The newer advice must name the version to upgrade to, and must be the
   // mirror of the older case: the actionable number, not just the label.
-  assert.match(newer.message, /upgrade to a build that reads schema version 4, or /,
+  assert.match(newer.message, new RegExp(`upgrade to a build that reads schema version ${FUTURE_BOARD_SCHEMA_VERSION}, or `),
     'the newer advice must name the version to upgrade to');
-  assert.doesNotMatch(newer.message, /upgrade to a build that reads schema version 3/,
+  assert.doesNotMatch(newer.message, new RegExp(`upgrade to a build that reads schema version ${BOARD_SCHEMA_VERSION}`),
     'the newer advice must not name the version this build already reads');
   assert.doesNotMatch(newer.message, /older Antonina/,
     'a future schema must not be told to migrate the board forward');
@@ -410,8 +424,8 @@ test('acceptance is unchanged from the base reader on a corpus of malformed boar
   const corpus = [
     board(),
     board({ nextIssueNumber: 3 }),
-    board({ schemaVersion: 2 }),
-    board({ schemaVersion: 4 }),
+    board({ schemaVersion: LEGACY_BOARD_SCHEMA_VERSION }),
+    board({ schemaVersion: FUTURE_BOARD_SCHEMA_VERSION }),
     board({ schemaVersion: '3' }),
     board({ schemaVersion: null }),
     board({ schemaVersion: Number.MAX_SAFE_INTEGER + 1 }),

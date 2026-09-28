@@ -4,6 +4,10 @@ import test from 'node:test';
 // The CLI compiles its own copy of packages/core, so this drives the module
 // graph the shipped executable runs, including the error identity it reports.
 import { BoardIncompatibilityError } from '../dist/packages/core/src/board-diagnostics.js';
+import {
+  BOARD_SCHEMA_VERSION,
+  LEGACY_BOARD_SCHEMA_VERSION,
+} from '../dist/packages/core/src/model.js';
 import { runBoardCommand } from '../dist/packages/cli/src/board.js';
 
 const TEST_HOME = '/nonexistent-antonina-test-home';
@@ -33,8 +37,12 @@ const mismatch = new BoardIncompatibilityError({
   kind: 'schema-version-mismatch',
   subject: 'board',
   field: 'schemaVersion',
-  found: '2',
-  expected: '3',
+  // The core parser reports a mismatch by stringifying both versions, so the
+  // fixture the CLI is handed is built from the same two constants the parser
+  // would have used. A hard-stamped pair would drift from the message this
+  // file then asserts on.
+  found: String(LEGACY_BOARD_SCHEMA_VERSION),
+  expected: String(BOARD_SCHEMA_VERSION),
   missingKeys: [],
   unexpectedKeys: [],
 });
@@ -59,7 +67,10 @@ const malformedField = new BoardIncompatibilityError({
 test('a board read failure reaches the operator as the specific reason', async () => {
   const version = await run(['list'], mismatch);
   assert.equal(version.code, 1);
-  assert.match(version.err.join('\n'), /schema version is 2, but this build reads schema version 3/);
+  assert.match(
+    version.err.join('\n'),
+    new RegExp(`schema version is ${LEGACY_BOARD_SCHEMA_VERSION}, but this build reads schema version ${BOARD_SCHEMA_VERSION}`),
+  );
   assert.doesNotMatch(version.err.join('\n'), /incompatible or malformed/);
 
   const field = await run(['list'], malformedField);
@@ -75,5 +86,5 @@ test('a board read failure reaches the operator as the specific reason', async (
 test('a board read failure is reported on stderr and not on stdout', async () => {
   const { out, err } = await run(['list', '--json'], mismatch);
   assert.deepEqual(out, [], 'a failed JSON read must not print a partial payload');
-  assert.match(err.join('\n'), /schema version is 2/);
+  assert.match(err.join('\n'), new RegExp(`schema version is ${LEGACY_BOARD_SCHEMA_VERSION}`));
 });

@@ -8,7 +8,11 @@ process.env.XDG_STATE_HOME = '/nonexistent-antonina-web-feed-state';
 process.env.XDG_CONFIG_HOME = '/nonexistent-antonina-web-feed-config';
 
 import { generateSigningKey } from '../../packages/core/src/canonical';
-import { parseBoard } from '../../packages/core/src/model';
+import {
+  BOARD_SCHEMA_VERSION,
+  parseBoard,
+  PERSISTED_BOARD_VERSIONS,
+} from '../../packages/core/src/model';
 import {
   boardReadFailure,
   BrowserBoardSession,
@@ -605,8 +609,19 @@ function refusalOf(value: unknown): Error {
 }
 
 const timestamp = '2026-09-24T00:00:00.000Z';
+
+// Every version below is derived. The browser only ever sees boards through
+// `parseBoard`, so the interesting case is a board at the oldest version this
+// build can still read — that is the one a superseded Antonina really did write,
+// and `parseBoard` must refuse it by name. Naming the constant that holds that
+// version is not available in this directory: the gate in
+// `packages/core/test/migrations.test.mjs` fails any `.ts` file under
+// `web/src` whose text refers to it, so the version is derived from the list
+// the build publishes instead.
+const SUPERSEDED_BOARD_SCHEMA_VERSION = Math.min(...PERSISTED_BOARD_VERSIONS);
+
 const board = (overrides: Record<string, unknown> = {}) => ({
-  schemaVersion: 3,
+  schemaVersion: BOARD_SCHEMA_VERSION,
   nextIssueNumber: 2,
   issues: [{ number: 1, title: 'Issue 1', body: '', state: 'open', createdAt: timestamp, updatedAt: timestamp, messages: [] }],
   resources: [],
@@ -623,10 +638,12 @@ const board = (overrides: Record<string, unknown> = {}) => ({
  */
 describe('a failed board read is classified, not just stringified', () => {
   it('names a version mismatch as one', () => {
-    const failure = boardReadFailure(refusalOf(board({ schemaVersion: 2 })));
+    const failure = boardReadFailure(refusalOf(board({ schemaVersion: SUPERSEDED_BOARD_SCHEMA_VERSION })));
     expect(failure.kind).toBe('schema-version-mismatch');
     expect(failure.field).toBe('schemaVersion');
-    expect(failure.message).toContain('schema version is 2, but this build reads schema version 3');
+    expect(failure.message).toContain(
+      `schema version is ${SUPERSEDED_BOARD_SCHEMA_VERSION}, but this build reads schema version ${BOARD_SCHEMA_VERSION}`,
+    );
   });
 
   it('names the field and the index of a malformed record', () => {
@@ -659,8 +676,11 @@ describe('a failed board read is classified, not just stringified', () => {
   });
 
   it('recognises the error without reading its message', () => {
-    const error = refusalOf(board({ schemaVersion: 2 }));
+    const error = refusalOf(board({ schemaVersion: SUPERSEDED_BOARD_SCHEMA_VERSION }));
     expect(isBoardIncompatibilityError(error)).toBe(true);
+    // Deliberately a bare literal: this is a decoy message, and the point is
+    // that the classification never comes from prose. The numeral in it is
+    // arbitrary, so deriving it would imply that it carries meaning.
     expect(isBoardIncompatibilityError(new Error('Antonina board schema version is 2'))).toBe(false);
   });
 });

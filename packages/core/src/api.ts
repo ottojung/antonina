@@ -1,4 +1,3 @@
-import { generateSigningKey } from './canonical.js';
 import {
   ANTONINA_NAMESPACE,
   BoardDeletedError,
@@ -11,12 +10,9 @@ import {
   type StoredSignedBoard,
 } from './board-store.js';
 import {
-  createBoardCredential,
   credentialTrustAnchor,
-  lookupCredentialAuthority,
   parseBoardCredential,
   parseBoardTrustAnchor,
-  resolveCredentialAuthority,
   verifyBoardCredential,
   verifyBoardTrustAnchor,
   type BoardCredential,
@@ -86,20 +82,6 @@ export {
   SIGNED_BOARD_KEY,
   SignedBoardStoreError,
 };
-
-const MUTATING_CAPABILITIES = new Set<BoardCapability>([
-  'issue.create',
-  'issue.edit',
-  'issue.delete',
-  'issue.comment',
-  'issue.state',
-  'queue.reorder',
-  'resource.modify',
-  'target.modify',
-  'board.delete',
-  'authority.delegate',
-  'authority.revoke',
-]);
 
 export class AntoninaApiError extends Error {}
 
@@ -174,22 +156,14 @@ function sameAnchor(left: BoardTrustAnchor, right: BoardTrustAnchor): boolean {
     && left.rootPublicKey === right.rootPublicKey;
 }
 
-function normalizeCapabilities(values: readonly BoardCapability[]): BoardCapability[] {
-  return [...new Set(values.map((value) => parseBoardCapability(value)))].sort();
-}
-
-function hasMutationCapability(capabilities: readonly BoardCapability[]): boolean {
-  return capabilities.some((capability) => MUTATING_CAPABILITIES.has(capability));
-}
-
 export class BoardApi {
   private readonly store: SignedBoardStore;
   private credential: BoardCredential | null;
   private anchor: BoardTrustAnchor | null;
   private rememberedHead: string | null;
   private storageRejected = false;
-  /** `null` until a verified log has matched this credential to a registered key. */
-  private effectiveAuthority: VerifiedAuthority | null = null;
+  /** True only for the one shared root board credential. */
+  private credentialAccepted = false;
   private credentialRejection: CredentialRejection | null = null;
 
   constructor(options: BoardApiOptions = {}) {
@@ -221,22 +195,22 @@ export class BoardApi {
   }
 
   getEffectiveCapabilities(): BoardCapability[] {
-    return this.effectiveAuthority === null ? [] : [...this.effectiveAuthority.capabilities];
+    return this.credentialAccepted ? [...BOARD_CAPABILITIES] : [];
   }
 
   /**
-   * Edit access is what the verified log grants this credential, minus any
-   * storage capability Skrynia has already refused. It is never established by
-   * a probe: reading the board writes nothing.
+   * Authentication is deliberately all-or-nothing for now: the one shared root
+   * credential grants every board mutation. There are no roles or delegated
+   * capabilities in the live access model.
    */
   hasWriteAccess(): boolean {
-    return !this.storageRejected && hasMutationCapability(this.getEffectiveCapabilities());
+    return this.credentialAccepted && !this.storageRejected;
   }
 
   clearCredential(): void {
     this.credential = null;
     this.storageRejected = false;
-    this.effectiveAuthority = null;
+    this.credentialAccepted = false;
     this.credentialRejection = null;
   }
 
@@ -294,10 +268,9 @@ export class BoardApi {
   }
 
   /**
-   * Verifies a credential against the board's own history: it must be a real
-   * signature over a live authority that holds the delegated capabilities. It
-   * never writes, so it cannot discover a stale storage capability; the first
-   * real mutation reports that.
+   * Verifies the one shared board credential. For now there are no roles,
+   * delegated credentials, or per-action capabilities: the root credential is
+   * full access and every other credential is rejected.
    */
   async verifyCredential(credentialValue: BoardCredential | null = this.credential): Promise<BoardAccessState> {
     if (credentialValue === null) {
@@ -312,13 +285,18 @@ export class BoardApi {
       throw new AntoninaApiError('Antonina credential does not match the trusted board root');
     }
 
-    const stored = await this.readStored(anchor);
-    const authority = this.requireActiveAuthority(stored.state, credential);
+    if (credential.keyId !== anchor.rootKeyId || credential.publicKey !== anchor.rootPublicKey) {
+      this.credentialAccepted = false;
+      this.credentialRejection = 'unknown';
+      throw new AntoninaApiError('Antonina accepts only the shared root board credential');
+    }
+
+    await this.readStored(anchor);
     this.anchor = anchor;
     this.credential = credential;
     this.storageRejected = false;
     this.credentialRejection = null;
-    this.effectiveAuthority = authority;
+    this.credentialAccepted = true;
     return this.accessState();
   }
 
@@ -326,7 +304,7 @@ export class BoardApi {
     const anchor = this.requireAnchor();
     return {
       boardId: anchor.boardId,
-      keyId: this.effectiveAuthority?.keyId ?? null,
+      keyId: this.credentialAccepted ? anchor.rootKeyId : null,
       rootKeyId: anchor.rootKeyId,
       capabilities: this.getEffectiveCapabilities(),
       credentialRejection: this.credentialRejection,
@@ -399,7 +377,7 @@ export class BoardApi {
   }
 
   async reorderQueue(numbers: number[]): Promise<number[]> {
-    const committed = await this.append('queue.reorder', { numbers: [...numbers] }, 'queue.reorder');
+    const committed = await this.append('queue.reorder', { numbers: [...numbers] });
     return [...committed.state.queue];
   }
 
@@ -414,7 +392,6 @@ export class BoardApi {
         if (createdNumber >= MAX_SAFE_INTEGER) throw new AntoninaApiError('Antonina issue number space is exhausted');
         return { number: createdNumber, title: cleanTitle, body: body.trim() };
       },
-      'issue.create',
     );
     return clone(this.requireIssue(committed.state.board.issues, createdNumber));
   }
@@ -423,7 +400,6 @@ export class BoardApi {
     const committed = await this.append(
       'issue.edit',
       { number, title: null, body: body.trim() },
-      'issue.edit',
     );
     return clone(this.requireIssue(committed.state.board.issues, number));
   }
@@ -444,7 +420,6 @@ export class BoardApi {
     const committed = await this.append(
       'resource.add',
       { number: issueNumber, host: cleanHost, path: cleanPath },
-      'resource.modify',
     );
     const resource = committed.state.board.resources.find(
       (entry) => entry.host === cleanHost && entry.path === cleanPath,
@@ -465,7 +440,6 @@ export class BoardApi {
     const committed = await this.append(
       'resource.remove',
       { number: issueNumber, host: cleanHost, path: cleanPath },
-      'resource.modify',
     );
     return clone(committed.state.board.resources);
   }
@@ -529,7 +503,6 @@ export class BoardApi {
         address,
         description: input.description ?? '',
       },
-      'target.modify',
     );
     return this.requireTarget(committed.state.board, id);
   }
@@ -556,7 +529,6 @@ export class BoardApi {
         capabilities: [...changes.capabilities].sort().map(parseExecutionTargetCapability),
         description: changes.description,
       },
-      'target.modify',
     );
     return this.requireTarget(committed.state.board, targetId);
   }
@@ -586,7 +558,6 @@ export class BoardApi {
     const committed = await this.append(
       'dispatch.record',
       { number: issueNumber, targetId: selection.target.id, rationale: selection.rationale },
-      'target.modify',
     );
     const dispatch = committed.state.board.dispatches.find((entry) => entry.issueNumber === issueNumber);
     if (!dispatch) throw new AntoninaApiError('Antonina dispatch record disappeared after mutation');
@@ -601,63 +572,39 @@ export class BoardApi {
     const committed = await this.append(
       'issue.comment',
       { number, author: cleanAuthor, body: cleanBody },
-      'issue.comment',
     );
     return clone(this.requireIssue(committed.state.board.issues, number));
   }
 
   async close(number: number): Promise<BoardIssue> {
-    const committed = await this.append('issue.close', { number }, 'issue.state');
+    const committed = await this.append('issue.close', { number });
     return clone(this.requireIssue(committed.state.board.issues, number));
   }
 
   async reopen(number: number): Promise<BoardIssue> {
-    const committed = await this.append('issue.reopen', { number }, 'issue.state');
+    const committed = await this.append('issue.reopen', { number });
     return clone(this.requireIssue(committed.state.board.issues, number));
   }
 
   async deleteIssue(number: number): Promise<Board> {
-    const committed = await this.append('issue.delete', { number }, 'issue.delete');
+    const committed = await this.append('issue.delete', { number });
     return clone(committed.state.board);
   }
 
   async deleteBoard(): Promise<void> {
-    await this.append('board.delete', {}, 'board.delete');
+    await this.append('board.delete', {});
   }
 
-  async delegateCredential(capabilities: readonly BoardCapability[]): Promise<BoardCredential> {
-    const current = await this.requireUsableCredential('authority.delegate');
-    const normalized = normalizeCapabilities(capabilities);
-    const held = this.getEffectiveCapabilities();
-    for (const capability of normalized) {
-      if (!held.includes(capability)) {
-        throw new AntoninaApiError('Delegation cannot add capability ' + capability);
-      }
-    }
-    const child = await generateSigningKey();
-    await this.append(
-      'authority.delegate',
-      {
-        childKeyId: child.keyId,
-        childPublicKey: child.publicKey,
-        capabilities: normalized,
-      },
-      'authority.delegate',
-    );
-    return createBoardCredential(this.requireAnchor(), child, current.storageCapability);
+  async delegateCredential(_capabilities: readonly BoardCapability[]): Promise<BoardCredential> {
+    throw new AntoninaApiError('Antonina uses one shared root board credential; delegation is disabled');
   }
 
-  async revokeCredential(keyId: string): Promise<VerifiedAuthority[]> {
-    const committed = await this.append(
-      'authority.revoke',
-      { keyId },
-      'authority.revoke',
-    );
-    return clone(committed.state.authorities);
+  async revokeCredential(_keyId: string): Promise<VerifiedAuthority[]> {
+    throw new AntoninaApiError('Antonina uses one shared root board credential; revocation is disabled');
   }
 
   async listAuthorities(): Promise<VerifiedAuthority[]> {
-    return clone((await this.readStored()).state.authorities);
+    throw new AntoninaApiError('Antonina uses one shared root board credential; authority lists are not part of the live access model');
   }
 
   /** States one requirement; `verifyCredential` reports the same miss. */
@@ -695,21 +642,22 @@ export class BoardApi {
     return clone(target);
   }
 
-  private requireActiveAuthority(state: VerifiedBoardState, credential: BoardCredential): VerifiedAuthority {
-    const looked = lookupCredentialAuthority(credential, state);
-    if (looked.active) return looked.authority;
-    throw new AntoninaApiError('Antonina board credential is unknown or revoked');
-  }
-
-  private async refreshEffectiveAuthority(state: VerifiedBoardState): Promise<void> {
+  private async refreshEffectiveAuthority(_state: VerifiedBoardState): Promise<void> {
     if (this.credential === null) {
-      this.effectiveAuthority = null;
+      this.credentialAccepted = false;
       this.credentialRejection = null;
       return;
     }
-    const resolved = await resolveCredentialAuthority(this.credential, state);
-    this.effectiveAuthority = resolved.active ? resolved.authority : null;
-    this.credentialRejection = resolved.active ? null : resolved.rejection;
+    try {
+      const credential = await verifyBoardCredential(this.credential);
+      const anchor = credentialTrustAnchor(credential);
+      this.credentialAccepted = credential.keyId === anchor.rootKeyId
+        && credential.publicKey === anchor.rootPublicKey;
+      this.credentialRejection = this.credentialAccepted ? null : 'unknown';
+    } catch {
+      this.credentialAccepted = false;
+      this.credentialRejection = 'unverified';
+    }
   }
 
   /** `acceptDeleted` is set only by the append that performed the deletion. */
@@ -739,27 +687,18 @@ export class BoardApi {
     return stored;
   }
 
-  private async requireUsableCredential(capability: BoardCapability): Promise<BoardCredential> {
-    if (this.credential === null || this.effectiveAuthority === null) {
-      // `verifyCredential` establishes board state before it asks for a
-      // credential, through the same one read path every command uses. It
-      // throws when there is no credential, so `requireCredential` below
-      // only narrows the type.
+  private async requireUsableCredential(): Promise<BoardCredential> {
+    if (this.credential === null || !this.credentialAccepted) {
       await this.verifyCredential(this.credential);
     }
-    const credential = this.requireCredential();
-    if (!this.effectiveAuthority?.capabilities.includes(capability)) {
-      throw new AntoninaApiError('Antonina credential lacks required capability ' + capability);
-    }
-    return credential;
+    return this.requireCredential();
   }
 
   private async append(
     kind: Exclude<BoardOperationKind, 'board.initialize'>,
     payload: BoardOperationPayload | ((state: VerifiedBoardState) => BoardOperationPayload),
-    capability: BoardCapability,
   ): Promise<StoredSignedBoard> {
-    const credential = await this.requireUsableCredential(capability);
+    const credential = await this.requireUsableCredential();
     try {
       const stored = await this.store.append(
         credential,

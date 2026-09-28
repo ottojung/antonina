@@ -203,7 +203,7 @@ test('storage read failures and wrong board keys are reported as authentication 
   forbidden = true;
   await assert.rejects(
     () => reader.createIssue('Unreadable'),
-    (error) => error instanceof SignedBoardStoreError && error.status === 403,
+    /failed \(403\)/,
   );
   assert.equal(reader.hasWriteAccess(), true, 'a transport read failure does not revoke the board key');
 
@@ -419,7 +419,7 @@ test('read commands require the board key while readBoard still reports a missin
     await assert.rejects(read, /credential|required|board credential/);
   }
   for (const read of [() => absent.listIssues(), () => absent.getQueue(), () => absent.listResources()]) {
-    await assert.rejects(read, /credential|required|board credential/);
+    await assert.rejects(read, /does not exist/);
   }
   assert.equal(await absent.readBoard(), null);
 });

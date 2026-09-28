@@ -104,18 +104,13 @@ const BOARD_SPECS: readonly CommandSpec[] = [
   }),
   withJson({
     path: ['access'],
-    summary: 'Show board access and credential capabilities.',
+    summary: 'Show board credential access.',
     normalize: (p) => ['access', ...jsonArg(p)],
   }),
   withJson({
     path: ['credential', 'show'],
     summary: 'Print the configured credential.',
     normalize: (p) => ['credential', 'show', ...jsonArg(p)],
-  }),
-  withJson({
-    path: ['credential', 'trust'],
-    summary: 'Print the configured trust anchor.',
-    normalize: (p) => ['credential', 'trust', ...jsonArg(p)],
   }),
   withJson({
     path: ['credential', 'verify'],
@@ -419,7 +414,7 @@ const SPECS: Readonly<Record<PublicNamespace, readonly CommandSpec[]>> = {
 
 const GROUPS: Readonly<Record<PublicNamespace, readonly string[]>> = {
   agent: [],
-  board: ['credential', 'authority', 'queue', 'resource', 'target', 'dispatch', 'collect'],
+  board: ['credential', 'queue', 'resource', 'target', 'dispatch', 'collect'],
   daemon: [],
 };
 

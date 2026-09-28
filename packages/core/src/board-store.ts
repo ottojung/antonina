@@ -158,22 +158,35 @@ export class SignedBoardStore {
     this.sharded = new ShardedBoardStore(options);
   }
 
+  /**
+   * Legacy trust-anchor-only read retained for board-v2 compatibility tests and
+   * one-time migration. V3 deliberately cannot be located without the board
+   * credential's one shared key.
+   */
   async read(anchor: BoardTrustAnchor, previouslyAcceptedHead?: string | null): Promise<StoredSignedBoard | null> {
-    // Reads re-probe while v3 is absent so a long-lived browser notices when
-    // another writer migrates the board instead of staying on frozen board-v2.
-    if (this.shardedAvailable !== true) {
-      this.shardedAvailable = await this.sharded.exists();
-    }
-    if (this.shardedAvailable) {
-      try {
-        return await this.sharded.read(anchor, previouslyAcceptedHead);
-      } catch (error) {
-        if (error instanceof ShardedBoardStoreError) {
-          throw fromShardedError(error);
-        }
-        throw error;
+    return this.readLegacy(anchor, previouslyAcceptedHead);
+  }
+
+  async readWithCredential(
+    credentialValue: BoardCredential,
+    previouslyAcceptedHead?: string | null,
+  ): Promise<StoredSignedBoard | null> {
+    const credential = await verifyBoardCredential(credentialValue);
+    const anchor = credentialTrustAnchor(credential);
+    try {
+      if (await this.sharded.exists(credential.storageCapability)) {
+        this.shardedAvailable = true;
+        return await this.sharded.read(
+          anchor,
+          credential.storageCapability,
+          previouslyAcceptedHead,
+        );
       }
+    } catch (error) {
+      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
+      throw error;
     }
+    this.shardedAvailable = false;
     return this.readLegacy(anchor, previouslyAcceptedHead);
   }
 
@@ -225,8 +238,8 @@ export class SignedBoardStore {
   }
 
   async signedBoardExists(): Promise<boolean> {
-    this.shardedAvailable = await this.sharded.exists();
-    if (this.shardedAvailable) return true;
+    // board-v2 is intentionally retained after migration, so existence can be
+    // checked without revealing any v3 shard locator.
     const response = await this.fetcher(this.url, { cache: 'no-store' });
     if (response.status === 404) return false;
     if (response.status === 200) return true;
@@ -293,36 +306,14 @@ export class SignedBoardStore {
       throw new SignedBoardStoreError('Antonina delegated credential operations are disabled');
     }
 
-    // A fresh client may attach after another client has already migrated the
-    // board. Probe once while availability is unknown; a client that already
-    // read legacy v2 has cached false and keeps the legacy mutation's original
-    // single-read failure semantics.
-    if (this.shardedAvailable === null) {
-      this.shardedAvailable = await this.sharded.exists();
-    }
+    this.shardedAvailable = await this.sharded.exists(credential.storageCapability);
 
-    if (this.shardedAvailable !== true) {
+    if (!this.shardedAvailable) {
       const legacy = await this.requireLegacyAppendable(anchor, previouslyAcceptedHead);
-
-      // V3 deliberately keeps reads public but keeps writes authenticated. Old
-      // Skrynia releases generated a different capability for every new object,
-      // so they cannot shard an existing board without replacing credentials.
-      // Stay on board-v2 until the server supports reusing this credential's
-      // existing board storage capability.
-      if (!await this.sharded.supportsSharedCapability(credential.storageCapability)) {
-        this.shardedAvailable = false;
-        return this.appendLegacy(credential, request, previouslyAcceptedHead);
-      }
-
       try {
-        await this.sharded.migrate(legacy, credential.storageCapability);
+        await this.sharded.migrate(legacy, anchor, credential.storageCapability);
         this.shardedAvailable = true;
       } catch (error) {
-        if (error instanceof ShardedBoardStoreError
-            && (error.status === 404 || error.status === 405 || error.status === 501)) {
-          this.shardedAvailable = false;
-          return this.appendLegacy(credential, request, previouslyAcceptedHead);
-        }
         if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
         throw error;
       }
@@ -383,60 +374,77 @@ export class SignedBoardStore {
       }
       if (response.status !== 200) throw this.httpError('PUT', SIGNED_BOARD_KEY, response);
 
-      return this.require(anchor, operation.opId);
+      const committed = await this.readLegacy(anchor, operation.opId);
+      if (committed === null) throw new BoardMissingError();
+      return committed;
     }
 
     throw new SignedBoardStoreError('Antonina board changed too often; signed operation was not committed');
   }
 
   async getIssue(
-    anchor: BoardTrustAnchor,
+    credentialValue: BoardCredential,
     number: number,
     previouslyAcceptedHead?: string | null,
   ): Promise<BoardIssue | null> {
-    if (this.shardedAvailable === true || await this.refreshShardedAvailability()) {
-      return this.sharded.getIssue(anchor, number);
+    const credential = await verifyBoardCredential(credentialValue);
+    const anchor = credentialTrustAnchor(credential);
+    if (await this.sharded.exists(credential.storageCapability)) {
+      this.shardedAvailable = true;
+      return this.sharded.getIssue(anchor, credential.storageCapability, number);
     }
-    const stored = await this.read(anchor, previouslyAcceptedHead);
+    this.shardedAvailable = false;
+    const stored = await this.readLegacy(anchor, previouslyAcceptedHead);
     return stored?.state.board.issues.find((issue) => issue.number === number) ?? null;
   }
 
   async readIssuePage(
-    anchor: BoardTrustAnchor,
+    credentialValue: BoardCredential,
     state: IssueState,
     page: number,
   ): Promise<IssueListPage | null> {
-    if (this.shardedAvailable !== true && !await this.refreshShardedAvailability()) return null;
-    return this.sharded.readIssuePage(anchor, state, page);
+    const credential = await verifyBoardCredential(credentialValue);
+    const anchor = credentialTrustAnchor(credential);
+    if (!await this.sharded.exists(credential.storageCapability)) return null;
+    this.shardedAvailable = true;
+    return this.sharded.readIssuePage(anchor, credential.storageCapability, state, page);
   }
 
   async getQueue(
-    anchor: BoardTrustAnchor,
+    credentialValue: BoardCredential,
     previouslyAcceptedHead?: string | null,
   ): Promise<number[] | null> {
-    if (this.shardedAvailable === true || await this.refreshShardedAvailability()) {
-      return this.sharded.getQueue(anchor);
+    const credential = await verifyBoardCredential(credentialValue);
+    const anchor = credentialTrustAnchor(credential);
+    if (await this.sharded.exists(credential.storageCapability)) {
+      this.shardedAvailable = true;
+      return this.sharded.getQueue(anchor, credential.storageCapability);
     }
-    const stored = await this.read(anchor, previouslyAcceptedHead);
+    this.shardedAvailable = false;
+    const stored = await this.readLegacy(anchor, previouslyAcceptedHead);
     return stored === null ? null : [...stored.state.queue];
   }
 
   async readFeed(
-    anchor: BoardTrustAnchor,
+    credentialValue: BoardCredential,
     request: BoardFeedRequest = {},
     previouslyAcceptedHead?: string | null,
   ): Promise<BoardFeedPage | null> {
-    if (this.shardedAvailable === true || await this.refreshShardedAvailability()) {
-      const page = await this.sharded.readFeed(anchor, request);
+    const credential = await verifyBoardCredential(credentialValue);
+    const anchor = credentialTrustAnchor(credential);
+    if (await this.sharded.exists(credential.storageCapability)) {
+      this.shardedAvailable = true;
+      const page = await this.sharded.readFeed(
+        anchor,
+        credential.storageCapability,
+        request,
+      );
       if (page !== null) return page;
+    } else {
+      this.shardedAvailable = false;
     }
-    const stored = await this.read(anchor, previouslyAcceptedHead);
+    const stored = await this.readLegacy(anchor, previouslyAcceptedHead);
     return stored === null ? null : boardFeed(stored.log, request);
-  }
-
-  private async refreshShardedAvailability(): Promise<boolean> {
-    this.shardedAvailable = await this.sharded.exists();
-    return this.shardedAvailable;
   }
 
   private async parseJson(response: Response, context: string): Promise<unknown> {

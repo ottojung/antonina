@@ -627,8 +627,11 @@ export class BoardApi {
   }
 
   async deleteIssue(number: number): Promise<Board> {
-    const committed = await this.append('issue.delete', { number });
-    return clone(committed.state.board);
+    await this.append('issue.delete', { number });
+    // This API promises a full Board, not the compact mutation working set.
+    // Deletion is rare enough that hydrating the surviving threads here is the
+    // explicit cost of that return type rather than a cost paid by every write.
+    return this.loadBoard();
   }
 
   async deleteBoard(): Promise<void> {
@@ -730,7 +733,7 @@ export class BoardApi {
   ): Promise<StoredSignedBoard> {
     const credential = await this.requireUsableCredential();
     try {
-      const stored = await this.store.append(
+      const stored = await this.store.appendFast(
         credential,
         { kind, payload },
         this.rememberedHead,

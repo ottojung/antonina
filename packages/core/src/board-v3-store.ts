@@ -1271,9 +1271,10 @@ export class ShardedBoardStore {
     };
   }
 
-  async append(
+  private async appendInternal(
     credentialValue: BoardCredential,
     request: AppendOperationRequest,
+    compact: boolean,
   ): Promise<StoredSignedBoard> {
     const credential = await verifyBoardCredential(credentialValue);
     if (request.kind === 'authority.delegate' || request.kind === 'authority.revoke') {
@@ -1284,7 +1285,9 @@ export class ShardedBoardStore {
       const pointerStored = await this.readPointer();
       if (pointerStored === null) throw new ShardedBoardStoreError('Antonina materialized board pointer does not exist');
       const pointer = pointerStored.value;
-      const bundle = await this.readBundle(credential, pointer);
+      const bundle = compact
+        ? await this.readMutationBundle(credential, pointer)
+        : await this.readBundle(credential, pointer);
       if (bundle.state.deleted) throw new ShardedBoardStoreError('Antonina board has been deleted');
 
       const rawPayload = typeof request.payload === 'function'
@@ -1324,6 +1327,36 @@ export class ShardedBoardStore {
       const beforeIssueNumber = typeof payloadNumber === 'number' && Number.isSafeInteger(payloadNumber)
         ? payloadNumber
         : null;
+
+      // The compact path starts from list summaries. Only issue mutations that
+      // actually need the issue body/messages hydrate that one issue, and only
+      // the directory page containing the touched issue is read.
+      if (compact && beforeIssueNumber !== null && request.kind.startsWith('issue.')) {
+        const pageNumber = directoryPageNumber(beforeIssueNumber);
+        const directory = await this.readDirectoryPage(credential, bundle.meta, pageNumber);
+        if (directory !== null) bundle.directoryPages.set(pageNumber, directory);
+        const entry = directory?.entries.find((candidate) => candidate.number === beforeIssueNumber);
+        if (request.kind !== 'issue.create' && request.kind !== 'issue.delete') {
+          if (entry === undefined) {
+            throw new ShardedBoardStoreError(`Operation references missing issue ${beforeIssueNumber}`);
+          }
+          const detail = await this.readIssueSnapshot(
+            credential,
+            bundle.meta,
+            entry.ref,
+            true,
+          );
+          bundle.issueSnapshots.set(beforeIssueNumber, detail.snapshot);
+          const index = bundle.state.board.issues.findIndex(
+            (issue) => issue.number === beforeIssueNumber,
+          );
+          if (index < 0) {
+            throw new ShardedBoardStoreError(`Operation references missing issue ${beforeIssueNumber}`);
+          }
+          bundle.state.board.issues[index] = detail.issue;
+        }
+      }
+
       const beforeIssue = beforeIssueNumber === null
         ? undefined
         : bundle.state.board.issues.find((issue) => issue.number === beforeIssueNumber);

@@ -165,11 +165,25 @@ function mark(file, kind) {
 }
 
 const ranScripts = new Set();
+// `depth` counts *nesting*, so it is decremented on the way out. It used to be
+// only ever incremented, which made it a total budget of twelve script
+// expansions for the whole run rather than a depth limit, and the difference
+// matters because a truncated trace is the green direction: fewer traced inputs,
+// fewer uncovered paths, a PASS. Nothing in this repository nests near twelve
+// today, so the bug was silent, and a silent truncation is the one failure this
+// checker exists to prevent. A tripped limit is now reported for the same
+// reason an untraceable specifier is.
+const MAX_SCRIPT_DEPTH = 12;
 let depth = 0;
+let depthLimitTripped = false;
 
 function scriptRunners(manifestFile, scriptNames, kind) {
   const key = `${manifestFile}#${kind}#${[...scriptNames].sort().join(',')}`;
-  if (ranScripts.has(key) || depth > 12) return;
+  if (ranScripts.has(key)) return;
+  if (depth >= MAX_SCRIPT_DEPTH) {
+    depthLimitTripped = true;
+    return;
+  }
   ranScripts.add(key);
   depth += 1;
   const dir = dirname(manifestFile);
@@ -182,6 +196,7 @@ function scriptRunners(manifestFile, scriptNames, kind) {
     if (!body) continue;
     runShell(body, dir, kind);
   }
+  depth -= 1;
 }
 
 const tsconfigReads = [];
@@ -431,6 +446,15 @@ if (pins.length) {
     console.log(`           ${workflowPath} (which is covered) or a manual workflow_dispatch redeploy does.`);
     console.log(`           Mitigation: pin by digest so the tag cannot move silently.`);
   }
+}
+
+// Reported for the same reason as the specifier list below, and in the same
+// place: a trace that stopped early is a smaller traced set, and a smaller
+// traced set is a PASS. Naming it is what keeps the PASS honest.
+if (depthLimitTripped) {
+  console.log(`  WARNING: the script expansion limit of ${MAX_SCRIPT_DEPTH} nested levels was reached and the trace was`);
+  console.log(`           stopped there, so the traced set below is incomplete by construction.`);
+  console.log(`           Treat a PASS underneath as unproven, or raise the limit, rather than as coverage.`);
 }
 
 // Only bundle-reachable specifiers are reported: a specifier that a file the

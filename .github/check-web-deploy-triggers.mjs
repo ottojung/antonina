@@ -16,6 +16,17 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workflowPath = '.github/workflows/web-deploy.yml';
 
+// `--workflow <file>` reads the workflow from somewhere else while keeping
+// `workflowPath` as the logical path that gets traced and compared, so the check
+// can be run against a candidate workflow without editing the tracked one. The
+// regression test needs exactly that: it removes a `paths` entry and asserts the
+// check goes red, which cannot be done by mutating the real workflow.
+const workflowOverride = process.argv.indexOf('--workflow');
+const readWorkflow = () => readFileSync(
+  workflowOverride === -1 ? join(repoRoot, workflowPath) : resolve(process.argv[workflowOverride + 1]),
+  'utf8',
+);
+
 // --- repository file list -------------------------------------------------
 
 function gitFiles() {
@@ -99,7 +110,7 @@ function expandGlob(glob, baseDir) {
 // --- workflow trigger extraction -----------------------------------------
 
 function workflowTrigger() {
-  const text = read(workflowPath);
+  const text = readWorkflow();
   const lines = text.split('\n');
   const onIndex = lines.findIndex((l) => /^on:\s*$/.test(l));
   if (onIndex === -1) throw new Error(`${workflowPath}: no top-level "on:" block found`);
@@ -253,11 +264,55 @@ function importSpecifiers(source) {
 
 const EXTENSIONS = ['', '.ts', '.tsx', '.d.ts', '.js', '.jsx', '.mjs', '.css', '.json'];
 
+// Bare specifiers that this walk could not account for. A relative specifier is
+// always resolved, so anything landing here is a specifier the check cannot see
+// through: today that is a package inside node_modules, which is correct, but
+// the same syntax also names a repository file the moment someone adds a
+// tsconfig `paths` alias, a vite `resolve.alias`, or an npm workspace name. The
+// skip below cannot tell those apart, and the failure direction is the dangerous
+// one: the traced set silently shrinks and the check still reports PASS, which is
+// precisely the incident this check exists to prevent. So the two cases are
+// separated with a real resolution attempt, and anything still unaccounted for is
+// reported by name rather than dropped in silence.
+const unresolvedSpecifiers = new Map();
+
+// A specifier is accounted for when the nearest manifest declares it. This
+// deliberately reads declarations rather than trying to resolve the module: the
+// `trigger-coverage` job runs before any dependency install, so an install-based
+// test cannot tell a real package from an alias on a fresh checkout and would
+// warn about every third-party import there. A name an alias points at a
+// repository file with is not a declared dependency of anything, which is
+// exactly the case worth reporting.
+const declaredDependencies = new Set();
+for (const manifest of files.filter((f) => /(^|\/)package\.json$/.test(f))) {
+  let parsed;
+  try { parsed = readJson(manifest); } catch { continue; }
+  for (const field of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+    for (const name of Object.keys(parsed[field] ?? {})) declaredDependencies.add(name);
+  }
+}
+
+function isDeclaredPackage(spec) {
+  const parts = spec.split('/');
+  return declaredDependencies.has(spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]);
+}
+
 function walkImports(file, kind) {
   if (!isFile(file) || !/\.(ts|tsx|js|jsx|mjs)$/.test(file)) return;
   const source = read(file);
   for (const spec of importSpecifiers(source)) {
-    if (!spec.startsWith('.')) continue; // bare specifiers resolve inside node_modules
+    if (!spec.startsWith('.')) {
+      // A `node:` builtin is named by the platform, never by a repository file
+      // and never through an alias, so it is not an input to the filter.
+      if (spec.startsWith('node:')) continue;
+      if (!isDeclaredPackage(spec)) {
+        if (!unresolvedSpecifiers.has(spec)) unresolvedSpecifiers.set(spec, { files: new Set(), bundle: false });
+        const entry = unresolvedSpecifiers.get(spec);
+        entry.files.add(file);
+        if (kind === 'bundle') entry.bundle = true;
+      }
+      continue;
+    }
     const base = relative(repoRoot, resolve(repoRoot, dirname(file), spec)).split(sep).join('/');
     let hit = null;
     for (const ext of EXTENSIONS) {
@@ -276,14 +331,58 @@ function walkImports(file, kind) {
   }
 }
 
-// Entry point: the Makefile target the deploy workflow invokes.
-const makeTarget = read(workflowPath).match(/make (\S+)/)?.[1] ?? 'build';
+// Entry point: the Makefile target the deploy workflow actually runs. This is
+// read out of the `run:` steps and not out of the first `make ` anywhere in the
+// file, because a first-match-anywhere read is correct only by ordering: a
+// comment, a different step, or an echoed command containing "make " would
+// silently redirect the whole trace. That failure direction is green, since a
+// wrong target yields a smaller input set, fewer uncovered paths and a PASS.
+function makeTargetsInRunSteps(text) {
+  const targets = [];
+  let openIndent = null;
+  for (const line of text.split('\n')) {
+    if (openIndent === null) {
+      const open = line.match(/^(\s*)run:\s*(.*)$/);
+      if (open === null) continue;
+      const rest = open[2];
+      const isBlock = /^[|>][-+]?\d*\s*$/.test(rest);
+      // `run: make build` and `run: | make build` on one line.
+      for (const m of rest.replace(/^[|>][-+]?\d*/, '').matchAll(/\bmake (\S+)/g)) targets.push(m[1]);
+      if (isBlock) openIndent = open[1].length;
+      continue;
+    }
+    // Inside a `run: |` block: the commands are the more-indented lines until
+    // the indentation returns to the key that opened it.
+    if (/^\s*$/.test(line)) continue;
+    if (line.match(/^\s*/)[0].length <= openIndent) {
+      openIndent = null;
+      continue;
+    }
+    for (const m of line.replace(/^\s*#.*$/, '').matchAll(/\bmake (\S+)/g)) targets.push(m[1]);
+  }
+  return targets;
+}
+
+const workflowText = readWorkflow();
+const distinctRunTargets = [...new Set(makeTargetsInRunSteps(workflowText))];
+if (distinctRunTargets.length > 1) {
+  console.error(`  ERROR: the workflow runs more than one make target (${distinctRunTargets.join(', ')});`);
+  console.error(`         this check cannot tell which one builds the deployed bundle. Failing rather than guessing.`);
+  process.exit(1);
+}
+const makeTarget = distinctRunTargets[0]
+  ?? [...workflowText.matchAll(/\bmake (\S+)/g)][0]?.[1]
+  ?? 'build';
+if (distinctRunTargets.length === 0) {
+  console.log(`  WARNING: no make target was found in any run step; falling back to \`${makeTarget}\`.`);
+  console.log(`           A target named only in a comment or outside a run step cannot be traced reliably.`);
+}
 runMake('Makefile', makeTarget, 'bundle');
 scriptRunners('package.json', ['build'], 'bundle');
 
 // The workflow also gates on `npm test --prefix web`; its sources are read by
 // the deploy build even though vitest does not emit into the bundle.
-for (const m of read(workflowPath).matchAll(/npm test --prefix (\S+)/g)) {
+for (const m of readWorkflow().matchAll(/npm test --prefix (\S+)/g)) {
   const base = resolve(repoRoot, m[1]);
   for (const cfg of readdirSync(base).filter((f) => /^tsconfig.*\.json$/.test(f))) {
     tsconfigReads.push({ file: `${m[1]}/${cfg}`, kind: 'bundle' });
@@ -324,13 +423,35 @@ console.log(`  push branches : ${trigger.branches ?? '(none)'}`);
 console.log(`  paths filter  : ${trigger.paths === null ? '(none - deploys on every matching push)' : trigger.paths.join(', ')}`);
 console.log(`  traced bundle inputs: ${required.length}`);
 
-const pins = builderPins(read(workflowPath));
+const pins = builderPins(readWorkflow());
 if (pins.length) {
   for (const pin of pins) {
     console.log(`  WARNING: builder image pin \`${pin}\` is build input but is not a repository file.`);
     console.log(`           No paths filter can cover a change to it; only a new commit that edits`);
     console.log(`           ${workflowPath} (which is covered) or a manual workflow_dispatch redeploy does.`);
     console.log(`           Mitigation: pin by digest so the tag cannot move silently.`);
+  }
+}
+
+// Only bundle-reachable specifiers are reported: a specifier that a file the
+// deploy build merely reads cannot change the bundle, so its reachability is
+// not a question about trigger coverage.
+const untracedBundleSpecifiers = [...unresolvedSpecifiers].filter(([, entry]) => entry.bundle).sort();
+if (untracedBundleSpecifiers.length) {
+  // Reported before the result line, and named, because a specifier the walk
+  // cannot see is an input of unknown reachability. If any of these turns out
+  // to name a repository file through a tsconfig `paths` alias, a vite
+  // `resolve.alias`, or an npm workspace name, then a real bundle input is
+  // missing from the traced set below and the PASS underneath is not evidence of
+  // coverage. Treat a PASS as conditional while this list is non-empty.
+  for (const [spec, entry] of untracedBundleSpecifiers) {
+    console.log(`  WARNING: \`${spec}\` imported by ${[...entry.files].sort().join(', ')} could not be traced.`);
+    console.log(`           No manifest in this repository declares it, so it is a repository file reached`);
+    console.log(`           through a tsconfig \`paths\` alias, a vite \`resolve.alias\`, or a workspace name,`);
+    console.log(`           not a package.`);
+    console.log(`           If so, this run's traced set is incomplete and the PASS underneath is not`);
+    console.log(`           evidence that the paths filter covers every bundle input. Widen the filter, or`);
+    console.log(`           teach this checker the alias, before trusting the result.`);
   }
 }
 

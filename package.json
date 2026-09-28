@@ -14,7 +14,8 @@
     "test:cli": "node --test packages/cli/test/*.test.mjs",
     "test:daemon": "node --test packages/host-daemon/test/*.test.mjs",
     "test:web": "npm test --prefix web",
-    "test": "npm run test:core && npm run test:runtime && npm run test:daemon && npm run test:cli && npm run test:web",
+    "test:workflow": "node --test .github/*.test.mjs",
+    "test": "npm run test:core && npm run test:runtime && npm run test:daemon && npm run test:cli && npm run test:web && npm run test:workflow",
     "build:web": "npm run build --prefix web",
     "build": "npm run typecheck && npm run build:web",
     "pack:cli": "npm pack ./packages/cli"

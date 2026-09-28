@@ -121,8 +121,14 @@ export class AntoninaApiError extends Error {}
  * the model: the record a caller builds is refused downstream if it repeats a
  * note or carries a blank one, and a refusal that arrives only after the
  * operation has been signed is a refusal the caller never gets to act on. So
- * the API produces the sorted, duplicate-free, non-empty list the model
+ * the API produces the sorted, duplicate-free list of non-empty notes the model
  * requires, or refuses before anything is signed.
+ *
+ * An empty list is passed through rather than refused, because it is how a
+ * caller retracts a note: it is the field saying it should not be there, and
+ * `operations.ts` omits the field from the record for exactly that reason. The
+ * model refuses an empty list on a *record*, which is where an empty list would
+ * be a stored claim rather than a retraction.
  */
 function canonicalNoteList(notes: readonly string[], label: string): string[] {
   if (notes.some((note) => note.trim() === '')) {

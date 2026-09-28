@@ -210,6 +210,72 @@ test('caveats are ordered and unique, and guidance is a repository document path
   assert.equal(guidancePathDefect('docs/skills/target-lubko-persistent-host.md'), null);
 });
 
+test('an empty note list is refused rather than stored, and reads as the backend default', () => {
+  // `[]` is trivially sorted, unique and blank-free, so the checks it used to
+  // pass were the wrong three. It is a claim that there is nothing to say, and
+  // for guidance the claim contradicts what an absent list means.
+  assert.match(
+    executionTargetDefect(persistentTarget({ guidance: [] })),
+    /guidance must be a sorted, duplicate-free, non-empty/,
+  );
+  assert.match(
+    executionTargetDefect(persistentTarget({ limitations: [] })),
+    /limitations must be a sorted, duplicate-free, non-empty/,
+  );
+  assert.throws(() => boardWith([persistentTarget({ guidance: [] })]), /execution target/);
+  assert.throws(() => boardWith([persistentTarget({ limitations: [] })]), /execution target/);
+
+  // The accessor is the second line of defence, for a caller that hands a
+  // hand-built record straight to it: an empty list reads as absent, so the
+  // backend's own guidance document is what a reader is pointed at.
+  assert.deepEqual(
+    executionTargetAccess(persistentTarget({ guidance: [] })).guidance,
+    [EXECUTION_TARGET_GUIDANCE.lubko],
+  );
+  assert.deepEqual(executionTargetAccess(persistentTarget({ limitations: [] })).limitations, []);
+});
+
+test('a note list the API is given as empty retracts it instead of storing a claim', async () => {
+  const board = api(fakeSkrynia());
+  await board.initialize();
+  const registered = await board.registerTarget({
+    id: 'phoebe-dev',
+    backend: 'lubko',
+    kind: 'persistent-host',
+    capabilities: ['persistent-filesystem'],
+    address: 'lubko://phoebe-dev',
+    limitations: ['no managed collection roots are configured on this host'],
+    guidance: ['docs/skills/target-lubko-persistent-host.md'],
+  });
+  assert.deepEqual(registered.limitations, ['no managed collection roots are configured on this host']);
+
+  // Registration with an empty list is the same statement as omitting it: the
+  // field is absent, so a reader resolves the backend's own guidance.
+  const empty = await board.registerTarget({
+    id: 'ruth-dev',
+    backend: 'lubko',
+    kind: 'persistent-host',
+    capabilities: ['persistent-filesystem'],
+    address: 'lubko://ruth-dev',
+    guidance: [],
+  });
+  assert.equal(empty.guidance, undefined);
+  assert.deepEqual(executionTargetAccess(empty).guidance, [EXECUTION_TARGET_GUIDANCE.lubko]);
+
+  // Retraction is the only way to remove a note, and it removes the field.
+  const retracted = await board.setTarget('phoebe-dev', {
+    status: registered.status,
+    capabilities: registered.capabilities,
+    description: registered.description,
+    limitations: [],
+    guidance: [],
+  });
+  assert.equal(retracted.limitations, undefined);
+  assert.equal(retracted.guidance, undefined);
+  const reread = (await board.listTargets()).find((target) => target.id === 'phoebe-dev');
+  assert.deepEqual(executionTargetAccess(reread).guidance, [EXECUTION_TARGET_GUIDANCE.lubko]);
+});
+
 test('a board written before the descriptive fields existed still parses', () => {
   // Additive means additive: the record shape already signed into existing logs
   // has to keep verifying, or every board on disk would need rewriting to be

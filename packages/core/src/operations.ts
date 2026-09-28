@@ -368,6 +368,15 @@ function parseDescriptionFields<F extends readonly (keyof TargetDescriptionField
  * carry. Spreading the payload directly would write absent fields as explicit
  * `undefined`, which is a different stored value and would make a record written
  * two ways compare unequal for no reason.
+ *
+ * A note list the payload carries as empty is omitted here too, and that is how
+ * a note is retracted: an empty list is the caller's way of saying the field
+ * should not be there, and a record that stored it would be a claim that there
+ * are no caveats or no guidance document at all. Dropping it leaves the field
+ * absent, which is the one spelling of "says nothing" the reader resolves
+ * against the backend. The consequence is that a payload carrying `[]` and one
+ * omitting the field reach the same record; the omission is not otherwise a
+ * retraction, because `target.set` carries the previous value forward.
  */
 function descriptionRecord<F extends readonly (keyof TargetDescriptionFields)[]>(
   payload: TargetDescriptionFields,
@@ -377,7 +386,12 @@ function descriptionRecord<F extends readonly (keyof TargetDescriptionFields)[]>
   for (const field of fields) {
     const value = payload[field];
     if (value === undefined) continue;
-    carried[field] = Array.isArray(value) ? [...value] : value;
+    if (Array.isArray(value)) {
+      if (value.length === 0) continue;
+      carried[field] = [...value];
+      continue;
+    }
+    carried[field] = value;
   }
   return carried as Fields<F>;
 }
@@ -876,6 +890,16 @@ function applyBoardMutation(
         ...descriptionRecord(payload, CORRECTABLE_FIELDS),
         updatedAt: operation.timestamp,
       };
+      // A note list the payload carries as empty retracts the field. Omitting
+      // it from the carry-over is not enough on its own, because this update is
+      // built on top of the record as it stands, so the previous value would
+      // survive the omission; a retraction has to remove what was there. An
+      // operation that never carried the field is unaffected, which is what
+      // keeps a correction that says nothing about the notes from dropping them.
+      for (const field of CORRECTABLE_FIELDS) {
+        const value = payload[field];
+        if (Array.isArray(value) && value.length === 0) delete (updated as Record<string, unknown>)[field];
+      }
       const defect = executionTargetDefect(updated);
       if (defect !== null) throw new OperationLogVerificationError(defect);
       candidate.targets[candidate.targets.indexOf(target)] = updated;

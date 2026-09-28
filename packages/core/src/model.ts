@@ -269,6 +269,15 @@ export interface ExecutionTargetAccess {
 
 /** One target's access facts, with every absent field resolved from its kind and backend. */
 export function executionTargetAccess(target: BoardExecutionTarget): ExecutionTargetAccess {
+  // An empty note list is absence, spelled as absence, at every point where a
+  // record is read. The parse rule already refuses one, so a record read back
+  // from a board never carries it; a caller that hands a hand-built target
+  // straight to this function still gets the backend's own guidance rather than
+  // a target that presents as having no guidance document at all.
+  const limitations = target.limitations ?? [];
+  const guidance = target.guidance !== undefined && target.guidance.length > 0
+    ? target.guidance
+    : [EXECUTION_TARGET_GUIDANCE[target.backend]];
   return {
     targetId: target.id,
     displayName: target.displayName ?? target.id,
@@ -282,8 +291,8 @@ export function executionTargetAccess(target: BoardExecutionTarget): ExecutionTa
     capabilities: [...target.capabilities],
     address: target.address,
     description: target.description,
-    limitations: [...(target.limitations ?? [])],
-    guidance: [...(target.guidance ?? [EXECUTION_TARGET_GUIDANCE[target.backend]])],
+    limitations: [...limitations],
+    guidance: [...guidance],
   };
 }
 
@@ -464,10 +473,22 @@ export function guidancePathDefect(path: string): string | null {
   return null;
 }
 
-/** A sorted, duplicate-free list of non-empty strings, or `null` when the value is not one. */
+/**
+ * A sorted, duplicate-free, non-empty list of non-empty strings, or `null` when
+ * the value is not one.
+ *
+ * An empty list is refused here rather than accepted as a trivially well-formed
+ * one, because a note list on a stored record is a claim, and `[]` claims that
+ * there is nothing to say. For limitations that is a harmless way of spelling
+ * absence; for guidance it is not, since an absent list means the backend's own
+ * document and an empty one would silently suppress it. One rule for both keeps
+ * the board from holding a value that reads as one thing and is another, so
+ * "retract this note" means the field is absent rather than that it is empty.
+ */
 function canonicalNoteList(value: unknown): string[] | null {
   if (!Array.isArray(value) || !value.every(isText)) return null;
   const notes = value as string[];
+  if (notes.length === 0) return null;
   const sorted = [...notes].sort();
   if (notes.some((note, index) => note !== sorted[index])) return null;
   if (new Set(notes).size !== notes.length) return null;
@@ -554,11 +575,11 @@ export function executionTargetDefect(target: BoardExecutionTarget): string | nu
     return 'an execution target display name must be a non-empty string';
   }
   if (target.limitations !== undefined && canonicalNoteList(target.limitations) === null) {
-    return 'execution target limitations must be a sorted, duplicate-free list of notes';
+    return 'execution target limitations must be a sorted, duplicate-free, non-empty list of notes';
   }
   if (target.guidance !== undefined) {
     if (canonicalNoteList(target.guidance) === null) {
-      return 'execution target guidance must be a sorted, duplicate-free list of document paths';
+      return 'execution target guidance must be a sorted, duplicate-free, non-empty list of document paths';
     }
     for (const path of target.guidance) {
       const defect = guidancePathDefect(path);

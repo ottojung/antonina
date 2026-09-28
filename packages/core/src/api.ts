@@ -85,7 +85,7 @@ export {
 
 export class AntoninaApiError extends Error {}
 
-/** The signed board exists but this client cannot verify it without a trust anchor. */
+/** The board exists but this client has not been given its board credential. */
 export class BoardTrustRequiredError extends AntoninaApiError {}
 
 /**
@@ -268,9 +268,9 @@ export class BoardApi {
   }
 
   /**
-   * Verifies the one shared board credential. For now there are no roles,
-   * delegated credentials, or per-action capabilities: the root credential is
-   * full access and every other credential is rejected.
+   * Verifies one existing Antonina board credential. All issued credentials are
+   * equivalent for now: possession grants the whole board, with no roles or
+   * per-action capabilities.
    */
   async verifyCredential(credentialValue: BoardCredential | null = this.credential): Promise<BoardAccessState> {
     if (credentialValue === null) {
@@ -298,7 +298,7 @@ export class BoardApi {
     const anchor = this.requireAnchor();
     return {
       boardId: anchor.boardId,
-      keyId: this.credentialAccepted ? anchor.rootKeyId : null,
+      keyId: this.credentialAccepted ? (this.credential?.keyId ?? null) : null,
       rootKeyId: anchor.rootKeyId,
       capabilities: this.getEffectiveCapabilities(),
       credentialRejection: this.credentialRejection,
@@ -353,8 +353,8 @@ export class BoardApi {
    * One page of the unified chronological board feed, newest first, with the
    * continuation token for the entries after it. The page is a projection over
    * the verified operation log rather than over the collapsed board view, so
-   * every entry names an operation the log actually recorded. It needs no
-   * credential and writes nothing.
+   * every entry names an operation the log actually recorded. It requires the
+   * same board credential as every other read and writes nothing.
    */
   async readFeed(request: BoardFeedRequest = {}): Promise<BoardFeedPage> {
     const credential = await this.fastReadCredential();
@@ -633,16 +633,18 @@ export class BoardApi {
     return clone(target);
   }
 
-  private async refreshEffectiveAuthority(_state: VerifiedBoardState): Promise<void> {
+  private async refreshEffectiveAuthority(state: VerifiedBoardState): Promise<void> {
     if (this.credential === null) {
       this.credentialAccepted = false;
       this.credentialRejection = null;
       return;
     }
     try {
-      await verifyBoardCredential(this.credential);
-      this.credentialAccepted = true;
-      this.credentialRejection = null;
+      const credential = await verifyBoardCredential(this.credential);
+      this.credentialAccepted = state.authorities.some(
+        (authority) => authority.keyId === credential.keyId,
+      );
+      this.credentialRejection = this.credentialAccepted ? null : 'unknown';
     } catch {
       this.credentialAccepted = false;
       this.credentialRejection = 'unverified';
@@ -656,6 +658,9 @@ export class BoardApi {
     }
     this.rememberedHead = stored.state.head;
     await this.refreshEffectiveAuthority(stored.state);
+    if (this.credential !== null && !this.credentialAccepted) {
+      throw new AntoninaApiError('Antonina board credential was never issued for this board');
+    }
   }
 
   /**

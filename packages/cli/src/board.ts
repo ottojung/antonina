@@ -236,9 +236,7 @@ function defaultClient(context: BoardCommandContext): BoardApi {
  * them. Naming a single file rather than also naming an environment variable is
  * deliberate: the CLI reads the file, so the file is the advice.
  */
-const TRUST_ADVICE = 'save the board trust anchor as $XDG_CONFIG_HOME/antonina/trust.json to read it';
-
-const CREDENTIAL_ADVICE = 'save a credential copied after the storage capability was issued as'
+const CREDENTIAL_ADVICE = 'save the shared board credential as'
   + ' $XDG_CONFIG_HOME/antonina/credential.json';
 
 /**
@@ -250,7 +248,7 @@ const CREDENTIAL_ADVICE = 'save a credential copied after the storage capability
 function collectionAdvice(kind: string): string | null {
   if (kind === 'board-missing') return 'run: antonina board initialize to create it';
   if (kind === 'board-unverifiable' || kind === 'board-state-rejected') {
-    return TRUST_ADVICE;
+    return CREDENTIAL_ADVICE;
   }
   // A transport failure is the one kind with no established advice, so it is
   // named as itself rather than flattened into another kind's advice.
@@ -268,7 +266,7 @@ function collectionAdvice(kind: string): string | null {
  */
 function boardStateAdvice(error: unknown): string | null {
   if (error instanceof BoardMissingError) return 'run: antonina board initialize to create it';
-  if (error instanceof BoardTrustRequiredError) return TRUST_ADVICE;
+  if (error instanceof BoardTrustRequiredError) return CREDENTIAL_ADVICE;
   if (error instanceof BoardDeletedError) return 'start a new board instead; this key is permanently occupied';
   if (error instanceof BoardStorageRejectedError) return CREDENTIAL_ADVICE;
   // A collection snapshot classifies its own failures rather than throwing the
@@ -313,17 +311,11 @@ async function execute(
         if (credential === null) throw new AntoninaApiError('Antonina board credential is not configured');
         return { mode: 'credential', value: credential };
       }
-      if (subcommand === 'trust') {
-        if (args.length !== 0) throw new AntoninaApiError('credential trust takes no arguments');
-        const trust = client.getTrustAnchor();
-        if (trust === null) throw new AntoninaApiError('Antonina board trust anchor is not configured');
-        return { mode: 'trust', value: trust };
-      }
       if (subcommand === 'verify') {
         if (args.length !== 0) throw new AntoninaApiError('credential verify takes no arguments');
         return { mode: 'access', value: await client.verifyCredential() };
       }
-      throw new AntoninaApiError('credential requires show, trust, or verify');
+      throw new AntoninaApiError('credential requires show or verify');
     }
     case 'queue': {
       const [subcommand, ...args] = parsed.args;
@@ -653,9 +645,9 @@ function humanLines(result: CommandResult): string[] {
     const initialized = result.value as BoardInitialization;
     return [
       'Antonina signed board initialized.',
-      'Trust anchor (public):',
+      'Integrity anchor (public; does not grant board access):',
       serializeBoardTrustAnchor(initialized.trustAnchor),
-      'Root credential (secret; store securely):',
+      'Board credential (secret; grants full access):',
       serializeBoardCredential(initialized.credential),
     ];
   }

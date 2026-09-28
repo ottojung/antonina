@@ -45,6 +45,13 @@ export class SignedBoardStoreError extends Error {
   }
 }
 
+function fromShardedError(error: ShardedBoardStoreError): SignedBoardStoreError {
+  const options: { cause: unknown; status?: number; method?: string } = { cause: error };
+  if (error.status !== null) options.status = error.status;
+  if (error.method !== null) options.method = error.method;
+  return new SignedBoardStoreError(error.message, options);
+}
+
 /** The signed board does not exist at its Skrynia key. */
 export class BoardMissingError extends SignedBoardStoreError {
   constructor() {
@@ -155,11 +162,7 @@ export class SignedBoardStore {
         return await this.sharded.read(anchor, previouslyAcceptedHead);
       } catch (error) {
         if (error instanceof ShardedBoardStoreError) {
-          throw new SignedBoardStoreError(error.message, {
-            cause: error,
-            status: error.status ?? undefined,
-            method: error.method ?? undefined,
-          });
+          throw fromShardedError(error);
         }
         throw error;
       }
@@ -261,11 +264,7 @@ export class SignedBoardStore {
         await this.sharded.migrate(legacy);
       } catch (error) {
         if (error instanceof ShardedBoardStoreError) {
-          throw new SignedBoardStoreError(error.message, {
-            cause: error,
-            status: error.status ?? undefined,
-            method: error.method ?? undefined,
-          });
+          throw fromShardedError(error);
         }
         throw error;
       }
@@ -275,11 +274,7 @@ export class SignedBoardStore {
       return await this.sharded.append(credential, request, previouslyAcceptedHead);
     } catch (error) {
       if (error instanceof ShardedBoardStoreError) {
-        throw new SignedBoardStoreError(error.message, {
-          cause: error,
-          status: error.status ?? undefined,
-          method: error.method ?? undefined,
-        });
+        throw fromShardedError(error);
       }
       throw error;
     }

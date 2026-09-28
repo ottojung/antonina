@@ -232,7 +232,7 @@ test('collect list surfaces a missing board as a failure and never as an empty l
       assert.deepEqual(out, [], argv.join(' '));
       assert.equal(
         err[0],
-        'antonina board: Antonina signed board does not exist; run: antonina board initialize to create it',
+        'antonina board: Antonina board does not exist; run: antonina board initialize to create it',
         argv.join(' '),
       );
     }

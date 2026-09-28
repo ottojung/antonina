@@ -142,6 +142,8 @@ export class SignedBoardStore {
   private readonly now: () => Date;
   private readonly newId: () => string;
   private readonly sharded: ShardedBoardStore;
+  /** Known v3 availability for this client; false still re-probes on reads. */
+  private shardedAvailable: boolean | null = null;
 
   constructor(options: SignedBoardStoreOptions = {}) {
     if (options.maxAttempts !== undefined && options.maxAttempts < 1) {
@@ -157,7 +159,12 @@ export class SignedBoardStore {
   }
 
   async read(anchor: BoardTrustAnchor, previouslyAcceptedHead?: string | null): Promise<StoredSignedBoard | null> {
-    if (await this.sharded.exists()) {
+    // Reads re-probe while v3 is absent so a long-lived browser notices when
+    // another writer migrates the board instead of staying on frozen board-v2.
+    if (this.shardedAvailable !== true) {
+      this.shardedAvailable = await this.sharded.exists();
+    }
+    if (this.shardedAvailable) {
       try {
         return await this.sharded.read(anchor, previouslyAcceptedHead);
       } catch (error) {
@@ -201,7 +208,8 @@ export class SignedBoardStore {
   }
 
   async signedBoardExists(): Promise<boolean> {
-    if (await this.sharded.exists()) return true;
+    this.shardedAvailable = await this.sharded.exists();
+    if (this.shardedAvailable) return true;
     const response = await this.fetcher(this.url, { cache: 'no-store' });
     if (response.status === 404) return false;
     if (response.status === 200) return true;
@@ -258,16 +266,21 @@ export class SignedBoardStore {
     const credential = await verifyBoardCredential(credentialValue);
     const anchor = credentialTrustAnchor(credential);
 
-    if (!await this.sharded.exists()) {
+    if (this.shardedAvailable !== true) {
+      // Do not add a v3 probe in front of the mutation's authoritative v2
+      // read. This preserves the old fail-closed behavior (and one-read error
+      // semantics) while migrate() itself detects a concurrently created v3.
       const legacy = await this.requireAppendable(anchor, previouslyAcceptedHead);
       try {
         await this.sharded.migrate(legacy);
+        this.shardedAvailable = true;
       } catch (error) {
         // Keep the old path usable against a Skrynia deployment (and test
         // double) that does not yet understand the public-write v3 objects.
         // No v3 metadata was committed, so board-v2 remains authoritative.
         if (error instanceof ShardedBoardStoreError
             && (error.status === 404 || error.status === 405)) {
+          this.shardedAvailable = false;
           return this.appendLegacy(credential, request, previouslyAcceptedHead);
         }
         if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
@@ -341,7 +354,9 @@ export class SignedBoardStore {
     number: number,
     previouslyAcceptedHead?: string | null,
   ): Promise<BoardIssue | null> {
-    if (await this.sharded.exists()) return this.sharded.getIssue(anchor, number);
+    if (this.shardedAvailable === true || await this.refreshShardedAvailability()) {
+      return this.sharded.getIssue(anchor, number);
+    }
     const stored = await this.read(anchor, previouslyAcceptedHead);
     return stored?.state.board.issues.find((issue) => issue.number === number) ?? null;
   }
@@ -351,7 +366,7 @@ export class SignedBoardStore {
     state: IssueState,
     page: number,
   ): Promise<IssueListPage | null> {
-    if (!await this.sharded.exists()) return null;
+    if (this.shardedAvailable !== true && !await this.refreshShardedAvailability()) return null;
     return this.sharded.readIssuePage(anchor, state, page);
   }
 
@@ -359,7 +374,9 @@ export class SignedBoardStore {
     anchor: BoardTrustAnchor,
     previouslyAcceptedHead?: string | null,
   ): Promise<number[] | null> {
-    if (await this.sharded.exists()) return this.sharded.getQueue(anchor);
+    if (this.shardedAvailable === true || await this.refreshShardedAvailability()) {
+      return this.sharded.getQueue(anchor);
+    }
     const stored = await this.read(anchor, previouslyAcceptedHead);
     return stored === null ? null : [...stored.state.queue];
   }
@@ -369,12 +386,17 @@ export class SignedBoardStore {
     request: BoardFeedRequest = {},
     previouslyAcceptedHead?: string | null,
   ): Promise<BoardFeedPage | null> {
-    if (await this.sharded.exists()) {
+    if (this.shardedAvailable === true || await this.refreshShardedAvailability()) {
       const page = await this.sharded.readFeed(anchor, request);
       if (page !== null) return page;
     }
     const stored = await this.read(anchor, previouslyAcceptedHead);
     return stored === null ? null : boardFeed(stored.log, request);
+  }
+
+  private async refreshShardedAvailability(): Promise<boolean> {
+    this.shardedAvailable = await this.sharded.exists();
+    return this.shardedAvailable;
   }
 
   private async parseJson(response: Response, context: string): Promise<unknown> {

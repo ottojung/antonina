@@ -1298,7 +1298,7 @@ test('a/d. a full host still launches, because launch is not host-capacity polic
   // reported rather than enforced.
   const impossible = { ...env, [ANTONINA_MIN_HEADROOM_ENV]: '1099511627776' };
 
-  const launched = run(['agent', 'prompt', '--id', 'ca91', '--detach', 'work'], impossible);
+  const launched = run(['agent', 'run', '--id', 'ca91', '--detach', '--prompt', 'work'], impossible);
   assert.equal(launched.status, 0, launched.stderr);
 
   const done = await waitFor(root, 'ca91', (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
@@ -1348,7 +1348,7 @@ test('e. a signal-killed agent is reported as an external kill through status', 
   const handle = fixture(t);
   const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'ca94', '--cwd', work], env).status, 0);
-  const launched = run(['agent', 'prompt', '--id', 'ca94', '--detach', 'die-by-signal'], env);
+  const launched = run(['agent', 'run', '--id', 'ca94', '--detach', '--prompt', 'die-by-signal'], env);
   assert.equal(launched.status, 0, launched.stderr);
   await waitFor(root, 'ca94', (meta) => meta.state === 'failed' && meta.active_runner === false, 30_000);
 

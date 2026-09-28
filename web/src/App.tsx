@@ -14,6 +14,17 @@ const TAB_PANE_LABEL: { readonly [V in View]: string } = {
   feed: 'Board activity feed',
 };
 
+type IssueListRow = IssueListSummary | BoardIssue;
+type IssueReference = Pick<BoardIssue, 'number' | 'title' | 'state'>;
+
+function rowMessageCount(issue: IssueListRow): number {
+  return 'messageCount' in issue ? issue.messageCount : issue.messages.length;
+}
+
+function rowHasBody(issue: IssueListRow): boolean {
+  return 'hasBody' in issue ? issue.hasBody : issue.body.length > 0;
+}
+
 export default function App() {
   const session = useMemo(() => createBrowserBoardApi(), []);
   const api = session.api;
@@ -355,7 +366,7 @@ export function issueMovedToPosition(event: { preventDefault(): void }, order: n
 }
 
 export function IssueQueue({ issues, queue, hasWriteAccess, selectedNumber, onSelect, onReorder, empty }: {
-  issues: IssueListSummary[];
+  issues: IssueListRow[];
   queue: number[];
   hasWriteAccess: boolean;
   selectedNumber: number | undefined;
@@ -374,7 +385,7 @@ export function IssueQueue({ issues, queue, hasWriteAccess, selectedNumber, onSe
 }
 
 function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSelect, onReorder }: {
-  issue: IssueListSummary;
+  issue: IssueListRow;
   order: number[];
   position: number;
   hasWriteAccess: boolean;
@@ -399,7 +410,7 @@ function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSel
   return <div className={`issue-row ${selected ? 'selected' : ''}`} data-issue={issue.number}
     onDragOver={queued ? allowIssueDrop : undefined}
     onDrop={queued ? (event) => { void onReorder(issueDropped(event, order, issue.number)); } : undefined}>
-    <button className="issue-select" onClick={() => onSelect(issue.number)} aria-current={selected ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{issue.messageCount} messages{issue.hasBody ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>
+    <button className="issue-select" onClick={() => onSelect(issue.number)} aria-current={selected ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{rowMessageCount(issue)} messages{rowHasBody(issue) ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>
     {/* The badge carries its name as text: an aria-label on a span whose only
         role is the implicit generic is prohibited and is never announced, so
         the position was spoken as a bare digit. The wording is real text, the
@@ -496,7 +507,7 @@ function AccessNotice({ access, readOnly, className, onAction }: { access: ReadO
   return <div className={className}><div><strong>{callout.title}</strong><p>{callout.body}</p></div><button onClick={onAction}>{callout.action}</button></div>;
 }
 
-function ResourcesView({ board, issues, access, onOpenIssue, onAdd, onRemove, onEnableEditing }: { board: BoardSummary; issues: IssueListSummary[]; access: BoardAccess; onOpenIssue: (number: number) => void; onAdd: (host: string, path: string, number: number) => Promise<unknown>; onRemove: (resource: BoardResource, number: number) => Promise<unknown>; onEnableEditing: () => void }) {
+function ResourcesView({ board, issues, access, onOpenIssue, onAdd, onRemove, onEnableEditing }: { board: BoardSummary; issues: IssueReference[]; access: BoardAccess; onOpenIssue: (number: number) => void; onAdd: (host: string, path: string, number: number) => Promise<unknown>; onRemove: (resource: BoardResource, number: number) => Promise<unknown>; onEnableEditing: () => void }) {
   const grouped = groupResources(board.resources);
   async function add(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await onAdd(String(data.get('host')), String(data.get('path')), Number(data.get('issue'))); if (result) form.reset(); }
   return <div className="resources-view">
@@ -507,7 +518,7 @@ function ResourcesView({ board, issues, access, onOpenIssue, onAdd, onRemove, on
     {!board.resources.length && <div className="empty-state"><h2>No resources registered</h2><p>Registered paths appear here grouped by Lubko host.</p></div>}
   </div>;
 }
-function AddDependency({ resource, issues, add }: { resource: BoardResource; issues: IssueListSummary[]; add: (host: string, path: string, number: number) => Promise<unknown> }) { const options = issues.filter((issue) => issue.state === 'open' && !resource.issueNumbers.includes(issue.number)); if (!options.length) return null; return <form className="dependency-add" onSubmit={async (event) => { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await add(resource.host, resource.path, Number(data.get('issue'))); if (result) form.reset(); }}><select name="issue" required defaultValue=""><option value="" disabled>Add open issue dependency…</option>{options.map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add</button></form>; }
+function AddDependency({ resource, issues, add }: { resource: BoardResource; issues: IssueReference[]; add: (host: string, path: string, number: number) => Promise<unknown> }) { const options = issues.filter((issue) => issue.state === 'open' && !resource.issueNumbers.includes(issue.number)); if (!options.length) return null; return <form className="dependency-add" onSubmit={async (event) => { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await add(resource.host, resource.path, Number(data.get('issue'))); if (result) form.reset(); }}><select name="issue" required defaultValue=""><option value="" disabled>Add open issue dependency…</option>{options.map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add</button></form>; }
 
 /**
  * The feed tab's container. It owns nothing but the page it last read: every
@@ -519,7 +530,7 @@ function AddDependency({ resource, issues, add }: { resource: BoardResource; iss
  */
 export function FeedView({ readFeed, issues, generation, onOpenIssue }: {
   readFeed: FeedRead;
-  issues: IssueListSummary[];
+  issues: IssueReference[];
   generation: number;
   onOpenIssue: (number: number) => void;
 }) {
@@ -594,7 +605,7 @@ export interface FeedThreadProps {
   /** How many entries the whole feed holds, per the same page. */
   total: number;
   /** The board view, used only to report the issues the log never recorded. */
-  issues: IssueListSummary[];
+  issues: IssueReference[];
   loading: boolean;
   error: string | undefined;
   onShowMore: () => void;

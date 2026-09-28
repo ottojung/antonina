@@ -605,7 +605,7 @@ export function FeedThread({ entries, nextCursor, total, issues, loading, error,
       </span>
       <time className="feed-at" dateTime={entry.at}>{date.format(new Date(entry.at))}</time>
     </li>)}</ol>
-    {!entries.length && !loading && <div className="empty-state"><h2>{FEED_EMPTY.title}</h2><p>{FEED_EMPTY.body}</p></div>}
+    {!entries.length && !loading && !error && <div className="empty-state"><h2>{FEED_EMPTY.title}</h2><p>{FEED_EMPTY.body}</p></div>}
     {untracked.length > 0 && <p className="feed-caveat" role="note">{FEED_TRUNCATED_COPY(untracked)}</p>}
     <p className="feed-untracked">{FEED_UNTRACKED_COPY}</p>
     {nextCursor !== null && <button className="feed-more" disabled={loading} onClick={onShowMore}>{FEED_MORE_LABEL}</button>}

@@ -1,7 +1,12 @@
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+// The source is located with `import.meta.dirname` and not through the global
+// `URL`: the suite runs in a DOM environment (board issue 72), where the global
+// `URL` is jsdom's own and resolves a relative path against the page's
+// location rather than against this file. What is read and what is asserted are
+// unchanged; only the path resolution moved.
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 // Test safety: nothing here may read or mutate the operator's Antonina state.
@@ -280,7 +285,7 @@ describe('the feed tab in the app shell', () => {
   // the same nav renders, that it is the third item beside the two settled
   // ones, and that selecting it renders the container that reads the core feed
   // through the session's own method.
-  const app = readFileSync(fileURLToPath(new URL('./App.tsx', import.meta.url)), 'utf8');
+  const app = readFileSync(resolve(import.meta.dirname, 'App.tsx'), 'utf8');
 
   it('is a top-level tab beside Issues and Resources', () => {
     // The tab list grew a fourth entry for the target overview, so the pinned list

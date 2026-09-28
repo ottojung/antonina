@@ -138,7 +138,7 @@ export interface BoardAccessState {
 /**
  * The whole verified state the create read, beside the one-time keys. It is
  * the same `VerifiedBoardState` a read hands back, so a caller never has to
- * read the log a second time to learn the queue beside the board.
+ * perform a second board read just to learn the queue beside the board.
  */
 export interface BoardInitialization {
   state: VerifiedBoardState;
@@ -233,13 +233,13 @@ export class BoardApi {
   }
 
   /**
-   * Deliberately creates the signed board and adopts its one-time root
+   * Deliberately creates the materialized board and adopts its board
    * credential. The only way to create a board; reading never does, and a
    * second initializer is refused instead of taking the trust root.
    */
   async initialize(initialBoard: Board = emptyBoard()): Promise<BoardInitialization> {
     if (await this.store.signedBoardExists()) {
-      throw new AntoninaApiError('The Antonina signed board already exists');
+      throw new AntoninaApiError('The Antonina board already exists');
     }
     const initialized = await this.store.initialize(initialBoard);
     this.anchor = credentialTrustAnchor(initialized.credential);

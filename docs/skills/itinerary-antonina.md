@@ -18,7 +18,7 @@ Continue recoverable ongoing Antonina work before starting duplicate work. If th
 
 Scheduled work accumulates on one current active `release/*` branch. A human promotes that branch into `main`.
 
-The active release branch is the latest `release/*` branch that has never been promoted into `main`; once promoted, it is retired. If no active release branch exists, create one from current `main`. Reuse the same active release branch across scheduled issues.
+The active release branch is the newest `release/*` branch on `origin` that still holds commits `main` lacks, measured as `git rev-list --count origin/main..BRANCH` being greater than zero, always against `origin/main` rather than a local `main` that a worktree may hold stale. A branch that holds no such commit has been promoted and is retired, because a human promotes a release branch by merging it into `main`. A branch freshly cut from `main` holds nothing `main` lacks, so it is active, and it stays active until `main` catches up with it; when branches exist but none holds a commit `main` lacks, a pass must reuse the newest of them rather than cut another. Newest means last in branch-name order, because a `release/*` branch created today can share a commit with every other branch created today and then commit dates cannot order them. Only when `origin` carries no `release/*` branch at all does a pass create one from current `main`. Reuse the same active release branch across scheduled issues.
 
 Start issue work from the active release branch in an isolated worktree, open the issue pull request against that branch, and merge only after implementation, validation, and review. Scheduled orchestrators must not merge into `main`.
 

@@ -266,7 +266,7 @@ describe('browser board session', () => {
     expect(other.hasCredential()).toBe(false);
     expect(storage.get('antonina:board-v2:credential')).toBeNull();
     await expect(other.readState()).rejects.toBeInstanceOf(BoardTrustRequiredError);
-    await expect(other.api.createIssue('Blocked')).rejects.toThrow('credential is required');
+    await expect(other.api.createIssue('Blocked')).rejects.toThrow('no board credential');
   });
 
   it('materialized reads never write or reconstruct history', async () => {

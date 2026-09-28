@@ -408,8 +408,8 @@ export const FEED_KIND_LABEL: { readonly [K in BoardFeedEntryKind]: string } = {
  * event the board never committed.
  */
 export function feedEntrySummary(entry: BoardFeedEntry): string {
-  if (entry.kind === 'comment-added' && entry.author !== null) {
-    return `${FEED_VERB['comment-added']} by ${entry.author}: ${entry.body ?? ''}`;
+  if (entry.kind === 'comment-added' && typeof entry.author === 'string') {
+    return `${FEED_VERB['comment-added']} by ${entry.author}: ${typeof entry.body === 'string' ? entry.body : ''}`;
   }
   return `${FEED_VERB[entry.kind]} — ${entry.title}`;
 }

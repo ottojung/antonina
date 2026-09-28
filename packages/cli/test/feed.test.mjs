@@ -163,7 +163,7 @@ test('board feed names initialization while the board is missing and creates not
   const server = fakeSkrynia();
   const { code, err } = await run(['feed'], client(server));
   assert.equal(code, 1);
-  assert.match(err[0], /^antonina board: Antonina signed board does not exist/);
+  assert.match(err[0], /^antonina board: Antonina board does not exist/);
   assert.equal(server.signed, null);
 });
 

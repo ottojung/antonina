@@ -8,8 +8,9 @@ import {
   parseBoard,
   parseLegacyBoardV2,
   parsePersistedBoard,
-  upgradePersistedBoard,
 } from '../dist/model.js';
+import { migratePersistedBoard } from '../dist/migrations.js';
+import * as model from '../dist/model.js';
 
 const timestamp = '2026-09-24T00:00:00.000Z';
 
@@ -227,9 +228,15 @@ test('a schemaVersion from another build is named, not merged into a shape compl
   const absent = refusal(() => parseBoard({ ...board(), schemaVersion: undefined }));
   assert.equal(absent.defect.found, 'a value that is not a schema version');
 
-  // The v2 shape still parses as the legacy board, and still upgrades.
+  // The v2 shape still parses as the legacy board, and still upgrades. Board
+  // issue 73 deleted `upgradePersistedBoard` because that shim WAS the bypass
+  // this issue exists to close: a caller could lift a legacy board without ever
+  // asking for a migration. The upgrade is therefore the gate's job, so this
+  // asserts it through the gate and separately pins the shim's absence, which
+  // is what keeps a second bypass from being reintroduced here.
   assert.equal(parsePersistedBoard(legacyBoard()).schemaVersion, 2);
-  assert.equal(upgradePersistedBoard(legacyBoard()).schemaVersion, 3);
+  assert.equal(migratePersistedBoard(legacyBoard()).board.schemaVersion, 3);
+  assert.equal(model.upgradePersistedBoard, undefined);
 });
 
 test('a version mismatch names the next step, and the right one in each direction', () => {

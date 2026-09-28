@@ -20,6 +20,20 @@ function storedLog() {
 }
 
 /**
+ * The thrown refusal as data. `assert.throws(fn, Ctor)` cannot be used to get a
+ * handle on the error in Node 22, it returns undefined, so the throw is
+ * captured directly and the caller asserts on the type.
+ */
+function captureRefusal(read) {
+  try {
+    read();
+  } catch (error) {
+    return error;
+  }
+  assert.fail('expected the board to be refused');
+}
+
+/**
  * The trust anchor of the fixture. The board id and root key id are read from
  * the fixture itself rather than restated, so a regenerated fixture does not
  * silently test against a stale anchor. The root public key is the public half
@@ -466,7 +480,15 @@ test('a legacy board that cannot be migrated is refused before anything is writt
 
 test('a legacy board cannot be opened through the current-format parser alone', () => {
   const legacy = storedLog().operations[0].payload.board;
-  assert.throws(() => model.parseBoard(legacy), /incompatible/);
+  // Board issue 71 gave this refusal a typed error, because "the CLI and the
+  // browser both just said incompatible" was the diagnosability complaint that
+  // issue was opened for. The type is the durable contract; the old assertion
+  // matched the literal word `incompatible`, which the new message no longer
+  // contains even though the refusal is stricter and better explained.
+  const refusal = captureRefusal(() => model.parseBoard(legacy));
+  assert.equal(model.isBoardIncompatibilityError(refusal), true);
+  assert.equal(refusal.defect.kind, 'schema-version-mismatch');
+  assert.equal(refusal.defect.found, '2');
   // There is no exported shortcut that lifts a legacy board any more: opening
   // one is the gate's job, so a caller cannot forget to ask for a migration.
   assert.equal(model.upgradePersistedBoard, undefined);

@@ -68,7 +68,11 @@ function board(issues: BoardIssue[]): Board {
 }
 
 function state(issues: BoardIssue[]): VerifiedBoardState {
-  return { board: board(issues), queue: issues.filter((each) => each.state === 'open').map((each) => each.number), authorities: [], deleted: false, head: 'op-1' };
+  // `migration` is required on VerifiedBoardState since board issue 73 made the
+  // migration gate mandatory, so a fixture that omits it no longer type-checks.
+  // A current-format board persists at the current version and steps through
+  // nothing, which is what the real gate reports for it.
+  return { board: board(issues), queue: issues.filter((each) => each.state === 'open').map((each) => each.number), authorities: [], deleted: false, head: 'op-1', migration: { persistedVersion: BOARD_SCHEMA_VERSION, throughVersions: [] } };
 }
 
 let sequence = 0;

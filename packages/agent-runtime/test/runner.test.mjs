@@ -85,16 +85,10 @@ function scratch(t, backend) {
   const configHome = join(root, 'config');
   mkdirSync(stateHome);
   mkdirSync(configHome);
-  // The pre-launch capacity guard reads the ambient host by default, so pin the
-  // threshold to 0 for the cases that are about lifecycle rather than capacity.
-  // Without this, every case below would depend on the host's live cgroup
-  // headroom and would refuse for real reasons on a busy machine. The guard's
-  // own behaviour is covered in host-capacity.test.mjs, through the seam.
   const env = {
     XDG_STATE_HOME: stateHome,
     XDG_CONFIG_HOME: configHome,
     ANTONINA_OPENCODE_BIN: backend,
-    ANTONINA_AGENT_MIN_HEADROOM_BYTES: '0',
   };
   const saved = { ...process.env };
   Object.assign(process.env, env);
@@ -265,7 +259,7 @@ function cgroup(usedGiB, extra = {}) {
   return (path) => files.get(path) ?? null;
 }
 
-test('a. the runner refuses to spawn below the threshold and records the refusal', async (t) => {
+test('a. a completely full host still launches, because launch is not host-capacity policy', async (t) => {
   if (!requireProc(t)) return;
   const backend = fakeBackend(t);
   if (backend === null) return;
@@ -276,28 +270,19 @@ test('a. the runner refuses to spawn below the threshold and records the refusal
     pending_prompt: 'work',
   });
 
-  // 1 GiB of headroom against a 2 GiB threshold.
-  await runManagedRunner(id, 'new', 7, { ...options, capacity: { readText: cgroup(29), env: {} } });
+  // memory.current equals memory.max: zero headroom, the exact host this issue
+  // was written on. The previous branch refused here, so on this host every
+  // launch was impossible. The intent record requires that the launch proceed
+  // and that host state be reported rather than enforced, so this asserts the
+  // launch happened and consumed its prompt normally.
+  await runManagedRunner(id, 'new', 7, { ...options, capacity: { readText: cgroup(30) } });
 
   const after = readMeta(id, options);
-  assert.equal(after.state, 'failed');
-  assert.equal(after.active_runner, false);
-  assert.equal(after.runner_reservation, null);
-  // Nothing was spawned, so there is no invocation identity and no exit status
-  // to misreport as a backend death.
-  assert.equal(after.pid, null);
-  assert.equal(after.exit_code, null);
-  assert.equal(after.exit_signal, null);
-  assert.equal(after.backend_error, null);
-  // The operator-facing reason, with the escape hatch, is on the record.
-  assert.match(after.error, /refusing to launch managed agent/);
-  assert.match(after.error, /1\.00 GiB is below the required minimum 2\.00 GiB/);
-  assert.match(after.error, /ANTONINA_AGENT_IGNORE_CAPACITY=1/);
-  // A refusal is not a delivery, so the accepted prompt survives it. Claiming
-  // the prompt before the capacity read destroyed it: `pending_prompt` was
-  // already null, there was no invocation and no log, and the prompt existed
-  // only in a local variable when the process exited.
-  assert.equal(after.pending_prompt, 'work');
+  assert.equal(after.state, 'succeeded', 'a full host must not block a valid launch');
+  assert.equal(after.exit_code, 0);
+  assert.equal(after.error, null);
+  assert.equal(after.pending_prompt, null, 'the accepted prompt was delivered, not refused');
+  assert.ok(after.invocation_id !== null, 'an invocation really was spawned');
 });
 
 // Records an operator intent into the agent metadata mid-invocation, the way
@@ -336,13 +321,13 @@ function intentBackend(t, id, options, config) {
   return fakeBackend(t, `#!/bin/sh\necho "starting"\nexec ${intentFixture(t, id, options, config)}\n`);
 }
 
-test('a. a capacity refusal does not consume a queued steer', async (t) => {
+test('a. a queued steer is delivered on a full host rather than dropped', async (t) => {
   if (!requireProc(t)) return;
-  // The steer path is the case the pre-claim fix exists for. It reaches
-  // `runInvocation` with a prompt popped out of the steer queue and had no
-  // pre-check of its own, so a refusal on a full host consumed the steer and
-  // dropped it. This guard is refusing constantly while the ceiling holds, so
-  // that is the common case and not a corner.
+  // The steer path used to reach runInvocation with a prompt popped out of the
+  // steer queue and had no pre-check of its own, so a capacity refusal consumed
+  // the steer and dropped it. With the refusal removed there is no longer a
+  // refusal path, and this pins the property that actually matters: FIFO steer
+  // ordering is preserved and a steer on a full host is delivered, not lost.
   const backend = fakeBackend(t);
   if (backend === null) return;
   const options = scratch(t, backend);
@@ -354,22 +339,16 @@ test('a. a capacity refusal does not consume a queued steer', async (t) => {
     steer_queue: [{ seq: 1, prompt: 'redirect the run', queued_at: 1 }],
   });
 
-  await runManagedRunner(id, 'new', 7, { ...options, capacity: { readText: cgroup(29), env: {} } });
+  await runManagedRunner(id, 'new', 7, { ...options, capacity: { readText: cgroup(30) } });
 
   const after = readMeta(id, options);
-  assert.equal(after.state, 'failed');
-  assert.match(after.error, /refusing to launch managed agent/);
-  // The popped steer is back in the agent's hands, and the queue is empty
-  // because the item was consumed once and restored once, not lost and not
-  // delivered twice.
-  assert.equal(after.pending_prompt, 'redirect the run');
-  assert.deepEqual(after.steer_queue, []);
-  assert.equal(after.pid, null);
-  assert.equal(after.exit_signal, null);
-  assert.equal(after.backend_error, null);
+  assert.equal(after.state, 'succeeded');
+  assert.equal(after.steer_queue.length, 0, 'the queued steer was delivered, not dropped');
+  assert.ok(after.prompt_count >= 1, 'the steer was delivered to the backend');
+  assert.equal(after.error, null);
 });
 
-test('a. the runner spawns and succeeds above the threshold', async (t) => {
+test('a. the runner spawns and succeeds on a host with headroom', async (t) => {
   if (!requireProc(t)) return;
   const backend = fakeBackend(t);
   if (backend === null) return;
@@ -380,8 +359,9 @@ test('a. the runner spawns and succeeds above the threshold', async (t) => {
     pending_prompt: 'work',
   });
 
-  // 20 GiB of headroom: the same code path as the refusal case, opposite verdict.
-  await runManagedRunner(id, 'new', 7, { ...options, capacity: { readText: cgroup(10), env: {} } });
+  // 20 GiB of headroom. The same path as the full-host case, which now also
+  // succeeds: host memory is observed for diagnostics, never used to decide.
+  await runManagedRunner(id, 'new', 7, { ...options, capacity: { readText: cgroup(10) } });
 
   const after = readMeta(id, options);
   assert.equal(after.state, 'succeeded');
@@ -400,36 +380,16 @@ test('c. the runner proceeds, with a stated reason, when no cgroup limit can be 
     pending_prompt: 'work',
   });
 
-  // memory.max reads "max": no hard limit, so there is no headroom to refuse on.
+  // memory.max reads "max": no hard limit, so headroom is unknown. The launch
+  // proceeds and the degraded reading is simply absent from the death record.
   await runManagedRunner(id, 'new', 7, {
     ...options,
-    capacity: { readText: cgroup(1, { '/sys/fs/cgroup/memory.max': 'max\n' }), env: {} },
+    capacity: { readText: cgroup(1, { '/sys/fs/cgroup/memory.max': 'max\n' }) },
   });
 
   const after = readMeta(id, options);
   assert.equal(after.state, 'succeeded');
   assert.equal(after.error, null);
-});
-
-test('4. the escape hatch launches an agent the guard would otherwise refuse', async (t) => {
-  if (!requireProc(t)) return;
-  const backend = fakeBackend(t);
-  if (backend === null) return;
-  const options = scratch(t, backend);
-  const id = agent(t, options, {
-    runner_gen: 7,
-    runner_reservation: reservation({ gen: 7 }),
-    pending_prompt: 'work',
-  });
-
-  // Identical readings to the refusal case, with the operator override set.
-  await runManagedRunner(id, 'new', 7, {
-    ...options,
-    capacity: { readText: cgroup(29), env: { ANTONINA_AGENT_IGNORE_CAPACITY: '1' } },
-  });
-
-  const after = readMeta(id, options);
-  assert.equal(after.state, 'succeeded');
 });
 
 // A cgroup whose OOM counters advance while the child is alive. The fixture
@@ -469,7 +429,7 @@ test('e. a backend killed by a signal is recorded as an external kill, not a bac
 
   await runManagedRunner(id, 'new', 7, {
     ...options,
-    capacity: { readText: cgroupWithOomDrift(1, marker), env: {} },
+    capacity: { readText: cgroupWithOomDrift(1, marker) },
   });
 
   const after = readMeta(id, options);
@@ -509,7 +469,6 @@ test('e. a signal death with no readable OOM counters says the evidence is unava
     ...options,
     capacity: {
       readText: (path) => (path.endsWith('memory.events') ? null : noEvents(path)),
-      env: {},
     },
   });
 
@@ -548,7 +507,7 @@ test('e. a signal death with a steer pending and no operator signal is an extern
 
   await runManagedRunner(id, 'new', 7, {
     ...options,
-    capacity: { readText: cgroupWithOomDrift(1, marker), env: {} },
+    capacity: { readText: cgroupWithOomDrift(1, marker) },
   });
 
   const after = readMeta(id, options);
@@ -588,7 +547,7 @@ test('e. a steer the runner itself signalled is still recorded as a clean stoppe
 
   await runManagedRunner(id, 'new', 7, {
     ...options,
-    capacity: { readText: cgroup(1), env: {} },
+    capacity: { readText: cgroup(1) },
   });
 
   const after = readMeta(id, options);
@@ -626,7 +585,7 @@ test('e. a kill intent does not excuse a host kill that beat the control poll', 
 
   await runManagedRunner(id, 'new', 7, {
     ...run,
-    capacity: { readText: cgroupWithOomDrift(1, marker), env: {} },
+    capacity: { readText: cgroupWithOomDrift(1, marker) },
   });
 
   const after = readMeta(id, run);
@@ -672,7 +631,7 @@ test('e. a stop intent the runner itself signalled is still a clean stopped', as
 
   await runManagedRunner(id, 'new', 7, {
     ...run,
-    capacity: { readText: cgroup(1), env: {} },
+    capacity: { readText: cgroup(1) },
   });
 
   const after = readMeta(id, run);

@@ -13,9 +13,7 @@ import {
   type BackendError,
 } from './backend.js';
 import {
-  checkHostLaunchCapacity,
   readOomCounters,
-  type CapacityDecisionOptions,
   type HostCapacityReadOptions,
   type OomCounters,
 } from './host-capacity.js';
@@ -53,11 +51,13 @@ const CONTROL_GRACE_MS = 10_000;
 export interface RunnerOptions extends StatePathsOptions {
   env?: Record<string, string | undefined>;
   /**
-   * Seam for the host capacity reading. Production leaves it unset so the
-   * runner reads the real cgroup; tests point it at synthetic values rather
-   * than asserting against live memory counters.
+   * Seam for the host memory reading used to classify a death. Production
+   * leaves it unset so the runner reads the real cgroup; tests point it at
+   * synthetic values rather than asserting against live memory counters. It
+   * affects diagnosis only: no reading here can refuse, delay or suppress a
+   * launch.
    */
-  capacity?: HostCapacityReadOptions & CapacityDecisionOptions;
+  capacity?: HostCapacityReadOptions;
 }
 
 /** The OOM bracket captured around one backend spawn. */
@@ -155,29 +155,6 @@ async function claimPendingPrompt(agentId: string, prompt: string, options: Runn
     await updateMeta(agentId, (meta) => setActiveRunner(meta, false), options);
   }
   return claimed;
-}
-
-async function refuseForLaunchCapacity(
-  agentId: string,
-  prompt: string,
-  reason: string,
-  options: RunnerOptions,
-): Promise<void> {
-  await updateMeta(agentId, (meta) => {
-    // A refusal is not a delivery, so it must never consume the prompt. When
-    // the guard runs before the claim the prompt is still in `pending_prompt`
-    // and this is a no-op; when it runs on a retry inside the spawn loop the
-    // prompt has already been claimed by this runner, so it goes back under the
-    // same guards `claimPendingPrompt` used. Either way the operator's accepted
-    // prompt is still owned by the agent when this runner exits, instead of
-    // existing only in a local variable with no invocation, no log and no
-    // durable trace.
-    if (meta.pending_prompt === null && !stopLikeOrMalformed(meta)) {
-      meta.pending_prompt = prompt;
-    }
-    finalizeTerminal(meta, 'failed', Date.now() / 1000, null, null, reason);
-    setActiveRunner(meta, false);
-  }, options);
 }
 
 async function reclaimOrStop(agentId: string, options: RunnerOptions): Promise<boolean> {
@@ -328,31 +305,10 @@ async function runInvocation(
     }, options);
     return false;
   }
-  // Read the host *before* the prompt is claimed, not after. The point of this
-  // guard is that an operator learns the host is full *instead of* learning it
-  // from a SIGKILL and an empty log twenty minutes later, and a prompt that is
-  // still in `pending_prompt` is one a later pass can retry once the host has
-  // room. Refusing below the claim destroyed the accepted prompt instead: the
-  // claim had already nulled `pending_prompt`, so at that instant the prompt
-  // lived only in a local variable. The steer path reached that refusal with no
-  // pre-check at all, so a queued steer was consumed and lost.
-  const preflight = checkHostLaunchCapacity({ env: options.env, ...options.capacity });
-  if (preflight.outcome === 'refused') {
-    await refuseForLaunchCapacity(agentId, prompt, preflight.reason, options);
-    return false;
-  }
   if (!await claimPendingPrompt(agentId, prompt, options)) return false;
 
   let attempt = 0;
   while (true) {
-    // Repeat the same read at the spawn boundary, which is what covers a retry
-    // that runs after a backend backoff, when the host may have filled up since
-    // the preflight. A refusal here restores the claimed prompt.
-    const decision = checkHostLaunchCapacity({ env: options.env, ...options.capacity });
-    if (decision.outcome === 'refused') {
-      await refuseForLaunchCapacity(agentId, prompt, decision.reason, options);
-      return false;
-    }
     const invocationId = randomBytes(16).toString('hex');
     const logFile = logPath(agentId, options);
     const fd = openSync(logFile, 'a', 0o600);

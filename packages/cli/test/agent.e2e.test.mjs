@@ -17,8 +17,9 @@ import test from 'node:test';
 
 const CLI = resolve('packages/cli/dist/packages/cli/src/main.js');
 const OPENCODE_BIN_ENV = 'ANTONINA_OPENCODE_BIN';
+// A setting the runtime no longer reads. The tests below set it deliberately, to
+// prove that host-capacity configuration can no longer affect a launch.
 const ANTONINA_MIN_HEADROOM_ENV = 'ANTONINA_AGENT_MIN_HEADROOM_BYTES';
-const ANTONINA_IGNORE_CAPACITY_ENV = 'ANTONINA_AGENT_IGNORE_CAPACITY';
 const REPO_FIXTURE_PARENT = resolve('.antonina-test-tmp');
 const PROBE_SENTINEL = 'ANTONINA-FIXTURE-EXEC-OK';
 
@@ -173,7 +174,6 @@ esac
     // suite independent of the host's live, constantly moving cgroup counters
     // — without this, a launch on a busy host would refuse for real reasons
     // and these tests would be asserting on the weather.
-    [ANTONINA_MIN_HEADROOM_ENV]: '0',
   };
   // Positive control: the fixture about to be used is exec-able and answers.
   const direct = spawnSync(opencode, ['models'], { env, encoding: 'utf8', timeout: 15_000 });
@@ -1257,70 +1257,27 @@ test('new refuses a --cwd that is not an existing directory and creates no state
   assert.equal(existsSync(join(root, 'state', 'antonina', 'agents', '4ec3', 'meta.json')), true);
 });
 
-test('a/d. a low-headroom host refuses the launch with the headroom and the escape hatch named', async (t) => {
+test('a/d. a full host still launches, because launch is not host-capacity policy', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'ca91', '--cwd', work], env).status, 0);
 
-  // A threshold no real host could satisfy, so the refusal is deterministic and
-  // does not depend on this machine's live cgroup headroom.
-  const tight = { ...env, [ANTONINA_MIN_HEADROOM_ENV]: '1099511627776' };
+  // A threshold no real host could satisfy was the previous branch's way of
+  // making a refusal deterministic. The setting no longer exists and setting it
+  // must not change anything, which is exactly what this asserts: the same
+  // launch that used to be refused now proceeds, and the host readings are
+  // reported rather than enforced.
+  const impossible = { ...env, [ANTONINA_MIN_HEADROOM_ENV]: '1099511627776' };
 
-  // Whether a refusal is even possible depends on the host having a readable
-  // cgroup limit. Learn the shape from status rather than assuming it, so this
-  // case asserts the real behaviour on either kind of host instead of failing on
-  // one of them.
-  const shape = JSON.parse(run(['agent', 'status', '--id', 'ca91', '--json'], env).stdout).host_capacity;
-  const limited = shape.degraded_reason === null;
+  const launched = run(['agent', 'prompt', '--id', 'ca91', '--detach', 'work'], impossible);
+  assert.equal(launched.status, 0, launched.stderr);
 
-  const refused = run(['agent', 'prompt', '--id', 'ca91', '--detach', 'work'], tight);
-
-  if (limited) {
-    assert.equal(refused.status, 1);
-    const body = JSON.parse(readFileSync(metaPath(root, 'ca91'), 'utf8'));
-    // A refusal must leave no accepted prompt and no dangling authority behind.
-    assert.equal(body.state, 'idle');
-    assert.equal(body.pending_prompt, null);
-    assert.equal(body.active_runner, false);
-    // The message names the headroom that was actually measured, the threshold
-    // it failed, the escape hatch, and the boundary it did not cross.
-    assert.match(refused.stderr, /refusing to launch managed agent/);
-    assert.match(refused.stderr, /headroom .* is below the required minimum 1\.00 TiB/);
-    assert.match(refused.stderr, new RegExp(`${ANTONINA_IGNORE_CAPACITY_ENV}=1`));
-    assert.match(refused.stderr, /nothing was killed, throttled, or reordered/);
-    // No backend was run: a refusal must not be a launch that then fails.
-    assertFixtureInvoked(handle, undefined);
-    assert.deepEqual(fixtureInvocations(env), []);
-    return;
-  }
-
-  // A host whose limit cannot be read must not be made unlaunchable. It proceeds
-  // with a stated reason instead of a refusal, which is requirement 2 seen
-  // through the CLI.
-  assert.equal(refused.status, 0, refused.stderr);
   const done = await waitFor(root, 'ca91', (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
   assert.equal(done.state, 'succeeded');
+  // The prompt was really delivered, so this is a launch and not a no-op that
+  // merely avoided refusing.
+  assert.equal(done.pending_prompt, null);
   assertFixtureInvoked(handle, 'work');
-});
-
-test('4. the escape hatch launches an agent the guard would otherwise refuse', async (t) => {
-  const handle = fixture(t);
-  const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'ca92', '--cwd', work], env).status, 0);
-
-  const tight = {
-    ...env,
-    [ANTONINA_MIN_HEADROOM_ENV]: '1099511627776',
-    [ANTONINA_IGNORE_CAPACITY_ENV]: '1',
-  };
-  const launched = run(['agent', 'prompt', '--id', 'ca92', '--detach', 'override-me'], tight);
-  assert.equal(launched.status, 0, launched.stderr);
-  // A generous budget: the default 8s is not enough when the host this suite
-  // runs on is itself near its memory ceiling, and a slow host must not read as
-  // a product failure.
-  const done = await waitFor(root, 'ca92', (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
-  assert.equal(done.state, 'succeeded');
-  assertFixtureInvoked(handle, 'override-me');
 });
 
 test('5. agent status exposes host headroom without a separate command', async (t) => {
@@ -1331,57 +1288,30 @@ test('5. agent status exposes host headroom without a separate command', async (
   const status = run(['agent', 'status', '--id', 'ca93', '--json'], env);
   assert.equal(status.status, 0, status.stderr);
   const capacity = JSON.parse(status.stdout).host_capacity;
-  // The shape a pass reads before launching: the headroom, the threshold it is
-  // measured against, and the verdict.
-  assert.equal(capacity.min_headroom_bytes, 0);
-  assert.equal(capacity.refused, false);
-  // Not exactly 'ok': a host under transient memory pressure correctly reports
-  // 'warning' even with the threshold disabled, and this host's PSI moves over
-  // the life of a suite. What must hold is that the verdict is never a refusal
-  // while the measured headroom clears the threshold. Asserting 'ok' here would
-  // be asserting on this machine's weather.
-  assert.ok(['ok', 'warning', 'unknown'].includes(capacity.outcome), `unexpected outcome ${capacity.outcome}`);
-  assert.equal(typeof capacity.reason, 'string');
-  assert.ok(capacity.reason.length > 10);
-  // The limit and usage behind the headroom are exposed too, so a number in
-  // status can be checked against the readings that produced it. That identity
-  // holds only where the host really is in a limited cgroup; on a host with no
-  // hard limit the reading must degrade to a stated reason instead (requirement
-  // 2, covered deterministically in the runtime suite). Assert whichever shape
-  // this host actually has, and never the weather.
+  // The shape an operator reads after a death: what the kernel reported. There
+  // is no threshold, no verdict and no refusal field, because there is no
+  // decision to report: the intent record requires that the agent command not
+  // decide whether the host has room.
+  for (const gone of ['min_headroom_bytes', 'min_headroom', 'refused', 'outcome', 'reason', 'override_applied']) {
+    assert.equal(gone in capacity, false, `host_capacity must not report ${gone}: it is admission policy`);
+  }
+  // The limit and usage behind the headroom are exposed so a number in status
+  // can be checked against the readings that produced it. That identity holds
+  // only where the host really is in a limited cgroup; on a host with no hard
+  // limit the reading degrades to a stated reason instead (covered
+  // deterministically in the runtime suite). Assert whichever shape this host
+  // actually has, and never the weather.
   if (capacity.degraded_reason === null) {
     assert.equal(capacity.source, 'cgroup_v2');
     assert.equal(typeof capacity.headroom_bytes, 'number');
     assert.equal(capacity.limit_bytes, capacity.usage_bytes + capacity.headroom_bytes);
     assert.notEqual(capacity.headroom, 'unknown');
 
-    // A standing refusal is visible in status, not only at the moment it fires.
-    const tight = { ...env, [ANTONINA_MIN_HEADROOM_ENV]: '1099511627776' };
-    const tightStatus = run(['agent', 'status', '--id', 'ca93', '--json'], tight);
-    assert.equal(tightStatus.status, 0, tightStatus.stderr);
-    const tightCapacity = JSON.parse(tightStatus.stdout).host_capacity;
-    assert.equal(tightCapacity.refused, true);
-    assert.equal(tightCapacity.outcome, 'refused');
-    assert.match(tightCapacity.reason, new RegExp(`${ANTONINA_IGNORE_CAPACITY_ENV}=1`));
-    // The measured headroom is in the refusal, not just the verdict.
-    assert.match(tightCapacity.reason, /headroom .* is below the required minimum 1\.00 TiB/);
-
-    // And the human-readable form names it as well, not only the JSON.
-    const human = run(['agent', 'status', '--id', 'ca93'], tight);
-    assert.equal(human.status, 0, human.stderr);
-    assert.match(human.stdout, /headroom:.*of .*required \(refused\)/);
-    assert.match(human.stdout, /host:.*refusing to launch managed agent/);
-  } else {
-    // Degraded host: no invented number anywhere, and the reason is surfaced
-    // through the same two surfaces a refusal would use.
-    assert.equal(capacity.source, 'degraded');
-    assert.equal(capacity.headroom_bytes, null);
-    assert.equal(capacity.headroom, null);
-    assert.ok(capacity.reason.length > 20, `degraded reason too short: ${capacity.reason}`);
+    // The human-readable form names the same reading.
     const human = run(['agent', 'status', '--id', 'ca93'], env);
     assert.equal(human.status, 0, human.stderr);
-    assert.match(human.stdout, /headroom:\s+-\s+of/);
-    assert.match(human.stdout, new RegExp(`host: +${capacity.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.match(human.stdout, /headroom:.*of .*limit/);
+    assert.doesNotMatch(human.stdout, /required/);
   }
 });
 

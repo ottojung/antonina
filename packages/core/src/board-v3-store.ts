@@ -30,6 +30,8 @@ import {
   parseOperationLog,
   parseSignedBoardOperation,
   parseUnsignedBoardOperation,
+  signBoardOperation,
+  verifyAndReplayOperationLog,
   type BoardOperationLog,
   type BoardOperationPayload,
   type BoardTrustAnchor,

@@ -10,6 +10,7 @@ import {
   executionTargetDefect,
   guidancePathDefect,
   parseBoard,
+  parseExecutionTargetGarbageCollection,
 } from '../dist/model.js';
 
 // The descriptive metadata a target carries about itself: what it is, how work
@@ -113,7 +114,10 @@ test('a target that states nothing descriptive reads through its backend and kin
   // The two are not the same shape of thing, and the access facts say so.
   assert.equal(host.accessMethod, 'lubko-transport');
   assert.equal(host.persistence, 'durable-host-filesystem');
-  assert.equal(host.garbageCollection, 'host-local-collector');
+  // The derived default names what the host offers, not what a job will cause:
+  // a host with no configured managed roots has a collector available and the
+  // collector refuses by name, which is not a promise that anything is removed.
+  assert.equal(host.garbageCollection, 'host-local-collector-available');
   assert.equal(runner.accessMethod, 'github-workflow-dispatch');
   assert.equal(runner.persistence, 'per-job-workspace');
   assert.equal(runner.garbageCollection, 'provider-managed');
@@ -161,6 +165,56 @@ test('a target may not state an access method or persistence its backend and kin
     executionTargetDefect(persistentTarget({ accessMethod: 'ssh' })),
     /must declare a known access method/,
   );
+});
+
+test('the released cleanup spelling keeps verifying and reads as the current one', async () => {
+  // `host-local-collector` is a released wire value, so the board has to stay
+  // readable across the rename rather than refusing a record it signed itself.
+  const legacy = persistentTarget({ garbageCollection: 'host-local-collector' });
+  assert.equal(executionTargetDefect(legacy), null, 'a released record is still a valid record');
+  assert.equal(executionTargetAccess(legacy).garbageCollection, 'host-local-collector-available');
+  assert.equal(
+    executionTargetAccess(persistentTarget({ garbageCollection: 'host-local-collector-available' })).garbageCollection,
+    'host-local-collector-available',
+    'the two spellings are one value, not two meanings',
+  );
+  assert.equal(
+    boardWith([legacy]).targets[0].garbageCollection,
+    'host-local-collector',
+    'the signed record keeps the bytes it was signed with',
+  );
+  assert.equal(
+    executionTargetAccess(boardWith([legacy]).targets[0]).garbageCollection,
+    'host-local-collector-available',
+    'and every reader reports the one current spelling',
+  );
+  assert.equal(parseExecutionTargetGarbageCollection('host-local-collector'), 'host-local-collector-available');
+  assert.throws(() => parseExecutionTargetGarbageCollection('host-local-collector-vacuum'), /garbage collection/);
+  // The rename did not widen the vocabulary: an ephemeral environment still
+  // cannot claim a host-local collector under either spelling.
+  assert.match(
+    executionTargetDefect(ephemeralTarget({ garbageCollection: 'host-local-collector' })),
+    /ephemeral environment cannot declare/,
+  );
+  assert.match(
+    executionTargetDefect(persistentTarget({ garbageCollection: 'host-local-collector-soon' })),
+    /must declare a known garbage collection/,
+  );
+
+  // A record signed with the released spelling replays, and an operation
+  // carrying it is stored under the current one.
+  const board = api(fakeSkrynia());
+  await board.initialize();
+  const registered = await board.registerTarget({
+    id: 'ruth-dev',
+    backend: 'lubko',
+    kind: 'persistent-host',
+    capabilities: ['persistent-filesystem'],
+    address: 'lubko://ruth-dev',
+    garbageCollection: 'host-local-collector',
+  });
+  assert.equal(registered.garbageCollection, 'host-local-collector-available');
+  assert.equal((await board.loadBoard()).targets[0].garbageCollection, 'host-local-collector-available');
 });
 
 test('a target may narrow its cleanup but never widen it into the other side of the world', () => {

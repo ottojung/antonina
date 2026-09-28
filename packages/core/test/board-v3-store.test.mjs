@@ -126,6 +126,11 @@ test('initialize immediately replaces board-v2 history with one materialized poi
     assert.equal(Array.isArray(entry.value?.operations), false);
     assert.equal(Array.isArray(entry.value?.tailOperations), false);
   }
+  assert.equal(
+    server.requests.some((request) => Array.isArray(request.body?.operations)),
+    false,
+    'new-board initialization must never create an operation log',
+  );
 });
 
 test('issue reads use only the pointer and materialized snapshots', async () => {

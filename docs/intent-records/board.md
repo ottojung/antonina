@@ -46,3 +46,35 @@ and what keeps the stored log and its signatures byte-identical forever — or i
 appends an explicitly signed migration/checkpoint operation, which is required
 only when the persisted bytes themselves must change. Tampering with
 pre-migration signed history stays detectable after migration support exists.
+
+A version bump owes the superseded version a parser *and* a persisted type. The
+parser table `PERSISTED_BOARD_PARSERS` is keyed by `PERSISTED_BOARD_VERSIONS`,
+and each entry must return a member of the closed `PersistedBoard` union
+carrying that version's own `schemaVersion`. Moving `BOARD_SCHEMA_VERSION` to 4
+without first adding a `BoardV3` interface to the union makes
+`PersistedBoardOfVersion<3>` resolve to `never`, and the mapped type then demands
+a v3 parser returning `never` — which typechecks, and which the suite would
+accept as "a reader for v3". The cheap-looking `[3]: (value: unknown) => value as
+never` is therefore a hole in the table, not a reader, and is not a way to close
+this obligation. The obligation is what makes a bump unable to merge with a board
+the previous release wrote that this build then refuses to read on the
+operation-log parse path, which is the failure board issue 104 was opened for.
+
+$id-1773008474150623
+title: A declared readable board version must be readable on every path
+date: 2026/09/28
+source: issue-104
+kind: requirement
+
+The versions a build declares it can read are one declaration, read by both the
+parser and the migration gate, and no path may recognise a version the others do
+not. `parsePersistedBoard` dispatches on `PERSISTED_BOARD_VERSIONS` over the
+parser table keyed by it, so a version the gate will accept and migrate is a
+version the parser has already agreed to read. A parser that branches on a single
+version constant instead — rather than on the declared list — is what let a v3
+board be accepted by the gate and refused by the parser at the next bump, before
+`migratePersistedBoard` was ever reached.
+
+Declaring a version without a parser is a typecheck failure, and
+`everySupportedVersionHasAParser` is the runtime half of the same obligation, so
+an incomplete bump is red by name rather than at some later symptom.

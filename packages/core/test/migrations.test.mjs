@@ -14,9 +14,72 @@ import { signBoardOperation, verifyAndReplayOperationLog } from '../dist/operati
 const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
 const FIXTURE_PATH = join(fixtureDir, 'board-v2-populated-operation-log.json');
 
+/**
+ * The compiled migration registry, read as structure rather than searched as
+ * text: each entry with the `from:` and `to:` it declares, and the offsets of
+ * its own text within the file.
+ *
+ * This is what lets the bump probe re-point the step the chain ends at without
+ * pinning a version literal. `String.replace` hits the *first* match in a file,
+ * so a search for `to: BOARD_SCHEMA_VERSION,` is not a search for "the step the
+ * chain ends at" — in a build that has already been bumped it finds whichever
+ * entry comes first in the file, which need not be that step. Slicing the entry
+ * out first and rewriting only inside it makes the rewrite say what it means.
+ *
+ * The `from`/`to` values are compared as *expressions* (`SUPERSEDED_BOARD_SCHEMA_VERSION`,
+ * `BOARD_SCHEMA_VERSION`, a literal), because that is how the compiled registry
+ * spells them; the caller compares them against the same expressions.
+ */
+function readRegistry(text, what) {
+  const open = 'const PERSISTED_BOARD_MIGRATIONS = {';
+  const start = text.indexOf(open);
+  assert.ok(start !== -1, `the compiled ${what} no longer contains ${JSON.stringify(open)}, so this probe cannot be built`);
+  const end = text.indexOf('\n};', start);
+  assert.ok(end !== -1, `the compiled ${what} no longer closes its migration registry with a bare "};", so this probe cannot be built`);
+  const body = text.slice(start, end);
+  const entries = [...body.matchAll(/^ {4}\[([^\]]+)\]: \{\n([\s\S]*?)^ {4}\},$/gm)].map((match) => {
+    const inner = match[2] ?? '';
+    const from = /^ {8}from: ([^,\n]+),$/m.exec(inner);
+    const to = /^ {8}to: ([^,\n]+),$/m.exec(inner);
+    assert.ok(from !== null && to !== null, `a registry entry in the compiled ${what} has no \`from:\`/\`to:\` pair, so this probe cannot be built`);
+    return {
+      key: match[1],
+      from: from[1],
+      to: to[1],
+      text: match[0],
+      start: start + (match.index ?? 0),
+    };
+  });
+  assert.ok(entries.length > 0, `the compiled ${what} declares no migration entries, so this probe cannot be built`);
+  return { entries };
+}
+
 /** The compiled core, beside which the version-bump probe is written. */
 function distDir() {
   return join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
+}
+
+/**
+ * Every version this build declares, as the file states it independently of the
+ * module under test: the oldest version it reads, through to the one it writes,
+ * with no gap. Derived from the two version constants rather than written out, so
+ * the next bump does not need an edit here.
+ */
+function everyDeclaredVersion() {
+  const from = model.LEGACY_BOARD_SCHEMA_VERSION;
+  const to = migrations.CURRENT_PERSISTED_BOARD_VERSION;
+  return Array.from({ length: to - from + 1 }, (_, index) => from + index);
+}
+
+/**
+ * The versions a board at `from` steps through on its way to the current one:
+ * one step per version, in order, up to and including the version this build
+ * writes. Stated from the constants and the distance between them, so a version
+ * bump moves the expectation instead of breaking it.
+ */
+function versionsSteppedThrough(from) {
+  const to = migrations.CURRENT_PERSISTED_BOARD_VERSION;
+  return Array.from({ length: to - from }, (_, index) => from + 1 + index);
 }
 
 /** The fixture as it is written on disk, read fresh so no test can share a mutation. */
@@ -112,7 +175,7 @@ test('a board already at the current persisted version opens without migrating',
 
 test('every supported version that is not current has a registered migration', () => {
   assert.equal(migrations.everySupersededVersionHasAMigration(), true);
-  assert.deepEqual([...migrations.SUPPORTED_PERSISTED_BOARD_VERSIONS], [2, 3]);
+  assert.deepEqual([...migrations.SUPPORTED_PERSISTED_BOARD_VERSIONS], everyDeclaredVersion());
   for (const version of migrations.SUPPORTED_PERSISTED_BOARD_VERSIONS) {
     const chain = migrations.persistedBoardMigrationChain(version);
     assert.equal(chain.at(-1)?.to ?? version, migrations.CURRENT_PERSISTED_BOARD_VERSION);
@@ -154,12 +217,27 @@ test('every step a chain returns agrees with the version it was asked to leave',
  * so a rename in either module makes the probe fail to build rather than pass
  * vacuously.
  *
- * Nothing is derived from a literal version anywhere below: `SUPERSEDED` is
- * whatever this build currently writes, and every string the probe searches the
- * compiled text for is built from `SUPERSEDED` or `NEXT`, so the same probe
- * covers the bump after next without being edited. (Before board issue 104's
- * repair, the search string here was the literal `= 3;` and the bump after next
- * could not be probed at all.)
+ * Nothing here is derived from a version literal. `SUPERSEDED` is whatever this
+ * build currently writes and `NEXT` is one above it, and every string the probe
+ * searches the compiled text for is built from those two, from the version
+ * constants the modules export, or from the *name* of the module-level constant
+ * that means "the version this build writes" — which is a rename, not a number,
+ * so it survives a bump. The strings that used to break that were the two gate
+ * literals `to: BOARD_SCHEMA_VERSION,` and the legacy re-stamp
+ * `return { ...legacy, schemaVersion: BOARD_SCHEMA_VERSION, ... };`, which a bump
+ * necessarily rewrites, and which therefore aborted the probe before it reached
+ * the model side. Both are now reached through {@link frozenChainEndEntry}: the
+ * registry entry the compiled chain ends at, located by the chain this build
+ * actually runs, and rewritten only inside that entry, so the rewrite cannot
+ * land on some other step's `to:`.
+ *
+ * What is still pinned, and loudly: the *shape* of the compiled output. Each
+ * entry is matched as `[<key>]: {` / `        from: <v>,` / `        to: <v>,` /
+ * `    },`, and the re-stamp is matched as `schemaVersion: <current-version
+ * expression>` inside that entry. A build that renames those, or that writes a
+ * chain whose last step does not name the current-version constant, fails to
+ * build rather than producing a probe that does not declare the version it
+ * claims to.
  */
 async function buildNextVersionBumpProbe() {
   const NEXT = migrations.CURRENT_PERSISTED_BOARD_VERSION + 1;
@@ -173,7 +251,6 @@ async function buildNextVersionBumpProbe() {
     }
     return out;
   };
-
   // The parser the bumped build registers for the version this build writes
   // today is, verbatim, the reader this build already ships. It is imported
   // from the *unrewritten* module so the probe is not asserting a v3 reader
@@ -200,21 +277,65 @@ async function buildNextVersionBumpProbe() {
       `    [${SUPERSEDED}]: parseSupersededBoard,\n    [BOARD_SCHEMA_VERSION]: parseCanonicalBoard,\n};`],
   ], 'model'));
 
-  writeFileSync(migrationsPath, rewrite(readFileSync(join(distDir(), 'migrations.js'), 'utf8'), [
-    [`from './model.js'`, `from './model.next-version-bump.probe.js'`],
-    ['export const CURRENT_PERSISTED_BOARD_VERSION = BOARD_SCHEMA_VERSION;',
-      `export const CURRENT_PERSISTED_BOARD_VERSION = ${NEXT};`],
-    // the step the bump registers, and nothing else.
-    ['const PERSISTED_BOARD_MIGRATIONS = {',
-      `const PERSISTED_BOARD_MIGRATIONS = {\n    ${SUPERSEDED}: {\n`
-      + `        from: ${SUPERSEDED},\n        to: ${NEXT},\n`
-      + "        summary: 'the step the next bump registers',\n"
-      + `        migrate(value) {\n            return { ...value, schemaVersion: ${NEXT} };\n        },\n    },`],
-    // and the existing v2 step now leads to v3 rather than to the end of the line.
-    ['        to: BOARD_SCHEMA_VERSION,', `        to: ${SUPERSEDED},`],
-    ['return { ...legacy, schemaVersion: BOARD_SCHEMA_VERSION, targets: [], dispatches: [] };',
-      `return { ...legacy, schemaVersion: ${SUPERSEDED}, targets: [], dispatches: [] };`],
-  ], 'gate'));
+  const gatePath = join(distDir(), 'migrations.js');
+  const gateText = readFileSync(gatePath, 'utf8');
+
+  // The step the bump has to re-point is *not* found by searching for a version
+  // literal. It is found structurally: the registry entries, in compiled form,
+  // each with its own `from:` and `to:`. The entry whose `to:` is the version
+  // this build writes is the one the bump supersedes, because a registry is a
+  // chain and exactly one entry can end at the current version. This is derived
+  // from the chain the build itself runs (`migrations.persistedBoardMigrationChain`
+  // below), so a build that has already been bumped is handled by the same code:
+  // its chain ends at the same place, one version further on.
+  const registry = readRegistry(gateText, 'gate');
+  const endOfChain = registry.entries.find((entry) => entry.to === 'BOARD_SCHEMA_VERSION');
+  assert.ok(
+    endOfChain !== undefined,
+    'the compiled gate no longer has a registered step whose `to` is the version this build writes, so this probe cannot be built',
+  );
+  // The frozen step must be the one the chain actually ends at, and the chain
+  // must be walkable — otherwise the entry found above is some other step that
+  // happens to name the current version, and rewriting it would build a probe
+  // that is not the bump.
+  assert.equal(
+    migrations.persistedBoardMigrationChain(migrations.SUPPORTED_PERSISTED_BOARD_VERSIONS[0]).at(-1)?.to,
+    migrations.CURRENT_PERSISTED_BOARD_VERSION,
+    'the gate the probe is built from does not walk its own registry to the current version, so this probe cannot be built',
+  );
+
+  writeFileSync(migrationsPath, rewrite(
+    // the frozen step is re-pointed at `SUPERSEDED`, by slicing the one entry the
+    // chain ends at out of the text and rewriting inside it. Scoping the rewrite
+    // to the entry — rather than replacing the first match in the file — is what
+    // keeps a build that has already been bumped correct: there, an *earlier*
+    // entry is the one that names the current version in some spellings, and a
+    // whole-file replace would silently re-point that one instead.
+    gateText.slice(0, endOfChain.start) + rewrite(endOfChain.text, [
+      // the step this build registers for the superseded version now leads to
+      // the version that supersedes it, not to the end of the line.
+      [`        to: ${endOfChain.to},`, `        to: ${SUPERSEDED},`],
+      // and the re-stamp in its body agrees with the version it now leads to.
+      // Anchored on the `schemaVersion:` *expression*, not on the whole return
+      // statement, because the statement is this step's own: in a build that has
+      // already been bumped the chain-end step spreads a parsed v3 board rather
+      // than a parsed legacy one, and a whole-statement search string would miss
+      // it and abort.
+      [`schemaVersion: ${endOfChain.to}`, `schemaVersion: ${SUPERSEDED}`],
+    ], 'gate') + gateText.slice(endOfChain.start + endOfChain.text.length),
+    [
+      [`from './model.js'`, `from './model.next-version-bump.probe.js'`],
+      ['export const CURRENT_PERSISTED_BOARD_VERSION = BOARD_SCHEMA_VERSION;',
+        `export const CURRENT_PERSISTED_BOARD_VERSION = ${NEXT};`],
+      // the step the bump registers, and nothing else.
+      ['const PERSISTED_BOARD_MIGRATIONS = {',
+        `const PERSISTED_BOARD_MIGRATIONS = {\n    ${SUPERSEDED}: {\n`
+        + `        from: ${SUPERSEDED},\n        to: ${NEXT},\n`
+        + "        summary: 'the step the next bump registers',\n"
+        + `        migrate(value) {\n            return { ...value, schemaVersion: ${NEXT} };\n        },\n    },`],
+    ],
+    'gate',
+  ));
 
   try {
     return {
@@ -231,16 +352,24 @@ async function buildNextVersionBumpProbe() {
 
 test('a step registered at the next version bump is used automatically, with no other edit to the gate', async () => {
   const { NEXT, SUPERSEDED, bumped } = await buildNextVersionBumpProbe();
+  const oldest = model.LEGACY_BOARD_SCHEMA_VERSION;
   assert.equal(bumped.CURRENT_PERSISTED_BOARD_VERSION, NEXT);
   assert.equal(bumped.everySupersededVersionHasAMigration(), true);
-  // The step registered for v3 is reached from v3, and from v2, in one chain.
+  // The step registered for the superseded version is reached from that version,
+  // and is the last step of the chain.
   assert.deepEqual(
     bumped.persistedBoardMigrationChain(SUPERSEDED).map((step) => [step.from, step.to]),
     [[SUPERSEDED, NEXT]],
   );
+  // And from the oldest version this build reads, the whole ladder is walked in
+  // one chain: one step per version from the oldest to the one the bump writes,
+  // with no version skipped. Stated as consecutive pairs rather than as the two
+  // steps a two-version build happens to have, so a build that has already been
+  // bumped is checked by the same assertion.
+  const ladder = [...bumped.SUPPORTED_PERSISTED_BOARD_VERSIONS];
   assert.deepEqual(
-    bumped.persistedBoardMigrationChain(2).map((step) => [step.from, step.to]),
-    [[2, SUPERSEDED], [SUPERSEDED, NEXT]],
+    bumped.persistedBoardMigrationChain(oldest).map((step) => [step.from, step.to]),
+    ladder.slice(0, -1).map((version, index) => [version, ladder[index + 1]]),
   );
 });
 
@@ -338,11 +467,13 @@ test('a version this build does not support is still refused by version, not by 
 });
 
 test('a stored board from a newer Antonina is refused by version, not by a parse symptom', () => {
-  const future = { ...model.emptyBoard(), schemaVersion: 4 };
-  assert.throws(() => migrations.migratePersistedBoard(future), (error) => {
+  // One past the version this build writes, derived rather than written down, so
+  // the next bump does not need an edit here.
+  const future = migrations.CURRENT_PERSISTED_BOARD_VERSION + 1;
+  assert.throws(() => migrations.migratePersistedBoard({ ...model.emptyBoard(), schemaVersion: future }), (error) => {
     assert.ok(error instanceof migrations.UnsupportedPersistedBoardVersionError);
-    assert.equal(error.persistedVersion, 4);
-    assert.match(error.message, /format version 4/);
+    assert.equal(error.persistedVersion, future);
+    assert.match(error.message, new RegExp(`format version ${future}`));
     assert.match(error.message, /Upgrade Antonina/);
     return true;
   });
@@ -350,15 +481,15 @@ test('a stored board from a newer Antonina is refused by version, not by a parse
 
 test('a stored board older than anything this build migrates is refused rather than guessed at', () => {
   const ancient = {
-    schemaVersion: 1,
+    schemaVersion: model.LEGACY_BOARD_SCHEMA_VERSION - 1,
     nextIssueNumber: 1,
     issues: [],
     resources: [],
   };
   assert.throws(() => migrations.migratePersistedBoard(ancient), (error) => {
     assert.ok(error instanceof migrations.NoPersistedBoardMigrationPathError);
-    assert.equal(error.persistedVersion, 1);
-    assert.match(error.message, /no migration from persisted board format version 1/);
+    assert.equal(error.persistedVersion, model.LEGACY_BOARD_SCHEMA_VERSION - 1);
+    assert.match(error.message, new RegExp(`no migration from persisted board format version ${model.LEGACY_BOARD_SCHEMA_VERSION - 1}`));
     return true;
   });
 });
@@ -381,17 +512,23 @@ test('a malformed legacy board fails closed and produces no board', () => {
 });
 
 test('a migration that produced an invalid current board is refused rather than exposed', () => {
-  const chain = migrations.persistedBoardMigrationChain(2);
+  const legacy = model.LEGACY_BOARD_SCHEMA_VERSION;
+  const chain = migrations.persistedBoardMigrationChain(legacy);
   // The step itself produces a valid board; the point of this case is that the
   // gate validates the migrated result, not that this input is bad.
   const migrated = migrations.migratePersistedBoard({
-    schemaVersion: 2,
+    schemaVersion: legacy,
     nextIssueNumber: 1,
     issues: [],
     resources: [],
   });
   assert.equal(migrated.board.schemaVersion, migrations.CURRENT_PERSISTED_BOARD_VERSION);
-  assert.equal(chain.length, 1);
+  // One step per version between the oldest this build reads and the one it
+  // writes, counted from the constants rather than written down.
+  assert.equal(chain.length, migrations.CURRENT_PERSISTED_BOARD_VERSION - legacy);
+  // The first step out of the oldest version is the one that adds the two
+  // collections; later steps are added by bumps and are not this test's subject.
+  assert.equal(chain[0].from, legacy);
   assert.match(chain[0].summary, /execution-target catalog/);
 });
 
@@ -403,10 +540,15 @@ test('a migration that produced an invalid current board is refused rather than 
  * The migrated board, written out by hand from the fixture rather than captured
  * from the code under test. A golden that the migration generates is not a
  * check, so this one is a second statement of what v2 -> v3 means.
+ *
+ * The one field taken from the module under test is `schemaVersion`: it is the
+ * version the migration lands on, which a bump moves, and it is the only value
+ * here that is not data the fixture itself holds. Every other field is what the
+ * signed 0.1.0 log says.
  */
 function expectedMigratedBoard() {
   return {
-    schemaVersion: 3,
+    schemaVersion: migrations.CURRENT_PERSISTED_BOARD_VERSION,
     nextIssueNumber: 7,
     issues: [
       {
@@ -497,8 +639,12 @@ function expectedMigratedBoard() {
 }
 
 test('the real 0.1.0 board opens through the gate and migrates to exactly the expected current board', async () => {
+  const legacy = model.LEGACY_BOARD_SCHEMA_VERSION;
   const state = await verifyAndReplayOperationLog(storedLog(), fixtureAnchor());
-  assert.deepEqual(state.migration, { persistedVersion: 2, throughVersions: [3] });
+  assert.deepEqual(state.migration, {
+    persistedVersion: legacy,
+    throughVersions: versionsSteppedThrough(legacy),
+  });
   assert.deepEqual(state.board, expectedMigratedBoard());
   assert.deepEqual(state.queue, [5, 1, 3, 4, 6]);
   assert.deepEqual(
@@ -531,7 +677,7 @@ test('the legacy signed representation is verified exactly as persisted, byte fo
   const persisted = log.operations[0].payload.board;
   const parsed = model.parsePersistedBoard(structuredClone(persisted));
   assert.equal(canonicalJson(parsed), canonicalJson(persisted));
-  assert.equal(parsed.schemaVersion, 2);
+  assert.equal(parsed.schemaVersion, model.LEGACY_BOARD_SCHEMA_VERSION);
   assert.equal(Object.hasOwn(parsed, 'targets'), false);
 
   // And opening must not have rewritten it.
@@ -565,10 +711,16 @@ test('a legacy board tampered with in storage is still rejected after migration 
 test('a legacy board rewritten into the current format in storage is rejected, not accepted as migrated', async () => {
   // The attack migration support must not enable: upgrade the signed payload
   // in place so it looks like a current board. The signature covered v2 bytes,
-  // so this is a signature failure and not a read.
+  // so this is a signature failure and not a read. "Current format" is the
+  // version this build writes, derived, so a bump needs no edit here.
   const log = storedLog();
   const board = log.operations[0].payload.board;
-  log.operations[0].payload.board = { ...board, schemaVersion: 3, targets: [], dispatches: [] };
+  log.operations[0].payload.board = {
+    ...board,
+    schemaVersion: migrations.CURRENT_PERSISTED_BOARD_VERSION,
+    targets: [],
+    dispatches: [],
+  };
   await assert.rejects(
     () => verifyAndReplayOperationLog(log, fixtureAnchor()),
     /(identity hash|signature)/,
@@ -580,12 +732,13 @@ test('a legacy history re-signed under the current format still cannot be rolled
   // board: rewrite the whole history, re-sign it as current-format, and serve
   // that instead. The result verifies as a history the root key authored, and it
   // is still refused by any client that already accepted the original head.
+  const current = migrations.CURRENT_PERSISTED_BOARD_VERSION;
   const log = storedLog();
   const resigned = { ...log, operations: [] };
   let previous = null;
   for (const original of log.operations) {
     const payload = original.kind === 'board.initialize'
-      ? { board: { ...original.payload.board, schemaVersion: 3, targets: [], dispatches: [] } }
+      ? { board: { ...original.payload.board, schemaVersion: current, targets: [], dispatches: [] } }
       : original.payload;
     const operation = await signBoardOperation({
       boardId: log.boardId,
@@ -604,8 +757,8 @@ test('a legacy history re-signed under the current format still cannot be rolled
   // It is a real history, and it opens as a current board: nothing here depends
   // on the migration being broken.
   const asCurrent = await verifyAndReplayOperationLog(resigned, fixtureAnchor());
-  assert.deepEqual(asCurrent.migration, { persistedVersion: 3, throughVersions: [] });
-  assert.equal(asCurrent.board.schemaVersion, 3);
+  assert.deepEqual(asCurrent.migration, { persistedVersion: current, throughVersions: [] });
+  assert.equal(asCurrent.board.schemaVersion, current);
 
   // What stops it is that a client which already accepted the original history
   // will not accept a replacement that does not contain the head it accepted.
@@ -622,8 +775,9 @@ test('opening a legacy board is idempotent and does not change what is stored', 
   const second = await store.require(fixtureAnchor());
   assert.deepEqual(second.state, first.state);
   assert.equal(canonicalJson(server.signed), before);
-  assert.equal(first.state.migration.persistedVersion, 2);
-  assert.deepEqual(first.state.migration.throughVersions, [3]);
+  const legacy = model.LEGACY_BOARD_SCHEMA_VERSION;
+  assert.equal(first.state.migration.persistedVersion, legacy);
+  assert.deepEqual(first.state.migration.throughVersions, versionsSteppedThrough(legacy));
 });
 
 // ---------------------------------------------------------------------------
@@ -684,13 +838,15 @@ test('a migrated board accepts writes, and those writes survive a reopen', async
   const fixtureLog = storedLog();
   assert.equal(canonicalJson(server.signed.operations[0]), canonicalJson(fixtureLog.operations[0]));
   assert.equal(server.signed.operations.length, fixtureLog.operations.length + 5);
-  assert.equal(server.signed.operations[0].payload.board.schemaVersion, 2);
+  assert.equal(server.signed.operations[0].payload.board.schemaVersion, model.LEGACY_BOARD_SCHEMA_VERSION);
   assert.equal(closed.state.board.nextIssueNumber, 8);
 });
 
 test('a legacy board that cannot be migrated is refused before anything is written', async () => {
   const log = storedLog();
-  log.operations[0].payload.board.schemaVersion = 4;
+  // One past the version this build writes: a board no migration can reach.
+  // Derived, so a bump needs no edit here.
+  log.operations[0].payload.board.schemaVersion = migrations.CURRENT_PERSISTED_BOARD_VERSION + 1;
   const server = fakeSkrynia(log);
   const before = canonicalJson(server.signed);
   const store = new SignedBoardStore({ fetch: server.fetch.bind(server) });
@@ -711,7 +867,7 @@ test('a legacy board cannot be opened through the current-format parser alone', 
   const refusal = captureRefusal(() => model.parseBoard(legacy));
   assert.equal(model.isBoardIncompatibilityError(refusal), true);
   assert.equal(refusal.defect.kind, 'schema-version-mismatch');
-  assert.equal(refusal.defect.found, '2');
+  assert.equal(refusal.defect.found, String(model.LEGACY_BOARD_SCHEMA_VERSION));
   // There is no exported shortcut that lifts a legacy board any more: opening
   // one is the gate's job, so a caller cannot forget to ask for a migration.
   assert.equal(model.upgradePersistedBoard, undefined);

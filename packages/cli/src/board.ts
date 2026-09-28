@@ -9,6 +9,7 @@ import {
   TargetSelectionError,
   type BoardAccessState,
   type BoardInitialization,
+  type IssueListSummary,
 } from '../../core/src/api.js';
 import {
   serializeBoardCredential,
@@ -86,6 +87,7 @@ export interface BoardCommandContext {
 type CommandValue =
   | BoardIssue
   | BoardIssue[]
+  | IssueListSummary[]
   | BoardResource
   | BoardResource[]
   | BoardDispatch
@@ -350,7 +352,7 @@ async function execute(
       }
       return {
         mode: 'issues',
-        value: await client.listIssues(state === 'all' ? undefined : state as IssueState),
+        value: await client.listIssueSummaries(state === 'all' ? undefined : state as IssueState),
       };
     }
     case 'show':

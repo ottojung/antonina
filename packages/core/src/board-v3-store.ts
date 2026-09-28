@@ -960,6 +960,9 @@ export class ShardedBoardStore {
   async getIssue(anchor: BoardTrustAnchor, number: number): Promise<BoardIssue | null> {
     const metaStored = await this.loadMeta(anchor);
     if (metaStored === null) return null;
+    if (metaStored.value.materializedRevision !== metaStored.value.operationCount) {
+      return this.getIssueFromCanonical(anchor, number);
+    }
     const stored = await this.getJson<unknown>(issueKey(number));
     if (stored === null || !isRecord(stored.value)) return null;
     const value = stored.value;
@@ -1024,6 +1027,7 @@ export class ShardedBoardStore {
     }
     const metaStored = await this.loadMeta(anchor);
     if (metaStored === null) return null;
+    if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
     const maxPage = state === 'open' ? metaStored.value.openPageCount : metaStored.value.closedPageCount;
     if (page > maxPage) {
       return {
@@ -1053,6 +1057,7 @@ export class ShardedBoardStore {
   async getQueue(anchor: BoardTrustAnchor): Promise<number[] | null> {
     const metaStored = await this.loadMeta(anchor);
     if (metaStored === null) return null;
+    if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
     const stored = await this.getJson<unknown>(SHARDED_QUEUE_KEY);
     if (stored === null || !isRecord(stored.value)
         || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
@@ -1068,6 +1073,7 @@ export class ShardedBoardStore {
   async readFeed(anchor: BoardTrustAnchor, request: BoardFeedRequest = {}): Promise<BoardFeedPage | null> {
     const metaStored = await this.loadMeta(anchor);
     if (metaStored === null) return null;
+    if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
     const limit = feedLimit(request.limit);
     const cursor = request.cursor === undefined || request.cursor === null
       ? null
@@ -1103,6 +1109,7 @@ export class ShardedBoardStore {
   async readAuthorities(anchor: BoardTrustAnchor): Promise<VerifiedAuthority[] | null> {
     const metaStored = await this.loadMeta(anchor);
     if (metaStored === null) return null;
+    if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
     const stored = await this.getJson<unknown>(SHARDED_AUTHORITIES_KEY);
     if (stored === null || !isRecord(stored.value)
         || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
@@ -1122,6 +1129,7 @@ export class ShardedBoardStore {
   } | null> {
     const metaStored = await this.loadMeta(anchor);
     if (metaStored === null) return null;
+    if (metaStored.value.materializedRevision !== metaStored.value.operationCount) return null;
     const stored = await this.getJson<unknown>(SHARDED_CATALOG_KEY);
     if (stored === null || !isRecord(stored.value)
         || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION

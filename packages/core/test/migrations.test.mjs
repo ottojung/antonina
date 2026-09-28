@@ -289,11 +289,34 @@ async function buildNextVersionBumpProbe() {
   // below), so a build that has already been bumped is handled by the same code:
   // its chain ends at the same place, one version further on.
   const registry = readRegistry(gateText, 'gate');
-  const endOfChain = registry.entries.find((entry) => entry.to === 'BOARD_SCHEMA_VERSION');
-  assert.ok(
-    endOfChain !== undefined,
-    'the compiled gate no longer has a registered step whose `to` is the version this build writes, so this probe cannot be built',
+  // A chain has exactly one last step, so exactly one registered step may end at
+  // the version this build writes, and that is asserted rather than assumed here
+  // because the selection is structural and a `find` takes the first entry that
+  // matches: a registry holding a second entry whose `to` names the current
+  // version — a redundant direct step declared ahead of the ladder step, say —
+  // would have the wrong entry re-pointed, and the rewrite would land somewhere
+  // other than the end of the chain.
+  //
+  // What this assertion is worth is the diagnosis, not the detection. The ladder
+  // assertion in the test below already goes red on such a registry, by name:
+  // a two-entry registry can only skip a version to end at the current version
+  // twice, and the ladder requires one step per version, so it reports a
+  // version-skip mismatch. That is a correct red, but it names the ladder and not
+  // the entries at fault. This assertion reports the same registry defect as the
+  // count of chain-end entries plus the offending `from -> to` pairs, so the
+  // reader is told which entry the probe would have re-pointed. (The chain
+  // cross-check two assertions below is the weaker sibling and is not what
+  // catches this class: it fires on the chain the running build walks, not on
+  // which registry entry was selected here.)
+  const chainEndEntries = registry.entries.filter((entry) => entry.to === 'BOARD_SCHEMA_VERSION');
+  assert.equal(
+    chainEndEntries.length,
+    1,
+    `the compiled gate registers ${chainEndEntries.length} steps whose \`to\` is the version this build writes`
+    + `${chainEndEntries.length === 0 ? ', so it has no chain end at all' : ` (${chainEndEntries.map((entry) => `${entry.from} -> ${entry.to}`).join('; ')}), so the probe would re-point whichever came first rather than the step the chain ends at`},`
+    + ' so this probe cannot be built',
   );
+  const endOfChain = chainEndEntries[0];
   // The frozen step must be the one the chain actually ends at, and the chain
   // must be walkable — otherwise the entry found above is some other step that
   // happens to name the current version, and rewriting it would build a probe
@@ -439,6 +462,19 @@ test('a board at a supported version is readable, including at the next version 
   // are. A version with no board behind it is stamped onto an empty one, which
   // is enough to show it is readable and migrates, and is why the bumped half
   // needs no fixture when the version after next is reached.
+  //
+  // The stamp is live code and it is a second place a bump can pass without a
+  // real board, so it is kept deliberately rather than by inertia, and the thing
+  // that holds it honest is named here. What would falsify the stamp is a bumped
+  // parser that needs a field an empty board does not have: the stamp would then
+  // prove readability of a board no release ever wrote. The answer is not a
+  // louder assertion in this loop, it is the current-build half above. Each
+  // version the bumped build declares *is* a version this build will declare one
+  // bump later, so `boards` is required to hold a real board for it, and the
+  // `no board fixture at declared version N` refusal — the one red this suite
+  // carries on purpose in a bumped build — stops the stamp from ever being the
+  // only evidence. The stamp covers the version *after* next; the refusal
+  // arrives, one bump later, and demands the fixture it stood in for.
   for (const version of bumpedModel.PERSISTED_BOARD_VERSIONS) {
     const board = boards.get(version) ?? model.emptyBoard();
     assert.equal(bumpedModel.parsePersistedBoard({ ...board, schemaVersion: version }).schemaVersion, version);

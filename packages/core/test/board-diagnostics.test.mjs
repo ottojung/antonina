@@ -238,11 +238,25 @@ test('a version mismatch names the next step, and the right one in each directio
   // board from a newer build is not readable by this one at all.
   const older = refusal(() => parseBoard(legacyBoard()));
   assert.match(older.message, /older Antonina/);
+  // The client advice must name the version the board is actually written at
+  // (2), not the version this build already reads (3): telling the operator to
+  // use a reader for the version they are on is advice they cannot act on and
+  // have already tried. The migration clause names the target version (3) and
+  // stays correct, so it is pinned separately.
+  assert.match(older.message, /use a client that reads schema version 2, or /,
+    'the older advice must name the version the board is written at');
+  assert.doesNotMatch(older.message, /use a client that reads schema version 3/,
+    'the older advice must not point the operator back at the version this build already reads');
   assert.match(older.message, /migration to bring the board up to version 3/);
 
   const newer = refusal(() => parseBoard(board({ schemaVersion: 4 })));
   assert.match(newer.message, /newer Antonina than this one/);
-  assert.match(newer.message, /upgrade to a build that reads schema version 4/);
+  // The newer advice must name the version to upgrade to, and must be the
+  // mirror of the older case: the actionable number, not just the label.
+  assert.match(newer.message, /upgrade to a build that reads schema version 4, or /,
+    'the newer advice must name the version to upgrade to');
+  assert.doesNotMatch(newer.message, /upgrade to a build that reads schema version 3/,
+    'the newer advice must not name the version this build already reads');
   assert.doesNotMatch(newer.message, /older Antonina/,
     'a future schema must not be told to migrate the board forward');
 

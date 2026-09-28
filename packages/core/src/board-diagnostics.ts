@@ -110,7 +110,7 @@ function versionSentence(found: string, expected: string, direction: 'older' | '
   if (direction === 'older') {
     return lead
       + 'the board was written by an older Antonina, so use a client that reads schema version '
-      + `${expected}, or run the supported migration to bring the board up to version ${expected}`;
+      + `${found}, or run the supported migration to bring the board up to version ${expected}`;
   }
   if (direction === 'newer') {
     return lead

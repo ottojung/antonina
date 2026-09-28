@@ -22,7 +22,6 @@ import {
   BOARD_FEED_ENTRY_KINDS,
   DEFAULT_FEED_LIMIT,
   MAX_FEED_LIMIT,
-  boardFeed,
   feedEntries,
   parseFeedCursor,
   type BoardFeedEntry,
@@ -350,17 +349,14 @@ export class BoardApi {
   }
 
   /**
-   * One page of the unified chronological board feed, newest first, with the
-   * continuation token for the entries after it. The page is a projection over
-   * the verified operation log rather than over the collapsed board view, so
-   * every entry names an operation the log actually recorded. It requires the
-   * same board credential as every other read and writes nothing.
+   * One page of the materialized chronological board feed, newest first.
+   * V3 stores feed pages directly; reading the feed never reconstructs history.
    */
   async readFeed(request: BoardFeedRequest = {}): Promise<BoardFeedPage> {
     const credential = await this.fastReadCredential();
     const page = await this.store.readFeed(credential, request, this.rememberedHead);
-    if (page !== null) return page;
-    return boardFeed((await this.readStored()).log, request);
+    if (page === null) throw new BoardMissingError();
+    return page;
   }
 
   async getQueue(): Promise<number[]> {
@@ -633,22 +629,12 @@ export class BoardApi {
     return clone(target);
   }
 
-  private async refreshEffectiveAuthority(state: VerifiedBoardState): Promise<void> {
-    if (this.credential === null) {
-      this.credentialAccepted = false;
-      this.credentialRejection = null;
-      return;
-    }
-    try {
-      const credential = await verifyBoardCredential(this.credential);
-      this.credentialAccepted = state.authorities.some(
-        (authority) => authority.keyId === credential.keyId,
-      );
-      this.credentialRejection = this.credentialAccepted ? null : 'unknown';
-    } catch {
-      this.credentialAccepted = false;
-      this.credentialRejection = 'unverified';
-    }
+  private async refreshEffectiveAuthority(_state: VerifiedBoardState): Promise<void> {
+    // Reaching a materialized board through readWithCredential already proves
+    // possession of the one board-wide key. There is deliberately no second
+    // authority or capability check.
+    this.credentialAccepted = this.credential !== null;
+    this.credentialRejection = null;
   }
 
   /** `acceptDeleted` is set only by the append that performed the deletion. */
@@ -658,9 +644,6 @@ export class BoardApi {
     }
     this.rememberedHead = stored.state.head;
     await this.refreshEffectiveAuthority(stored.state);
-    if (this.credential !== null && !this.credentialAccepted) {
-      throw new AntoninaApiError('Antonina board credential was never issued for this board');
-    }
   }
 
   /**

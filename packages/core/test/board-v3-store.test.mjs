@@ -204,6 +204,58 @@ test('overview reads list pages without fetching issue bodies or comments', asyn
   assert.equal(server.requests.every((request) => request.method === 'GET'), true);
 });
 
+test('fast mutations read summaries plus only the touched issue thread', async () => {
+  const server = fakeSkrynia();
+  const store = deterministicStore(server);
+  const issues = Array.from({ length: 51 }, (_, index) => ({
+    number: index + 1,
+    title: `Issue ${index + 1}`,
+    body: index === 50 ? 'unrelated body' : '',
+    state: 'open',
+    createdAt: '2026-09-28T17:00:00.000Z',
+    updatedAt: '2026-09-28T17:00:00.000Z',
+    messages: index === 50 ? [{
+      id: 'sha256:' + 'B'.repeat(43),
+      author: 'other',
+      body: 'unrelated comment',
+      createdAt: '2026-09-28T17:00:00.000Z',
+    }] : [],
+  }));
+  const initialized = await store.initialize({
+    schemaVersion: 3,
+    nextIssueNumber: 52,
+    issues,
+    resources: [],
+    targets: [],
+    dispatches: [],
+  });
+
+  const unrelatedKeys = new Set(
+    [...server.objects.entries()]
+      .filter(([, entry]) =>
+        entry.value?.number === 51
+        && (entry.value?.issue !== undefined || Array.isArray(entry.value?.messages)))
+      .map(([key]) => key),
+  );
+
+  server.clearRequests();
+  await store.appendFast(initialized.credential, {
+    kind: 'issue.comment',
+    payload: { number: 1, author: 'tester', body: 'localized write' },
+  });
+
+  assert.equal(
+    server.requests.some((request) => unrelatedKeys.has(request.key)),
+    false,
+    'a write to issue 1 must not fetch issue 51 or its comments',
+  );
+
+  const secondPage = await store.readIssuePage(initialized.credential, 'open', 2);
+  assert.equal(secondPage?.entries[0].number, 51);
+  assert.equal(secondPage?.entries[0].messageCount, 1);
+  assert.equal(secondPage?.entries[0].hasBody, true);
+});
+
 test('feed entries are materialized directly and read without history', async () => {
   const server = fakeSkrynia();
   const store = deterministicStore(server);

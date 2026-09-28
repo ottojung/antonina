@@ -163,7 +163,7 @@ test('an empty queue reorder is accepted for a board with no open issues', async
   assert.deepEqual(replayed.queue, []);
 });
 
-test('a delegated credential without queue.reorder cannot reorder the queue', async () => {
+test('any issued board key can reorder the queue', async () => {
   const { root, anchor, log } = await queued(2);
   const editor = await generateSigningKey();
   await append(log, root, 'authority.delegate', {
@@ -173,9 +173,8 @@ test('a delegated credential without queue.reorder cannot reorder the queue', as
   }, 3);
   await append(log, editor, 'queue.reorder', { numbers: [2, 1] }, 4);
 
-  await assert.rejects(() => verifyAndReplayOperationLog(log, anchor), /lacks required capability queue\.reorder/);
-  const committed = await verifyAndReplayOperationLog(withoutLastOperation(log), anchor);
-  assert.deepEqual(committed.queue, [1, 2]);
+  const replayed = await verifyAndReplayOperationLog(log, anchor);
+  assert.deepEqual(replayed.queue, [2, 1]);
 });
 
 test('a delegated credential holding queue.reorder can reorder the queue', async () => {

@@ -1,4 +1,4 @@
-import { base64UrlEncode, type CanonicalValue } from './canonical.js';
+import { base64UrlEncode, canonicalBytes, sha256Id, type CanonicalValue } from './canonical.js';
 import {
   credentialSigningKey,
   credentialTrustAnchor,
@@ -20,18 +20,22 @@ import {
   type BoardDispatch,
   type BoardExecutionTarget,
   type BoardResource,
+  upgradePersistedBoard,
   type IssueState,
 } from './model.js';
 import {
+  BOARD_CAPABILITIES,
   OPLOG_SCHEMA_VERSION,
+  applyBoardMutation,
+  parseOperationLog,
   parseSignedBoardOperation,
-  signBoardOperation,
-  verifyAndReplayOperationLog,
+  parseUnsignedBoardOperation,
   type BoardOperationLog,
   type BoardOperationPayload,
   type BoardTrustAnchor,
   type SignedBoardOperation,
   type VerifiedAuthority,
+  type UnsignedBoardOperation,
   type VerifiedBoardState,
 } from './operations.js';
 import type {

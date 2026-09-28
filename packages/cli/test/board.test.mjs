@@ -107,13 +107,13 @@ function run(argv, context) {
   return runBoardCommand(argv, { env: {}, home: TEST_HOME, io: capture.io, ...context }).then((code) => ({ code, ...capture }));
 }
 
-test('board CLI emits deterministic JSON list output for a read-only client', async () => {
+test('board CLI emits deterministic JSON list output for a board-key holder', async () => {
   const server = fakeSkrynia();
   const owner = client(server);
   const initialized = await owner.initialize();
   await owner.createIssue('First', 'signed board');
 
-  const reader = client(server, { trustAnchor: initialized.trustAnchor });
+  const reader = client(server, { credential: initialized.credential });
   const capture = memoryIo();
   const code = await runBoardCommand(['list', '--json'], { env: {}, home: TEST_HOME, io: capture.io, createClient: () => reader });
 
@@ -180,7 +180,6 @@ test('mutating commands name initialization before they demand a credential', as
     ['create', 'Mine'],
     ['close', '1'],
     ['resource', 'add', '1', 'lubko://host', '/workspace'],
-    ['credential', 'delegate', 'issue.create'],
   ]) {
     const { code, err } = await run(command, { createClient: () => reader });
     assert.equal(code, 1, command.join(' '));
@@ -206,11 +205,11 @@ test('a client on an existing board with no credential is told exactly that', as
   assert.equal(server.signed.operations.length, 1);
 });
 
-test('every read command names the trust anchor when it cannot verify the board', async () => {
+test('every read command names the board credential when access is not configured', async () => {
   const server = fakeSkrynia();
   await client(server).initialize();
-  const untrusted = 'antonina board: Antonina signed board exists; this client has no trust anchor for it; '
-    + 'save the board trust anchor as $XDG_CONFIG_HOME/antonina/trust.json to read it';
+  const untrusted = 'antonina board: Antonina board exists; this client has no board credential; '
+    + 'save the shared board credential as $XDG_CONFIG_HOME/antonina/credential.json';
 
   for (const command of [
     ['list'],
@@ -248,7 +247,7 @@ test('board CLI reports an existing board instead of taking the trust root again
   assert.match(err[0], /already exists/);
 });
 
-test('board CLI reports the trust anchor and root credential after initialization', async () => {
+test('board CLI reports the integrity anchor and board credential after initialization', async () => {
   const server = fakeSkrynia();
   const { code, out } = await run(['initialize', '--json'], { createClient: () => client(server) });
 
@@ -259,14 +258,15 @@ test('board CLI reports the trust anchor and root credential after initializatio
   assert.equal(server.signed.operations[0].kind, 'board.initialize');
 });
 
-test('board CLI hands the initializer the copyable trust anchor and credential', async () => {
+test('board CLI hands the initializer the integrity anchor and board credential', async () => {
   const server = fakeSkrynia();
   const { out } = await run(['initialize'], { createClient: () => client(server) });
   const anchor = JSON.parse(out[2]);
   const credential = JSON.parse(out[4]);
 
-  assert.equal(out[1], 'Trust anchor (public):');
+  assert.equal(out[1], 'Integrity anchor (public; does not grant board access):');
   assert.equal(serializeBoardTrustAnchor(anchor), out[2]);
+  assert.equal(out[3], 'Board credential (secret; grants full access):');
   assert.equal(serializeBoardCredential(credential), out[4]);
   assert.equal(credential.storageCapability, server.capability);
   assert.equal(credential.rootKeyId, anchor.rootKeyId);
@@ -284,7 +284,7 @@ test('board CLI prints only the credential for a pipe-friendly initialization', 
   assert.equal(credential.storageCapability, server.capability);
 });
 
-test('board CLI prints only the trust anchor for a pipe-friendly initialization', async () => {
+test('board CLI prints only the public integrity anchor for a pipe-friendly initialization', async () => {
   const server = fakeSkrynia();
   const { code, out, err } = await run(['initialize', '--trust-anchor'], { createClient: () => client(server) });
 
@@ -355,7 +355,7 @@ test('a pipe-friendly initialization leaves stdout empty when the board already 
   }
 });
 
-test('a board command takes its trust anchor and credential from the config files', async () => {
+test('a board command takes its board credential and optional integrity anchor from config files', async () => {
   const initialized = await client(fakeSkrynia()).initialize();
   const config = configDirectory({
     'trust.json': serializeBoardTrustAnchor(initialized.trustAnchor),
@@ -435,7 +435,7 @@ test('the injected home resolves the config directory when XDG_CONFIG_HOME is un
   assert.equal(identity.credential, null);
 });
 
-test('a trust anchor and credential from different boards are still refused', async () => {
+test('a mismatched integrity anchor and board credential are still refused', async () => {
   const first = await client(fakeSkrynia()).initialize();
   const second = await client(fakeSkrynia()).initialize();
   const mismatched = configDirectory({

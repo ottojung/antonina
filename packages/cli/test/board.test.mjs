@@ -169,7 +169,7 @@ test('a client on an existing board with no credential is told exactly that', as
     assert.equal(err[0], 'antonina board: Antonina board credential is required', command.join(' '));
   }
 
-  assert.equal(server.signed.operations.length, 1);
+  assert.equal(server.signed.revision, 1);
 });
 
 test('every read command names the board credential when access is not configured', async () => {
@@ -222,7 +222,8 @@ test('board CLI reports the integrity anchor and board credential after initiali
   const printed = JSON.parse(out[0]);
   assert.equal(printed.credential.keyId, printed.trustAnchor.rootKeyId);
   assert.equal(printed.state.board.nextIssueNumber, 1);
-  assert.equal(server.signed.operations[0].kind, 'board.initialize');
+  assert.equal(server.signed.format, 'materialized-snapshots');
+  assert.equal(server.signed.revision, 1);
 });
 
 test('board CLI hands the initializer the integrity anchor and board credential', async () => {
@@ -435,12 +436,14 @@ async function queuedBoard() {
 
 test('board CLI queue reorder prints the committed order on one line', async () => {
   const board = await queuedBoard();
+  const before = board.server.signed.revision;
   const { code, out, err } = await run(['queue', 'reorder', '3', '1', '2'], { createClient: () => board.client });
 
   assert.equal(code, 0);
   assert.deepEqual(err, []);
   assert.deepEqual(out, ['#3 #1 #2']);
-  assert.equal(board.server.signed.operations.at(-1).kind, 'queue.reorder');
+  assert.equal(board.server.signed.revision, before + 1);
+  assert.deepEqual(await board.client.getQueue(), [3, 1, 2]);
 });
 
 test('board CLI queue list prints the reordered order in human and JSON form', async () => {
@@ -506,7 +509,7 @@ test('board CLI rejects a queue reorder argument that is not a positive integer 
   }
 
   assert.deepEqual(methods, [], 'a malformed argument never reaches the store');
-  assert.equal(board.server.signed.operations.length, 4);
+  assert.equal(board.server.signed.revision, 4);
 });
 
 test('board CLI refuses a duplicated queue reorder without writing it', async () => {

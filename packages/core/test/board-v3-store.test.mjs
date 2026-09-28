@@ -48,16 +48,21 @@ function fakeSkrynia() {
         if (mode !== 'capability-write' && mode !== 'public-write') {
           return jsonResponse({ error: 'mode required' }, 400);
         }
+        const headers = new Headers(init.headers);
+        const suppliedCapability = headers.get('X-Skrynia-Capability');
+        const objectCapability = mode === 'capability-write'
+          ? (suppliedCapability ?? capability)
+          : null;
         const entry = {
           value: JSON.parse(String(init.body)),
           mode,
-          capability: mode === 'capability-write' ? capability : null,
+          capability: objectCapability,
           revision: 1,
         };
         objects.set(key, entry);
         return jsonResponse(
           mode === 'capability-write'
-            ? { mode, capability }
+            ? { mode, capability: objectCapability }
             : { mode },
           201,
         );
@@ -149,7 +154,7 @@ test('materialized issue reads do not fetch board-v2 or replay every log chunk',
   assert.equal(server.requests.some((request) => request.key.startsWith('board-v3-log-')), false);
   assert.deepEqual(
     server.requests.map((request) => request.key),
-    ['board-v3-meta', 'board-v3-issue-000000001', 'board-v3-comments-000000001-000000001'],
+    ['board-v3-meta', 'board-v3-meta', 'board-v3-issue-000000001', 'board-v3-comments-000000001-000000001'],
   );
 });
 
@@ -176,7 +181,7 @@ test('feed reads use only the v3 feed pages after migration', async () => {
   assert.equal(server.requests.some((request) => request.key.startsWith('board-v3-log-')), false);
   assert.deepEqual(
     server.requests.map((request) => request.key),
-    ['board-v3-meta', 'board-v3-feed-000000001'],
+    ['board-v3-meta', 'board-v3-meta', 'board-v3-feed-000000001'],
   );
 });
 

@@ -45,20 +45,19 @@ function fakeSkrynia() {
         if (current !== undefined) return new Response(null, { status: 409 });
         const headers = new Headers(init.headers);
         const mode = headers.get('X-Skrynia-Mode');
-        if (!['capability-write', 'public-write', 'immutable'].includes(mode)) {
+        if (!['capability-write', 'immutable'].includes(mode)) {
           return jsonResponse({ error: 'mode required' }, 400);
         }
-        const objectCapability = mode === 'capability-write' ? capability : null;
         const entry = {
           value: body,
           mode,
-          capability: objectCapability,
+          capability: mode === 'capability-write' ? capability : null,
           revision: 1,
         };
         objects.set(key, entry);
         return jsonResponse(
           mode === 'capability-write'
-            ? { mode, capability: objectCapability }
+            ? { mode, capability }
             : { mode },
           201,
         );
@@ -66,34 +65,23 @@ function fakeSkrynia() {
 
       if (method === 'PUT') {
         if (current === undefined) return new Response(null, { status: 404 });
+        if (current.mode === 'immutable') return jsonResponse({ error: 'immutable' }, 403);
         const headers = new Headers(init.headers);
-        if (current.mode === 'capability-write'
-            && headers.get('X-Skrynia-Capability') !== current.capability) {
+        if (headers.get('X-Skrynia-Capability') !== current.capability) {
           return jsonResponse({ error: 'invalid capability' }, 403);
         }
         const match = headers.get('If-Match');
-        if (match !== null && match !== etag(current)) return new Response(null, { status: 412 });
+        if (match !== null && match !== etag(current)) {
+          return jsonResponse({ error: 'etag_mismatch' }, 412);
+        }
         current.value = body;
         current.revision += 1;
-        return new Response(null, { status: 200 });
+        return jsonResponse({ ok: true }, 200);
       }
 
       return new Response(null, { status: 405 });
     },
   };
-}
-
-function findObject(server, predicate) {
-  return [...server.objects.entries()].find(([, entry]) => predicate(entry.value)) ?? null;
-}
-
-function findMeta(server) {
-  return findObject(
-    server,
-    (value) => value && value.schemaVersion === 1
-      && Array.isArray(value.tailOperations)
-      && Number.isInteger(value.operationCount),
-  );
 }
 
 function deterministicStore(server) {
@@ -105,55 +93,54 @@ function deterministicStore(server) {
   });
 }
 
-test('first mutation migrates board-v2 into chunked v3 and leaves board-v2 frozen', async () => {
+function materializedObjects(server) {
+  return [...server.objects.entries()]
+    .filter(([key]) => key !== 'board-v2');
+}
+
+function findMeta(server, head) {
+  return materializedObjects(server).find(([, entry]) =>
+    entry.value?.schemaVersion === 2
+      && entry.value?.head === head
+      && Array.isArray(entry.value?.directoryRefs)
+      && typeof entry.value?.queueRef === 'string') ?? null;
+}
+
+test('initialize immediately replaces board-v2 history with one materialized pointer', async () => {
   const server = fakeSkrynia();
   const store = deterministicStore(server);
   const initialized = await store.initialize();
-  const legacy = structuredClone(server.objects.get('board-v2').value);
 
-  const committed = await store.append(initialized.credential, {
-    kind: 'issue.create',
-    payload: (state) => ({
-      number: state.board.nextIssueNumber,
-      title: 'Sharded issue',
-      body: 'small canonical issue object',
-    }),
-  }, initialized.state.head);
+  const pointer = server.objects.get('board-v2').value;
+  assert.equal(pointer.schemaVersion, 3);
+  assert.equal(pointer.format, 'materialized-snapshots');
+  assert.equal(pointer.head, initialized.state.head);
+  assert.equal(initialized.log, null);
 
-  assert.equal(committed.state.board.issues.length, 1);
-  assert.deepEqual(server.objects.get('board-v2').value, legacy);
-  assert.ok(findObject(server, (value) => value?.issue?.number === 1));
-  assert.ok(findObject(server, (value) => value?.state === 'open' && Array.isArray(value.entries)));
-  assert.ok(server.objects.has('board-v3-present'));
+  const meta = findMeta(server, pointer.head);
+  assert.ok(meta);
+  assert.equal(meta[1].value.revision, 1);
+  assert.equal(meta[1].value.nextIssueNumber, 1);
 
-  const metaEntry = findMeta(server);
-  assert.ok(metaEntry);
-  const meta = metaEntry[1].value;
-  assert.equal(meta.operationCount, 2);
-  assert.equal(meta.tailOperations.length, 2);
-  assert.equal(meta.logChunkCount, 0);
-  assert.equal(meta.materializedRevision, 2);
-  assert.equal(meta.nextIssueNumber, 2);
-  assert.equal(meta.openIssueCount, 1);
-  assert.equal(meta.closedIssueCount, 0);
+  for (const [, entry] of server.objects) {
+    assert.equal(Array.isArray(entry.value?.operations), false);
+    assert.equal(Array.isArray(entry.value?.tailOperations), false);
+  }
 });
 
-test('materialized issue reads do not fetch board-v2 or replay every log chunk', async () => {
+test('issue reads use only the pointer and materialized snapshots', async () => {
   const server = fakeSkrynia();
   const store = deterministicStore(server);
   const initialized = await store.initialize();
 
-  await store.append(initialized.credential, {
+  const created = await store.append(initialized.credential, {
     kind: 'issue.create',
     payload: { number: 1, title: 'One key', body: '' },
-  }, initialized.state.head);
-  const afterCreate = await store.readWithCredential(initialized.credential);
-  assert.ok(afterCreate);
-
+  });
   await store.append(initialized.credential, {
     kind: 'issue.comment',
     payload: { number: 1, author: 'tester', body: 'hello' },
-  }, afterCreate.state.head);
+  }, created.state.head);
 
   server.clearRequests();
   const issue = await store.getIssue(initialized.credential, 1);
@@ -161,12 +148,12 @@ test('materialized issue reads do not fetch board-v2 or replay every log chunk',
   assert.equal(issue?.title, 'One key');
   assert.equal(issue?.messages.length, 1);
   assert.equal(issue?.messages[0].body, 'hello');
-  assert.equal(server.requests.some((request) => request.key === 'board-v2'), false);
-  assert.equal(server.requests.length, 4);
   assert.equal(server.requests.every((request) => request.method === 'GET'), true);
+  assert.equal(server.requests.filter((request) => request.key === 'board-v2').length, 2);
+  assert.equal(server.requests.some((request) => Array.isArray(request.body?.operations)), false);
 });
 
-test('feed reads use only the v3 feed pages after migration', async () => {
+test('feed entries are materialized directly and read without history', async () => {
   const server = fakeSkrynia();
   const store = deterministicStore(server);
   const initialized = await store.initialize();
@@ -174,7 +161,7 @@ test('feed reads use only the v3 feed pages after migration', async () => {
   const created = await store.append(initialized.credential, {
     kind: 'issue.create',
     payload: { number: 1, title: 'Feed issue', body: '' },
-  }, initialized.state.head);
+  });
   await store.append(initialized.credential, {
     kind: 'issue.comment',
     payload: { number: 1, author: 'tester', body: 'feed message' },
@@ -185,49 +172,50 @@ test('feed reads use only the v3 feed pages after migration', async () => {
 
   assert.equal(page?.entries.length, 2);
   assert.equal(page?.entries[0].kind, 'comment-added');
-  assert.equal(server.requests.some((request) => request.key === 'board-v2'), false);
-  assert.equal(server.requests.length, 3);
+  assert.equal(page?.entries[1].kind, 'issue-created');
   assert.equal(server.requests.every((request) => request.method === 'GET'), true);
 });
 
-test('a credential without the shared board key cannot read or write migrated v3', async () => {
+test('the existing board storage key is the only live access key', async () => {
   const server = fakeSkrynia();
   const store = deterministicStore(server);
   const initialized = await store.initialize();
 
   await store.append(initialized.credential, {
     kind: 'issue.create',
-    payload: { number: 1, title: 'Migrated', body: '' },
-  }, initialized.state.head);
+    payload: { number: 1, title: 'Private locator', body: '' },
+  });
 
-  const wrongBoardKey = {
+  const wrongKey = {
     ...initialized.credential,
     storageCapability: 'b'.repeat(64),
   };
 
   await assert.rejects(
-    () => store.readWithCredential(wrongBoardKey),
-    /does not carry the board key/,
+    () => store.readWithCredential(wrongKey),
+    /board key/i,
   );
   await assert.rejects(
-    () => store.append(wrongBoardKey, {
+    () => store.append(wrongKey, {
       kind: 'issue.comment',
-      payload: { number: 1, author: 'root', body: 'must not land' },
+      payload: { number: 1, author: 'x', body: 'must not land' },
     }),
-    /does not carry the board key/,
+    /board key/i,
   );
+
+  const issue = await store.getIssue(initialized.credential, 1);
+  assert.equal(issue?.messages.length, 0);
 });
 
-
-test('concurrent v3 writers serialize through metadata CAS without losing either operation', async () => {
+test('concurrent writers serialize through the one capability-protected pointer', async () => {
   const server = fakeSkrynia();
   const first = deterministicStore(server);
   const initialized = await first.initialize();
 
-  const seed = await first.append(initialized.credential, {
+  await first.append(initialized.credential, {
     kind: 'issue.create',
     payload: { number: 1, title: 'Seed', body: '' },
-  }, initialized.state.head);
+  });
 
   const left = deterministicStore(server);
   const right = deterministicStore(server);
@@ -239,7 +227,7 @@ test('concurrent v3 writers serialize through metadata CAS without losing either
         title: 'Left',
         body: '',
       }),
-    }, seed.state.head),
+    }),
     right.append(initialized.credential, {
       kind: 'issue.create',
       payload: (state) => ({
@@ -247,12 +235,11 @@ test('concurrent v3 writers serialize through metadata CAS without losing either
         title: 'Right',
         body: '',
       }),
-    }, seed.state.head),
+    }),
   ]);
 
-  const final = await first.readWithCredential(initialized.credential, seed.state.head);
+  const final = await first.readWithCredential(initialized.credential);
   assert.ok(final);
-  assert.equal(final.state.board.issues.length, 3);
   assert.deepEqual(
     final.state.board.issues.map((issue) => issue.number),
     [1, 2, 3],
@@ -261,16 +248,13 @@ test('concurrent v3 writers serialize through metadata CAS without losing either
     new Set(final.state.board.issues.map((issue) => issue.title)),
     new Set(['Seed', 'Left', 'Right']),
   );
-  const metaEntry = findMeta(server);
-  assert.ok(metaEntry);
-  const meta = metaEntry[1].value;
-  assert.equal(meta.operationCount, 4);
-  assert.equal(meta.materializedRevision, 4);
-  assert.equal(meta.tailOperations.length, 4);
+
+  const pointer = server.objects.get('board-v2').value;
+  assert.equal(pointer.revision, 4);
+  assert.ok(findMeta(server, pointer.head));
 });
 
-
-test('commenting an issue rewrites only its one issue-list page', async () => {
+test('commenting rewrites only the affected issue-list page plus snapshot leaves', async () => {
   const server = fakeSkrynia();
   const store = deterministicStore(server);
   const issues = Array.from({ length: 51 }, (_, index) => ({
@@ -291,22 +275,22 @@ test('commenting an issue rewrites only its one issue-list page', async () => {
     dispatches: [],
   });
 
-  const migrated = await store.append(initialized.credential, {
-    kind: 'issue.create',
-    payload: { number: 52, title: 'Migration trigger', body: '' },
-  }, initialized.state.head);
-
   server.clearRequests();
   await store.append(initialized.credential, {
     kind: 'issue.comment',
     payload: { number: 1, author: 'tester', body: 'one-page update' },
-  }, migrated.state.head);
+  });
 
-  const pageWrites = server.requests.filter(
-    (request) => request.method === 'PUT'
+  const listPages = server.requests.filter(
+    (request) => request.method === 'POST'
       && request.body?.state === 'open'
       && Array.isArray(request.body?.entries),
   );
-  assert.equal(pageWrites.length, 1);
-  assert.equal(pageWrites[0].body.page, 1);
+  assert.equal(listPages.length, 1);
+  assert.equal(listPages[0].body.page, 1);
+
+  const pointerWrites = server.requests.filter(
+    (request) => request.method === 'PUT' && request.key === 'board-v2',
+  );
+  assert.equal(pointerWrites.length, 1);
 });

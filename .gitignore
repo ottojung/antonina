@@ -4,6 +4,14 @@
 dist/
 build/
 node_modules/
+
+# Build identity, written by scripts/build-identity.mjs at build time from Git and
+# the package manifests. Ignored on purpose: a committed copy of these files is a
+# hand-maintained constant wearing a generated file's name, and it would go stale
+# silently. Their absence is the loud failure - `npm run typecheck` regenerates
+# them, and the toolchain cannot compile without them.
+packages/cli/src/build-identity.generated.ts
+web/build-identity.generated.ts
 *.tsbuildinfo
 web/node_modules
 web/dist/

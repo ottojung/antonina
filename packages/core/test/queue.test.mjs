@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { generateSigningKey } from '../dist/canonical.js';
-import { emptyBoard } from '../dist/model.js';
+import { BOARD_SCHEMA_VERSION, emptyBoard } from '../dist/model.js';
 import {
   createTrustAnchor,
   emptyOperationLog,
@@ -232,7 +232,7 @@ test('board initialization seeds the queue from the imported open issues in issu
   });
   await append(log, root, 'board.initialize', {
     board: {
-      schemaVersion: 3,
+      schemaVersion: BOARD_SCHEMA_VERSION,
       nextIssueNumber: 4,
       issues: [issue(1, 'closed'), issue(2, 'open'), issue(3, 'open')],
       resources: [],

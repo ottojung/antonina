@@ -2,14 +2,33 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  BOARD_SCHEMA_VERSION,
   BoardIncompatibilityError,
   canonicalHost,
   canonicalPath,
   emptyBoard,
   parseBoard,
   pathFormDefect,
+  PERSISTED_BOARD_VERSIONS,
   resourceViews,
 } from '../dist/model.js';
+
+/**
+ * A version no build in this line has ever written, so it is refused as too old
+ * rather than merely unreadable. Derived from the declared version range rather
+ * than written as `1`: the oldest readable version is what moves at a bump and
+ * `1` is what stays behind it, so a literal would make this case silently test
+ * a different refusal once the floor moves.
+ *
+ * It is derived from {@link PERSISTED_BOARD_VERSIONS} rather than from
+ * `LEGACY_BOARD_SCHEMA_VERSION - 1` deliberately. Both resolve to the same
+ * number today, but naming the legacy constant here is what
+ * `migrations.test.mjs`'s "no source file can lift a legacy board without going
+ * through the gate" scan exists to forbid, and that scan covers `web/src`. The
+ * declared range says the same thing -- the oldest version this build reads --
+ * without naming the version that gate owns.
+ */
+const UNREADABLE_BOARD_SCHEMA_VERSION = Math.min(...PERSISTED_BOARD_VERSIONS) - 1;
 
 const timestamp = '2026-09-24T00:00:00.000Z';
 const issue = (number, state = 'open') => ({
@@ -26,17 +45,17 @@ test('canonical board parser rejects incompatible schemas and unknown issue fiel
   // Still refused, and refused as a version mismatch rather than as a shape
   // complaint: this is the 0.1.0 -> 0.1.1 rollout failure named as one.
   assert.throws(
-    () => parseBoard({ schemaVersion: 1, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] }),
+    () => parseBoard({ schemaVersion: UNREADABLE_BOARD_SCHEMA_VERSION, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] }),
     (error) => {
       assert.ok(error instanceof BoardIncompatibilityError);
       assert.equal(error.defect.kind, 'schema-version-mismatch');
-      assert.equal(error.defect.found, '1');
-      assert.equal(error.defect.expected, '3');
-      return /schema version is 1, but this build reads schema version 3/.test(error.message);
+      assert.equal(error.defect.found, String(UNREADABLE_BOARD_SCHEMA_VERSION));
+      assert.equal(error.defect.expected, String(BOARD_SCHEMA_VERSION));
+      return new RegExp(`schema version is ${UNREADABLE_BOARD_SCHEMA_VERSION}, but this build reads schema version ${BOARD_SCHEMA_VERSION}`).test(error.message);
     },
   );
   assert.throws(() => parseBoard({
-    schemaVersion: 3,
+    schemaVersion: BOARD_SCHEMA_VERSION,
     nextIssueNumber: 2,
     issues: [{ ...issue(1), assignee: 'agent' }],
     resources: [],
@@ -53,7 +72,7 @@ test('canonical board parser rejects incompatible schemas and unknown issue fiel
 
 test('canonical board parser rejects unsafe counters and out-of-order messages', () => {
   assert.throws(() => parseBoard({
-    schemaVersion: 3,
+    schemaVersion: BOARD_SCHEMA_VERSION,
     nextIssueNumber: Number.MAX_SAFE_INTEGER + 1,
     issues: [],
     resources: [],
@@ -65,7 +84,7 @@ test('canonical board parser rejects unsafe counters and out-of-order messages',
     return /malformed field nextIssueNumber/.test(error.message);
   });
   assert.throws(() => parseBoard({
-    schemaVersion: 3,
+    schemaVersion: BOARD_SCHEMA_VERSION,
     nextIssueNumber: 2,
     issues: [{
       ...issue(1),
@@ -82,7 +101,7 @@ test('canonical board parser rejects unsafe counters and out-of-order messages',
 
 test('resource schema is strict and resource views derive protection from open dependencies', () => {
   const board = parseBoard({
-    schemaVersion: 3,
+    schemaVersion: BOARD_SCHEMA_VERSION,
     nextIssueNumber: 3,
     issues: [issue(1), issue(2, 'closed')],
     resources: [{

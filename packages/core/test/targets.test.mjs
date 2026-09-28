@@ -7,8 +7,10 @@ import {
 } from '../dist/api.js';
 import {
   BoardIncompatibilityError,
+  BOARD_SCHEMA_VERSION,
   canonicalTargetRequirements,
   executionTargetDefect,
+  LEGACY_BOARD_SCHEMA_VERSION,
   parseBoard,
   resourceViews,
   selectExecutionTarget,
@@ -64,7 +66,7 @@ const resource = (overrides = {}) => ({
 
 function boardWith(targets, resources = [], dispatches = []) {
   return parseBoard({
-    schemaVersion: 3,
+    schemaVersion: BOARD_SCHEMA_VERSION,
     nextIssueNumber: 2,
     issues: [issue(1)],
     resources,
@@ -81,11 +83,11 @@ test('a target record carries its identity, backend, kind, capabilities, and hos
 
 test('the canonical board parser refuses the schema that had no execution targets', () => {
   assert.throws(
-    () => parseBoard({ schemaVersion: 2, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] }),
+    () => parseBoard({ schemaVersion: LEGACY_BOARD_SCHEMA_VERSION, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] }),
     (error) => {
       assert.ok(error instanceof BoardIncompatibilityError);
       assert.equal(error.defect.kind, 'schema-version-mismatch');
-      return /schema version is 2/.test(error.message);
+      return new RegExp(`schema version is ${LEGACY_BOARD_SCHEMA_VERSION}`).test(error.message);
     },
   );
 });

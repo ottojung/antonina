@@ -142,8 +142,6 @@ export class SignedBoardStore {
   private readonly now: () => Date;
   private readonly newId: () => string;
   private readonly sharded: ShardedBoardStore;
-  /** Known v3 availability for this client; false still re-probes on reads. */
-  private shardedAvailable: boolean | null = null;
 
   constructor(options: SignedBoardStoreOptions = {}) {
     if (options.maxAttempts !== undefined && options.maxAttempts < 1) {
@@ -282,12 +280,6 @@ export class SignedBoardStore {
     }
 
     const credential = await createBoardCredential(anchor, root, created.capability);
-    const legacy: StoredSignedBoard = {
-      log: initialized,
-      state,
-      etag: response.headers.get('ETag') ?? '',
-    };
-
     // POST responses do not have to expose the object ETag, so read the legacy
     // object exactly once to obtain the CAS token used by migration.
     const readableLegacy = await this.readLegacy(anchor, operation.opId);

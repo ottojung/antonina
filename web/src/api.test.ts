@@ -250,20 +250,15 @@ describe('browser board session', () => {
     expect(initialized.credential.keyId).toBe(reopened.api.getCredential()?.keyId);
   });
 
-  it('surfaces a stale storage capability on the first mutation and then drops edit access', async () => {
+  it('rejects a credential carrying the wrong shared board key immediately', async () => {
     const server = fakeSkrynia();
     const owner = session(server);
     const initialized = await owner.initialize();
     const other = session(server);
-    await other.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
-
     const stale = { ...initialized.credential, storageCapability: 'b'.repeat(64) };
-    const access = await other.enableEditing(serializeBoardCredential(stale));
 
-    expect(access.canEdit).toBe(true);
-    await expect(other.api.createIssue('Refused')).rejects.toThrow('copy a fresh credential');
+    await expect(other.enableEditing(serializeBoardCredential(stale))).rejects.toThrow('403');
     expect(other.api.hasWriteAccess()).toBe(false);
-    expect(other.api.accessState().storageRejected).toBe(true);
     expect((server.signed as { operations: unknown[] }).operations.length).toBe(1);
   });
 
@@ -281,7 +276,7 @@ describe('browser board session', () => {
     expect(other.hasCredential()).toBe(false);
   });
 
-  it('stays read-only when a stored credential names a live authority but holds another key', async () => {
+  it('a stored malformed credential cannot read the board', async () => {
     const { server, storage } = await initializedBoard();
     await session(server, storage).api.createIssue('Visible');
     const other = await generateSigningKey();
@@ -292,15 +287,12 @@ describe('browser board session', () => {
     }));
 
     const reopened = session(server, storage);
-    await expect(reopened.readState()).resolves.toMatchObject({ board: { issues: [{ title: 'Visible' }] } });
+    await expect(reopened.readState()).rejects.toThrow('key ID does not match its public key');
     expect(reopened.api.hasWriteAccess()).toBe(false);
-    expect(reopened.api.getEffectiveCapabilities()).toEqual([]);
     await expect(reopened.api.createIssue('Impostor')).rejects.toThrow('key ID does not match its public key');
-    expect((server.signed as { operations: unknown[] }).operations.length).toBe(2);
-    expect(reopened.api.accessState().keyId).toBeNull();
   });
 
-  it('reports a rejected stored credential after a read that still succeeds', async () => {
+  it('a stored credential with a foreign private key cannot read the board', async () => {
     const { server, storage } = await initializedBoard();
     await session(server, storage).api.createIssue('Visible');
     const foreign = await generateSigningKey();
@@ -310,15 +302,8 @@ describe('browser board session', () => {
     }));
 
     const reopened = session(server, storage);
-    await expect(reopened.readState()).resolves.toMatchObject({ board: { issues: [{ title: 'Visible' }] } });
-
-    const access = reopened.api.accessState();
-    expect(reopened.hasCredential()).toBe(true);
-    expect(access.credentialRejection).toBe('unverified');
-    expect(access.keyId).toBeNull();
-    expect(access.canEdit).toBe(false);
+    await expect(reopened.readState()).rejects.toThrow('private key does not match its public key');
     expect(reopened.api.hasWriteAccess()).toBe(false);
-    expect((server.signed as { operations: unknown[] }).operations.length).toBe(2);
   });
 
   it('remembers the accepted head so a replaced history is refused after a reload', async () => {
@@ -400,13 +385,12 @@ describe('the shared priority queue through the session', () => {
     expect((await session(server, storage).api.getQueue())).toEqual([1, 2, 3]);
   });
 
-  it('never lets a read-only credential reorder the shared queue', async () => {
-    const { server, initialized } = await boardWithThreeIssues();
+  it('never lets a client without the board credential reorder the shared queue', async () => {
+    const { server } = await boardWithThreeIssues();
     const reader = session(server);
-    await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
 
     expect(reader.api.hasWriteAccess()).toBe(false);
-    await expect(reader.api.reorderQueue([3, 2, 1])).rejects.toThrow('credential is required');
+    await expect(reader.api.reorderQueue([3, 2, 1])).rejects.toThrow('credential');
     expect((server.signed as { operations: unknown[] }).operations.length).toBe(4);
   });
 
@@ -566,25 +550,18 @@ describe('the board feed through the session', () => {
     expect((BrowserBoardSession.prototype as { readFeed?: unknown }).readFeed).toBeUndefined();
   });
 
-  it('reads the feed without a credential and without writing anything', async () => {
+  it('does not expose the feed without the board credential', async () => {
     const server = fakeSkrynia();
-    const storage = memoryStorage();
-    const owner = session(server, storage);
-    const initialized = await owner.initialize();
-    await owner.api.createIssue('Readable');
-    const before = server.signed;
-    const methods: Array<string | undefined> = [];
+    const owner = session(server, memoryStorage());
+    await owner.initialize();
+    await owner.api.createIssue('Private');
+
     const reader = new BrowserBoardSession(memoryStorage(), {
-      fetch: async (input, init) => { methods.push(init?.method); return server.fetch(String(input), init); },
+      fetch: (input, init) => server.fetch(String(input), init),
       now: () => new Date(STAMP),
     });
-    await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
 
-    const page = await reader.readFeed();
-
-    expect(page.entries.map((entry) => entry.kind)).toEqual(['issue-created']);
+    await expect(reader.readFeed()).rejects.toThrow('credential');
     expect(reader.hasCredential()).toBe(false);
-    expect(server.signed).toBe(before);
-    expect(methods.every((method) => method === undefined)).toBe(true);
   });
 });

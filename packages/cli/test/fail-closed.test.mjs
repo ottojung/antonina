@@ -73,7 +73,7 @@ function seed(id, work, state) {
   writeMeta(id, idleMeta(id, work, null, 1), state);
 }
 
-test('prompt does not accept work when the metadata lock cannot be acquired', async (t) => {
+test('run does not accept work when the metadata lock cannot be acquired', async (t) => {
   const { work, state } = fixture(t);
   seed('a11d', work, state);
   const output = capture();
@@ -85,7 +85,7 @@ test('prompt does not accept work when the metadata lock cannot be acquired', as
   });
 
   const code = await runAgentCommand(
-    ['prompt', '--id', 'a11d', '--detach', 'must-not-run'],
+    ['run', '--id', 'a11d', '--prompt', 'must-not-run', '--detach'],
     context(work, state, output.io, failingFs),
   );
 

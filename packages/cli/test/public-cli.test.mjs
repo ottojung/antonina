@@ -38,7 +38,7 @@ test('old positional data arguments are rejected at the public CLI boundary', ()
     (error) => error instanceof PublicCliUsageError && /unexpected positional argument/.test(error.message),
   );
   assert.throws(
-    () => preparePublicCommand('agent', ['prompt', '--id', 'a11d', 'do work']),
+    () => preparePublicCommand('agent', ['run', '--id', 'a11d', 'do work']),
     (error) => error instanceof PublicCliUsageError && /unexpected positional argument/.test(error.message),
   );
 });
@@ -50,9 +50,20 @@ test('option values can contain whitespace, newlines, punctuation and leading da
     ['comment', '7', body],
   );
   assert.deepEqual(
-    run('agent', ['prompt', '--id', 'cafe', '--prompt=--do-not-parse-this-as-an-option', '--detach']),
-    ['prompt', '--id', 'cafe', '--prompt', '--do-not-parse-this-as-an-option', '--detach'],
+    run('agent', ['run', '--id', 'cafe', '--prompt=--do-not-parse-this-as-an-option', '--detach']),
+    ['run', '--id', 'cafe', '--prompt', '--do-not-parse-this-as-an-option', '--detach'],
   );
+});
+
+test('agent prompt is not retained as an alias for run', () => {
+  assert.throws(
+    () => preparePublicCommand('agent', ['prompt', '--id', 'a11d', '--prompt', 'work']),
+    (error) => error instanceof PublicCliUsageError && /unknown agent command: prompt/.test(error.message),
+  );
+  const help = preparePublicCommand('agent', ['--help']);
+  assert.equal(help.kind, 'help');
+  assert.match(help.text, /\brun\b/);
+  assert.doesNotMatch(help.text, /\bprompt\b/);
 });
 
 test('board create never accepts a caller-supplied issue id', () => {

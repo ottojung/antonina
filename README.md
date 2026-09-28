@@ -85,7 +85,7 @@ The current local runtime is available through the `antonina agent` namespace:
 
 ```sh
 antonina agent new --id a13f09c2 --cwd /workspace/project
-antonina agent prompt --id a13f09c2 --prompt 'Investigate the issue and implement the fix.'
+antonina agent run --id a13f09c2 --prompt 'Investigate the issue and implement the fix.'
 antonina agent status --id a13f09c2
 antonina agent log --id a13f09c2
 antonina agent wait --id a13f09c2 --timeout 3600

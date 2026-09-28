@@ -162,7 +162,7 @@ When Antonina's managed agent runtime is appropriate, use the CLI:
 antonina agent list
 antonina agent status --id ID
 antonina agent log --id ID
-antonina agent prompt --id ID --prompt '...' --detach
+antonina agent run --id ID --prompt '...' --detach
 antonina agent new --id ID --cwd /absolute/worktree
 ```
 

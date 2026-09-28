@@ -243,7 +243,7 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
   if (parsed.flags.has('--json')) {
     context.io.stdout(stableJson({ id: agentId, state: 'idle', cwd, created_at: meta.created_at }));
   } else {
-    context.io.stdout(`Created agent with id ${agentId} (idle). Start work with \`antonina agent prompt --id ${agentId} --prompt 'task'\`.`);
+    context.io.stdout(`Created agent with id ${agentId} (idle). Start work with \`antonina agent run --id ${agentId} --prompt 'task'\`.`);
   }
   return EXIT_OK;
 }
@@ -465,12 +465,12 @@ async function followAttached(agentId: string, context: AgentCommandContext): Pr
   }
 }
 
-async function cmdPrompt(args: string[], context: AgentCommandContext): Promise<number> {
+async function cmdRun(args: string[], context: AgentCommandContext): Promise<number> {
   const parsed = parse(args, ['--steer', '--detach', '--json']);
-  if (parsed.positionals.length > 1) throw new UsageError('prompt: expected one prompt');
-  const agentId = requireAgentId(parsed.values.get('--id'), 'prompt');
-  const prompt = parsed.values.get('--prompt') ?? parsed.positionals[0];
-  if (!prompt) throw new UsageError('prompt: a prompt is required');
+  if (parsed.positionals.length !== 0) throw new UsageError('run: unexpected positional arguments');
+  const agentId = requireAgentId(parsed.values.get('--id'), 'run');
+  const prompt = parsed.values.get('--prompt');
+  if (!prompt) throw new UsageError('run: --prompt is required');
   const observed = requireMeta(agentId, context);
   // Durable execution configuration must be canonical before this prompt can
   // acquire runner or invocation authority.
@@ -828,7 +828,7 @@ export async function runAgentCommand(argv: string[], context: AgentCommandConte
       case 'kill': return await stopLike('kill', args, context);
       case 'delete': return await cmdDelete(args, context);
       case 'clean': return await cmdClean(args, context);
-      case 'prompt': return await cmdPrompt(args, context);
+      case 'run': return await cmdRun(args, context);
       default:
         throw new UsageError(command ? `unsupported antonina agent command: ${command}` : 'an agent command is required');
     }

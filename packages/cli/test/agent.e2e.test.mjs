@@ -253,13 +253,13 @@ test('built CLI runs a fresh prompt then continues the discovered OpenCode sessi
   assert.equal(created.status, 0, created.stderr);
   assert.equal(JSON.parse(created.stdout).state, 'idle');
 
-  const first = run(['agent', 'prompt', '--id', 'a11d', '--detach', '--prompt', 'hello'], env);
+  const first = run(['agent', 'run', '--id', 'a11d', '--detach', '--prompt', 'hello'], env);
   assert.equal(first.status, 0, first.stderr);
   const firstDone = await waitFor(root, 'a11d', (meta) => meta.state === 'succeeded' && meta.active_runner === false);
   assert.equal(firstDone.native_session_id, 'ses_fake');
   assert.equal(firstDone.prompt_count, 1);
 
-  const second = run(['agent', 'prompt', '--id', 'a11d', '--detach', '--prompt', 'again'], env);
+  const second = run(['agent', 'run', '--id', 'a11d', '--detach', '--prompt', 'again'], env);
   assert.equal(second.status, 0, second.stderr);
   const secondDone = await waitFor(root, 'a11d', (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false);
   assert.equal(secondDone.native_session_id, 'ses_fake');
@@ -274,10 +274,10 @@ test('hard steer interrupts the running process group and drains redirect FIFO',
   const handle = fixture(t);
   const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'beef', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'prompt', '--id', 'beef', '--detach', '--prompt', 'slow'], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'beef', '--detach', '--prompt', 'slow'], env).status, 0);
   await waitFor(root, 'beef', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
 
-  const steer = run(['agent', 'prompt', '--id', 'beef', '--steer', '--detach', '--prompt', 'redirect'], env);
+  const steer = run(['agent', 'run', '--id', 'beef', '--steer', '--detach', '--prompt', 'redirect'], env);
   assert.equal(steer.status, 0, steer.stderr);
   const done = await waitFor(root, 'beef', (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false, 12_000);
   assert.equal(done.native_session_id, 'ses_beef');
@@ -292,9 +292,9 @@ test('ordinary prompt remains busy while an invocation is running', async (t) =>
   const handle = fixture(t);
   const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'cafe', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'prompt', '--id', 'cafe', '--detach', '--prompt', 'slow'], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'cafe', '--detach', '--prompt', 'slow'], env).status, 0);
   await waitFor(root, 'cafe', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
-  const busy = run(['agent', 'prompt', '--id', 'cafe', '--detach', '--prompt', 'second'], env);
+  const busy = run(['agent', 'run', '--id', 'cafe', '--detach', '--prompt', 'second'], env);
   assert.equal(busy.status, 1);
   assert.match(busy.stderr, /still running/);
   const killed = run(['agent', 'kill', '--id', 'cafe'], env);
@@ -327,7 +327,7 @@ test('stale reserved work is recovered without overwriting the accepted prompt',
   });
   writeFileSync(path, JSON.stringify(meta));
 
-  const recovery = run(['agent', 'prompt', '--id', 'd00d', '--detach', '--prompt', 'replacement'], env);
+  const recovery = run(['agent', 'run', '--id', 'd00d', '--detach', '--prompt', 'replacement'], env);
   assert.equal(recovery.status, 1);
   assert.match(recovery.stderr, /recovering an already accepted prompt/);
   const done = await waitFor(root, 'd00d', (value) => value.state === 'succeeded' && value.active_runner === false);
@@ -396,7 +396,7 @@ test('clean dry-run observes and clean removes old terminal agents', (t) => {
 test('delete without force refuses live work and force converges before removal', async (t) => {
   const { root, work, env } = fixture(t);
   assert.equal(run(['agent', 'new', '--id', 'feed', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'prompt', '--id', 'feed', '--detach', '--prompt', 'slow'], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'feed', '--detach', '--prompt', 'slow'], env).status, 0);
   await waitFor(root, 'feed', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
 
   const refused = run(['agent', 'delete', '--id', 'feed'], env);
@@ -423,7 +423,7 @@ test('delete --force reaps the live runner process before removing the agent', a
   const handle = fixture(t);
   const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'feed1', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'prompt', '--id', 'feed1', '--detach', '--prompt', 'slow'], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'feed1', '--detach', '--prompt', 'slow'], env).status, 0);
   const live = await waitFor(
     root,
     'feed1',
@@ -561,7 +561,7 @@ test('delete tombstone blocks later prompt reservation', (t) => {
   meta.delete_pending = true;
   writeFileSync(path, JSON.stringify(meta));
 
-  const prompt = run(['agent', 'prompt', '--id', 'face', '--detach', '--prompt', 'must-not-run'], env);
+  const prompt = run(['agent', 'run', '--id', 'face', '--detach', '--prompt', 'must-not-run'], env);
   assert.equal(prompt.status, 1);
   assert.match(prompt.stderr, /still running|redirect/);
   const after = JSON.parse(readFileSync(path, 'utf8'));
@@ -575,7 +575,7 @@ test('backend server failure is persisted and sanitized through status', async (
   const handle = fixture(t);
   const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'bad1', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'prompt', '--id', 'bad1', '--detach', '--prompt', 'server-error'], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'bad1', '--detach', '--prompt', 'server-error'], env).status, 0);
   await waitFor(root, 'bad1', (meta) => meta.state === 'failed' && meta.active_runner === false);
 
   const status = run(['agent', 'status', '--id', 'bad1', '--json'], env);
@@ -594,7 +594,7 @@ test('prompt recovers an existing OpenCode session when durable session id was l
   const handle = fixture(t);
   const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'a11d', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'prompt', '--id', 'a11d', '--detach', '--prompt', 'first'], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'a11d', '--detach', '--prompt', 'first'], env).status, 0);
   await waitFor(root, 'a11d', (meta) => meta.state === 'succeeded' && meta.active_runner === false);
 
   const path = metaPath(root, 'a11d');
@@ -602,7 +602,7 @@ test('prompt recovers an existing OpenCode session when durable session id was l
   meta.native_session_id = null;
   writeFileSync(path, JSON.stringify(meta));
 
-  assert.equal(run(['agent', 'prompt', '--id', 'a11d', '--detach', '--prompt', 'recovered'], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'a11d', '--detach', '--prompt', 'recovered'], env).status, 0);
   const done = await waitFor(
     root,
     'a11d',
@@ -674,7 +674,7 @@ test('prompt rejects malformed durable execution configuration before reservatio
   const malformedCwd = JSON.parse(readFileSync(path, 'utf8'));
   malformedCwd.cwd = 'relative';
   writeFileSync(path, JSON.stringify(malformedCwd));
-  const cwdPrompt = run(['agent', 'prompt', '--id', 'c0de', '--detach', '--prompt', 'must-not-run'], env);
+  const cwdPrompt = run(['agent', 'run', '--id', 'c0de', '--detach', '--prompt', 'must-not-run'], env);
   assert.equal(cwdPrompt.status, 1);
   assert.match(cwdPrompt.stderr, /cwd is malformed/);
   let after = JSON.parse(readFileSync(path, 'utf8'));
@@ -684,7 +684,7 @@ test('prompt rejects malformed durable execution configuration before reservatio
   after.cwd = work;
   after.variant = '';
   writeFileSync(path, JSON.stringify(after));
-  const variantPrompt = run(['agent', 'prompt', '--id', 'c0de', '--detach', '--prompt', 'must-not-run'], env);
+  const variantPrompt = run(['agent', 'run', '--id', 'c0de', '--detach', '--prompt', 'must-not-run'], env);
   assert.equal(variantPrompt.status, 1);
   assert.match(variantPrompt.stderr, /variant is malformed/);
   after = JSON.parse(readFileSync(path, 'utf8'));
@@ -723,7 +723,7 @@ test('public CLI rejects positional data arguments', (t) => {
   assert.equal(board.status, 2);
   assert.match(board.stderr, /every data argument must use a named --option/);
 
-  const agent = run(['agent', 'prompt', '--id', 'a11d', 'do work'], env);
+  const agent = run(['agent', 'run', '--id', 'a11d', 'do work'], env);
   assert.equal(agent.status, 2);
   assert.match(agent.stderr, /every data argument must use a named --option/);
 });
@@ -733,7 +733,7 @@ test('attached prompt streams output and returns invocation status', (t) => {
   const handle = fixture(t);
   const { work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'ac1d', '--cwd', work], env).status, 0);
-  const prompt = run(['agent', 'prompt', '--id', 'ac1d', '--prompt', 'attached'], env);
+  const prompt = run(['agent', 'run', '--id', 'ac1d', '--prompt', 'attached'], env);
   assert.equal(prompt.status, 0, prompt.stderr);
   assert.match(prompt.stdout, /FAKE:attached/);
   assertFixtureInvoked(handle, 'attached');
@@ -742,7 +742,7 @@ test('attached prompt streams output and returns invocation status', (t) => {
 test('graceful stop and wait timeout expose stable lifecycle results', async (t) => {
   const { root, work, env } = fixture(t);
   assert.equal(run(['agent', 'new', '--id', '5a0f', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'prompt', '--id', '5a0f', '--detach', '--prompt', 'slow'], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', '5a0f', '--detach', '--prompt', 'slow'], env).status, 0);
   await waitFor(root, '5a0f', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
 
   const timed = run(['agent', 'wait', '--id', '5a0f', '--timeout', '1'], env);
@@ -853,7 +853,7 @@ test('fixture guard: an unpinned backend falls into the PATH trap instead of a r
   const unpinned = { ...env };
   delete unpinned[OPENCODE_BIN_ENV];
   assert.equal(run(['agent', 'new', '--id', 'b00b', '--cwd', work], unpinned).status, 0);
-  assert.equal(run(['agent', 'prompt', '--id', 'b00b', '--detach', '--prompt', 'unpinned'], unpinned).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'b00b', '--detach', '--prompt', 'unpinned'], unpinned).status, 0);
   const done = await waitFor(root, 'b00b', (meta) => meta.state !== 'running' && meta.active_runner === false);
   assert.equal(done.state, 'failed');
   assert.equal(done.exit_code, 70);
@@ -874,7 +874,7 @@ test('attached prompt reports the invocation outcome, not unconditional success'
   const handle = fixture(t);
   const { work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', 'a7ac', '--cwd', work], env).status, 0);
-  const failing = run(['agent', 'prompt', '--id', 'a7ac', '--prompt', 'server-error'], env);
+  const failing = run(['agent', 'run', '--id', 'a7ac', '--prompt', 'server-error'], env);
   assert.equal(
     failing.status,
     1,
@@ -884,7 +884,7 @@ test('attached prompt reports the invocation outcome, not unconditional success'
   // The succeeding path stays pinned too: the same command, same exit-code
   // wiring, opposite outcome.
   assert.equal(run(['agent', 'new', '--id', 'a7ad', '--cwd', work], env).status, 0);
-  const succeeding = run(['agent', 'prompt', '--id', 'a7ad', '--prompt', 'ok'], env);
+  const succeeding = run(['agent', 'run', '--id', 'a7ad', '--prompt', 'ok'], env);
   assert.equal(succeeding.status, 0, succeeding.stderr);
   assert.match(succeeding.stdout, /FAKE:ok/);
 });
@@ -958,7 +958,7 @@ test('log --follow streams a live invocation and returns when it reaches a termi
   const handle = fixture(t);
   const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', '109b', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'prompt', '--id', '109b', '--detach', '--prompt', 'slow'], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', '109b', '--detach', '--prompt', 'slow'], env).status, 0);
   const live = await waitFor(root, '109b', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
   t.after(() => {
     try { process.kill(-live.pid, 'SIGKILL'); } catch {}
@@ -1018,7 +1018,7 @@ test('log --follow reports a vanished agent directory instead of following forev
   const handle = fixture(t);
   const { root, work, env } = handle;
   assert.equal(run(['agent', 'new', '--id', '109c', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'prompt', '--id', '109c', '--detach', '--prompt', 'slow'], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', '109c', '--detach', '--prompt', 'slow'], env).status, 0);
   const live = await waitFor(
     root,
     '109c',

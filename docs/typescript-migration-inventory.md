@@ -15,9 +15,9 @@ The supported command namespaces are:
 
 ## Shared board contract
 
-`packages/core` is the authoritative board/domain implementation consumed by both the CLI and web application. It owns schema validation, resource semantics, the signed board operation log and its Ed25519 verification, credential and trust-anchor handling, Skrynia ETag/CAS behavior, deterministic mutation replay, and common errors.
+`packages/core` is the authoritative board/domain implementation consumed by both the CLI and web application. Live board state is stored as materialized snapshots split across Skrynia keys: paged issue summaries, per-issue bodies and comment pages, queue, catalog, feed, directories, and metadata. The one shared board credential supplies the board-wide storage key, and mutations commit atomically by CAS-updating the small board pointer. Normal v3 reads and writes do not replay history; the old signed board-v2 log is retained only as a one-time migration input for existing boards.
 
-Important invariants include strict schema version 2 parsing, JavaScript-safe issue counters, chronological messages, canonical resource identities, existing-issue dependency checks, and ETag-based mutation retries after HTTP 412.
+Important invariants include strict schema parsing, JavaScript-safe issue counters, chronological messages, canonical resource identities, existing-issue dependency checks, summary-only list reads, localized issue mutation reads, and ETag-based mutation retries after HTTP 412.
 
 ## Managed-agent runtime contract
 

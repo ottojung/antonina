@@ -1157,13 +1157,89 @@ export function parseLegacyBoardV2(value: unknown): LegacyBoardV2 {
 }
 
 /**
+ * Every persisted board version this build can read, oldest first. Adding a
+ * version here is the declaration "boards of this version still exist in the
+ * world"; a version that is not listed is refused rather than guessed at.
+ *
+ * This list lives here, and not in `migrations.ts`, because it is also the list
+ * of versions this module has a parser for, and the parser table below needs
+ * it. `migrations.ts` imports it from here, so the one declaration of "what
+ * this build reads" is read by every consumer: the parser table, the migration
+ * registry's obligation, and the gate's refusals.
+ */
+export const PERSISTED_BOARD_VERSIONS = [
+  LEGACY_BOARD_SCHEMA_VERSION,
+  BOARD_SCHEMA_VERSION,
+] as const;
+
+export type PersistedBoardVersion = (typeof PERSISTED_BOARD_VERSIONS)[number];
+
+/**
+ * The board of one specific persisted version. Used to key a parser to the
+ * version it reads, so a parser cannot be registered as the reader for a
+ * version whose shape it does not produce.
+ */
+type PersistedBoardOfVersion<V extends PersistedBoardVersion> = Extract<PersistedBoard, { schemaVersion: V }>;
+
+/**
+ * One parser per supported persisted version.
+ *
+ * The type is a mapped type over {@link PERSISTED_BOARD_VERSIONS}, the same
+ * obligation `migrations.ts` makes of the migration registry: declaring a
+ * version this build can read, without giving it a parser, is a typecheck
+ * failure rather than a runtime surprise. A version bump therefore cannot
+ * merge with a board the previous release wrote that this build then refuses
+ * to read on the operation-log parse path.
+ *
+ * Each parser returns the board of the version it is keyed by, so a v2 reader
+ * cannot be filed as the v4 reader even when both typecheck.
+ */
+const PERSISTED_BOARD_PARSERS: {
+  [V in PersistedBoardVersion]: (value: unknown) => PersistedBoardOfVersion<V>;
+} = {
+  [LEGACY_BOARD_SCHEMA_VERSION]: parseLegacyBoardV2,
+  [BOARD_SCHEMA_VERSION]: parseCanonicalBoard,
+};
+
+/** Whether `version` is one this build both reads and has a parser for. */
+export function isPersistedBoardVersion(version: unknown): version is PersistedBoardVersion {
+  return typeof version === 'number'
+    && (PERSISTED_BOARD_VERSIONS as readonly number[]).includes(version);
+}
+
+/**
+ * The runtime half of the mapped type above: every version declared readable
+ * has a parser registered, and every registered parser is keyed by a declared
+ * version. A registry edited to be incomplete cannot pass unnoticed, which is
+ * the same contract {@link everySupersededVersionHasAMigration} gives the
+ * migration side.
+ */
+export function everySupportedVersionHasAParser(): boolean {
+  const declared = [...PERSISTED_BOARD_VERSIONS].sort((left, right) => left - right);
+  const registered = Object.keys(PERSISTED_BOARD_PARSERS).map(Number).sort((left, right) => left - right);
+  return declared.length === registered.length
+    && declared.every((version, index) => version === registered[index]);
+}
+
+/**
  * The board as it may be found on disk or in a signature: the current format, or
- * one this build still knows how to read. Which one it is decides nothing here
- * — reading a persisted board is the migration gate's job, in `migrations.ts`,
- * and this module deliberately exposes no way to lift an old board without it.
+ * one this build still knows how to read. Which one it is decides nothing about
+ * *lifting* it — turning an older board into a current one is the migration
+ * gate's job, in `migrations.ts`, and this module deliberately exposes no way to
+ * do that without it. Recognising the version is a different question from
+ * migrating it, and it is answered here, for every version this build claims to
+ * read, from {@link PERSISTED_BOARD_PARSERS}.
+ *
+ * A value whose `schemaVersion` is not one this build reads is refused by
+ * `parseCanonicalBoard`, whose version defect names the version found and the
+ * version this build reads. That is deliberate: the refusal is about a version
+ * Antonina cannot read, not about the shape of the board, and an operator is
+ * told which of the two it is.
  */
 export function parsePersistedBoard(value: unknown): PersistedBoard {
-  if (isRecord(value) && value.schemaVersion === LEGACY_BOARD_SCHEMA_VERSION) return parseLegacyBoardV2(value);
+  if (isRecord(value) && isPersistedBoardVersion(value.schemaVersion)) {
+    return PERSISTED_BOARD_PARSERS[value.schemaVersion](value);
+  }
   return parseCanonicalBoard(value);
 }
 

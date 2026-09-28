@@ -40,11 +40,15 @@
 import {
   BOARD_SCHEMA_VERSION,
   LEGACY_BOARD_SCHEMA_VERSION,
+  PERSISTED_BOARD_VERSIONS,
   parseBoard,
   parseLegacyBoardV2,
   type Board,
   type LegacyBoardV2,
+  type PersistedBoardVersion,
 } from './model.js';
+
+export type { PersistedBoardVersion } from './model.js';
 
 /**
  * The persisted format this build writes. It is the version the gate migrates
@@ -53,16 +57,16 @@ import {
 export const CURRENT_PERSISTED_BOARD_VERSION = BOARD_SCHEMA_VERSION;
 
 /**
- * Every persisted board version this build can read, oldest first. Adding a
- * version here is the declaration "boards of this version still exist in the
- * world"; a version that is not listed is refused rather than guessed at.
+ * Every persisted board version this build can read, oldest first.
+ *
+ * This is not a second list: it is {@link PERSISTED_BOARD_VERSIONS} under the
+ * name this module has always published, re-exported so existing consumers and
+ * this module's own refusals read the one declaration in `model.ts`. That
+ * declaration is also the key set of the parser table `parsePersistedBoard`
+ * dispatches on, so declaring a readable version here cannot outrun the ability
+ * to read it.
  */
-export const SUPPORTED_PERSISTED_BOARD_VERSIONS = [
-  LEGACY_BOARD_SCHEMA_VERSION,
-  BOARD_SCHEMA_VERSION,
-] as const;
-
-export type PersistedBoardVersion = (typeof SUPPORTED_PERSISTED_BOARD_VERSIONS)[number];
+export const SUPPORTED_PERSISTED_BOARD_VERSIONS = PERSISTED_BOARD_VERSIONS;
 
 /** A supported version that is not the current one, and therefore needs a migration. */
 export type SupersededPersistedBoardVersion = Exclude<
@@ -91,11 +95,21 @@ export interface PersistedBoardMigration {
  * is a typecheck failure rather than a runtime surprise: a version bump cannot
  * merge with no way to read what the previous release wrote.
  *
- * The registry is also the *only* dispatch: {@link migrationFrom} is the single
- * place a version is turned into a step, and it reads this map. A second,
- * hand-written branch over version constants would leave the mapped type
- * checking a table the gate never consults, which is how a registered v3
- * migration could be refused at runtime on a green build.
+ * The registry is the only dispatch of *migration steps*: {@link migrationFrom}
+ * is the single place a superseded version is turned into a step, and it reads
+ * this map. A second, hand-written branch over version constants here would
+ * leave the mapped type checking a table the gate never consults, which is how
+ * a registered v3 migration could be refused at runtime on a green build.
+ *
+ * It is not the only place a version is recognised, and this comment does not
+ * claim it is. `parsePersistedBoard` in `model.ts` dispatches on the same
+ * declared list, over the parser table keyed by it, and that dispatch is a
+ * mapped type as well. The two obligations are the same declaration read twice:
+ * a version cannot be added to {@link PERSISTED_BOARD_VERSIONS} without both a
+ * parser to read it and, if it is superseded, a step to migrate it. What would
+ * break that is a version branch written against a constant *outside* that list
+ * — a hand-written `if (schemaVersion === SOME_CONSTANT)` in either module,
+ * which no mapped type can see.
  */
 const PERSISTED_BOARD_MIGRATIONS: { [V in SupersededPersistedBoardVersion]: PersistedBoardMigration } = {
   [LEGACY_BOARD_SCHEMA_VERSION]: {

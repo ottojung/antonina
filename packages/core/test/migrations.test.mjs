@@ -140,25 +140,60 @@ test('every step a chain returns agrees with the version it was asked to leave',
   }
 });
 
-test('a step registered at the next version bump is used automatically, with no other edit to the gate', async () => {
-  // The version bump this build has not made yet: v4 becomes current, v3 joins
-  // the supported list, and a v3 -> v4 step joins the registry. Nothing else
-  // about the gate changes, in particular nothing about how it turns a version
-  // into a step. This is built by rewriting the *compiled* module into a probe
-  // beside it, because the version bump must not be declared in the real
-  // source: the point is to show that registering a step is sufficient, not to
-  // ship a v4.
-  const compiled = readFileSync(join(distDir(), 'migrations.js'), 'utf8');
+/**
+ * The version bump this build has not made yet, built the way the real bump
+ * would be: the current version moves up one, the version this build writes
+ * today becomes a supported superseded version, and it is given both of the
+ * things a bump owes it — a parser to read boards at that version, and a step
+ * to migrate them.
+ *
+ * It is built by rewriting the *compiled* `model.js` and `migrations.js` into
+ * probes beside them, because the bump must not be declared in the real
+ * source: the point is to show that adding the two entries is sufficient, not
+ * to ship a v4. Everything the probes assert is derived from the compiled text,
+ * so a rename in either module makes the probe fail to build rather than pass
+ * vacuously.
+ *
+ * Nothing is derived from the literal v3 or v4 anywhere below: `SUPERSEDED` is
+ * whatever this build currently writes, so the same probe covers the bump after
+ * next without being edited.
+ */
+async function buildNextVersionBumpProbe() {
   const NEXT = migrations.CURRENT_PERSISTED_BOARD_VERSION + 1;
   const SUPERSEDED = migrations.CURRENT_PERSISTED_BOARD_VERSION;
-  const rewrites = [
-    // v4 is what this build writes.
-    ['export const CURRENT_PERSISTED_BOARD_VERSION = BOARD_SCHEMA_VERSION;',
-      `export const CURRENT_PERSISTED_BOARD_VERSION = ${NEXT};`],
-    // v3 is still in the world and still needs reading, and v4 is what is written.
+
+  const rewrite = (text, rewrites, what) => {
+    let out = text;
+    for (const [from, to] of rewrites) {
+      assert.ok(out.includes(from), `the compiled ${what} no longer contains ${JSON.stringify(from)}, so this probe cannot be built`);
+      out = out.replace(from, to);
+    }
+    return out;
+  };
+
+  // The parser the bumped build registers for the version this build writes
+  // today is, verbatim, the reader this build already ships. It is imported
+  // from the *unrewritten* module so the probe is not asserting a v3 reader
+  // against a v4 guard.
+  const modelPath = join(distDir(), 'model.next-version-bump.probe.js');
+  const migrationsPath = join(distDir(), 'migrations.next-version-bump.probe.js');
+  writeFileSync(modelPath, rewrite(readFileSync(join(distDir(), 'model.js'), 'utf8'), [
+    // v4 is what the bumped build writes.
+    ['export const BOARD_SCHEMA_VERSION = 3;', `export const BOARD_SCHEMA_VERSION = ${NEXT};`],
+    [`import { BoardIncompatibilityError,`, `import { parseCanonicalBoard as parseSupersededBoard } from './model.js';\nimport { BoardIncompatibilityError,`],
+    // the version this build writes today is still in the world and still needs
+    // reading, and the new version is what is written.
     ['    LEGACY_BOARD_SCHEMA_VERSION,\n    BOARD_SCHEMA_VERSION,\n];',
       `    LEGACY_BOARD_SCHEMA_VERSION,\n    ${SUPERSEDED},\n    ${NEXT},\n];`],
-    // the v3 -> v4 step, registered and nothing else.
+    ['    [BOARD_SCHEMA_VERSION]: parseCanonicalBoard,\n};',
+      `    [${SUPERSEDED}]: parseSupersededBoard,\n    [BOARD_SCHEMA_VERSION]: parseCanonicalBoard,\n};`],
+  ], 'model'));
+
+  writeFileSync(migrationsPath, rewrite(readFileSync(join(distDir(), 'migrations.js'), 'utf8'), [
+    [`from './model.js'`, `from './model.next-version-bump.probe.js'`],
+    ['export const CURRENT_PERSISTED_BOARD_VERSION = BOARD_SCHEMA_VERSION;',
+      `export const CURRENT_PERSISTED_BOARD_VERSION = ${NEXT};`],
+    // the step the bump registers, and nothing else.
     ['const PERSISTED_BOARD_MIGRATIONS = {',
       `const PERSISTED_BOARD_MIGRATIONS = {\n    ${SUPERSEDED}: {\n`
       + `        from: ${SUPERSEDED},\n        to: ${NEXT},\n`
@@ -168,31 +203,105 @@ test('a step registered at the next version bump is used automatically, with no 
     ['        to: BOARD_SCHEMA_VERSION,', `        to: ${SUPERSEDED},`],
     ['return { ...legacy, schemaVersion: BOARD_SCHEMA_VERSION, targets: [], dispatches: [] };',
       `return { ...legacy, schemaVersion: ${SUPERSEDED}, targets: [], dispatches: [] };`],
-  ];
-  let probe = compiled;
-  for (const [from, to] of rewrites) {
-    assert.ok(probe.includes(from), `the compiled gate no longer contains ${JSON.stringify(from)}, so this probe cannot be built`);
-    probe = probe.replace(from, to);
+  ], 'gate'));
+
+  try {
+    return {
+      NEXT,
+      SUPERSEDED,
+      bumpedModel: await import(pathToFileURL(modelPath).href),
+      bumped: await import(pathToFileURL(migrationsPath).href),
+    };
+  } finally {
+    rmSync(modelPath, { force: true });
+    rmSync(migrationsPath, { force: true });
+  }
+}
+
+test('a step registered at the next version bump is used automatically, with no other edit to the gate', async () => {
+  const { NEXT, SUPERSEDED, bumped } = await buildNextVersionBumpProbe();
+  assert.equal(bumped.CURRENT_PERSISTED_BOARD_VERSION, NEXT);
+  assert.equal(bumped.everySupersededVersionHasAMigration(), true);
+  // The step registered for v3 is reached from v3, and from v2, in one chain.
+  assert.deepEqual(
+    bumped.persistedBoardMigrationChain(SUPERSEDED).map((step) => [step.from, step.to]),
+    [[SUPERSEDED, NEXT]],
+  );
+  assert.deepEqual(
+    bumped.persistedBoardMigrationChain(2).map((step) => [step.from, step.to]),
+    [[2, SUPERSEDED], [SUPERSEDED, NEXT]],
+  );
+});
+
+test('a board at a supported version is readable, including at the next version bump', async () => {
+  // Board issue 104. The gate could accept and migrate a board that
+  // `parsePersistedBoard` refused, because the two recognised versions
+  // independently: the gate consulted the registry, and the parser branched on
+  // `LEGACY_BOARD_SCHEMA_VERSION` alone. So at the next bump a v3 board was
+  // refused on the operation-log parse path at operations.ts, before the
+  // migration that would have read it was ever reached.
+  //
+  // The general form is the point: for every version this build declares it can
+  // read, a board at that version parses, and a build whose current version has
+  // moved on still parses a board at the version this build writes. Both are
+  // checked here so the bump after next is covered by construction rather than
+  // by a test someone has to remember to add.
+  assert.equal(model.everySupportedVersionHasAParser(), true);
+  assert.deepEqual([...model.PERSISTED_BOARD_VERSIONS], [...migrations.SUPPORTED_PERSISTED_BOARD_VERSIONS]);
+
+  const boards = {
+    [migrations.CURRENT_PERSISTED_BOARD_VERSION]: model.emptyBoard(),
+    [2]: storedLog().operations[0].payload.board,
+  };
+  for (const version of model.PERSISTED_BOARD_VERSIONS) {
+    const board = boards[version];
+    assert.ok(board !== undefined, `no board fixture at declared version ${version}`);
+    assert.equal(model.parsePersistedBoard(board).schemaVersion, version);
+    // The gate agrees about which versions are readable, for the same list.
+    assert.ok(migrations.SUPPORTED_PERSISTED_BOARD_VERSIONS.includes(version));
   }
 
-  const probePath = join(distDir(), 'migrations-next-version-bump.probe.js');
-  writeFileSync(probePath, probe);
-  try {
-    const bumped = await import(pathToFileURL(probePath).href);
-    assert.equal(bumped.CURRENT_PERSISTED_BOARD_VERSION, NEXT);
-    assert.equal(bumped.everySupersededVersionHasAMigration(), true);
-    // The step registered for v3 is reached from v3, and from v2, in one chain.
-    assert.deepEqual(
-      bumped.persistedBoardMigrationChain(SUPERSEDED).map((step) => [step.from, step.to]),
-      [[SUPERSEDED, NEXT]],
-    );
-    assert.deepEqual(
-      bumped.persistedBoardMigrationChain(2).map((step) => [step.from, step.to]),
-      [[2, SUPERSEDED], [SUPERSEDED, NEXT]],
-    );
-  } finally {
-    rmSync(probePath, { force: true });
+  const { NEXT, SUPERSEDED, bumpedModel, bumped } = await buildNextVersionBumpProbe();
+  assert.equal(bumpedModel.everySupportedVersionHasAParser(), true);
+  assert.deepEqual([...bumpedModel.PERSISTED_BOARD_VERSIONS], [...bumped.SUPPORTED_PERSISTED_BOARD_VERSIONS]);
+
+  // The concrete instance: at v4, a v3 board — the one the immediately
+  // preceding release wrote — is readable, and refused no earlier than the gate.
+  const supersededBoard = boards[SUPERSEDED];
+  assert.equal(supersededBoard.schemaVersion, SUPERSEDED);
+  assert.equal(bumpedModel.parsePersistedBoard(supersededBoard).schemaVersion, SUPERSEDED);
+  assert.equal(bumped.migratePersistedBoard(supersededBoard).board.schemaVersion, NEXT);
+  // And v2 is still readable at v4, through the v2 parser, not by accident.
+  assert.equal(bumpedModel.parsePersistedBoard(boards[2]).schemaVersion, 2);
+
+  // Every version the bumped build claims is readable at v4, and every one that
+  // is superseded at v4 still migrates. The current version needs no fixture:
+  // an empty chain leaves the board exactly as it was found.
+  for (const version of bumpedModel.PERSISTED_BOARD_VERSIONS) {
+    const board = boards[version] ?? model.emptyBoard();
+    assert.equal(bumpedModel.parsePersistedBoard({ ...board, schemaVersion: version }).schemaVersion, version);
+    const migrated = bumped.migratePersistedBoard({ ...board, schemaVersion: version });
+    assert.equal(migrated.board.schemaVersion, NEXT, `version ${version}`);
+    assert.equal(migrated.throughVersions.length, bumped.persistedBoardMigrationChain(version).length);
   }
+});
+
+test('a version this build does not support is still refused by version, not by a parse symptom', () => {
+  // The exhaustive dispatch must not have widened what is accepted: a version
+  // that is neither current nor in the declared list is still refused, and the
+  // refusal still names the version rather than reporting a key set or a field.
+  const NEXT = migrations.CURRENT_PERSISTED_BOARD_VERSION + 1;
+  for (const version of [1, NEXT, NEXT + 1]) {
+    const refused = captureRefusal(() => model.parsePersistedBoard({ ...model.emptyBoard(), schemaVersion: version }));
+    assert.equal(refused.constructor.name, 'BoardIncompatibilityError');
+    assert.equal(refused.defect.kind, 'schema-version-mismatch');
+    assert.match(refused.message, new RegExp(`schema version is ${version}`));
+    assert.match(refused.message, new RegExp(`reads schema version ${migrations.CURRENT_PERSISTED_BOARD_VERSION}`));
+  }
+  // A value carrying no version at all is still a shape problem, not a version one.
+  const { schemaVersion: _omitted, ...unversioned } = model.emptyBoard();
+  const malformed = captureRefusal(() => model.parsePersistedBoard(unversioned));
+  assert.equal(malformed.defect.kind, 'schema-version-mismatch');
 });
 
 test('a stored board from a newer Antonina is refused by version, not by a parse symptom', () => {

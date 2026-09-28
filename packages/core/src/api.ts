@@ -349,6 +349,7 @@ export class BoardApi {
     const states: IssueState[] = state === undefined ? ['open', 'closed'] : [state];
     const numbers: number[] = [];
     for (const issueState of states) {
+      let listedCount = 0;
       for (let page = 1; ; page += 1) {
         const listed = await this.store.readIssuePage(anchor, issueState, page);
         if (listed === null) {
@@ -358,7 +359,8 @@ export class BoardApi {
             .sort((left, right) => left.number - right.number);
         }
         numbers.push(...listed.entries.map((entry) => entry.number));
-        if (listed.entries.length === 0 || page * 50 >= listed.total) break;
+        listedCount += listed.entries.length;
+        if (listed.entries.length === 0 || listedCount >= listed.total) break;
       }
     }
     const issues = await Promise.all(numbers.map((number) => this.store.getIssue(anchor, number, this.rememberedHead)));

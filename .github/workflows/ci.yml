@@ -67,7 +67,7 @@ jobs:
           export PATH="/tmp/antonina-fake-bin:$PATH"
 
           "$antonina" agent new --id a11d --cwd /tmp/antonina-work
-          "$antonina" agent prompt --id a11d --detach hello
+          "$antonina" agent prompt --id a11d --prompt hello --detach
           for _ in $(seq 1 100); do
             status="$("$antonina" agent status --id a11d --json)"
             if printf '%s' "$status" | grep -q '"state": "succeeded"'; then

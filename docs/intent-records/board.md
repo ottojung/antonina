@@ -21,3 +21,28 @@ source: issue-19
 kind: requirement
 
 The Antonina web interface makes it easy to reorder the priority of issues in the queue. Reordering changes the shared queue priority rather than only a browser-local presentation order.
+
+$id-1773008474150622
+title: Persisted board format transitions are migrations, not parser shims
+date: 2026/09/28
+source: issue-73
+kind: requirement
+
+Every path that opens Antonina board state passes through one migration gate
+(`packages/core/src/migrations.ts`, called from `verifyAndReplayOperationLog`). A
+stored version mismatch selects and applies the registered migration chain
+automatically, so no caller has to remember to invoke a migration. A stored
+version this build has no registered path from is refused by name before
+anything is written, and a board already at the current version is not migrated
+or changed by being opened. Declaring a version in
+`SUPPORTED_PERSISTED_BOARD_VERSIONS` without registering its migration is a
+typecheck failure, and the previous supported version is covered by a signed
+fixture under `packages/core/test/fixtures/`.
+
+A migration must not rewrite bytes or semantic objects that were already signed.
+It either verifies the legacy signed representation exactly as persisted and
+lifts it into the current in-memory representation — which is what v2 -> v3 does,
+and what keeps the stored log and its signatures byte-identical forever — or it
+appends an explicitly signed migration/checkpoint operation, which is required
+only when the persisted bytes themselves must change. Tampering with
+pre-migration signed history stays detectable after migration support exists.

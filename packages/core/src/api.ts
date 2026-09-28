@@ -75,6 +75,17 @@ import {
   type HostBytesMeasurement,
 } from './host-daemon.js';
 import {
+  CURRENT_PERSISTED_BOARD_VERSION,
+  NoPersistedBoardMigrationPathError,
+  PersistedBoardMigrationError,
+  SUPPORTED_PERSISTED_BOARD_VERSIONS,
+  UnsupportedPersistedBoardVersionError,
+  migratePersistedBoard,
+  persistedBoardMigrationChain,
+  type PersistedBoardMigration,
+  type PersistedBoardVersion,
+} from './migrations.js';
+import {
   BOARD_CAPABILITIES,
   parseBoardCapability,
   type BoardCapability,
@@ -915,3 +926,19 @@ export type {
   VerifiedBoardState,
 } from './operations.js';
 export type { CandidatePathFacts } from './managed-roots.js';
+export {
+  CURRENT_PERSISTED_BOARD_VERSION,
+  NoPersistedBoardMigrationPathError,
+  PersistedBoardMigrationError,
+  SUPPORTED_PERSISTED_BOARD_VERSIONS,
+  UnsupportedPersistedBoardVersionError,
+  migratePersistedBoard,
+  persistedBoardMigrationChain,
+} from './migrations.js';
+export type {
+  MigratedPersistedBoard,
+  PersistedBoardMigration,
+  PersistedBoardVersion,
+  SupersededPersistedBoardVersion,
+} from './migrations.js';
+export type { BoardMigrationReport } from './operations.js';

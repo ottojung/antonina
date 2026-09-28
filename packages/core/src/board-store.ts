@@ -296,19 +296,24 @@ export class SignedBoardStore {
     }
 
     if (this.shardedAvailable !== true) {
-      // Do not add a v3 probe in front of the mutation's authoritative v2
-      // read. This preserves the old fail-closed behavior (and one-read error
-      // semantics) while migrate() itself detects a concurrently created v3.
       const legacy = await this.requireLegacyAppendable(anchor, previouslyAcceptedHead);
+
+      // V3 deliberately keeps reads public but keeps writes authenticated. Old
+      // Skrynia releases generated a different capability for every new object,
+      // so they cannot shard an existing board without replacing credentials.
+      // Stay on board-v2 until the server supports reusing this credential's
+      // existing board storage capability.
+      if (!await this.sharded.supportsSharedCapability(credential.storageCapability)) {
+        this.shardedAvailable = false;
+        return this.appendLegacy(credential, request, previouslyAcceptedHead);
+      }
+
       try {
-        await this.sharded.migrate(legacy);
+        await this.sharded.migrate(legacy, credential.storageCapability);
         this.shardedAvailable = true;
       } catch (error) {
-        // Keep the old path usable against a Skrynia deployment (and test
-        // double) that does not yet understand the public-write v3 objects.
-        // No v3 metadata was committed, so board-v2 remains authoritative.
         if (error instanceof ShardedBoardStoreError
-            && (error.status === 404 || error.status === 405)) {
+            && (error.status === 404 || error.status === 405 || error.status === 501)) {
           this.shardedAvailable = false;
           return this.appendLegacy(credential, request, previouslyAcceptedHead);
         }

@@ -10,6 +10,7 @@ import {
   executionTargetDefect,
   guidancePathDefect,
   parseBoard,
+  parseExecutionTargetGarbageCollection,
 } from '../dist/model.js';
 
 // The descriptive metadata a target carries about itself: what it is, how work
@@ -113,7 +114,10 @@ test('a target that states nothing descriptive reads through its backend and kin
   // The two are not the same shape of thing, and the access facts say so.
   assert.equal(host.accessMethod, 'lubko-transport');
   assert.equal(host.persistence, 'durable-host-filesystem');
-  assert.equal(host.garbageCollection, 'host-local-collector');
+  // The derived default names what the host offers, not what a job will cause:
+  // a host with no configured managed roots has a collector available and the
+  // collector refuses by name, which is not a promise that anything is removed.
+  assert.equal(host.garbageCollection, 'host-local-collector-available');
   assert.equal(runner.accessMethod, 'github-workflow-dispatch');
   assert.equal(runner.persistence, 'per-job-workspace');
   assert.equal(runner.garbageCollection, 'provider-managed');
@@ -163,6 +167,56 @@ test('a target may not state an access method or persistence its backend and kin
   );
 });
 
+test('the released cleanup spelling keeps verifying and reads as the current one', async () => {
+  // `host-local-collector` is a released wire value, so the board has to stay
+  // readable across the rename rather than refusing a record it signed itself.
+  const legacy = persistentTarget({ garbageCollection: 'host-local-collector' });
+  assert.equal(executionTargetDefect(legacy), null, 'a released record is still a valid record');
+  assert.equal(executionTargetAccess(legacy).garbageCollection, 'host-local-collector-available');
+  assert.equal(
+    executionTargetAccess(persistentTarget({ garbageCollection: 'host-local-collector-available' })).garbageCollection,
+    'host-local-collector-available',
+    'the two spellings are one value, not two meanings',
+  );
+  assert.equal(
+    boardWith([legacy]).targets[0].garbageCollection,
+    'host-local-collector',
+    'the signed record keeps the bytes it was signed with',
+  );
+  assert.equal(
+    executionTargetAccess(boardWith([legacy]).targets[0]).garbageCollection,
+    'host-local-collector-available',
+    'and every reader reports the one current spelling',
+  );
+  assert.equal(parseExecutionTargetGarbageCollection('host-local-collector'), 'host-local-collector-available');
+  assert.throws(() => parseExecutionTargetGarbageCollection('host-local-collector-vacuum'), /garbage collection/);
+  // The rename did not widen the vocabulary: an ephemeral environment still
+  // cannot claim a host-local collector under either spelling.
+  assert.match(
+    executionTargetDefect(ephemeralTarget({ garbageCollection: 'host-local-collector' })),
+    /ephemeral environment cannot declare/,
+  );
+  assert.match(
+    executionTargetDefect(persistentTarget({ garbageCollection: 'host-local-collector-soon' })),
+    /must declare a known garbage collection/,
+  );
+
+  // A record signed with the released spelling replays, and an operation
+  // carrying it is stored under the current one.
+  const board = api(fakeSkrynia());
+  await board.initialize();
+  const registered = await board.registerTarget({
+    id: 'ruth-dev',
+    backend: 'lubko',
+    kind: 'persistent-host',
+    capabilities: ['persistent-filesystem'],
+    address: 'lubko://ruth-dev',
+    garbageCollection: 'host-local-collector',
+  });
+  assert.equal(registered.garbageCollection, 'host-local-collector-available');
+  assert.equal((await board.loadBoard()).targets[0].garbageCollection, 'host-local-collector-available');
+});
+
 test('a target may narrow its cleanup but never widen it into the other side of the world', () => {
   // A host may say nothing removes its paths; it may not claim the provider does.
   assert.equal(executionTargetDefect(persistentTarget({ garbageCollection: 'none' })), null);
@@ -208,6 +262,72 @@ test('caveats are ordered and unique, and guidance is a repository document path
     /guidance path is unusable: not-a-repository-path/,
   );
   assert.equal(guidancePathDefect('docs/skills/target-lubko-persistent-host.md'), null);
+});
+
+test('an empty note list is refused rather than stored, and reads as the backend default', () => {
+  // `[]` is trivially sorted, unique and blank-free, so the checks it used to
+  // pass were the wrong three. It is a claim that there is nothing to say, and
+  // for guidance the claim contradicts what an absent list means.
+  assert.match(
+    executionTargetDefect(persistentTarget({ guidance: [] })),
+    /guidance must be a sorted, duplicate-free, non-empty/,
+  );
+  assert.match(
+    executionTargetDefect(persistentTarget({ limitations: [] })),
+    /limitations must be a sorted, duplicate-free, non-empty/,
+  );
+  assert.throws(() => boardWith([persistentTarget({ guidance: [] })]), /execution target/);
+  assert.throws(() => boardWith([persistentTarget({ limitations: [] })]), /execution target/);
+
+  // The accessor is the second line of defence, for a caller that hands a
+  // hand-built record straight to it: an empty list reads as absent, so the
+  // backend's own guidance document is what a reader is pointed at.
+  assert.deepEqual(
+    executionTargetAccess(persistentTarget({ guidance: [] })).guidance,
+    [EXECUTION_TARGET_GUIDANCE.lubko],
+  );
+  assert.deepEqual(executionTargetAccess(persistentTarget({ limitations: [] })).limitations, []);
+});
+
+test('a note list the API is given as empty retracts it instead of storing a claim', async () => {
+  const board = api(fakeSkrynia());
+  await board.initialize();
+  const registered = await board.registerTarget({
+    id: 'phoebe-dev',
+    backend: 'lubko',
+    kind: 'persistent-host',
+    capabilities: ['persistent-filesystem'],
+    address: 'lubko://phoebe-dev',
+    limitations: ['no managed collection roots are configured on this host'],
+    guidance: ['docs/skills/target-lubko-persistent-host.md'],
+  });
+  assert.deepEqual(registered.limitations, ['no managed collection roots are configured on this host']);
+
+  // Registration with an empty list is the same statement as omitting it: the
+  // field is absent, so a reader resolves the backend's own guidance.
+  const empty = await board.registerTarget({
+    id: 'ruth-dev',
+    backend: 'lubko',
+    kind: 'persistent-host',
+    capabilities: ['persistent-filesystem'],
+    address: 'lubko://ruth-dev',
+    guidance: [],
+  });
+  assert.equal(empty.guidance, undefined);
+  assert.deepEqual(executionTargetAccess(empty).guidance, [EXECUTION_TARGET_GUIDANCE.lubko]);
+
+  // Retraction is the only way to remove a note, and it removes the field.
+  const retracted = await board.setTarget('phoebe-dev', {
+    status: registered.status,
+    capabilities: registered.capabilities,
+    description: registered.description,
+    limitations: [],
+    guidance: [],
+  });
+  assert.equal(retracted.limitations, undefined);
+  assert.equal(retracted.guidance, undefined);
+  const reread = (await board.listTargets()).find((target) => target.id === 'phoebe-dev');
+  assert.deepEqual(executionTargetAccess(reread).guidance, [EXECUTION_TARGET_GUIDANCE.lubko]);
 });
 
 test('a board written before the descriptive fields existed still parses', () => {

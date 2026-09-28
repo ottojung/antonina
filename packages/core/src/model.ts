@@ -75,14 +75,62 @@ export type ExecutionTargetPersistence = (typeof EXECUTION_TARGET_PERSISTENCE)[n
 /**
  * Who removes what a job left behind.
  *
- * `host-local-collector` is the Antonina collector, which can only be pointed at
- * a path a human registered and which no open issue depends on.
+ * `host-local-collector-available` is the Antonina collector, which can only be
+ * pointed at a path a human registered and which no open issue depends on. The
+ * name states what the host offers and not what any job will cause to happen:
+ * a collector with no configured managed roots is refused by name and never
+ * proceeds, and the board cannot see a host's managed-roots configuration from
+ * here, so a registration that says the collector is available is not promising
+ * that anything will be collected.
  * `provider-managed` means the external service expires the environment on its
  * own schedule and Antonina has no part in it. `none` means nothing removes it,
  * which is a real and common state for a host with no configured managed roots.
+ *
+ * A target may narrow this and never widen it, so the vocabulary is what it is
+ * and the default is the widest answer the target's kind can honestly give.
  */
-export const EXECUTION_TARGET_GARBAGE_COLLECTION = ['host-local-collector', 'provider-managed', 'none'] as const;
+export const EXECUTION_TARGET_GARBAGE_COLLECTION = [
+  'host-local-collector-available', 'provider-managed', 'none',
+] as const;
 export type ExecutionTargetGarbageCollection = (typeof EXECUTION_TARGET_GARBAGE_COLLECTION)[number];
+
+/**
+ * The released spelling of the collector value, kept so a board signed before the
+ * rename keeps verifying and keeps reading. It is the same claim under the older
+ * name, not a narrower or a wider one, and it is read as the current value by
+ * every reader rather than being carried through as a second meaning: a record
+ * that says `host-local-collector` is a record whose collector was available.
+ *
+ * It stays readable rather than being refused because a signed log is immutable,
+ * so refusing it would make a board written by a released Antonina unreadable
+ * and offer the operator nothing to do about it.
+ */
+export const LEGACY_EXECUTION_TARGET_GARBAGE_COLLECTION = ['host-local-collector'] as const;
+export type LegacyExecutionTargetGarbageCollection =
+  (typeof LEGACY_EXECUTION_TARGET_GARBAGE_COLLECTION)[number];
+
+/**
+ * What a record may carry, as opposed to what the vocabulary holds. This is the
+ * type on the record and on nothing an operator can write: a caller names a
+ * current value, and only a record read back from a board can hold the released
+ * spelling.
+ */
+export type RecordedExecutionTargetGarbageCollection =
+  | ExecutionTargetGarbageCollection
+  | LegacyExecutionTargetGarbageCollection;
+
+/** The one spelling a reader reports, whichever of the two a record carries. */
+export function canonicalGarbageCollection(
+  value: RecordedExecutionTargetGarbageCollection,
+): ExecutionTargetGarbageCollection {
+  return value === 'host-local-collector' ? 'host-local-collector-available' : value;
+}
+
+/** Whether a stored value is one this release reads, the current name or the released one. */
+function isRecordedGarbageCollection(value: string): value is RecordedExecutionTargetGarbageCollection {
+  return (EXECUTION_TARGET_GARBAGE_COLLECTION as readonly string[]).includes(value)
+    || (LEGACY_EXECUTION_TARGET_GARBAGE_COLLECTION as readonly string[]).includes(value);
+}
 
 /**
  * The guidance document each backend points at when a target names none of its
@@ -192,8 +240,10 @@ export interface BoardExecutionTarget {
    * ephemeral environment may narrow it to `none` when the provider is not the
    * one expiring it. It may never widen: no target can claim a host-local
    * collector when it has no host, or provider management when it is a host.
+   * The released spelling of the collector value also reads here, because a
+   * board signed before the rename is a record the board still has to hold.
    */
-  garbageCollection?: ExecutionTargetGarbageCollection;
+  garbageCollection?: RecordedExecutionTargetGarbageCollection;
   /** Sorted, duplicate-free operational caveats stated about this target. */
   limitations?: string[];
   /**
@@ -290,6 +340,15 @@ export interface ExecutionTargetAccess {
 
 /** One target's access facts, with every absent field resolved from its kind and backend. */
 export function executionTargetAccess(target: BoardExecutionTarget): ExecutionTargetAccess {
+  // An empty note list is absence, spelled as absence, at every point where a
+  // record is read. The parse rule already refuses one, so a record read back
+  // from a board never carries it; a caller that hands a hand-built target
+  // straight to this function still gets the backend's own guidance rather than
+  // a target that presents as having no guidance document at all.
+  const limitations = target.limitations ?? [];
+  const guidance = target.guidance !== undefined && target.guidance.length > 0
+    ? target.guidance
+    : [EXECUTION_TARGET_GUIDANCE[target.backend]];
   return {
     targetId: target.id,
     displayName: target.displayName ?? target.id,
@@ -298,13 +357,14 @@ export function executionTargetAccess(target: BoardExecutionTarget): ExecutionTa
     status: target.status,
     accessMethod: target.accessMethod ?? defaultExecutionTargetAccessMethod(target.backend),
     persistence: target.persistence ?? defaultExecutionTargetPersistence(target.kind),
-    garbageCollection: target.garbageCollection
-      ?? (target.kind === 'persistent-host' ? 'host-local-collector' : 'provider-managed'),
+    garbageCollection: target.garbageCollection !== undefined
+      ? canonicalGarbageCollection(target.garbageCollection)
+      : (target.kind === 'persistent-host' ? 'host-local-collector-available' : 'provider-managed'),
     capabilities: [...target.capabilities],
     address: target.address,
     description: target.description,
-    limitations: [...(target.limitations ?? [])],
-    guidance: [...(target.guidance ?? [EXECUTION_TARGET_GUIDANCE[target.backend]])],
+    limitations: [...limitations],
+    guidance: [...guidance],
   };
 }
 
@@ -463,6 +523,9 @@ export function parseExecutionTargetPersistence(value: string): ExecutionTargetP
 }
 
 export function parseExecutionTargetGarbageCollection(value: string): ExecutionTargetGarbageCollection {
+  if ((LEGACY_EXECUTION_TARGET_GARBAGE_COLLECTION as readonly string[]).includes(value)) {
+    return canonicalGarbageCollection(value as LegacyExecutionTargetGarbageCollection);
+  }
   if (!(EXECUTION_TARGET_GARBAGE_COLLECTION as readonly string[]).includes(value)) {
     throw new Error('Unknown Antonina execution target garbage collection: ' + value);
   }
@@ -485,10 +548,22 @@ export function guidancePathDefect(path: string): string | null {
   return null;
 }
 
-/** A sorted, duplicate-free list of non-empty strings, or `null` when the value is not one. */
+/**
+ * A sorted, duplicate-free, non-empty list of non-empty strings, or `null` when
+ * the value is not one.
+ *
+ * An empty list is refused here rather than accepted as a trivially well-formed
+ * one, because a note list on a stored record is a claim, and `[]` claims that
+ * there is nothing to say. For limitations that is a harmless way of spelling
+ * absence; for guidance it is not, since an absent list means the backend's own
+ * document and an empty one would silently suppress it. One rule for both keeps
+ * the board from holding a value that reads as one thing and is another, so
+ * "retract this note" means the field is absent rather than that it is empty.
+ */
 function canonicalNoteList(value: unknown): string[] | null {
   if (!Array.isArray(value) || !value.every(isText)) return null;
   const notes = value as string[];
+  if (notes.length === 0) return null;
   const sorted = [...notes].sort();
   if (notes.some((note, index) => note !== sorted[index])) return null;
   if (new Set(notes).size !== notes.length) return null;
@@ -552,7 +627,7 @@ export function executionTargetDefect(target: BoardExecutionTarget): string | nu
     return 'an execution target must declare a known persistence';
   }
   if (target.garbageCollection !== undefined
-      && !(EXECUTION_TARGET_GARBAGE_COLLECTION as readonly string[]).includes(target.garbageCollection)) {
+      && !isRecordedGarbageCollection(target.garbageCollection)) {
     return 'an execution target must declare a known garbage collection';
   }
   if (target.accessMethod !== undefined && target.accessMethod !== defaultExecutionTargetAccessMethod(target.backend)) {
@@ -562,8 +637,11 @@ export function executionTargetDefect(target: BoardExecutionTarget): string | nu
     return 'an execution target must declare the persistence its kind has';
   }
   if (target.garbageCollection !== undefined) {
-    const allowed: readonly ExecutionTargetGarbageCollection[] = target.kind === 'persistent-host'
-      ? ['host-local-collector', 'none']
+    // The released spelling is allowed here for the same claim, so a board
+    // signed before the rename is not a board that has to be rewritten to be
+    // readable; it is narrowed to the current value before any reader sees it.
+    const allowed: readonly RecordedExecutionTargetGarbageCollection[] = target.kind === 'persistent-host'
+      ? ['host-local-collector-available', 'host-local-collector', 'none']
       : ['provider-managed', 'none'];
     if (!allowed.includes(target.garbageCollection)) {
       return target.kind === 'persistent-host'
@@ -575,11 +653,11 @@ export function executionTargetDefect(target: BoardExecutionTarget): string | nu
     return 'an execution target display name must be a non-empty string';
   }
   if (target.limitations !== undefined && canonicalNoteList(target.limitations) === null) {
-    return 'execution target limitations must be a sorted, duplicate-free list of notes';
+    return 'execution target limitations must be a sorted, duplicate-free, non-empty list of notes';
   }
   if (target.guidance !== undefined) {
     if (canonicalNoteList(target.guidance) === null) {
-      return 'execution target guidance must be a sorted, duplicate-free list of document paths';
+      return 'execution target guidance must be a sorted, duplicate-free, non-empty list of document paths';
     }
     for (const path of target.guidance) {
       const defect = guidancePathDefect(path);
@@ -632,8 +710,7 @@ function isTarget(value: unknown): value is BoardExecutionTarget {
       && !(EXECUTION_TARGET_ACCESS_METHODS as readonly string[]).includes(value.accessMethod as string)) return false;
   if (value.persistence !== undefined
       && !(EXECUTION_TARGET_PERSISTENCE as readonly string[]).includes(value.persistence as string)) return false;
-  if (value.garbageCollection !== undefined
-      && !(EXECUTION_TARGET_GARBAGE_COLLECTION as readonly string[]).includes(value.garbageCollection as string)) return false;
+  if (value.garbageCollection !== undefined && !isRecordedGarbageCollection(value.garbageCollection as string)) return false;
   let capabilities: ExecutionTargetCapability[];
   try {
     capabilities = parseTargetCapabilities(value.capabilities);

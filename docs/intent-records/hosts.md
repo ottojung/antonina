@@ -155,3 +155,59 @@ request are four distinguishable results. The rationale travels with the
 decision: the dispatch record on the board carries the reason the target was
 chosen, so the board itself explains a routing choice rather than leaving it
 to be reconstructed.
+
+$id-5090620393758907
+title: What a target states about itself is a fact, not a promise
+date: 2026/09/28
+source: issue-95
+kind: constraint
+
+The descriptive fields of an execution target state what is true of it, and none
+of them states what a job will cause to happen. The access method and the
+persistence are closed vocabularies, one member each, so a target narrows them
+to nothing and widens them to nothing: a target that states a value its backend
+or kind does not have is refused rather than reconciled. Cleanup is the same
+rule with a narrower range still: a target may narrow cleanup to nothing and
+never widen it into the other side of the world, so no ephemeral environment
+claims a host-local collector and no persistent host claims that a provider
+expires it. A collector is named as what the host offers rather than as
+something that will run, because a collector with no configured managed roots is
+refused by name and never proceeds, and a registration cannot see a host's
+managed-roots configuration. The released spelling of that value still names a
+valid record and every reader reports the one current spelling, so a board that
+carries it in a stored target record is read rather than refused, and nothing an
+operator can run wrote one. That last clause is load-bearing and it is bounded.
+A board record is not the only place the value can be signed: an operation
+payload is parsed by a reader that canonicalises the field, and an operation's
+identity hash is taken over the parsed bytes, so a signed operation that carried
+the released spelling would fail its own hash and the log would stop verifying.
+Nothing shipped can put one there, because the released spelling is a record-only
+value and no command accepts an option that would write it, but the guarantee
+this record makes is the one above and not the wider one that no signed log can
+ever stop verifying.
+
+A list of notes is absent or non-empty, and an absent list is not the same
+statement as an empty one. Limitations and guidance are claims, so an empty
+list is refused at parse time and a list carried as empty by an operation
+retracts the field rather than storing a claim that there is nothing to say.
+Refused at parse time is a statement about reading, and it holds on both ways
+into a board that a caller has: a board written by a command is an operation
+replayed in order, and the replay drops an empty carried list, so a log this
+release wrote and a log the release before it wrote agree. The one way in that
+does not pass through the parse rule is the one that takes a whole board rather
+than an operation: `BoardApi.initialize(initialBoard)` hands a caller-supplied
+board straight to the store, which writes it as the payload of the one
+`board.initialize` operation, and that payload is stored as given. A hand-built
+board with an empty list is therefore refused by this release's own reader and
+was readable by the release before it. No shipped entry point supplies a board:
+`antonina board initialize` and the web board's first-run action both call the
+no-argument form, whose default is the empty board, and the library's caller is
+a program rather than a surface. The guarantee is therefore about a signed log
+that a shipped surface wrote, and the boundary is that one library entry point,
+named here rather than left for a reader to infer.
+Guidance that a target does not name is its backend's own document, so a
+retracted guidance reference returns the target to the documented default
+instead of to a target that presents as having no guidance document at all. A
+retraction is named as its own act rather than as a reserved word inside the
+list, so that a note that happens to read like a sentinel is still stored as the
+note it is.

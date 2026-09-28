@@ -345,14 +345,34 @@ export class BoardApi {
   }
 
   async listIssues(state?: IssueState): Promise<BoardIssue[]> {
-    const issues = (await this.loadBoard()).issues;
+    const anchor = await this.fastReadAnchor();
+    const states: IssueState[] = state === undefined ? ['open', 'closed'] : [state];
+    const numbers: number[] = [];
+    for (const issueState of states) {
+      for (let page = 1; ; page += 1) {
+        const listed = await this.store.readIssuePage(anchor, issueState, page);
+        if (listed === null) {
+          const issues = (await this.loadBoard()).issues;
+          return issues
+            .filter((issue) => state === undefined || issue.state === state)
+            .sort((left, right) => left.number - right.number);
+        }
+        numbers.push(...listed.entries.map((entry) => entry.number));
+        if (listed.entries.length === 0 || page * 50 >= listed.total) break;
+      }
+    }
+    const issues = await Promise.all(numbers.map((number) => this.store.getIssue(anchor, number, this.rememberedHead)));
     return issues
-      .filter((issue) => state === undefined || issue.state === state)
-      .sort((left, right) => left.number - right.number);
+      .filter((issue): issue is BoardIssue => issue !== null)
+      .sort((left, right) => left.number - right.number)
+      .map(clone);
   }
 
   async getIssue(number: number): Promise<BoardIssue> {
-    return clone(this.requireIssue((await this.loadBoard()).issues, number));
+    const anchor = await this.fastReadAnchor();
+    const issue = await this.store.getIssue(anchor, number, this.rememberedHead);
+    if (issue === null) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
+    return clone(issue);
   }
 
   /**
@@ -363,10 +383,16 @@ export class BoardApi {
    * credential and writes nothing.
    */
   async readFeed(request: BoardFeedRequest = {}): Promise<BoardFeedPage> {
+    const anchor = await this.fastReadAnchor();
+    const page = await this.store.readFeed(anchor, request, this.rememberedHead);
+    if (page !== null) return page;
     return boardFeed((await this.readStored()).log, request);
   }
 
   async getQueue(): Promise<number[]> {
+    const anchor = await this.fastReadAnchor();
+    const queue = await this.store.getQueue(anchor, this.rememberedHead);
+    if (queue !== null) return [...queue];
     return [...(await this.readStored()).state.queue];
   }
 
@@ -643,6 +669,16 @@ export class BoardApi {
       throw new AntoninaApiError('Antonina board trust anchor is required before board state can be accepted');
     }
     return this.anchor;
+  }
+
+  /**
+   * Fast materialized reads still require the same public trust anchor as the
+   * canonical signed log. On a fresh client, route through the canonical read
+   * once so the existing missing-vs-untrusted distinction is preserved.
+   */
+  private async fastReadAnchor(): Promise<BoardTrustAnchor> {
+    if (this.anchor === null) await this.readStored();
+    return this.requireAnchor();
   }
 
   private requireIssue(issues: BoardIssue[], number: number): BoardIssue {

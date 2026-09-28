@@ -1499,7 +1499,6 @@ export class ShardedBoardStore {
         || value.state !== state
         || value.page !== page
         || !Number.isSafeInteger(value.revision)
-        || value.revision !== meta.revision
         || !Array.isArray(value.entries)) {
       throw new ShardedBoardStoreError('Antonina issue list page is malformed');
     }

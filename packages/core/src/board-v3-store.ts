@@ -656,7 +656,8 @@ export class ShardedBoardStore {
     this.newId = options.newId ?? defaultId;
   }
 
-  private url(key: string): string {
+  private async url(logicalKey: string, storageCapability: string): Promise<string> {
+    const key = await objectLocator(storageCapability, logicalKey);
     return `${this.baseUrl}/store/antonina/${encodeURIComponent(key)}`;
   }
 
@@ -670,65 +671,50 @@ export class ShardedBoardStore {
 
   private httpError(method: string, key: string, response: Response): ShardedBoardStoreError {
     return new ShardedBoardStoreError(
-      `Skrynia ${method} antonina/${key} failed (${response.status})`,
+      `Skrynia ${method} Antonina v3 object ${key} failed (${response.status})`,
       { status: response.status, method },
     );
   }
 
-  private async getJson<T>(key: string): Promise<JsonObject<T> | null> {
-    const response = await this.fetcher(this.url(key), { cache: 'no-store' });
+  private async getJson<T>(
+    key: string,
+    storageCapability: string,
+  ): Promise<JsonObject<T> | null> {
+    const response = await this.fetcher(await this.url(key, storageCapability), { cache: 'no-store' });
     if (response.status === 404) return null;
     if (response.status !== 200) throw this.httpError('GET', key, response);
     const etag = response.headers.get('ETag');
-    if (!etag) throw new ShardedBoardStoreError(`Skrynia GET antonina/${key} returned no ETag`);
-    return { value: await this.parseJson(response, `Skrynia GET antonina/${key}`) as T, etag };
+    if (!etag) throw new ShardedBoardStoreError(`Skrynia GET Antonina v3 object ${key} returned no ETag`);
+    return { value: await this.parseJson(response, `Skrynia GET Antonina v3 object ${key}`) as T, etag };
   }
 
-  /**
-   * V3 keeps board contents public to read, but does not disable write
-   * authentication. Every shard is capability-write and reuses the exact
-   * storage capability already carried by every existing board credential.
-   */
-  private async createShared(
+  private async createPublic(
     key: string,
     value: unknown,
     storageCapability: string,
   ): Promise<boolean> {
-    const response = await this.fetcher(this.url(key), {
+    const response = await this.fetcher(await this.url(key, storageCapability), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Skrynia-Mode': 'capability-write',
-        'X-Skrynia-Capability': storageCapability,
+        'X-Skrynia-Mode': 'public-write',
       },
       body: JSON.stringify(value),
     });
     if (response.status === 409) return false;
     if (response.status !== 201) throw this.httpError('POST', key, response);
-    const created = await this.parseJson(response, `Skrynia POST antonina/${key}`);
-    if (!isRecord(created)
-        || created.mode !== 'capability-write'
-        || created.capability !== storageCapability) {
-      throw new ShardedBoardStoreError(
-        'Skrynia does not support creating several objects with one supplied capability',
-        { status: 501, method: 'POST' },
-      );
-    }
     return true;
   }
 
-  private async putShared(
+  private async putPublic(
     key: string,
     value: unknown,
     storageCapability: string,
     etag?: string,
   ): Promise<boolean> {
-    const headers = new Headers({
-      'Content-Type': 'application/json',
-      'X-Skrynia-Capability': storageCapability,
-    });
+    const headers = new Headers({ 'Content-Type': 'application/json' });
     if (etag !== undefined) headers.set('If-Match', etag);
-    const response = await this.fetcher(this.url(key), {
+    const response = await this.fetcher(await this.url(key, storageCapability), {
       method: 'PUT',
       headers,
       body: JSON.stringify(value),
@@ -738,74 +724,42 @@ export class ShardedBoardStore {
     return true;
   }
 
-  private async upsertShared(
+  private async upsertPublic(
     key: string,
     value: unknown,
     storageCapability: string,
   ): Promise<void> {
     for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const current = await this.getJson<unknown>(key);
+      const current = await this.getJson<unknown>(key, storageCapability);
       if (current === null) {
-        if (await this.createShared(key, value, storageCapability)) return;
+        if (await this.createPublic(key, value, storageCapability)) return;
       } else {
-        // Projection writes can overlap after the canonical metadata CAS.
-        // Never let an older committed revision overwrite a newer projection.
         if (isRecord(current.value) && isRecord(value)
             && Number.isSafeInteger(current.value.revision)
             && Number.isSafeInteger(value.revision)
             && (current.value.revision as number) > (value.revision as number)) {
           return;
         }
-        if (await this.putShared(key, value, storageCapability, current.etag)) return;
+        if (await this.putPublic(key, value, storageCapability, current.etag)) return;
       }
     }
     throw new ShardedBoardStoreError(`Antonina v3 object ${key} changed too often`);
   }
 
-  /**
-   * Old Skrynia versions always generated a fresh per-object capability.
-   * Probe once before migration so Antonina can keep using board-v2 unchanged
-   * until the storage server supports sharing the existing board capability.
-   */
-  async supportsSharedCapability(storageCapability: string): Promise<boolean> {
-    const suffix = this.newId().replace(/[^A-Za-z0-9_-]/g, '-');
-    const key = `board-v3-probe-${suffix}`;
-    const response = await this.fetcher(this.url(key), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Skrynia-Mode': 'capability-write',
-        'X-Skrynia-Capability': storageCapability,
-      },
-      body: '{}',
-    });
-    if (response.status !== 201) return false;
-    let returned: string | null = null;
-    try {
-      const created = await this.parseJson(response, `Skrynia POST antonina/${key}`);
-      if (isRecord(created) && typeof created.capability === 'string') returned = created.capability;
-    } catch {
-      returned = null;
-    }
-    const capability = returned ?? storageCapability;
-    await this.fetcher(this.url(key), {
-      method: 'DELETE',
-      headers: { 'X-Skrynia-Capability': capability },
-    });
-    return returned === storageCapability;
+  async exists(storageCapability: string): Promise<boolean> {
+    return (await this.getJson<unknown>(SHARDED_META_KEY, storageCapability)) !== null;
   }
 
-  async exists(): Promise<boolean> {
-    return (await this.getJson<unknown>(SHARDED_META_KEY)) !== null;
-  }
-
-  async loadMeta(anchor?: BoardTrustAnchor): Promise<JsonObject<ShardedBoardMeta> | null> {
-    const stored = await this.getJson<unknown>(SHARDED_META_KEY);
+  async loadMeta(
+    storageCapability: string,
+    anchor?: BoardTrustAnchor,
+  ): Promise<JsonObject<ShardedBoardMeta> | null> {
+    const stored = await this.getJson<unknown>(SHARDED_META_KEY, storageCapability);
     if (stored === null) return null;
     const meta = parseMeta(stored.value);
     if (anchor !== undefined
         && (meta.boardId !== anchor.boardId || meta.rootKeyId !== anchor.rootKeyId)) {
-      throw new ShardedBoardStoreError('Antonina v3 metadata does not match the configured trust anchor');
+      throw new ShardedBoardStoreError('Antonina v3 metadata does not match this board key');
     }
     return { value: meta, etag: stored.etag };
   }

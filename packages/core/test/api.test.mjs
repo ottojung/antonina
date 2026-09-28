@@ -303,7 +303,7 @@ test('a second initializer is refused before it can replace the trust root', asy
   const pointer = structuredClone(server.signed);
 
   const second = api(server);
-  await assert.rejects(() => second.initialize(), /The Antonina signed board already exists/);
+  await assert.rejects(() => second.initialize(), /The Antonina board already exists/);
 
   assert.deepEqual(server.signed, pointer);
   assert.equal(second.getCredential(), null);

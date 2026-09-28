@@ -746,9 +746,11 @@ export class ShardedBoardStore {
         || !Array.isArray(current.value.operations)) {
       throw new ShardedBoardStoreError('Antonina v3 tail log chunk is malformed');
     }
-    const committedInChunk = offset === 0 && meta.operationCount > 0 ? V3_LOG_CHUNK_SIZE : offset;
+    // Only the prefix before the next global operation index is committed.
+    // A chunk that exists at offset zero can be an orphan from a writer that
+    // lost the metadata CAS; none of its operations are committed yet.
     const committed = current.value.operations
-      .slice(0, committedInChunk)
+      .slice(0, offset)
       .map(parseSignedBoardOperation);
     const candidate: ShardedLogChunk = {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,

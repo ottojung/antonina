@@ -97,6 +97,30 @@ function keyParts(defect: BoardDefect): string {
   return parts.join('; ');
 }
 
+/**
+ * The next step for a version mismatch. The correct action is opposite in the
+ * two directions, so one sentence cannot serve both: a board from an *older*
+ * build is readable by a newer client, whereas a board from a *newer* build
+ * cannot be read by this one at all, and no migration of the data helps until
+ * the client is newer too. A version that is not a number gives no direction
+ * and gets the one thing true in both: the board and this build disagree.
+ */
+function versionSentence(found: string, expected: string, direction: 'older' | 'newer' | 'unknown'): string {
+  const lead = `Antonina board schema version is ${found}, but this build reads schema version ${expected}; `;
+  if (direction === 'older') {
+    return lead
+      + 'the board was written by an older Antonina, so use a client that reads schema version '
+      + `${expected}, or run the supported migration to bring the board up to version ${expected}`;
+  }
+  if (direction === 'newer') {
+    return lead
+      + 'the board was written by a newer Antonina than this one, so this client cannot read it; '
+      + `upgrade to a build that reads schema version ${found}, or point this client at a board `
+      + `written at schema version ${expected}`;
+  }
+  return lead + 'the board was written by a different Antonina version than this one';
+}
+
 function sentence(defect: BoardDefect): string {
   if (defect.message !== undefined) return defect.message;
   const where = defect.subject;
@@ -104,8 +128,9 @@ function sentence(defect: BoardDefect): string {
     case 'not-a-record':
       return `Antonina board is not a JSON object: found ${defect.found}, expected an object`;
     case 'schema-version-mismatch':
-      return `Antonina board schema version is ${defect.found}, but this build reads schema version ${defect.expected}; `
-        + 'the board was written by a different Antonina version than this one';
+      // Reached when the caller built the defect by hand and did not know the
+      // direction; {@link versionDefect} always supplies the specific sentence.
+      return versionSentence(defect.found, defect.expected, 'unknown');
     case 'key-set':
       return `Antonina ${where} has the wrong keys (${keyParts(defect)}), `
         + `expected exactly ${defect.expected}`;
@@ -180,13 +205,16 @@ export function describeArray(value: readonly unknown[], expected: string): stri
  * A schemaVersion, echoed only when it is one this reader could plausibly have
  * written: a small non-negative integer, or a short opaque token. A
  * `schemaVersion` carrying a credential, a JSON document or a paragraph is
- * reported as an unnamed value instead.
+ * reported as an unnamed value instead. Dots are excluded for the same reason
+ * {@link readKeyName} excludes them: a credential of the `a.b.c` shape that
+ * happens to be short is the case a 32-character bound does not catch, so the
+ * two functions must not disagree about it.
  */
 export function readSchemaVersion(value: unknown): string {
   if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value < 1_000_000) {
     return String(value);
   }
-  if (typeof value === 'string' && value.length > 0 && value.length <= 32 && /^[A-Za-z0-9._-]+$/.test(value)) {
+  if (typeof value === 'string' && value.length > 0 && value.length <= 32 && /^[A-Za-z0-9_-]+$/.test(value)) {
     return `'${value}'`;
   }
   return 'a value that is not a schema version';
@@ -295,14 +323,22 @@ export function keySetDefect(
 }
 
 export function versionDefect(found: unknown, expected: number): BoardDefect {
+  const described = readSchemaVersion(found);
+  // The direction needs the raw value, not the description of it: a version
+  // this reader declined to echo is still a number or a token of known shape.
+  const observed = typeof found === 'number' ? found : Number.NaN;
+  const direction = !Number.isFinite(observed)
+    ? 'unknown'
+    : observed < expected ? 'older' : observed > expected ? 'newer' : 'unknown';
   return {
     kind: 'schema-version-mismatch',
     subject: 'board',
     field: 'schemaVersion',
-    found: readSchemaVersion(found),
+    found: described,
     expected: String(expected),
     missingKeys: [],
     unexpectedKeys: [],
+    message: versionSentence(described, String(expected), direction),
   };
 }
 

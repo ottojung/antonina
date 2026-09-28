@@ -232,6 +232,27 @@ test('a schemaVersion from another build is named, not merged into a shape compl
   assert.equal(upgradePersistedBoard(legacyBoard()).schemaVersion, 3);
 });
 
+test('a version mismatch names the next step, and the right one in each direction', () => {
+  // The action is opposite in the two directions, so one sentence cannot serve
+  // both: a board from an older build is readable by a newer client, and a
+  // board from a newer build is not readable by this one at all.
+  const older = refusal(() => parseBoard(legacyBoard()));
+  assert.match(older.message, /older Antonina/);
+  assert.match(older.message, /migration to bring the board up to version 3/);
+
+  const newer = refusal(() => parseBoard(board({ schemaVersion: 4 })));
+  assert.match(newer.message, /newer Antonina than this one/);
+  assert.match(newer.message, /upgrade to a build that reads schema version 4/);
+  assert.doesNotMatch(newer.message, /older Antonina/,
+    'a future schema must not be told to migrate the board forward');
+
+  // A version this reader declined to echo has no knowable direction, so the
+  // sentence says only what is true either way and still names the mismatch.
+  const opaque = refusal(() => parseBoard(board({ schemaVersion: 'x'.repeat(40) })));
+  assert.match(opaque.message, /different Antonina version than this one/);
+  assert.doesNotMatch(opaque.message, /upgrade to a build|migration to bring/);
+});
+
 test('a wrong shape is reported as a shape, naming the missing and extra keys', () => {
   const extra = refusal(() => parseBoard({ ...board(), extra: true }));
   assert.equal(extra.defect.kind, 'key-set');
@@ -522,6 +543,18 @@ test('no diagnostic reproduces a value from the board it refuses', () => {
   assert.match(bounded.message, /a key name that is not a plain identifier/);
   const shapeVersion = refusal(() => parseBoard(board({ schemaVersion: credential })));
   assert.match(shapeVersion.message, /a value that is not a schema version/);
+  // The corpus credential above is 55 characters, so it is refused by the
+  // length bound and would pass even if the length bound were the only rule.
+  // This one is 27 — inside the bound, and only the dot rule refuses it, so it
+  // is the case that pins the two functions to the same answer as
+  // `readKeyName`, which describes anything with `a.b.c` structure.
+  const shortDotted = 'sk-proj-aaaa.bbbb.cccc.dddd';
+  assert.ok(shortDotted.length <= 32, 'the corpus credential must be inside the length bound');
+  const dottedVersion = refusal(() => parseBoard(board({ schemaVersion: shortDotted })));
+  assert.match(dottedVersion.message, /a value that is not a schema version/);
+  assert.ok(!dottedVersion.message.includes(shortDotted), 'a short dotted version must not be quoted');
+  assert.doesNotMatch(JSON.stringify(dottedVersion.defect.found), /sk-proj/,
+    'the found value must be described, not quoted');
   // The limit of the guarantee, stated rather than implied: a field that is
   // *supposed* to hold free text accepts a credential-shaped string, and the
   // board is then simply a valid board. The reader is not a secret scanner.

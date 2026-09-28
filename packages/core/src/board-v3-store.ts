@@ -1396,6 +1396,12 @@ export class ShardedBoardStore {
           && beforeIssueNumber !== null) {
         nextClosedAt.delete(beforeIssueNumber);
       }
+      const nextMessageCounts = new Map(bundle.messageCounts);
+      if (request.kind === 'issue.delete' && beforeIssueNumber !== null) {
+        nextMessageCounts.delete(beforeIssueNumber);
+      } else if (request.kind.startsWith('issue.') && beforeIssueNumber !== null && afterIssue !== undefined) {
+        nextMessageCounts.set(beforeIssueNumber, afterIssue.messages.length);
+      }
 
       const nextIssueRefs = new Map(bundle.issueRefs);
       const nextDirectoryRefs = [...bundle.meta.directoryRefs];
@@ -1479,6 +1485,8 @@ export class ShardedBoardStore {
         bundle.state,
         bundle.closedAt,
         bundle.meta.openPageRefs,
+        nextMessageCounts,
+        bundle.messageCounts,
       );
       const closedPageRefs = await this.writeIssueListPages(
         credential,
@@ -1491,6 +1499,8 @@ export class ShardedBoardStore {
         bundle.state,
         bundle.closedAt,
         bundle.meta.closedPageRefs,
+        nextMessageCounts,
+        bundle.messageCounts,
       );
 
       const feedEntry = feedEntryForMutation(
@@ -1556,6 +1566,20 @@ export class ShardedBoardStore {
     }
 
     throw new ShardedBoardStoreError('Antonina board changed too often; mutation was not committed');
+  }
+
+  async append(
+    credentialValue: BoardCredential,
+    request: AppendOperationRequest,
+  ): Promise<StoredSignedBoard> {
+    return this.appendInternal(credentialValue, request, false);
+  }
+
+  async appendFast(
+    credentialValue: BoardCredential,
+    request: AppendOperationRequest,
+  ): Promise<StoredSignedBoard> {
+    return this.appendInternal(credentialValue, request, true);
   }
 
   private async requirePointerForCredential(

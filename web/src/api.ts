@@ -4,6 +4,7 @@ import {
   type BoardAccessState,
   type BoardApiOptions,
   type BoardInitialization,
+  type BoardOverview,
 } from '../../packages/core/src/api';
 import {
   BOARD_CREDENTIAL_STORAGE_KEY,
@@ -84,6 +85,21 @@ export class BrowserBoardSession {
       const state = await this.api.loadState();
       this.rememberHead();
       return state;
+    } catch (error) {
+      if (error instanceof BoardMissingError) return null;
+      throw error;
+    }
+  }
+
+  /**
+   * Lightweight board overview for the main UI. This reads only list pages,
+   * queue and catalog; issue bodies and comments stay unloaded.
+   */
+  async readOverview(): Promise<BoardOverview | null> {
+    try {
+      const overview = await this.api.loadOverview();
+      this.rememberHead();
+      return overview;
     } catch (error) {
       if (error instanceof BoardMissingError) return null;
       throw error;

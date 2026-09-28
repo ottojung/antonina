@@ -949,11 +949,19 @@ export class ShardedBoardStore {
     previousState: VerifiedBoardState | null,
     previousClosedAt: Map<number, string> | null,
     previousRefs: string[],
+    messageCounts?: Map<number, number>,
+    previousMessageCounts?: Map<number, number>,
   ): Promise<string[]> {
-    const nextPages = paginate(orderedSummaries(state, closedAt, issueState), V3_ISSUE_PAGE_SIZE);
+    const nextPages = paginate(
+      orderedSummaries(state, closedAt, issueState, messageCounts),
+      V3_ISSUE_PAGE_SIZE,
+    );
     const previousPages = previousState === null || previousClosedAt === null
       ? []
-      : paginate(orderedSummaries(previousState, previousClosedAt, issueState), V3_ISSUE_PAGE_SIZE);
+      : paginate(
+          orderedSummaries(previousState, previousClosedAt, issueState, previousMessageCounts),
+          V3_ISSUE_PAGE_SIZE,
+        );
     const refs: string[] = [];
     for (let index = 0; index < nextPages.length; index += 1) {
       const entries = nextPages[index]!;

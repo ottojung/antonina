@@ -181,12 +181,19 @@ interface CatalogSnapshot {
   dispatches: BoardDispatch[];
 }
 
+type StoredFeedEntry = Omit<BoardFeedEntry, 'author' | 'body'> & {
+  author?: string | null;
+  body?: string | null;
+  commentRef?: string;
+  commentIndex?: number;
+};
+
 interface FeedPage {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;
   page: number;
   revision: number;
-  entries: BoardFeedEntry[];
+  entries: StoredFeedEntry[];
 }
 
 interface StateBundle {
@@ -507,6 +514,22 @@ function feedEntryForMutation(
     author,
     body,
   };
+}
+
+function compactFeedEntry(
+  entry: BoardFeedEntry,
+  commentLocation?: { ref: string; index: number },
+): StoredFeedEntry {
+  const { author, body, ...base } = entry;
+  if (entry.kind === 'comment-added' && commentLocation !== undefined) {
+    return {
+      ...base,
+      commentRef: commentLocation.ref,
+      commentIndex: commentLocation.index,
+    };
+  }
+  if (entry.kind === 'comment-added') return { ...base, author, body };
+  return base;
 }
 
 export class ShardedBoardStore {
@@ -993,11 +1016,12 @@ export class ShardedBoardStore {
     revision: number,
     head: string,
     entry: BoardFeedEntry | null,
+    commentLocation?: { ref: string; index: number },
   ): Promise<{ refs: string[]; count: number }> {
     if (entry === null) return { refs: [...meta.feedPageRefs], count: meta.feedCount };
     const refs = [...meta.feedPageRefs];
     const pageNumber = Math.floor(meta.feedCount / V3_FEED_PAGE_SIZE) + 1;
-    let entries: BoardFeedEntry[] = [];
+    let entries: StoredFeedEntry[] = [];
     if (meta.feedCount % V3_FEED_PAGE_SIZE !== 0) {
       const previousRef = refs[pageNumber - 1];
       if (previousRef === undefined) throw new ShardedBoardStoreError('Antonina feed page reference is missing');
@@ -1005,9 +1029,9 @@ export class ShardedBoardStore {
       if (!isRecord(previous.value) || !Array.isArray(previous.value.entries)) {
         throw new ShardedBoardStoreError('Antonina feed page is malformed');
       }
-      entries = clone(previous.value.entries as BoardFeedEntry[]);
+      entries = clone(previous.value.entries as StoredFeedEntry[]);
     }
-    entries.push(entry);
+    entries.push(compactFeedEntry(entry, commentLocation));
     const ref = pageRef('feed', head, pageNumber);
     const page: FeedPage = {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
@@ -1084,6 +1108,7 @@ export class ShardedBoardStore {
       : closedAtFromLegacy(stored.log, stored.state.board);
     const issueRefs = new Map<number, string>();
     const directoryPages = new Map<number, DirectoryEntry[]>();
+    const messageLocations = new Map<string, { ref: string; index: number }>();
 
     for (const issue of stored.state.board.issues) {
       const commentRefs: string[] = [];
@@ -1091,16 +1116,20 @@ export class ShardedBoardStore {
       for (let index = 0; index < pages.length; index += 1) {
         const page = index + 1;
         const ref = pageRef(`comments:${issue.number}`, head, page);
+        const messages = pages[index]!;
         const value: CommentPage = {
           schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
           boardId: anchor.boardId,
           number: issue.number,
           page,
           revision,
-          messages: clone(pages[index]!),
+          messages: clone(messages),
         };
         await this.writeImmutable(credential.storageCapability, ref, value);
         commentRefs.push(ref);
+        for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+          messageLocations.set(messages[messageIndex]!.id, { ref, index: messageIndex });
+        }
       }
       const issueRef = singletonRef(`issue:${issue.number}`, head);
       const snapshot: IssueSnapshot = {
@@ -1185,11 +1214,17 @@ export class ShardedBoardStore {
     // offsets into the legacy operation log. Normalize once during migration so
     // later snapshot-native entries can append at feedCount without collisions
     // even when the old log contained non-feed operations.
-    const legacyFeed = stored.log === null
+    const legacyFeed: StoredFeedEntry[] = stored.log === null
       ? []
       : feedEntries(stored.log)
           .sort((left, right) => left.position - right.position)
-          .map((entry, position) => ({ ...entry, position }));
+          .map((entry, position) => {
+            const positioned = { ...entry, position };
+            const location = entry.kind === 'comment-added' && entry.messageId !== null
+              ? messageLocations.get(entry.messageId)
+              : undefined;
+            return compactFeedEntry(positioned, location);
+          });
     const feedPageRefs: string[] = [];
     const feedPages = paginate(legacyFeed, V3_FEED_PAGE_SIZE);
     for (let index = 0; index < feedPages.length; index += 1) {
@@ -1512,12 +1547,23 @@ export class ShardedBoardStore {
         timestamp,
         bundle.meta.feedCount,
       );
+      const feedCommentLocation = request.kind === 'issue.comment' && afterIssue !== undefined
+        ? {
+            ref: pageRef(
+              `comments:${afterIssue.number}`,
+              head,
+              Math.floor((afterIssue.messages.length - 1) / V3_COMMENT_PAGE_SIZE) + 1,
+            ),
+            index: (afterIssue.messages.length - 1) % V3_COMMENT_PAGE_SIZE,
+          }
+        : undefined;
       const feed = await this.appendFeed(
         credential,
         bundle.meta,
         revision,
         head,
         feedEntry,
+        feedCommentLocation,
       );
 
       const meta: ShardedBoardMeta = {
@@ -1680,6 +1726,78 @@ export class ShardedBoardStore {
     return this.readQueue(credential, meta);
   }
 
+  private async hydrateFeedEntry(
+    credential: BoardCredential,
+    meta: ShardedBoardMeta,
+    entry: StoredFeedEntry,
+  ): Promise<BoardFeedEntry> {
+    if (entry.kind !== 'comment-added') {
+      return {
+        id: entry.id,
+        kind: entry.kind,
+        at: entry.at,
+        position: entry.position,
+        issueNumber: entry.issueNumber,
+        title: entry.title,
+        state: entry.state,
+        messageId: entry.messageId,
+        author: null,
+        body: null,
+      };
+    }
+
+    if (entry.commentRef === undefined) {
+      if (typeof entry.author !== 'string' || typeof entry.body !== 'string') {
+        throw new ShardedBoardStoreError('Antonina inline feed comment is malformed');
+      }
+      return {
+        id: entry.id,
+        kind: entry.kind,
+        at: entry.at,
+        position: entry.position,
+        issueNumber: entry.issueNumber,
+        title: entry.title,
+        state: entry.state,
+        messageId: entry.messageId,
+        author: entry.author,
+        body: entry.body,
+      };
+    }
+
+    if (!Number.isSafeInteger(entry.commentIndex) || (entry.commentIndex as number) < 0) {
+      throw new ShardedBoardStoreError('Antonina feed comment reference is malformed');
+    }
+    const stored = await this.requireJson<unknown>(credential.storageCapability, entry.commentRef);
+    const value = stored.value;
+    if (!isRecord(value)
+        || value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
+        || value.boardId !== meta.boardId
+        || value.number !== entry.issueNumber
+        || !Array.isArray(value.messages)) {
+      throw new ShardedBoardStoreError('Antonina feed comment page is malformed');
+    }
+    const message = value.messages[entry.commentIndex as number];
+    if (!isRecord(message)
+        || typeof message.id !== 'string'
+        || message.id !== entry.messageId
+        || typeof message.author !== 'string'
+        || typeof message.body !== 'string') {
+      throw new ShardedBoardStoreError('Antonina feed comment message is malformed');
+    }
+    return {
+      id: entry.id,
+      kind: entry.kind,
+      at: entry.at,
+      position: entry.position,
+      issueNumber: entry.issueNumber,
+      title: entry.title,
+      state: entry.state,
+      messageId: entry.messageId,
+      author: message.author,
+      body: message.body,
+    };
+  }
+
   async readFeed(
     credentialValue: BoardCredential,
     request: BoardFeedRequest = {},
@@ -1689,22 +1807,25 @@ export class ShardedBoardStore {
     const cursor = request.cursor === undefined || request.cursor === null
       ? null
       : parseFeedCursor(request.cursor);
-    const entries: BoardFeedEntry[] = [];
+    const entries: StoredFeedEntry[] = [];
     for (let page = meta.feedPageRefs.length; page >= 1 && entries.length < limit + 1; page -= 1) {
       const ref = meta.feedPageRefs[page - 1]!;
       const stored = await this.requireJson<unknown>(credential.storageCapability, ref);
       if (!isRecord(stored.value) || !Array.isArray(stored.value.entries)) {
         throw new ShardedBoardStoreError('Antonina feed page is malformed');
       }
-      const pageEntries = [...stored.value.entries as BoardFeedEntry[]]
+      const pageEntries = [...stored.value.entries as StoredFeedEntry[]]
         .sort((left, right) => right.position - left.position)
         .filter((entry) => cursor === null || entry.position < cursor.position);
       entries.push(...pageEntries);
     }
     const pageEntries = entries.slice(0, limit);
     const last = pageEntries.at(-1);
+    const hydrated = await Promise.all(
+      pageEntries.map((entry) => this.hydrateFeedEntry(credential, meta, entry)),
+    );
     return {
-      entries: clone(pageEntries),
+      entries: hydrated,
       nextCursor: entries.length > limit && last !== undefined ? feedCursor(last) : null,
       total: meta.feedCount,
       limit,

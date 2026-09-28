@@ -207,7 +207,7 @@ test('the target commands parse only the typed vocabulary', async () => {
 
 test('the new read commands name initialization while the board is missing', async () => {
   const server = fakeSkrynia();
-  const missing = 'antonina board: Antonina signed board does not exist; run: antonina board initialize to create it';
+  const missing = 'antonina board: Antonina board does not exist; run: antonina board initialize to create it';
   for (const command of [['target', 'list'], ['target', 'show', 'phoebe-dev'], ['dispatch', 'select'], ['dispatch', 'record', '1']]) {
     const { code, err } = await run(command, client(server));
     assert.equal(code, 1, command.join(' '));

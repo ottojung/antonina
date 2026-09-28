@@ -5,62 +5,12 @@ import { credentialSigningKey } from '../dist/credential.js';
 import { emptyBoard } from '../dist/model.js';
 import { signBoardOperation } from '../dist/operations.js';
 import { SignedBoardStore } from '../dist/board-store.js';
+import { fakeSkrynia } from './fake-skrynia.mjs';
 
 function jsonResponse(value, status, etag) {
   const headers = { 'Content-Type': 'application/json' };
   if (etag !== undefined) headers.ETag = etag;
   return new Response(JSON.stringify(value), { status, headers });
-}
-
-function fakeSkrynia() {
-  const capability = 'a'.repeat(64);
-  let signed = null;
-  let revision = 0;
-  let beforePut = null;
-
-  const etag = () => `"v${revision}"`;
-
-  return {
-    get signed() { return signed; },
-    set signed(value) { signed = value; },
-    get revision() { return revision; },
-    set beforePut(value) { beforePut = value; },
-    capability,
-    bump(value) {
-      signed = structuredClone(value);
-      revision += 1;
-    },
-    async fetch(url, init = {}) {
-      const method = init.method ?? 'GET';
-      if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
-
-      if (method === 'GET') {
-        return signed === null ? new Response(null, { status: 404 }) : jsonResponse(signed, 200, etag());
-      }
-      if (method === 'POST') {
-        if (signed !== null) return new Response(null, { status: 409 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return jsonResponse({ mode: 'capability-write', capability }, 201);
-      }
-      if (method === 'PUT') {
-        const headers = new Headers(init.headers);
-        if (headers.get('X-Skrynia-Capability') !== capability) {
-          return jsonResponse({ error: 'invalid capability' }, 403);
-        }
-        if (beforePut) {
-          const hook = beforePut;
-          beforePut = null;
-          await hook();
-        }
-        if (headers.get('If-Match') !== etag()) return new Response(null, { status: 412 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return new Response(null, { status: 200 });
-      }
-      return new Response(null, { status: 405 });
-    },
-  };
 }
 
 test('initialization creates board-v2 deliberately and returns a root credential', async () => {

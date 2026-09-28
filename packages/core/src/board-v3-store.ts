@@ -1073,7 +1073,13 @@ export class ShardedBoardStore {
       [],
     );
 
-    const legacyFeed = feedEntries(stored.log).sort((left, right) => left.position - right.position);
+    // V3 feed positions are contiguous materialized-feed positions, not
+    // offsets into the legacy operation log. Normalize once during migration so
+    // later snapshot-native entries can append at feedCount without collisions
+    // even when the old log contained non-feed operations.
+    const legacyFeed = feedEntries(stored.log)
+      .sort((left, right) => left.position - right.position)
+      .map((entry, position) => ({ ...entry, position }));
     const feedPageRefs: string[] = [];
     const feedPages = paginate(legacyFeed, V3_FEED_PAGE_SIZE);
     for (let index = 0; index < feedPages.length; index += 1) {

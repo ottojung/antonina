@@ -40,10 +40,7 @@ import {
   type TargetView,
 } from '../../core/src/model.js';
 import {
-  parseBoardCapability,
-  type BoardCapability,
   type BoardTrustAnchor,
-  type VerifiedAuthority,
 } from '../../core/src/operations.js';
 import {
   CollectBoardError,
@@ -100,7 +97,6 @@ type CommandValue =
   | BoardCredential
   | BoardAccessState
   | BoardTrustAnchor
-  | VerifiedAuthority[]
   | CollectListEntry[]
   | CollectDeleteReportBase
   | BoardFeedPage
@@ -231,11 +227,6 @@ function defaultClient(context: BoardCommandContext): BoardApi {
   });
 }
 
-function parseCapabilities(args: string[]): BoardCapability[] {
-  if (args.length === 0) throw new AntoninaApiError('credential delegate requires at least one capability');
-  return args.map(parseBoardCapability);
-}
-
 /**
  * The normal place to put a value, and the one place it comes from.
  *
@@ -332,19 +323,7 @@ async function execute(
         if (args.length !== 0) throw new AntoninaApiError('credential verify takes no arguments');
         return { mode: 'access', value: await client.verifyCredential() };
       }
-      if (subcommand === 'delegate') {
-        return { mode: 'credential', value: await client.delegateCredential(parseCapabilities(args)) };
-      }
-      if (subcommand === 'revoke') {
-        if (args.length !== 1) throw new AntoninaApiError('credential revoke requires KEY_ID');
-        return { mode: 'authorities', value: await client.revokeCredential(requireArg(args[0], 'KEY_ID')) };
-      }
-      throw new AntoninaApiError('credential requires show, trust, verify, delegate, or revoke');
-    }
-    case 'authority': {
-      const [subcommand, ...args] = parsed.args;
-      if (subcommand !== 'list' || args.length !== 0) throw new AntoninaApiError('authority requires list');
-      return { mode: 'authorities', value: await client.listAuthorities() };
+      throw new AntoninaApiError('credential requires show, trust, or verify');
     }
     case 'queue': {
       const [subcommand, ...args] = parsed.args;

@@ -89,7 +89,7 @@ async function boardWithActivity() {
   await owner.editIssueBody(1, 'the body, edited');
   await owner.close(1);
   await owner.reopen(1);
-  return client(server, { trustAnchor: initialized.trustAnchor });
+  return client(server, { credential: initialized.credential });
 }
 
 test('board feed prints every recorded operation, newest first, and names the continuation', async () => {
@@ -121,7 +121,7 @@ test('board feed prints every recorded operation, newest first, and names the co
   assert.deepEqual([first.out[0], second.out[0]], out.slice(0, 2));
 });
 
-test('board feed --json is the whole page, machine readable, and a reader needs no credential', async () => {
+test('board feed --json is the whole page, machine readable, and requires the board credential', async () => {
   const reader = await boardWithActivity();
   const { code, out } = await run(['feed', '--json'], reader);
 
@@ -156,7 +156,7 @@ test('board feed pages with --cursor and --limit without loss or repeat', async 
     await owner.createIssue('Issue ' + index, '');
     await owner.comment(index + 1, 'ada', 'note ' + index);
   }
-  const reader = client(server, { trustAnchor: initialized.trustAnchor });
+  const reader = client(server, { credential: initialized.credential });
 
   const whole = await run(['feed', '--json', '--limit', '500'], reader);
   const expected = JSON.parse(whole.out[0]).entries.map((entry) => entry.id);

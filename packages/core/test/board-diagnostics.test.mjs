@@ -468,6 +468,12 @@ test('acceptance is unchanged from the base reader on a corpus of malformed boar
         `a refused board must report a BoardIncompatibilityError, got ${error?.message}`);
       assert.ok(error.defect.kind.length > 0, 'every refusal carries a kind');
       assert.ok(error.message.length > 0, 'every refusal carries a message');
+      // The explainers mirror the predicates field for field. If one had fallen
+      // out of step with the predicate it guards, the operator would get the
+      // deliberately vague fallback instead of a named field; this asserts the
+      // mirror held for every corpus entry rather than trusting the comment.
+      assert.doesNotMatch(error.message, /for a reason it does not name/,
+        `every refusal in the corpus must name its reason, got: ${error.message}`);
     }
     assert.equal(threw, !baseAccepts,
       `acceptance diverged from the base reader for ${JSON.stringify(value)}`);

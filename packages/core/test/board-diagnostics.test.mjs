@@ -6,10 +6,10 @@ import {
   BOARD_SCHEMA_VERSION,
   executionTargetDefect,
   isBoardIncompatibilityError,
-  LEGACY_BOARD_SCHEMA_VERSION,
   parseBoard,
   parseLegacyBoardV2,
   parsePersistedBoard,
+  PERSISTED_BOARD_VERSIONS,
 } from '../dist/model.js';
 import { migratePersistedBoard } from '../dist/migrations.js';
 import * as model from '../dist/model.js';
@@ -24,6 +24,16 @@ const timestamp = '2026-09-24T00:00:00.000Z';
 // (`'3'` as a string, `null`, `Number.MAX_SAFE_INTEGER + 1`) are deliberately
 // not derived: they exist to test coercion, so each stays a literal on purpose.
 const FUTURE_BOARD_SCHEMA_VERSION = BOARD_SCHEMA_VERSION + 1;
+
+// The `legacyBoard()` fixture below is not just "some old version": it is the
+// four-key v2 shape, with no `targets` and no `dispatches`. The version whose
+// shape that is, is the oldest version this build still reads, which is what
+// `OLDEST_READABLE_BOARD_SCHEMA_VERSION` says. It resolves to the same number
+// as the legacy constant today, and unlike the constant it stays right when v2
+// is retired and the legacy version rolls forward: at that point a fixture
+// still shaped like v2 has to be stamped at v2, or the reader dispatches it to
+// the wrong parser and refuses it for the wrong reason.
+const OLDEST_READABLE_BOARD_SCHEMA_VERSION = Math.min(...PERSISTED_BOARD_VERSIONS);
 
 const issue = (number, state = 'open') => ({
   number,
@@ -78,7 +88,7 @@ const board = (overrides = {}) => ({
 });
 
 const legacyBoard = (overrides = {}) => ({
-  schemaVersion: LEGACY_BOARD_SCHEMA_VERSION,
+  schemaVersion: OLDEST_READABLE_BOARD_SCHEMA_VERSION,
   nextIssueNumber: 2,
   issues: [issue(1)],
   resources: [resource()],
@@ -222,11 +232,11 @@ const baseTopLevelAccepts = (value) => isObject(value)
 test('a schemaVersion from another build is named, not merged into a shape complaint', () => {
   const v2 = refusal(() => parseBoard(legacyBoard()));
   assert.equal(v2.defect.kind, 'schema-version-mismatch');
-  assert.equal(v2.defect.found, String(LEGACY_BOARD_SCHEMA_VERSION));
+  assert.equal(v2.defect.found, String(OLDEST_READABLE_BOARD_SCHEMA_VERSION));
   assert.equal(v2.defect.expected, String(BOARD_SCHEMA_VERSION));
   assert.match(
     v2.message,
-    new RegExp(`schema version is ${LEGACY_BOARD_SCHEMA_VERSION}, but this build reads schema version ${BOARD_SCHEMA_VERSION}`),
+    new RegExp(`schema version is ${OLDEST_READABLE_BOARD_SCHEMA_VERSION}, but this build reads schema version ${BOARD_SCHEMA_VERSION}`),
   );
   // The key set of a v2 board is wrong only because of its version, so the
   // diagnostic must not send the operator looking for `targets` and
@@ -248,7 +258,7 @@ test('a schemaVersion from another build is named, not merged into a shape compl
   // asking for a migration. The upgrade is therefore the gate's job, so this
   // asserts it through the gate and separately pins the shim's absence, which
   // is what keeps a second bypass from being reintroduced here.
-  assert.equal(parsePersistedBoard(legacyBoard()).schemaVersion, LEGACY_BOARD_SCHEMA_VERSION);
+  assert.equal(parsePersistedBoard(legacyBoard()).schemaVersion, OLDEST_READABLE_BOARD_SCHEMA_VERSION);
   assert.equal(migratePersistedBoard(legacyBoard()).board.schemaVersion, BOARD_SCHEMA_VERSION);
   assert.equal(model.upgradePersistedBoard, undefined);
 });
@@ -264,7 +274,7 @@ test('a version mismatch names the next step, and the right one in each directio
   // use a reader for the version they are on is advice they cannot act on and
   // have already tried. The migration clause names the target version (3) and
   // stays correct, so it is pinned separately.
-  assert.match(older.message, new RegExp(`use a client that reads schema version ${LEGACY_BOARD_SCHEMA_VERSION}, or `),
+  assert.match(older.message, new RegExp(`use a client that reads schema version ${OLDEST_READABLE_BOARD_SCHEMA_VERSION}, or `),
     'the older advice must name the version the board is written at');
   assert.doesNotMatch(older.message, new RegExp(`use a client that reads schema version ${BOARD_SCHEMA_VERSION}`),
     'the older advice must not point the operator back at the version this build already reads');
@@ -424,7 +434,7 @@ test('acceptance is unchanged from the base reader on a corpus of malformed boar
   const corpus = [
     board(),
     board({ nextIssueNumber: 3 }),
-    board({ schemaVersion: LEGACY_BOARD_SCHEMA_VERSION }),
+    board({ schemaVersion: OLDEST_READABLE_BOARD_SCHEMA_VERSION }),
     board({ schemaVersion: FUTURE_BOARD_SCHEMA_VERSION }),
     board({ schemaVersion: '3' }),
     board({ schemaVersion: null }),

@@ -109,12 +109,14 @@ test('first mutation migrates board-v2 into chunked v3 and leaves board-v2 froze
   assert.equal(committed.state.board.issues.length, 1);
   assert.deepEqual(server.objects.get('board-v2').value, legacy);
   assert.ok(server.objects.has('board-v3-meta'));
-  assert.ok(server.objects.has('board-v3-log-000000001'));
   assert.ok(server.objects.has('board-v3-issue-000000001'));
   assert.ok(server.objects.has('board-v3-issues-open-000000001'));
 
   const meta = server.objects.get('board-v3-meta').value;
   assert.equal(meta.operationCount, 2);
+  assert.equal(meta.tailOperations.length, 2);
+  assert.equal(meta.logChunkCount, 0);
+  assert.equal(meta.materializedRevision, 2);
   assert.equal(meta.nextIssueNumber, 2);
   assert.equal(meta.openIssueCount, 1);
   assert.equal(meta.closedIssueCount, 0);

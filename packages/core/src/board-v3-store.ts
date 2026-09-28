@@ -1,6 +1,5 @@
 import { base64UrlEncode, canonicalBytes, sha256Id, type CanonicalValue } from './canonical.js';
 import {
-  credentialSigningKey,
   credentialTrustAnchor,
   verifyBoardCredential,
   type BoardCredential,
@@ -30,8 +29,6 @@ import {
   parseOperationLog,
   parseSignedBoardOperation,
   parseUnsignedBoardOperation,
-  signBoardOperation,
-  verifyAndReplayOperationLog,
   type BoardOperationLog,
   type BoardOperationPayload,
   type BoardTrustAnchor,

@@ -290,14 +290,24 @@ async function buildNextVersionBumpProbe() {
   // its chain ends at the same place, one version further on.
   const registry = readRegistry(gateText, 'gate');
   // A chain has exactly one last step, so exactly one registered step may end at
-  // the version this build writes. That uniqueness is what makes the selection
-  // below safe, and it is asserted rather than assumed: a `find` takes the first
-  // entry that matches, so a registry holding a second entry whose `to` names the
-  // current version — a redundant direct step declared ahead of the ladder step,
-  // say — has the wrong entry re-pointed, and the rewrite lands somewhere other
-  // than the end of the chain. The chain cross-check two assertions below cannot
-  // catch it: that check fires on the chain the running build walks, not on
-  // which registry entry was selected here.
+  // the version this build writes, and that is asserted rather than assumed here
+  // because the selection is structural and a `find` takes the first entry that
+  // matches: a registry holding a second entry whose `to` names the current
+  // version — a redundant direct step declared ahead of the ladder step, say —
+  // would have the wrong entry re-pointed, and the rewrite would land somewhere
+  // other than the end of the chain.
+  //
+  // What this assertion is worth is the diagnosis, not the detection. The ladder
+  // assertion in the test below already goes red on such a registry, by name:
+  // a two-entry registry can only skip a version to end at the current version
+  // twice, and the ladder requires one step per version, so it reports a
+  // version-skip mismatch. That is a correct red, but it names the ladder and not
+  // the entries at fault. This assertion reports the same registry defect as the
+  // count of chain-end entries plus the offending `from -> to` pairs, so the
+  // reader is told which entry the probe would have re-pointed. (The chain
+  // cross-check two assertions below is the weaker sibling and is not what
+  // catches this class: it fires on the chain the running build walks, not on
+  // which registry entry was selected here.)
   const chainEndEntries = registry.entries.filter((entry) => entry.to === 'BOARD_SCHEMA_VERSION');
   assert.equal(
     chainEndEntries.length,

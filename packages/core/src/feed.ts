@@ -15,18 +15,11 @@ const textDecoder = new TextDecoder();
 /**
  * The kinds of board activity the feed reports, and the whole vocabulary.
  *
- * The feed is a projection over the signed operation log, and every kind here is
- * one recorded operation. The board DOES record that an issue was closed and
- * that it was reopened, and it records each edit and each comment with the
- * instant it was committed: `issue.close`, `issue.reopen`, `issue.edit` and
- * `issue.comment` are all in `BOARD_OPERATION_KINDS`. What the collapsed
- * `Board` view cannot express is only the history: `BoardIssue` keeps one
- * `createdAt`, one `updatedAt` and a `messages` array of immutable
- * `{id, author, body, createdAt}` records, so the view shows that an issue is
- * closed but not that it was closed at a named instant, and it cannot say
- * whether the single `updatedAt` was an edit, a comment, a closure or a
- * reopen. Reading the log instead of the view is what makes the difference
- * between those real, separately timestamped events.
+ * V3 stores these entries directly as materialized feed pages. Each committed
+ * issue mutation contributes at most one entry, carrying the timestamp and
+ * issue state needed by the feed without replaying board history. The legacy
+ * helpers later in this module can still project the old signed board-v2 log
+ * during one-time migration, but normal feed reads use the materialized pages.
  *
  * The vocabulary is exactly the issue-scoped operation kinds, one entry each, so
  * it is total over what the projection can produce. A message edit stays absent
@@ -55,8 +48,9 @@ export interface BoardFeedEntry {
   /** The operation's own instant, the time the thing actually happened. */
   at: string;
   /**
-   * The entry's index in the operation log. The log is append-only, so a
-   * position never moves, and the log's own order is the feed's tie-break.
+   * The entry's stable position in the materialized feed. Positions increase
+   * on each feed-producing mutation and are normalized once during legacy
+   * migration, so they remain a unique ordering key without a live log.
    */
   position: number;
   issueNumber: number;

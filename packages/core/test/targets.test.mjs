@@ -13,6 +13,7 @@ import {
   selectExecutionTarget,
   targetViews,
 } from '../dist/model.js';
+import { fakeSkrynia } from './fake-skrynia.mjs';
 
 const timestamp = '2026-09-24T00:00:00.000Z';
 
@@ -291,40 +292,6 @@ function jsonResponse(value, status, etag) {
   return new Response(JSON.stringify(value), { status, headers });
 }
 
-function fakeSkrynia() {
-  const capability = 'a'.repeat(64);
-  let signed = null;
-  let revision = 0;
-  const etag = () => `"v${revision}"`;
-
-  return {
-    capability,
-    get signed() { return signed; },
-    async fetch(url, init = {}) {
-      const method = init.method ?? 'GET';
-      if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
-      if (method === 'GET') {
-        return signed === null ? new Response(null, { status: 404 }) : jsonResponse(signed, 200, etag());
-      }
-      if (method === 'POST') {
-        if (signed !== null) return new Response(null, { status: 409 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return jsonResponse({ mode: 'capability-write', capability }, 201);
-      }
-      if (method === 'PUT') {
-        const headers = new Headers(init.headers);
-        if (headers.get('X-Skrynia-Capability') !== capability) return jsonResponse({ error: 'invalid capability' }, 403);
-        if (headers.get('If-Match') !== etag()) return new Response(null, { status: 412 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return new Response(null, { status: 200 });
-      }
-      return new Response(null, { status: 405 });
-    },
-  };
-}
-
 function api(server, options = {}) {
   let sequence = 0;
   return new BoardApi({
@@ -478,20 +445,18 @@ test('a resource registered on a catalogued host is related to that target', asy
   assert.deepEqual((await client.listTargets())[0].resources.map((entry) => entry.path), ['/workspace/project-worktree']);
 });
 
-test('target registration and dispatch need the target capability a credential may not hold', async () => {
+test('target registration uses the same full-access board key as every other mutation', async () => {
   const server = fakeSkrynia();
   const root = api(server);
-  const initialized = await root.initialize();
-  await root.createIssue('Delegated');
-  const child = await root.delegateCredential(['issue.create', 'target.read']);
-  const reader = api(server, { credential: child, trustAnchor: initialized.trustAnchor });
-
-  await assert.rejects(() => reader.registerTarget({
+  await root.initialize();
+  await root.createIssue('Target work');
+  const target = await root.registerTarget({
     id: 'phoebe-dev',
     backend: 'lubko',
     kind: 'persistent-host',
     capabilities: ['persistent-filesystem'],
     address: 'lubko://phoebe-dev',
-  }), /target.modify/);
-  assert.deepEqual(await reader.listTargets(), [], 'reading the catalog needs no write access');
+  });
+  assert.equal(target.id, 'phoebe-dev');
+  assert.equal((await root.listTargets())[0].id, 'phoebe-dev');
 });

@@ -524,7 +524,10 @@ export function parseCanonicalBoard(value: unknown): Board {
 
 export const parseBoard = parseCanonicalBoard;
 
-export function resourceState(resource: BoardResource, issues: BoardIssue[]): ResourceState {
+export function resourceState(
+  resource: BoardResource,
+  issues: readonly Pick<BoardIssue, 'number' | 'state'>[],
+): ResourceState {
   return resource.issueNumbers.some((number) => issues.find((issue) => issue.number === number)?.state === 'open')
     ? 'protected'
     : 'collectible';

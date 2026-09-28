@@ -50,7 +50,7 @@ import {
   unplacedIssueNumbers,
   untrackedIssueNumbers,
   visibleIssues,
-  TRUST_COPY,
+  BOARD_KEY_COPY,
   READ_ONLY_CALLOUT,
   type BoardLoad,
 } from './ui-state';
@@ -199,9 +199,8 @@ describe('board copy', () => {
     expect(emptyIssueList('open', false)).toEqual({ title: 'No open issues', body: 'No issues match this filter yet.' });
   });
 
-  it('names priority as part of what write access allows, and says the order is shared', () => {
-    expect(WRITE_ACCESS_SUMMARY).toContain('priority order');
-    expect(WRITE_ACCESS_SUMMARY).toContain('status');
+  it('states that the one board credential grants full access', () => {
+    expect(WRITE_ACCESS_SUMMARY).toContain('full read and write access');
     expect(QUEUE_HINT).toContain('shared priority order');
   });
 
@@ -239,7 +238,7 @@ describe('board copy', () => {
     expect(accessCallout('read-only', COMPOSER_READ_ONLY_CALLOUT)).toBe(COMPOSER_READ_ONLY_CALLOUT);
     expect(accessCallout('rejected', COMPOSER_READ_ONLY_CALLOUT)).toBe(REJECTED_CREDENTIAL_COPY);
 
-    expect(COMPOSER_READ_ONLY_CALLOUT.title).toBe('Want to join the conversation?');
+    expect(COMPOSER_READ_ONLY_CALLOUT.title).toBe('Board credential required');
     expect(REJECTED_CREDENTIAL_COPY.body).not.toBe(READ_ONLY_CALLOUT.body);
     expect(REJECTED_CREDENTIAL_COPY.body).not.toBe(COMPOSER_READ_ONLY_CALLOUT.body);
     expect(REJECTED_CREDENTIAL_COPY.action).not.toBe(READ_ONLY_CALLOUT.action);
@@ -249,15 +248,31 @@ describe('board copy', () => {
 describe('board load state', () => {
   const board: Board = { ...emptyBoard(), nextIssueNumber: 2, issues: [issue(1, 'open')] };
   const verified = state({ board, queue: [1] });
+  const summaryBoard = {
+    issues: [{
+      number: 1,
+      title: 'Issue 1',
+      state: 'open' as const,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      closedAt: null,
+      messageCount: 0,
+      hasBody: false,
+    }],
+    resources: [],
+    targets: [],
+    dispatches: [],
+  };
+  const ready: BoardLoad = { status: 'ready', board: summaryBoard, queue: [1], head: 'head' };
 
   it('resolves a read to the first-run state while the board is missing', () => {
     expect(boardLoaded(null)).toEqual({ status: 'uninitialized' });
-    expect(boardLoaded(verified)).toEqual({ status: 'ready', board, queue: [1] });
+    expect(boardLoaded(verified)).toEqual(ready);
   });
 
   it('turns a failed initialization whose board now exists into a read-only board', () => {
     const resolved = firstRunResolved(boardLoaded(verified), new Error('The Antonina board already exists'));
-    expect(resolved.load).toEqual({ status: 'ready', board, queue: [1] });
+    expect(resolved.load).toEqual(ready);
     expect(resolved.error).toBeUndefined();
   });
 
@@ -280,17 +295,17 @@ describe('board load state', () => {
 
   it('reports a board this browser created as ready, with the queue that create verified', () => {
     const outcome = firstRunOutcome({ state: verified });
-    expect(outcome.load).toEqual({ status: 'ready', board, queue: [1] });
+    expect(outcome.load).toEqual(ready);
     expect(outcome.error).toBeUndefined();
     expect(outcome.notice).toBe(FIRST_RUN_COPY.initialized);
   });
 
   it('reports a lost first-run race as read-only, with no error', () => {
     const outcome = firstRunOutcome(
-      { failure: new Error('The Antonina signed board already exists') },
+      { failure: new Error('The Antonina board already exists') },
       { state: verified },
     );
-    expect(outcome.load).toEqual({ status: 'ready', board, queue: [1] });
+    expect(outcome.load).toEqual(ready);
     expect(outcome.error).toBeUndefined();
     expect(outcome.notice).toBe(FIRST_RUN_COPY.raced);
   });
@@ -323,7 +338,7 @@ describe('board load state', () => {
   });
 
   it('applies the same no-board rule to the trust path', () => {
-    expect(boardReadOutcome(verified)).toEqual({ load: { status: 'ready', board, queue: [1] } });
+    expect(boardReadOutcome(verified)).toEqual({ load: ready });
     expect(boardReadOutcome(null)).toEqual({
       load: { status: 'failed', message: FIRST_RUN_COPY.readFailed },
       error: FIRST_RUN_COPY.readFailed,
@@ -343,15 +358,15 @@ describe('board load state', () => {
       .toEqual({ status: 'failed', message: 'Skrynia GET antonina/board-v2 failed (503)' });
   });
 
-  it('explains that the trust anchor is public and only unlocks reading', () => {
-    expect(TRUST_COPY.action).toBe('Trust this board');
-    expect(TRUST_COPY.body).toContain('public trust anchor');
+  it('explains that the shared board credential is required for access', () => {
+    expect(BOARD_KEY_COPY.action).toBe('Open board');
+    expect(BOARD_KEY_COPY.body).toContain('shared credential');
+    expect(BOARD_KEY_COPY.body).toContain('full read and write access');
   });
 
   it('keeps the last good board when a later read fails', () => {
-    const ready: BoardLoad = { status: 'ready', board, queue: [1] };
     expect(boardLoadFailed(ready, 'Skrynia GET failed (503)')).toBe(ready);
-    expect(loadedBoard(boardLoadFailed(ready, 'Skrynia GET failed (503)'))).toBe(board);
+    expect(loadedBoard(boardLoadFailed(ready, 'Skrynia GET failed (503)'))).toBe(summaryBoard);
   });
 
   it('fails terminally only while no board has ever loaded', () => {
@@ -413,7 +428,7 @@ describe('the feed, as the browser presents it', () => {
   it('says the predates-the-log caveat in terms of the issues it cannot place', () => {
     expect(FEED_TRUNCATED_COPY([1])).toContain('#1');
     expect(FEED_TRUNCATED_COPY([1, 2])).toContain('#1, #2');
-    expect(FEED_TRUNCATED_COPY([1])).toContain('already on the board when the signed log began');
+    expect(FEED_TRUNCATED_COPY([1])).toContain('already on the board when the materialized feed began');
     // The sentence names the exhaustion it depends on, so it cannot be quoted
     // as a claim made from a partial walk.
     expect(FEED_TRUNCATED_COPY([1])).toContain('read the whole feed');

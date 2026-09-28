@@ -167,8 +167,9 @@ export function describeRootsDefect(result: {
  * failure.
  *
  * The read is `readCollectionSnapshot` over `boardApiCollectionReader(api)`, the
- * verifying reader, and never a reader hand-built from `loadState()`: the signed
- * log is what makes the revision verified, and only this reader verifies it. An
+ * verifying reader, and never a reader hand-built from `loadState()`: the board
+ * API opens the current materialized revision through the shared credential, and
+ * this reader carries that verified revision into collection. An
  * unverified snapshot is reported and the command exits non-zero -- it is never
  * rendered as an empty registry, which is the one answer that would let an
  * unreadable board look like a board with nothing to collect.

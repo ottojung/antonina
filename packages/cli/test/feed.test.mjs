@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { fakeSkrynia } from '../../core/test/fake-skrynia.mjs';
 import { BoardApi } from '../dist/packages/core/src/api.js';
 import { runBoardCommand } from '../dist/packages/cli/src/board.js';
 
@@ -16,39 +17,6 @@ function jsonResponse(value, status = 200, etag) {
   const headers = { 'Content-Type': 'application/json' };
   if (etag !== undefined) headers.ETag = etag;
   return new Response(JSON.stringify(value), { status, headers });
-}
-
-function fakeSkrynia() {
-  const capability = 'a'.repeat(64);
-  let signed = null;
-  let revision = 0;
-  const etag = () => `"v${revision}"`;
-
-  return {
-    get signed() { return signed; },
-    async fetch(url, init = {}) {
-      const method = init.method ?? 'GET';
-      if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
-      if (method === 'GET') {
-        return signed === null ? new Response(null, { status: 404 }) : jsonResponse(signed, 200, etag());
-      }
-      if (method === 'POST') {
-        if (signed !== null) return new Response(null, { status: 409 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return jsonResponse({ mode: 'capability-write', capability }, 201);
-      }
-      if (method === 'PUT') {
-        const headers = new Headers(init.headers);
-        if (headers.get('X-Skrynia-Capability') !== capability) return jsonResponse({ error: 'invalid capability' }, 403);
-        if (headers.get('If-Match') !== etag()) return jsonResponse({ error: 'stale' }, 412);
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return new Response(null, { status: 200 });
-      }
-      return new Response(null, { status: 405 });
-    },
-  };
 }
 
 function client(server, options = {}) {
@@ -89,7 +57,7 @@ async function boardWithActivity() {
   await owner.editIssueBody(1, 'the body, edited');
   await owner.close(1);
   await owner.reopen(1);
-  return client(server, { trustAnchor: initialized.trustAnchor });
+  return client(server, { credential: initialized.credential });
 }
 
 test('board feed prints every recorded operation, newest first, and names the continuation', async () => {
@@ -121,7 +89,7 @@ test('board feed prints every recorded operation, newest first, and names the co
   assert.deepEqual([first.out[0], second.out[0]], out.slice(0, 2));
 });
 
-test('board feed --json is the whole page, machine readable, and a reader needs no credential', async () => {
+test('board feed --json is the whole page, machine readable, and requires the board credential', async () => {
   const reader = await boardWithActivity();
   const { code, out } = await run(['feed', '--json'], reader);
 
@@ -156,7 +124,7 @@ test('board feed pages with --cursor and --limit without loss or repeat', async 
     await owner.createIssue('Issue ' + index, '');
     await owner.comment(index + 1, 'ada', 'note ' + index);
   }
-  const reader = client(server, { trustAnchor: initialized.trustAnchor });
+  const reader = client(server, { credential: initialized.credential });
 
   const whole = await run(['feed', '--json', '--limit', '500'], reader);
   const expected = JSON.parse(whole.out[0]).entries.map((entry) => entry.id);
@@ -195,7 +163,7 @@ test('board feed names initialization while the board is missing and creates not
   const server = fakeSkrynia();
   const { code, err } = await run(['feed'], client(server));
   assert.equal(code, 1);
-  assert.match(err[0], /^antonina board: Antonina signed board does not exist/);
+  assert.match(err[0], /^antonina board: Antonina board does not exist/);
   assert.equal(server.signed, null);
 });
 

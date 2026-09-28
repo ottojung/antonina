@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fakeSkrynia } from '../../core/test/fake-skrynia.mjs';
 
 // The CLI compiles its own copy of packages/core and of the agent-runtime
 // gatherer, so these cases drive the exact module graph the shipped executable
@@ -39,40 +40,6 @@ const TEST_HOME = '/nonexistent-antonina-test-home';
 
 // A minimal Skrynia stand-in, as in `board.test.mjs`: the collector's only
 // contact with the board is this store, and nothing here needs a real backend.
-function fakeSkrynia() {
-  const capability = 'a'.repeat(64);
-  let signed = null;
-  let revision = 0;
-  const etag = () => `"v${revision}"`;
-
-  return {
-    capability,
-    get signed() { return signed; },
-    async fetch(url, init = {}) {
-      const method = init.method ?? 'GET';
-      if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
-      if (method === 'GET') {
-        return signed === null ? new Response(null, { status: 404 }) : jsonResponse(signed, 200, etag());
-      }
-      if (method === 'POST') {
-        if (signed !== null) return new Response(null, { status: 409 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return jsonResponse({ mode: 'capability-write', capability }, 201);
-      }
-      if (method === 'PUT') {
-        const headers = new Headers(init.headers);
-        if (headers.get('X-Skrynia-Capability') !== capability) return jsonResponse({ error: 'invalid capability' }, 403);
-        if (headers.get('If-Match') !== etag()) return new Response(null, { status: 412 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return jsonResponse({ ok: true }, 200);
-      }
-      return new Response(null, { status: 405 });
-    },
-  };
-}
-
 function jsonResponse(value, status = 200, etag) {
   const headers = { 'Content-Type': 'application/json' };
   if (etag !== undefined) headers.ETag = etag;
@@ -122,7 +89,7 @@ async function withWorkTree(body) {
   const writer = api(server);
   try {
     const initialized = await writer.initialize();
-    const reader = api(server, { trustAnchor: initialized.trustAnchor });
+    const reader = api(server, { credential: initialized.credential });
     const contexts = { root, stateHome, managed, worktree, server, writer, reader };
     const outcome = await body(contexts);
     if (outcome !== undefined) return outcome;
@@ -237,17 +204,22 @@ test('collect list refuses a host that is not a lubko host identity', async () =
   });
 });
 
-test('collect list needs no credential', async () => {
+test('collect list requires the board credential', async () => {
   await withWorkTree(async (context) => {
     await seededWorkTree(context);
-    // A reader with the trust anchor and nothing else: no credential, and no
-    // write capability of any kind, and the list is still complete.
     const { code, out, err } = await run(['collect', 'list', '--host', HOST], {
       createClient: () => context.reader,
     });
     assert.equal(code, 0);
     assert.deepEqual(err, []);
     assert.equal(out.length, 1);
+
+    const withoutKey = await run(['collect', 'list', '--host', HOST], {
+      createClient: () => api(context.server),
+    });
+    assert.equal(withoutKey.code, 1);
+    assert.deepEqual(withoutKey.out, []);
+    assert.match(withoutKey.err[0], /credential\.json|board credential/);
   });
 });
 
@@ -260,7 +232,7 @@ test('collect list surfaces a missing board as a failure and never as an empty l
       assert.deepEqual(out, [], argv.join(' '));
       assert.equal(
         err[0],
-        'antonina board: Antonina signed board does not exist; run: antonina board initialize to create it',
+        'antonina board: Antonina board does not exist; run: antonina board initialize to create it',
         argv.join(' '),
       );
     }
@@ -268,18 +240,15 @@ test('collect list surfaces a missing board as a failure and never as an empty l
   });
 });
 
-test('collect list surfaces an unverifiable board and names the trust anchor', async () => {
+test('collect list surfaces an inaccessible board and names the board credential', async () => {
   await withWorkTree(async (context) => {
     const { code, out, err } = await run(['collect', 'list', '--host', HOST], {
       createClient: () => api(context.server),
     });
     assert.equal(code, 1);
     assert.deepEqual(out, []);
-    assert.equal(
-      err[0],
-      'antonina board: Antonina signed board exists; this client has no trust anchor for it; '
-        + 'save the board trust anchor as $XDG_CONFIG_HOME/antonina/trust.json to read it',
-    );
+    assert.match(err[0], /board credential/);
+    assert.match(err[0], /credential\.json/);
   });
 });
 

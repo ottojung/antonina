@@ -354,6 +354,57 @@ test('the CLI keeps what a target says about itself when only its status changes
   assert.deepEqual(record.limitations, ['shares a LAN with the build farm']);
 });
 
+test('the CLI retracts a caveat and a guidance reference it no longer stands behind', async () => {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  await owner.initialize();
+  await run([...PHOEBE, '--limitation', 'shares a LAN with the build farm',
+    '--guidance', 'docs/skills/target-lubko-persistent-host.md'], owner);
+
+  // Absent carries forward, which is the half of the old behaviour that was
+  // already right and must not change: a status change is not a retraction.
+  const carried = await run(['target', 'set', 'phoebe-dev', '--status', 'unavailable', '--json'], owner);
+  assert.deepEqual(JSON.parse(carried.out[0]).limitations, ['shares a LAN with the build farm']);
+  assert.deepEqual(JSON.parse(carried.out[0]).guidance, ['docs/skills/target-lubko-persistent-host.md']);
+
+  // Explicitly empty is a different statement, and it is the one the old CLI
+  // could not make: the field is retracted, so a reader resolves the backend's
+  // own guidance again.
+  const cleared = await run(['target', 'set', 'phoebe-dev',
+    '--clear-limitations', '--clear-guidance', '--json'], owner);
+  assert.equal(cleared.code, 0, cleared.err.join(String.fromCharCode(10)));
+  const record = JSON.parse(cleared.out[0]);
+  assert.equal(record.limitations, undefined, 'the caveat is retracted, not stored empty');
+  assert.equal(record.guidance, undefined, 'the guidance reference is retracted, not stored empty');
+
+  const shown = await run(['target', 'show', 'phoebe-dev'], owner);
+  assert.equal(shown.code, 0, shown.err.join(String.fromCharCode(10)));
+  assert.equal(shown.out.join(String.fromCharCode(10)).includes('caveat:'), false);
+  assert.match(shown.out.join(String.fromCharCode(10)), /guidance docs\/skills\/target-lubko-persistent-host\.md/);
+
+  // The board on disk holds the retracted field as absent, so a later read is
+  // not reading an empty list as if it meant anything.
+  const stored = (await owner.loadBoard()).targets[0];
+  assert.equal(Object.hasOwn(stored, 'limitations'), false);
+  assert.equal(Object.hasOwn(stored, 'guidance'), false);
+
+  // A flag and a value on the same field is a contradiction, not an ordering.
+  for (const argv of [
+    ['target', 'set', 'phoebe-dev', '--clear-limitations', '--limitation', 'a caveat'],
+    ['target', 'set', 'phoebe-dev', '--clear-guidance', '--guidance', 'docs/skills/target-lubko-persistent-host.md'],
+  ]) {
+    const { code, err } = await run(argv, owner);
+    assert.equal(code, 1, argv.join(' '));
+    assert.match(err[0], /cannot be combined with/, argv.join(' '));
+  }
+
+  // A note that reads like a sentinel is still a note: there is no reserved
+  // word, because the retraction is named as a flag and not as a value.
+  const resaid = await run(['target', 'set', 'phoebe-dev', '--limitation', 'none', '--json'], owner);
+  assert.equal(resaid.code, 0, resaid.err.join(String.fromCharCode(10)));
+  assert.deepEqual(JSON.parse(resaid.out[0]).limitations, ['none']);
+});
+
 test('the CLI states an unknown or inapplicable capacity rather than a number', async () => {
   const server = fakeSkrynia();
   const owner = client(server);

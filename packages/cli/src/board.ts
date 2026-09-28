@@ -572,8 +572,10 @@ async function execute(
         const limitationOption = repeatedOption(displayNameOption.rest, '--limitation');
         const guidanceOption = repeatedOption(limitationOption.rest, '--guidance');
         const capabilityOption = repeatedOption(guidanceOption.rest, '--capability');
-        if (capabilityOption.rest.length !== 1) throw new AntoninaApiError('target set requires ID');
-        const id = requireArg(capabilityOption.rest[0], 'ID');
+        const clearLimitations = flag(capabilityOption.rest, '--clear-limitations');
+        const clearGuidance = flag(clearLimitations.rest, '--clear-guidance');
+        if (clearGuidance.rest.length !== 1) throw new AntoninaApiError('target set requires ID');
+        const id = requireArg(clearGuidance.rest[0], 'ID');
         const existing = await client.getTarget(id);
         const status: ExecutionTargetStatus = statusOption.value === undefined
           ? existing.status
@@ -585,6 +587,19 @@ async function execute(
         const capabilities = capabilityOption.values.length === 0
           ? existing.capabilities
           : capabilityOption.values.map(parseExecutionTargetCapability);
+        // A caveat or a guidance document that has since become wrong is
+        // retracted by naming it as a flag rather than as a value, so there is
+        // no reserved word that a real note could collide with: an operator who
+        // genuinely wants a note that happens to read like a sentinel still
+        // gets that note stored, because the sentinel is not a note at all.
+        // A flag and a value on the same field is a contradiction rather than
+        // an ordering, so it is refused instead of resolved.
+        if (clearLimitations.value && limitationOption.values.length > 0) {
+          throw new AntoninaApiError('--clear-limitations cannot be combined with --limitation');
+        }
+        if (clearGuidance.value && guidanceOption.values.length > 0) {
+          throw new AntoninaApiError('--clear-guidance cannot be combined with --guidance');
+        }
         return {
           mode: 'target',
           value: await client.setTarget(id, {
@@ -596,10 +611,14 @@ async function execute(
               : existing.displayName !== undefined ? { displayName: existing.displayName } : {}),
             ...(limitationOption.values.length > 0
               ? { limitations: limitationOption.values }
-              : existing.limitations !== undefined ? { limitations: existing.limitations } : {}),
+              : clearLimitations.value
+                ? { limitations: [] }
+                : existing.limitations !== undefined ? { limitations: existing.limitations } : {}),
             ...(guidanceOption.values.length > 0
               ? { guidance: guidanceOption.values }
-              : existing.guidance !== undefined ? { guidance: existing.guidance } : {}),
+              : clearGuidance.value
+                ? { guidance: [] }
+                : existing.guidance !== undefined ? { guidance: existing.guidance } : {}),
           }),
         };
       }

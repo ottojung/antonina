@@ -73,6 +73,27 @@ test('board create never accepts a caller-supplied issue id', () => {
   );
 });
 
+test('the public CLI can retract a target caveat and its guidance references', () => {
+  assert.deepEqual(
+    run('board', ['target', 'set', '--id', 'phoebe-dev', '--clear-limitations', '--clear-guidance']),
+    ['target', 'set', 'phoebe-dev', '--clear-limitations', '--clear-guidance'],
+  );
+  assert.deepEqual(
+    run('board', ['target', 'set', '--id', 'phoebe-dev', '--limitation', 'a caveat', '--guidance', 'docs/skills/a.md']),
+    ['target', 'set', 'phoebe-dev', '--limitation', 'a caveat', '--guidance', 'docs/skills/a.md'],
+  );
+  // The help has to name the retraction, or an operator with a terminal has no
+  // way to learn that a note can be withdrawn at all.
+  const help = preparePublicCommand('board', ['target', 'set', '--help']);
+  assert.equal(help.kind, 'help');
+  assert.match(help.text, /--clear-limitations <value>|--clear-limitations/);
+  assert.match(help.text, /Retract the target/);
+  // `target add` states notes but has nothing to retract.
+  const add = preparePublicCommand('board', ['target', 'add', '--help']);
+  assert.equal(add.kind, 'help');
+  assert.equal(/--clear-/.test(add.text), false);
+});
+
 test('every public leaf command has both long and short help', () => {
   for (const namespace of ['agent', 'board', 'daemon']) {
     for (const path of publicCommandPaths(namespace)) {

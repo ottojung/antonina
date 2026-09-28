@@ -1,3 +1,23 @@
+import {
+  BoardIncompatibilityError,
+  corruptDefect,
+  describeArray,
+  fieldDefect,
+  firstDefect,
+  keySetDefect,
+  notARecordDefect,
+  unclassifiedElementDefect,
+  versionDefect,
+  type BoardDefect,
+} from './board-diagnostics.js';
+
+export {
+  BoardIncompatibilityError,
+  isBoardIncompatibilityError,
+  type BoardDefect,
+  type BoardDefectKind,
+} from './board-diagnostics.js';
+
 export const BOARD_SCHEMA_VERSION = 3 as const;
 export const LEGACY_BOARD_SCHEMA_VERSION = 2 as const;
 export const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
@@ -657,25 +677,409 @@ function isResource(value: unknown, issueNumbers: Set<number>): value is BoardRe
     && isTimestamp(value.updatedAt);
 }
 
+const CANONICAL_BOARD_KEYS = [
+  'schemaVersion', 'nextIssueNumber', 'issues', 'resources', 'targets', 'dispatches',
+] as const;
+
+const LEGACY_BOARD_V2_KEYS = [
+  'schemaVersion', 'nextIssueNumber', 'issues', 'resources',
+] as const;
+
+/**
+ * Why one `BoardMessage` is not a message, or `null` when it is one.
+ *
+ * This mirrors {@link isMessage} field for field. It is consulted only after
+ * that predicate has already refused the value, so it decides which reason is
+ * reported and never whether the value is accepted; a drift between the two
+ * can therefore only ever cost specificity, never admit a bad record.
+ */
+function messageDefect(value: unknown, where: string): BoardDefect | null {
+  if (!isRecord(value)) return notARecordDefect(where, value);
+  if (!hasExactKeys(value, ['id', 'author', 'body', 'createdAt'])) {
+    return keySetDefect(where, ['id', 'author', 'body', 'createdAt'], value);
+  }
+  return firstDefect(where, [
+    { field: 'id', expected: 'a non-empty string', ok: isText(value.id), value: value.id },
+    { field: 'author', expected: 'a non-empty string', ok: isText(value.author), value: value.author },
+    { field: 'body', expected: 'a non-empty string', ok: isText(value.body), value: value.body },
+    {
+      field: 'createdAt',
+      expected: 'a parseable timestamp string',
+      ok: isTimestamp(value.createdAt),
+      value: value.createdAt,
+    },
+  ]);
+}
+
+/** {@link messageDefect} for one message, or the issue-level defect if the element is not even a record. */
+function messageElementDefect(issue: BoardIssue, index: number, value: unknown): BoardDefect {
+  const where = `board.issues.${issue.number}.messages`;
+  const detail = messageDefect(value, where);
+  if (detail === null) return unclassifiedElementDefect(where, index);
+  return { ...detail, kind: 'element', subject: where, field: detail.field };
+}
+
+/** {@link isIssue}, explained. Consulted only after {@link isIssue} has refused. */
+function issueDefect(value: unknown, index: number): BoardDefect {
+  const where = `board issue at index ${index}`;
+  if (!isRecord(value)) return { ...notARecordDefect(where, value), kind: 'element', field: '' };
+  if (!hasExactKeys(value, ['number', 'title', 'body', 'state', 'createdAt', 'updatedAt', 'messages'])) {
+    return { ...keySetDefect(where, ['number', 'title', 'body', 'state', 'createdAt', 'updatedAt', 'messages'], value), kind: 'element' };
+  }
+  const field = firstDefect(where, [
+    {
+      field: 'number',
+      expected: 'a positive safe integer',
+      ok: isPositiveSafeInteger(value.number),
+      value: value.number,
+    },
+    { field: 'title', expected: 'a non-empty string', ok: isText(value.title), value: value.title },
+    { field: 'body', expected: 'a string', ok: typeof value.body === 'string', value: value.body },
+    {
+      field: 'state',
+      expected: 'the string "open" or "closed"',
+      ok: value.state === 'open' || value.state === 'closed',
+      value: value.state,
+    },
+    {
+      field: 'createdAt',
+      expected: 'a parseable timestamp string',
+      ok: isTimestamp(value.createdAt),
+      value: value.createdAt,
+    },
+    {
+      field: 'updatedAt',
+      expected: 'a parseable timestamp string',
+      ok: isTimestamp(value.updatedAt),
+      value: value.updatedAt,
+    },
+    {
+      field: 'messages',
+      expected: 'an array of messages',
+      ok: Array.isArray(value.messages),
+      value: value.messages,
+    },
+  ]);
+  if (field !== null) return { ...field, kind: 'element' };
+  const messages = value.messages as unknown[];
+  for (let position = 0; position < messages.length; position += 1) {
+    const message = messages[position];
+    if (message === undefined || !isMessage(message)) {
+      return messageElementDefect(value as unknown as BoardIssue, position, message);
+    }
+  }
+  return unclassifiedElementDefect(where, index);
+}
+
+/** {@link isResource}, explained. Consulted only after {@link isResource} has refused. */
+function resourceDefect(value: unknown, issueNumbers: Set<number>, index: number): BoardDefect {
+  const where = `board resource at index ${index}`;
+  const at = { kind: 'element' } as const;
+  if (!isRecord(value)) return { ...notARecordDefect(where, value), ...at };
+  if (!hasExactKeys(value, ['host', 'path', 'issueNumbers', 'createdAt', 'updatedAt'])) {
+    const defect = keySetDefect(where, ['host', 'path', 'issueNumbers', 'createdAt', 'updatedAt'], value);
+    return { ...defect, ...at };
+  }
+  const issueList = value.issueNumbers;
+  const field = firstDefect(where, [
+    { field: 'host', expected: 'a "lubko://" host string', ok: isText(value.host) && isValidHost(value.host), value: value.host },
+    {
+      field: 'path',
+      expected: 'an absolute normalized POSIX path',
+      ok: isText(value.path) && isValidPath(value.path),
+      value: value.path,
+    },
+    { field: 'issueNumbers', expected: 'an array of issue numbers', ok: Array.isArray(issueList), value: issueList },
+    Array.isArray(issueList) && issueList.length > 0
+      ? {
+        field: 'issueNumbers',
+        expected: 'a non-empty list of issue numbers that exist on this board',
+        ok: true,
+        found: describeArray(issueList, 'at least one issue number'),
+      }
+      : {
+        field: 'issueNumbers',
+        expected: 'a non-empty list of issue numbers that exist on this board',
+        ok: false,
+        value: issueList,
+      },
+    {
+      field: 'createdAt',
+      expected: 'a parseable timestamp string',
+      ok: isTimestamp(value.createdAt),
+      value: value.createdAt,
+    },
+    {
+      field: 'updatedAt',
+      expected: 'a parseable timestamp string',
+      ok: isTimestamp(value.updatedAt),
+      value: value.updatedAt,
+    },
+  ]);
+  if (field !== null) return { ...field, ...at };
+  if (!Array.isArray(issueList)) return unclassifiedElementDefect(where, index);
+  for (let position = 0; position < issueList.length; position += 1) {
+    const entry = issueList[position];
+    if (!isPositiveSafeInteger(entry)) {
+      return {
+        ...fieldDefect(where, `issueNumbers index ${position}`,
+          entry, 'a positive safe integer'),
+        kind: 'element',
+      };
+    }
+    if (!issueNumbers.has(entry)) {
+      return {
+        ...fieldDefect(where, `issueNumbers index ${position}`,
+          entry, 'an issue number that exists on this board'),
+        kind: 'element',
+      };
+    }
+    const previous = position === 0 ? undefined : issueList[position - 1];
+    if (previous !== undefined && typeof entry === 'number' && typeof previous === 'number' && entry <= previous) {
+      return {
+        ...corruptDefect(
+          where, `issueNumbers index ${position}`,
+          'repeats or reverses the ascending order of the issue numbers before it',
+          'Antonina board resource issue numbers are not in strictly ascending order'),
+        kind: 'element',
+      };
+    }
+  }
+  return unclassifiedElementDefect(where, index);
+}
+
+/** {@link isDispatch}, explained. Consulted only after {@link isDispatch} has refused. */
+function dispatchDefect(value: unknown, issueNumbers: Set<number>, index: number): BoardDefect {
+  const where = `board dispatch record at index ${index}`;
+  const at = { kind: 'element' } as const;
+  if (!isRecord(value)) return { ...notARecordDefect(where, value), ...at };
+  if (!hasExactKeys(value, ['issueNumber', 'targetId', 'rationale', 'recordedAt'])) {
+    const defect = keySetDefect(where, ['issueNumber', 'targetId', 'rationale', 'recordedAt'], value);
+    return { ...defect, ...at };
+  }
+  const field = firstDefect(where, [
+    {
+      field: 'issueNumber',
+      expected: 'a positive safe integer naming an issue on this board',
+      ok: isPositiveSafeInteger(value.issueNumber) && issueNumbers.has(value.issueNumber),
+      value: value.issueNumber,
+    },
+    {
+      field: 'targetId',
+      expected: 'a lowercase alphanumeric or dash slug',
+      ok: isText(value.targetId) && TARGET_ID.test(value.targetId),
+      value: value.targetId,
+    },
+    { field: 'rationale', expected: 'a non-empty string', ok: isText(value.rationale), value: value.rationale },
+    {
+      field: 'recordedAt',
+      expected: 'a parseable timestamp string',
+      ok: isTimestamp(value.recordedAt),
+      value: value.recordedAt,
+    },
+  ]);
+  if (field !== null) return { ...field, ...at };
+  return unclassifiedElementDefect(where, index);
+}
+
+/** {@link isTarget}, explained. Consulted only after {@link isTarget} has refused. */
+function targetDefect(value: unknown, index: number): BoardDefect {
+  const where = `board execution target at index ${index}`;
+  const at = { kind: 'element' } as const;
+  if (!isRecord(value)) return { ...notARecordDefect(where, value), ...at };
+  if (!hasTargetKeys(value)) return { ...targetKeySetDefect(where, value), ...at };
+  const field = firstDefect(where, [
+    { field: 'id', expected: 'a lowercase alphanumeric or dash slug', ok: isText(value.id) && TARGET_ID.test(value.id), value: value.id },
+    {
+      field: 'backend',
+      expected: `one of ${EXECUTION_TARGET_BACKENDS.join(', ')}`,
+      ok: typeof value.backend === 'string' && (EXECUTION_TARGET_BACKENDS as readonly string[]).includes(value.backend),
+      value: value.backend,
+    },
+    {
+      field: 'kind',
+      expected: `one of ${EXECUTION_TARGET_KINDS.join(', ')}`,
+      ok: typeof value.kind === 'string' && (EXECUTION_TARGET_KINDS as readonly string[]).includes(value.kind),
+      value: value.kind,
+    },
+    {
+      field: 'status',
+      expected: `one of ${EXECUTION_TARGET_STATUSES.join(', ')}`,
+      ok: isText(value.status) && (EXECUTION_TARGET_STATUSES as readonly string[]).includes(value.status),
+      value: value.status,
+    },
+    {
+      field: 'address',
+      expected: 'a "lubko://" host string, or null',
+      ok: value.address === null || (isText(value.address) && isValidHost(value.address)),
+      value: value.address,
+    },
+    { field: 'description', expected: 'a string', ok: typeof value.description === 'string', value: value.description },
+    {
+      field: 'createdAt',
+      expected: 'a parseable timestamp string',
+      ok: isTimestamp(value.createdAt),
+      value: value.createdAt,
+    },
+    {
+      field: 'updatedAt',
+      expected: 'a parseable timestamp string',
+      ok: isTimestamp(value.updatedAt),
+      value: value.updatedAt,
+    },
+    {
+      field: 'capabilities',
+      expected: 'a sorted, duplicate-free array of capability names',
+      ok: targetCapabilitiesOk(value.capabilities),
+      value: value.capabilities,
+    },
+  ]);
+  if (field !== null) return { ...field, ...at };
+  const consistency = executionTargetDefect({
+    ...(value as unknown as BoardExecutionTarget),
+    capabilities: value.capabilities as ExecutionTargetCapability[],
+  });
+  if (consistency !== null) {
+    return { ...corruptDefect(`${where}.index ${index}`, '', consistency, `Antonina board execution target at index ${index} is inconsistent: ${consistency}`), ...at };
+  }
+  return unclassifiedElementDefect(where, index);
+}
+
+/** `parseTargetCapabilities` as a predicate, so a capability list can be checked without a throw. */
+function targetCapabilitiesOk(value: unknown): boolean {
+  try {
+    parseTargetCapabilities(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `hasTargetKeys` explained. A target has required keys and permitted optional
+ * ones rather than one exact set, so this reports which required key is absent
+ * and which present key is not permitted, and never enumerates the record.
+ */
+function targetKeySetDefect(subject: string, value: Record<string, unknown>): BoardDefect {
+  const missing = TARGET_REQUIRED_KEYS.filter((key) => !Object.hasOwn(value, key));
+  const unexpected = Object.keys(value).filter((key) =>
+    !(TARGET_REQUIRED_KEYS as readonly string[]).includes(key)
+    && !(TARGET_OPTIONAL_KEYS as readonly string[]).includes(key));
+  return {
+    kind: 'key-set',
+    subject,
+    field: '',
+    found: 'a different set of keys',
+    expected: `the required keys ${TARGET_REQUIRED_KEYS.join(', ')}, optionally plus ${TARGET_OPTIONAL_KEYS.join(', ')}`,
+    missingKeys: missing,
+    unexpectedKeys: unexpected.map((key) =>
+      key.length > 0 && key.length <= 64 && /^[A-Za-z0-9._$-]+$/.test(key) ? key : 'a key name that is not a plain identifier'),
+  };
+}
+
+/**
+ * The defect reported when the element is refused but no named field explains
+ * it. This is a deliberately uninformative fallback rather than a guess: it
+ * names the collection and the index and nothing else, so a predicate that
+ * learns a new condition it does not yet explain narrows the diagnostic to
+ * "look here" instead of quoting a record it does not understand.
+ */
+/**
+ * The top-level shape of a canonical board, explained.
+ *
+ * `schemaVersion` is checked before the key set on purpose. A board written by
+ * a build with a different version is the failure an operator has to be told
+ * about first, and a v2 board reaching this reader is missing `targets` and
+ * `dispatches` only *because* of its version; reporting the missing keys would
+ * send the operator looking for two fields that are supposed to be absent.
+ *
+ * Called only after the guard has refused, so this chooses a message and never
+ * an outcome.
+ */
+function canonicalBoardDefect(value: unknown): BoardDefect {
+  if (!isRecord(value)) return notARecordDefect('board', value);
+  if (value.schemaVersion !== BOARD_SCHEMA_VERSION) return versionDefect(value.schemaVersion, BOARD_SCHEMA_VERSION);
+  if (!hasExactKeys(value, CANONICAL_BOARD_KEYS)) return keySetDefect('board', CANONICAL_BOARD_KEYS, value);
+  const field = firstDefect('board', [
+    {
+      field: 'nextIssueNumber',
+      expected: 'a positive safe integer',
+      ok: isPositiveSafeInteger(value.nextIssueNumber),
+      value: value.nextIssueNumber,
+    },
+    { field: 'issues', expected: 'an array of issues', ok: Array.isArray(value.issues), value: value.issues },
+    { field: 'resources', expected: 'an array of resources', ok: Array.isArray(value.resources), value: value.resources },
+    { field: 'targets', expected: 'an array of execution targets', ok: Array.isArray(value.targets), value: value.targets },
+    { field: 'dispatches', expected: 'an array of dispatch records', ok: Array.isArray(value.dispatches), value: value.dispatches },
+  ]);
+  if (field !== null) return field;
+  const issues = value.issues as unknown[];
+  for (let index = 0; index < issues.length; index += 1) {
+    const issue = issues[index];
+    if (issue === undefined || !isIssue(issue)) return issueDefect(issue, index);
+  }
+  // The remaining collections are checked field by field in `parseCanonicalBoard`,
+  // where the issue numbers they refer to are known; naming their elements here
+  // would need a second derivation of the same state for no gain.
+  return { ...unclassifiedElementDefect('board', 0), subject: 'board', field: '' };
+}
+
+/** {@link canonicalBoardDefect} for the four-key v2 board shape. */
+function legacyBoardV2Defect(value: unknown): BoardDefect {
+  if (!isRecord(value)) return notARecordDefect('board', value);
+  if (value.schemaVersion !== LEGACY_BOARD_SCHEMA_VERSION) return versionDefect(value.schemaVersion, LEGACY_BOARD_SCHEMA_VERSION);
+  if (!hasExactKeys(value, LEGACY_BOARD_V2_KEYS)) return keySetDefect('board', LEGACY_BOARD_V2_KEYS, value);
+  const field = firstDefect('board', [
+    {
+      field: 'nextIssueNumber',
+      expected: 'a positive safe integer',
+      ok: isPositiveSafeInteger(value.nextIssueNumber),
+      value: value.nextIssueNumber,
+    },
+    { field: 'issues', expected: 'an array of issues', ok: Array.isArray(value.issues), value: value.issues },
+    { field: 'resources', expected: 'an array of resources', ok: Array.isArray(value.resources), value: value.resources },
+  ]);
+  if (field !== null) return field;
+  const issues = value.issues as unknown[];
+  for (let index = 0; index < issues.length; index += 1) {
+    const issue = issues[index];
+    if (issue === undefined || !isIssue(issue)) return issueDefect(issue, index);
+  }
+  return { ...unclassifiedElementDefect('board', 0), subject: 'board', field: '' };
+}
+
 export function parseLegacyBoardV2(value: unknown): LegacyBoardV2 {
   if (!isRecord(value)
-      || !hasExactKeys(value, ['schemaVersion', 'nextIssueNumber', 'issues', 'resources'])
+      || !hasExactKeys(value, LEGACY_BOARD_V2_KEYS)
       || value.schemaVersion !== LEGACY_BOARD_SCHEMA_VERSION
       || !isPositiveSafeInteger(value.nextIssueNumber)
       || !Array.isArray(value.issues)
       || !value.issues.every(isIssue)
       || !Array.isArray(value.resources)) {
-    throw new Error('Antonina legacy board object is incompatible or malformed');
+    throw new BoardIncompatibilityError(legacyBoardV2Defect(value));
   }
   const board = value as unknown as LegacyBoardV2;
   const numbers = new Set<number>();
   for (const issue of board.issues) {
-    if (numbers.has(issue.number)) throw new Error('Antonina board issue number counter is inconsistent with its issues');
+    if (numbers.has(issue.number)) {
+      throw new BoardIncompatibilityError(corruptDefect(
+        'board.issues', `number ${issue.number}`,
+        'is used by more than one issue',
+        'Antonina board issue number counter is inconsistent with its issues'));
+    }
     numbers.add(issue.number);
   }
-  if (board.nextIssueNumber <= Math.max(0, ...numbers)) throw new Error('Antonina board issue number counter is inconsistent with its issues');
-  for (const resource of board.resources) {
-    if (!isResource(resource, numbers)) throw new Error('Antonina board contains an incompatible or malformed resource');
+  if (board.nextIssueNumber <= Math.max(0, ...numbers)) {
+    throw new BoardIncompatibilityError(corruptDefect(
+      'board', 'nextIssueNumber',
+      'does not exceed every issue number already on the board',
+      'Antonina board issue number counter is inconsistent with its issues'));
+  }
+  for (let index = 0; index < board.resources.length; index += 1) {
+    const resource = board.resources[index];
+    if (resource === undefined || !isResource(resource, numbers)) {
+      throw new BoardIncompatibilityError(resourceDefect(resource, numbers, index));
+    }
   }
   return structuredClone(board);
 }
@@ -691,8 +1095,14 @@ export function upgradePersistedBoard(board: PersistedBoard): Board {
 }
 
 export function parseCanonicalBoard(value: unknown): Board {
+  // The guard is unchanged from the one this parser always ran: it is the sole
+  // authority on what a canonical board is, and it runs first and alone. The
+  // defect functions below are only reached when it has already refused, so
+  // they choose which reason an operator is told and cannot widen what is
+  // accepted. Every defect path below therefore throws in exactly the cases
+  // this condition throws in, and no others.
   if (!isRecord(value)
-      || !hasExactKeys(value, ['schemaVersion', 'nextIssueNumber', 'issues', 'resources', 'targets', 'dispatches'])
+      || !hasExactKeys(value, CANONICAL_BOARD_KEYS)
       || value.schemaVersion !== BOARD_SCHEMA_VERSION
       || !isPositiveSafeInteger(value.nextIssueNumber)
       || !Array.isArray(value.issues)
@@ -700,69 +1110,103 @@ export function parseCanonicalBoard(value: unknown): Board {
       || !Array.isArray(value.resources)
       || !Array.isArray(value.targets)
       || !Array.isArray(value.dispatches)) {
-    throw new Error('Antonina board object is incompatible or malformed');
+    throw new BoardIncompatibilityError(canonicalBoardDefect(value));
   }
 
   const board = value as unknown as Board;
   const numbers = new Set<number>();
   for (const issue of board.issues) {
     if (numbers.has(issue.number)) {
-      throw new Error('Antonina board issue number counter is inconsistent with its issues');
+      throw new BoardIncompatibilityError(corruptDefect(
+        'board.issues', `number ${issue.number}`,
+        'is used by more than one issue',
+        'Antonina board issue number counter is inconsistent with its issues'));
     }
     numbers.add(issue.number);
     for (let index = 1; index < issue.messages.length; index += 1) {
       const previous = issue.messages[index - 1];
       const current = issue.messages[index];
-      if (!previous || !current) throw new Error(`Antonina issue ${issue.number} has malformed messages`);
+      if (!previous || !current) {
+        throw new BoardIncompatibilityError(corruptDefect(
+          `board.issues.${issue.number}.messages`, `index ${index}`,
+          'is missing from an issue that has a message at the index before it',
+          `Antonina issue ${issue.number} has malformed messages`));
+      }
       if (Date.parse(previous.createdAt) > Date.parse(current.createdAt)) {
-        throw new Error(`Antonina issue ${issue.number} has messages out of chronological order`);
+        throw new BoardIncompatibilityError(corruptDefect(
+          `board.issues.${issue.number}.messages`, `index ${index}`,
+          'was created before the message before it',
+          `Antonina issue ${issue.number} has messages out of chronological order`));
       }
     }
   }
   if (board.nextIssueNumber <= Math.max(0, ...numbers)) {
-    throw new Error('Antonina board issue number counter is inconsistent with its issues');
+    throw new BoardIncompatibilityError(corruptDefect(
+      'board', 'nextIssueNumber',
+      'does not exceed every issue number already on the board',
+      'Antonina board issue number counter is inconsistent with its issues'));
   }
 
   const resources = new Set<string>();
-  for (const resource of board.resources) {
+  for (let index = 0; index < board.resources.length; index += 1) {
+    const resource = board.resources[index] as BoardResource;
     const key = JSON.stringify([resource.host, resource.path]);
-    if (resources.has(key)) throw new Error('Antonina board contains duplicate resources');
+    if (resources.has(key)) {
+      throw new BoardIncompatibilityError(corruptDefect(
+        `board.resources`, `index ${index}`,
+        'repeats a host and path already on the board',
+        'Antonina board contains duplicate resources'));
+    }
     resources.add(key);
-    if (!isResource(resource, numbers)) {
-      throw new Error('Antonina board contains an incompatible or malformed resource');
+    if (resource === undefined || !isResource(resource, numbers)) {
+      throw new BoardIncompatibilityError(resourceDefect(resource, numbers, index));
     }
   }
 
   const targetIds = new Set<string>();
   const targetAddresses = new Set<string>();
-  for (const target of board.targets) {
-    if (!isTarget(target)) {
-      throw new Error('Antonina board contains an incompatible or malformed execution target');
+  for (let index = 0; index < board.targets.length; index += 1) {
+    const target = board.targets[index];
+    if (target === undefined || !isTarget(target)) {
+      throw new BoardIncompatibilityError(targetDefect(target, index));
     }
     if (targetIds.has(target.id)) {
-      throw new Error('Antonina board contains duplicate execution target identities');
+      throw new BoardIncompatibilityError(corruptDefect(
+        `board.targets`, `index ${index}`,
+        'reuses an execution target identity already on the board',
+        'Antonina board contains duplicate execution target identities'));
     }
     targetIds.add(target.id);
     if (target.address !== null) {
       // Two targets answering to one host address would make "the host of this
       // resource" ambiguous, so the address is as identifying as the id here.
       if (targetAddresses.has(target.address)) {
-        throw new Error('Antonina board contains two execution targets for one Lubko address');
+        throw new BoardIncompatibilityError(corruptDefect(
+          `board.targets`, `index ${index}.address`,
+          'is a Lubko address another execution target already answers to',
+          'Antonina board contains two execution targets for one Lubko address'));
       }
       targetAddresses.add(target.address);
     }
   }
 
   const dispatchedIssues = new Set<number>();
-  for (const dispatch of board.dispatches) {
-    if (!isDispatch(dispatch, numbers)) {
-      throw new Error('Antonina board contains an incompatible or malformed dispatch record');
+  for (let index = 0; index < board.dispatches.length; index += 1) {
+    const dispatch = board.dispatches[index];
+    if (dispatch === undefined || !isDispatch(dispatch, numbers)) {
+      throw new BoardIncompatibilityError(dispatchDefect(dispatch, numbers, index));
     }
     if (!targetIds.has(dispatch.targetId)) {
-      throw new Error('Antonina board dispatch record names an unregistered execution target');
+      throw new BoardIncompatibilityError(corruptDefect(
+        `board.dispatches`, `index ${index}.targetId`,
+        'names an execution target that is not registered on this board',
+        'Antonina board dispatch record names an unregistered execution target'));
     }
     if (dispatchedIssues.has(dispatch.issueNumber)) {
-      throw new Error('Antonina board contains duplicate dispatch records for one issue');
+      throw new BoardIncompatibilityError(corruptDefect(
+        `board.dispatches`, `index ${index}.issueNumber`,
+        'dispatches an issue another dispatch record already dispatches',
+        'Antonina board contains duplicate dispatch records for one issue'));
     }
     dispatchedIssues.add(dispatch.issueNumber);
   }

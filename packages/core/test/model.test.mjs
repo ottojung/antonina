@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  BoardIncompatibilityError,
   canonicalHost,
   canonicalPath,
   emptyBoard,
@@ -22,7 +23,18 @@ const issue = (number, state = 'open') => ({
 });
 
 test('canonical board parser rejects incompatible schemas and unknown issue fields', () => {
-  assert.throws(() => parseBoard({ schemaVersion: 1, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] }), /incompatible/);
+  // Still refused, and refused as a version mismatch rather than as a shape
+  // complaint: this is the 0.1.0 -> 0.1.1 rollout failure named as one.
+  assert.throws(
+    () => parseBoard({ schemaVersion: 1, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] }),
+    (error) => {
+      assert.ok(error instanceof BoardIncompatibilityError);
+      assert.equal(error.defect.kind, 'schema-version-mismatch');
+      assert.equal(error.defect.found, '1');
+      assert.equal(error.defect.expected, '3');
+      return /schema version is 1, but this build reads schema version 3/.test(error.message);
+    },
+  );
   assert.throws(() => parseBoard({
     schemaVersion: 3,
     nextIssueNumber: 2,
@@ -30,7 +42,13 @@ test('canonical board parser rejects incompatible schemas and unknown issue fiel
     resources: [],
     targets: [],
     dispatches: [],
-  }), /incompatible/);
+  }), (error) => {
+    assert.ok(error instanceof BoardIncompatibilityError);
+    assert.equal(error.defect.kind, 'element');
+    assert.equal(error.defect.subject, 'board issue at index 0');
+    assert.deepEqual(error.defect.unexpectedKeys, ['assignee']);
+    return /has the wrong keys \(unexpected 'assignee'\)/.test(error.message);
+  });
 });
 
 test('canonical board parser rejects unsafe counters and out-of-order messages', () => {
@@ -41,7 +59,11 @@ test('canonical board parser rejects unsafe counters and out-of-order messages',
     resources: [],
     targets: [],
     dispatches: [],
-  }), /incompatible/);
+  }), (error) => {
+    assert.ok(error instanceof BoardIncompatibilityError);
+    assert.equal(error.defect.field, 'nextIssueNumber');
+    return /malformed field nextIssueNumber/.test(error.message);
+  });
   assert.throws(() => parseBoard({
     schemaVersion: 3,
     nextIssueNumber: 2,

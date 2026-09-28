@@ -362,6 +362,26 @@ function jsonSame(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function closedAtFromBoard(board: Board): Map<number, string> {
+  return new Map(
+    board.issues
+      .filter((issue) => issue.state === 'closed')
+      .map((issue) => [issue.number, issue.updatedAt] as const),
+  );
+}
+
+function latestBoardTimestamp(board: Board, fallback: string): string {
+  const timestamps: string[] = [fallback];
+  for (const issue of board.issues) {
+    timestamps.push(issue.createdAt, issue.updatedAt);
+    for (const message of issue.messages) timestamps.push(message.createdAt);
+  }
+  for (const resource of board.resources) timestamps.push(resource.createdAt, resource.updatedAt);
+  for (const target of board.targets) timestamps.push(target.createdAt, target.updatedAt);
+  for (const dispatch of board.dispatches) timestamps.push(dispatch.recordedAt);
+  return new Date(Math.max(...timestamps.map((value) => Date.parse(value)))).toISOString();
+}
+
 function closedAtFromLegacy(log: NonNullable<StoredSignedBoard['log']>, board: Board): Map<number, string> {
   const result = new Map<number, string>();
   for (const issue of board.issues) {
@@ -978,14 +998,15 @@ export class ShardedBoardStore {
     stored: StoredSignedBoard,
     credentialValue: BoardCredential,
   ): Promise<StoredSignedBoard> {
-    if (stored.log === null) return stored;
     const credential = await verifyBoardCredential(credentialValue);
     const anchor = credentialTrustAnchor(credential);
     if (stored.state.deleted) throw new ShardedBoardStoreError('Antonina board has been deleted');
 
     const revision = 1;
     const head = stored.state.head;
-    const closedAt = closedAtFromLegacy(stored.log, stored.state.board);
+    const closedAt = stored.log === null
+      ? closedAtFromBoard(stored.state.board)
+      : closedAtFromLegacy(stored.log, stored.state.board);
     const issueRefs = new Map<number, string>();
     const directoryPages = new Map<number, DirectoryEntry[]>();
 
@@ -1089,9 +1110,11 @@ export class ShardedBoardStore {
     // offsets into the legacy operation log. Normalize once during migration so
     // later snapshot-native entries can append at feedCount without collisions
     // even when the old log contained non-feed operations.
-    const legacyFeed = feedEntries(stored.log)
-      .sort((left, right) => left.position - right.position)
-      .map((entry, position) => ({ ...entry, position }));
+    const legacyFeed = stored.log === null
+      ? []
+      : feedEntries(stored.log)
+          .sort((left, right) => left.position - right.position)
+          .map((entry, position) => ({ ...entry, position }));
     const feedPageRefs: string[] = [];
     const feedPages = paginate(legacyFeed, V3_FEED_PAGE_SIZE);
     for (let index = 0; index < feedPages.length; index += 1) {
@@ -1108,8 +1131,9 @@ export class ShardedBoardStore {
       feedPageRefs.push(ref);
     }
 
-    const updatedAt = stored.log.operations.at(-1)?.timestamp
-      ?? this.now().toISOString();
+    const updatedAt = stored.log === null
+      ? latestBoardTimestamp(stored.state.board, this.now().toISOString())
+      : (stored.log.operations.at(-1)?.timestamp ?? this.now().toISOString());
     const meta: ShardedBoardMeta = {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId: anchor.boardId,
@@ -1117,7 +1141,7 @@ export class ShardedBoardStore {
       head,
       revision,
       updatedAt,
-      migratedFrom: head,
+      migratedFrom: stored.log === null ? null : head,
       nextIssueNumber: stored.state.board.nextIssueNumber,
       issueCount: stored.state.board.issues.length,
       openIssueCount: stored.state.board.issues.filter((issue) => issue.state === 'open').length,

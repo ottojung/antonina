@@ -37,7 +37,7 @@ import {
   runnerReservationState,
   type AgentMetadata,
 } from './metadata.js';
-import { procStartTicks } from './process.js';
+import { procStartTicks, processIsZombie } from './process.js';
 import {
   logPath,
   readMeta,
@@ -95,16 +95,22 @@ function childResult(child: ChildProcess, agentId: string, options: RunnerOption
       if (meta === null) return;
       const intent = persistedControlField(meta, 'intent');
       if (intent.malformed || intent.value === null) return;
+      // `operatorSignalled` is the evidence that this runner asked for the
+      // death, so it is set from whether the signal was actually delivered and
+      // never from the intent alone. `signalInvocation` returns false when the
+      // identity no longer matches or the send failed, which is exactly the
+      // case of a host kill that beat this poll: the intent is on the record,
+      // the process is already gone, and the signal reached nobody. Claiming
+      // credit for that death is what recorded a host SIGKILL as a clean
+      // `stopped`/`killed` with a null `backend_error`.
       if (intent.value === 'kill') {
-        operatorSignalled = true;
-        signalInvocation(meta, 'SIGKILL');
+        if (signalInvocation(meta, 'SIGKILL')) operatorSignalled = true;
         return;
       }
       if (intent.value === 'stop' || intent.value === 'steer') {
         if (controlStartedAt === null) controlStartedAt = Date.now();
         const signal = Date.now() - controlStartedAt >= CONTROL_GRACE_MS ? 'SIGKILL' : 'SIGTERM';
-        operatorSignalled = true;
-        signalInvocation(meta, signal);
+        if (signalInvocation(meta, signal)) operatorSignalled = true;
       }
     }, CONTROL_POLL_MS);
     child.once('close', (code, signal) => {
@@ -391,8 +397,37 @@ async function runInvocation(
         throw error;
       }
       if (!accepted) {
-        try { process.kill(-pid, 'SIGKILL'); } catch {}
-        await resultPromise.catch(() => undefined);
+        // The invocation is already spawned, so refusing to adopt it is not the
+        // end of it. The child has to be ended and its death has to be
+        // recorded, through the same path as an adopted invocation, because
+        // returning here without a terminal state left the agent recorded as
+        // `running` with a dead pid, a null `exit_signal`, no `backend_error`
+        // and a still-claimed reservation. That ghost record is what the
+        // signal-death classification exists to remove, and it is reachable
+        // whenever an operator's stop or kill intent is persisted in the
+        // window between the spawn and this write.
+        // Whether this runner caused the death is decided by evidence and not
+        // by the fact that a kill was attempted: a process that is no longer
+        // running was killed by the host, and its death stays an external one.
+        // The test is for a *live* process, not merely for one whose /proc entry
+        // still resolves. A child that has already died is a zombie until this
+        // runner reaps it, and `procStartTicks` still answers for a zombie, so
+        // a start-tick comparison alone calls a corpse live and hands this
+        // runner credit for a death it did not cause. `processIsZombie` covers
+        // both the exited-and-unreaped case and the entry that has gone away.
+        const alreadyGone = processIsZombie(pid) || procStartTicks(pid) !== startTicks;
+        if (!alreadyGone) {
+          try { process.kill(-pid, 'SIGKILL'); } catch {}
+        }
+        const unadopted = await resultPromise;
+        const unadoptedSignal = signalNumber(unadopted.signal);
+        const unadoptedCode = unadopted.code ?? (unadoptedSignal === null ? 1 : -unadoptedSignal);
+        await finalizeInvocation(agentId, {
+          code: unadopted.code,
+          signal: unadopted.signal,
+          operatorSignalled: !alreadyGone,
+        }, classifyBackendFailure(logFile, invocationLogStart, unadoptedCode, isContinue), options, oom, isContinue);
+        await updateMeta(agentId, (current) => setActiveRunner(current, false), options);
         return false;
       }
       result = await resultPromise;

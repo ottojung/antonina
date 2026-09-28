@@ -290,33 +290,133 @@ test('a. a completely full host still launches, because launch is not host-capac
 // drift marker on the way. It cannot be seeded into the metadata up front
 // instead: `claimPendingPrompt` refuses to claim a prompt for a stop-like
 // agent, so a pre-seeded intent would stop the invocation from ever starting,
-// and the two cases below are precisely about what happens when the intent
-// lands while an invocation is already live. `die` selects whether the fixture
-// then SIGKILLs itself; it is the whole difference between the two cases.
-function intentFixture(t, id, options, { intent, marker = '', die = false } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'antonina-intent-'));
+// and the case below is precisely about what happens when the intent lands while
+// an invocation is already live.
+
+// Wall-clock bounds for the two intent cases at the end of this file, whose
+// fixture backend outlives the control poll on purpose. `INTENT_FIXTURE_BACKSTOP_MS`
+// is the waiting fixture's own ceiling; `INTENT_CASE_TIMEOUT_MS` is the case's
+// and sits above the backstop, so a self-ended fixture is reported as a real
+// assertion failure rather than as a timeout. The successful stop case spends
+// about ten seconds in the backend session-discovery probe before it finalises,
+// because the fixture backend does not answer that probe.
+const INTENT_FIXTURE_BACKSTOP_MS = 20_000;
+const INTENT_CASE_TIMEOUT_MS = 60_000;
+// How long a fixture will wait for the runner to publish the invocation it has
+// already spawned. It is a bound rather than a wait-forever, so a runner that
+// never publishes still ends the case with a diagnosed failure.
+const INTENT_FIXTURE_ADOPT_TIMEOUT_MS = 10_000;
+
+// A backend whose death is provably not this runner's, with the operator's intent
+// still on the record when the runner takes its reading.
+//
+// The obvious fixture for that is one process that writes the intent and then
+// SIGKILLs itself, and that is what this file used. It cannot express the
+// property: writing a file and dying are not one operation, so there is always a
+// window in which the invocation is alive and the intent is on disk, and if the
+// control poll lands in it the runner really does signal the process and records
+// the death as the operator's own — correctly, and against this case's
+// assertion. The window is a scheduler artefact, so the case failed on a loaded
+// host and passed on a quiet one, which is the whole problem this file is here to
+// remove.
+//
+// So the death and the intent are separated here instead. The backend kills
+// itself immediately, and a separate recorder waits until that process is dead
+// before persisting the intent. The ordering is then a fact about processes
+// rather than a race between two of them: by the time the intent is visible the
+// invocation is gone, so a poll that reads it has nothing left to signal and the
+// death is the host's. Nothing is weakened — the case still requires that a
+// persisted kill intent does not excuse a death this runner did not cause, and it
+// now requires it on every run.
+function hostKillBackend(t, id, options, { intent, marker = '' } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'antonina-hostkill-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const helper = join(root, 'record-intent.mjs');
-  writeFileSync(helper, [
+  const recorder = join(root, 'record-intent-after-death.mjs');
+  writeFileSync(recorder, [
     "import { readFileSync, writeFileSync } from 'node:fs';",
-    'const [path, intent, marker, die] = process.argv.slice(2);',
+    'const [path, intent, marker, victim] = process.argv.slice(2);',
+    'const wait = new Int32Array(new SharedArrayBuffer(4));',
+    'for (;;) {',
+    '  let dead = false;',
+    '  try {',
+    // A child that has died is a zombie until the runner reaps it, so an
+    // absent /proc entry is not the only way it can be gone.
+    "    const stat = readFileSync(`/proc/${victim}/stat`, 'utf8');",
+    "    const close = stat.lastIndexOf(')');",
+    "    const state = stat.slice(close + 2, close + 3);",
+    "    dead = state === 'Z' || state === 'X';",
+    '  } catch {',
+    '    dead = true;',
+    '  }',
+    '  if (dead) break;',
+    '  Atomics.wait(wait, 0, 0, 5);',
+    '}',
     'const meta = JSON.parse(readFileSync(path, "utf8"));',
     'meta.intent = intent;',
     'meta.stop_reason = intent;',
     'writeFileSync(path, JSON.stringify(meta));',
     'if (marker !== "") writeFileSync(marker, "");',
-    'if (die === "1") process.kill(process.pid, "SIGKILL");',
-    'else setInterval(() => {}, 1000);',
   ].join('\n'));
-  const argv = [helper, metaPath(id, options), intent, marker, die ? '1' : '0']
+  const argv = [recorder, metaPath(id, options), intent, marker, '$$']
+    .map((value) => JSON.stringify(value))
+    .join(' ');
+  return fakeBackend(t, `#!/bin/sh\necho "starting"\nnode ${argv} &\nkill -KILL $$\n`);
+}
+
+// A fake backend that records the operator intent and then waits to be
+// signalled, so the control poll reaches a live invocation and really sends the
+// signal.
+function intentFixture(t, id, options, { intent, marker = '' } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'antonina-intent-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const helper = join(root, 'record-intent.mjs');
+  writeFileSync(helper, [
+    "import { readFileSync, writeFileSync } from 'node:fs';",
+    'const [path, intent, marker] = process.argv.slice(2);',
+    // Wait for the runner to publish this invocation before touching the record.
+    // The operator's stop or kill lands on an agent that is already running,
+    // and that is also the only order in which this fixture is well defined: the
+    // record is written here without the state lock, so a write that beats the
+    // runner's own publish of the spawned invocation is silently reverted by it,
+    // because the publish carries a snapshot taken before this write. The
+    // intent then never becomes visible to the control poll at all, this
+    // backend is never signalled, and the case fails with a death nobody asked
+    // for — which is how this case failed roughly one run in three.
+    'const park = new Int32Array(new SharedArrayBuffer(4));',
+    `const adoptBy = Date.now() + ${INTENT_FIXTURE_ADOPT_TIMEOUT_MS};`,
+    'for (;;) {',
+    '  let seen = null;',
+    '  try { seen = JSON.parse(readFileSync(path, "utf8")); } catch { /* mid-write */ }',
+    '  if (seen !== null && seen.pid !== null) break;',
+    '  if (Date.now() > adoptBy) break;',
+    '  Atomics.wait(park, 0, 0, 5);',
+    '}',
+    'const meta = JSON.parse(readFileSync(path, "utf8"));',
+    'meta.intent = intent;',
+    'meta.stop_reason = intent;',
+    'writeFileSync(path, JSON.stringify(meta));',
+    'if (marker !== "") writeFileSync(marker, "");',
+    // This fixture outlives the control poll, which is what makes it a real
+    // operator-signalled death rather than a host kill. It is bounded anyway: a fixture that only this runner's
+    // signal can end left the case unsettled for good when that signal did not
+    // land, and `node --test` has no default per-test bound, so the run then
+    // ended only at the caller's external timeout with the other fourteen cases
+    // reported as passed. The bound is well past CONTROL_GRACE_MS (10s) plus
+    // this runner's 200ms poll, so the runner's own SIGTERM-then-SIGKILL
+    // escalation always ends the fixture first; this backstop can only fire
+    // when the signalling is broken, and then the case fails on the
+    // classification instead of hanging.
+    `setTimeout(() => process.kill(process.pid, "SIGKILL"), ${INTENT_FIXTURE_BACKSTOP_MS});`,
+  ].join('\n'));
+  const argv = [helper, metaPath(id, options), intent, marker]
     .map((value) => JSON.stringify(value))
     .join(' ');
   return `node ${argv}`;
 }
 
-// A fake backend whose first act is to record an operator intent and then either
-// die on its own or wait to be signalled. `exec` keeps the recorded pid as the
-// process group leader, so the runner signals the very process the fixture is.
+// A fake backend whose first act is to record an operator intent and then wait
+// to be signalled. `exec` keeps the recorded pid as the process group leader, so
+// the runner signals the very process the fixture is.
 function intentBackend(t, id, options, config) {
   return fakeBackend(t, `#!/bin/sh\necho "starting"\nexec ${intentFixture(t, id, options, config)}\n`);
 }
@@ -559,16 +659,30 @@ test('e. a steer the runner itself signalled is still recorded as a clean stoppe
   assert.equal(after.error, null);
 });
 
-test('e. a kill intent does not excuse a host kill that beat the control poll', async (t) => {
+// Both cases below drive a fixture that outlives the control poll on purpose, so
+// that the poll really does reach a live invocation and really does send the
+// signal; the difference between them is only who killed it. The waiting fixture
+// is bounded rather than open-ended: one that only this runner's signal can end
+// left the case unsettled for good when that signal did not land, and
+// `node --test` has no default per-test bound, so the run then ended only at the
+// caller's external timeout with the other fourteen cases reported as passed and
+// no indication of which one hung. The bounds turn that unbounded wait into a
+// reported failure at a known place. `INTENT_CASE_TIMEOUT_MS` sits above the
+// fixture's ceiling so a self-ended fixture is reported as a real assertion
+// failure rather than as a timeout, and above the case's real cost: the
+// successful stop case spends about ten seconds in the backend
+// session-discovery probe before it finalises, because the fixture backend does
+// not answer that probe.
+test('e. a kill intent does not excuse a host kill that beat the control poll', { timeout: INTENT_CASE_TIMEOUT_MS }, async (t) => {
   if (!requireProc(t)) return;
   // A persisted kill intent is not evidence that the operator's signal reached
-  // the invocation. This invocation records the intent and then SIGKILLs itself
-  // in the same process, so it dies before the 200 ms control poll can run again
-  // and observe what it wrote. The death is the host's, and the classification
-  // has to say so. Keying the classification off the intent instead recorded a
-  // null `backend_error` and no death classification at all, which is the exact
-  // failure this classification exists to remove, and the reason the steer case
-  // needed `operatorSignalled` in the first place.
+  // the invocation. This invocation is killed by the host and the intent lands
+  // on the record only once that process is gone, so there is no window in which
+  // this runner could have signalled it: the death is the host's, and the
+  // classification has to say so. Keying the classification off the intent
+  // instead recorded a null `backend_error` and no death classification at all,
+  // which is the exact failure this classification exists to remove, and the
+  // reason the steer case needed `operatorSignalled` in the first place.
   // The agent record has to exist before the fixture can be told where to write
   // the intent, so the backend is bound after `scratch` and re-pointed here.
   const options = scratch(t, '/nonexistent/backend');
@@ -579,7 +693,7 @@ test('e. a kill intent does not excuse a host kill that beat the control poll', 
   });
   const marker = join(mkdtempSync(join(tmpdir(), 'antonina-oom-')), 'died');
   t.after(() => rmSync(join(marker, '..'), { recursive: true, force: true }));
-  const backend = intentBackend(t, id, options, { intent: 'kill', marker, die: true });
+  const backend = hostKillBackend(t, id, options, { intent: 'kill', marker });
   if (backend === null) return;
   const run = { ...options, env: { ...options.env, ANTONINA_OPENCODE_BIN: backend } };
 
@@ -611,7 +725,7 @@ test('e. a kill intent does not excuse a host kill that beat the control poll', 
   assert.match(after.error, /OOM killer fired inside the agent lifetime/);
 });
 
-test('e. a stop intent the runner itself signalled is still a clean stopped', async (t) => {
+test('e. a stop intent the runner itself signalled is still a clean stopped', { timeout: INTENT_CASE_TIMEOUT_MS }, async (t) => {
   if (!requireProc(t)) return;
   // The complement of the case above, and the guard against over-correcting it.
   // The invocation is still alive when the control poll runs, so the poll really

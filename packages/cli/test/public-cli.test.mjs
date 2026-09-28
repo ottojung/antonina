@@ -38,7 +38,7 @@ test('old positional data arguments are rejected at the public CLI boundary', ()
     (error) => error instanceof PublicCliUsageError && /unexpected positional argument/.test(error.message),
   );
   assert.throws(
-    () => preparePublicCommand('agent', ['prompt', '--id', 'a11d', 'do work']),
+    () => preparePublicCommand('agent', ['run', '--id', 'a11d', 'do work']),
     (error) => error instanceof PublicCliUsageError && /unexpected positional argument/.test(error.message),
   );
 });
@@ -50,8 +50,8 @@ test('option values can contain whitespace, newlines, punctuation and leading da
     ['comment', '7', body],
   );
   assert.deepEqual(
-    run('agent', ['prompt', '--id', 'cafe', '--prompt=--do-not-parse-this-as-an-option', '--detach']),
-    ['prompt', '--id', 'cafe', '--prompt', '--do-not-parse-this-as-an-option', '--detach'],
+    run('agent', ['run', '--id', 'cafe', '--prompt=--do-not-parse-this-as-an-option', '--detach']),
+    ['run', '--id', 'cafe', '--prompt', '--do-not-parse-this-as-an-option', '--detach'],
   );
 });
 

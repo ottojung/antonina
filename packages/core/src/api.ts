@@ -1,3 +1,4 @@
+import type { BoardOverview, IssueListSummary } from './board-v3-store.js';
 import {
   ANTONINA_NAMESPACE,
   BoardDeletedError,
@@ -286,7 +287,9 @@ export class BoardApi {
 
     this.anchor = anchor;
     this.credential = credential;
-    await this.readStored();
+    const overview = await this.store.readOverview(credential, this.rememberedHead);
+    if (overview.deleted) throw new BoardDeletedError();
+    this.rememberedHead = overview.head;
     this.storageRejected = false;
     this.credentialRejection = null;
     this.credentialAccepted = true;
@@ -309,6 +312,21 @@ export class BoardApi {
   async loadState(): Promise<VerifiedBoardState> {
     const stored = await this.readStored();
     return clone(stored.state);
+  }
+
+  /**
+   * Lightweight board read for list-oriented clients. It reads materialized
+   * list pages, queue and catalog only; issue bodies and comment pages are not
+   * fetched until getIssue() is called.
+   */
+  async loadOverview(): Promise<BoardOverview> {
+    const credential = await this.fastReadCredential();
+    const overview = await this.store.readOverview(credential, this.rememberedHead);
+    if (overview.deleted) throw new BoardDeletedError();
+    this.rememberedHead = overview.head;
+    this.credentialAccepted = true;
+    this.credentialRejection = null;
+    return clone(overview);
   }
 
   async loadBoard(): Promise<Board> {
@@ -710,6 +728,7 @@ export {
   parseFeedCursor,
 } from './feed.js';
 export type { BoardFeedEntry, BoardFeedEntryKind, BoardFeedPage, BoardFeedRequest } from './feed.js';
+export type { BoardOverview, IssueListSummary } from './board-v3-store.js';
 export {
   EXECUTION_TARGET_BACKENDS,
   EXECUTION_TARGET_CAPABILITIES,

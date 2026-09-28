@@ -97,27 +97,23 @@ describe('the feed container, mounted', () => {
     expect(read).toHaveBeenCalledTimes(1);
   });
 
-  it('shows the empty state beside a failed read — a known defect, pinned here', async () => {
-    // FOUND WHILE MOUNTING, NOT FIXED HERE, AND REPORTED SEPARATELY. Board issue
-    // 72 is about test configuration, so production behaviour is unchanged. But
-    // `FeedThread` decides the empty state from the entries alone
-    // (`!entries.length && !loading`), and a read that failed leaves the entries
-    // empty, so the mounted tab shows the error *and* "No activity recorded
-    // yet" at the same time. A reader is told the board is quiet in the same
-    // breath as being told the read failed, and the empty state is the more
-    // reassuring of the two.
-    //
-    // This assertion pins the current behaviour so the defect is visible in the
-    // suite rather than only in a report. A deliberate fix must change this
-    // expectation, and the change is what proves the fix happened; it must not be
-    // made to keep this test green.
+  it('does not claim the board is empty when a read fails', async () => {
+    // Board issue 100. A failed read leaves the entries empty and the load
+    // finished, so deciding the empty state from `entries` and `loading` alone
+    // showed the reader "No activity recorded yet" beside the failure. The
+    // backend's own reason is the only thing that distinguishes a read that
+    // failed from a board that has never recorded anything, so the error stands
+    // alone: the empty state is absent, not beside it.
     const read = vi.fn(async () => { throw new Error('the board log is not readable from this browser'); });
 
     const { container } = mount(read);
     await screen.findByRole('alert');
 
-    expect(container.querySelector('.empty-state h2')?.textContent).toBe(FEED_EMPTY.title);
+    expect(container.querySelector('.empty-state')).toBeNull();
+    expect(screen.queryByText(FEED_EMPTY.title)).toBeNull();
   });
+
+  it.todo('characterisation: a failed read used to render the empty state too (issue 72 pin, replaced by issue 100)');
 
   it('asks for older entries with the token the backend issued and appends what comes back', async () => {
     const first = entry('comment-added', 3);

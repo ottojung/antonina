@@ -674,14 +674,6 @@ function humanLines(result: CommandResult): string[] {
       'capabilities: ' + access.capabilities.join(', '),
     ];
   }
-  if (result.mode === 'authorities') {
-    return (result.value as VerifiedAuthority[]).map((authority) =>
-      authority.keyId
-      + ' parent=' + (authority.parentKeyId ?? '-')
-      + ' ' + (authority.revoked ? 'revoked' : 'active')
-      + ' [' + authority.capabilities.join(', ') + ']'
-    );
-  }
   if (result.mode === 'queue') {
     return [(result.value as number[]).map((number) => '#' + number).join(' ')];
   }

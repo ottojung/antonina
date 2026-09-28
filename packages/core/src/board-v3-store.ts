@@ -1188,8 +1188,9 @@ export class ShardedBoardStore {
         payload: payload as unknown as CanonicalValue,
       }));
 
-      const beforeIssueNumber = isRecord(payload) && Number.isSafeInteger(payload.number)
-        ? payload.number as number
+      const payloadNumber = isRecord(payload) ? payload.number : undefined;
+      const beforeIssueNumber = typeof payloadNumber === 'number' && Number.isSafeInteger(payloadNumber)
+        ? payloadNumber
         : null;
       const beforeIssue = beforeIssueNumber === null
         ? undefined

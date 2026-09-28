@@ -28,6 +28,18 @@ npm install -g ./antonina-cli-*.tgz
 
 This installs the `antonina` executable. Release artifacts should ship the already-built package, so execution hosts do not compile TypeScript.
 
+### OpenClaw orchestrator skill
+
+The OpenClaw skill used by Antonina hosts is versioned in this repository at `skills/antonina-orchestrator/`. Deploy that directory as a unit so the skill and its companion resource instructions stay on the same revision as the CLI:
+
+```sh
+mkdir -p "$HOME/.openclaw/skills"
+rm -rf "$HOME/.openclaw/skills/antonina-orchestrator"
+cp -a skills/antonina-orchestrator "$HOME/.openclaw/skills/"
+```
+
+The versioned skill is mechanically checked against `docs/skills/orchestrator.md` and `docs/skills/resources.md` in CI so the human-readable documentation and installed OpenClaw skill cannot silently drift.
+
 ## Board
 
 The Antonina board stores issues and durable resources in Skrynia as a signed operation log under `antonina/board-v2`. The CLI is available as `antonina board`. Command and subcommand words are positional, but every data argument is an explicit named option: for example, `antonina board show --id 12`, `antonina board create --title "Fix it" --body "Details"`, and `antonina board comment --id 12 --body "Done"`. Every public command and subcommand supports `-h` and `--help`. It reads its trust anchor from `$XDG_CONFIG_HOME/antonina/trust.json` and its credential from `$XDG_CONFIG_HOME/antonina/credential.json`, falling back to `$HOME/.config/antonina` when `XDG_CONFIG_HOME` is unset. Those two files are the only source: there is no environment override for either, so a fresh shell needs nothing exported. Unrelated settings — `ANTONINA_BOARD_URL`, `ANTONINA_BOARD_HEAD`, `ANTONINA_BOARD_AUTHOR` — remain environment variables.

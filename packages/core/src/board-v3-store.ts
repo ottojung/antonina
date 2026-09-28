@@ -30,6 +30,7 @@ import {
 import {
   OPLOG_SCHEMA_VERSION,
   applyBoardMutation,
+  parseUnsignedBoardOperation,
   type BoardOperationPayload,
   type BoardTrustAnchor,
   type SignedBoardOperation,
@@ -1169,7 +1170,7 @@ export class ShardedBoardStore {
       const bundle = await this.readBundle(credential, pointer);
       if (bundle.state.deleted) throw new ShardedBoardStoreError('Antonina board has been deleted');
 
-      const payload = typeof request.payload === 'function'
+      const rawPayload = typeof request.payload === 'function'
         ? request.payload(clone(bundle.state))
         : request.payload;
       const timestamp = canonicalTimestampAtOrAfter(
@@ -1177,6 +1178,20 @@ export class ShardedBoardStore {
         bundle.meta.updatedAt,
       );
       const nonce = request.nonce ?? this.newId();
+
+      // Reuse the strict operation payload parser only as a validator and
+      // normalizer. V3 does not persist, verify, or replay an operation log.
+      const validated = parseUnsignedBoardOperation({
+        schemaVersion: OPLOG_SCHEMA_VERSION,
+        boardId: pointer.boardId,
+        previous: pointer.head,
+        signerKeyId: credential.rootKeyId,
+        timestamp,
+        nonce,
+        kind: request.kind,
+        payload: rawPayload,
+      });
+      const payload = validated.payload;
       const revision = pointer.revision + 1;
       const head = await sha256Id('sha256', canonicalBytes({
         boardId: pointer.boardId,

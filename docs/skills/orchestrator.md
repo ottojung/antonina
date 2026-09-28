@@ -25,7 +25,7 @@ Use JSON output for orchestration decisions.
 antonina board access --json
 antonina board queue list --json
 antonina board list --state open --json
-antonina board show NUMBER --json
+antonina board show --id NUMBER --json
 ```
 
 The board trust anchor and credential come from Antonina's config directory. Never print, copy into comments, or otherwise expose credentials, private keys, tokens, or other secrets.
@@ -162,7 +162,7 @@ When Antonina's managed agent runtime is appropriate, use the CLI:
 antonina agent list
 antonina agent status --id ID
 antonina agent log --id ID
-antonina agent prompt --id ID --detach '...'
+antonina agent prompt --id ID --prompt '...' --detach
 antonina agent new --id ID --cwd /absolute/worktree
 ```
 
@@ -209,7 +209,7 @@ Before closing an issue:
 1. reconcile the claimed result with objective repository/execution state;
 2. make any required resource handoff safe;
 3. append a `completed` comment naming the result and validation;
-4. close the issue with `antonina board close NUMBER`;
+4. close the issue with `antonina board close --id NUMBER`;
 5. verify that the issue is closed and no longer appears in the queue.
 
 If the implementation is ready but a human-only action is still required, use `handoff`, leave the issue open, and name that action explicitly.
@@ -231,24 +231,24 @@ Never put secrets in issue bodies, comments, branch names, logs quoted into comm
 antonina board access --json
 antonina board queue list --json
 antonina board list --state open --json
-antonina board show NUMBER --json
+antonina board show --id NUMBER --json
 
 # append coordination state
-antonina board comment NUMBER BODY
-antonina board comment NUMBER BODY --author NAME
+antonina board comment --id NUMBER --body BODY
+antonina board comment --id NUMBER --body BODY --author NAME
 
 # issue lifecycle
-antonina board create TITLE --body BODY
-antonina board close NUMBER
-antonina board reopen NUMBER
+antonina board create --title TITLE --body BODY
+antonina board close --id NUMBER
+antonina board reopen --id NUMBER
 
 # shared priority, only when priority really changed
-antonina board queue reorder N1 N2 N3
+antonina board queue reorder --id N1 --id N2 --id N3
 
 # durable resource dependencies
 antonina board resource list --issue NUMBER
-antonina board resource add NUMBER HOST PATH
-antonina board resource remove NUMBER HOST PATH
+antonina board resource add --issue NUMBER --host HOST --path PATH
+antonina board resource remove --issue NUMBER --host HOST --path PATH
 ```
 
 The board is the durable coordination memory. Keep it concise, factual, append-only, and sufficient for the next fresh pass.

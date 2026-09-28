@@ -5,6 +5,7 @@ import { generateSigningKey } from '../dist/canonical.js';
 import { createBoardCredential, credentialSigningKey } from '../dist/credential.js';
 import { signBoardOperation } from '../dist/operations.js';
 import {
+import { fakeSkrynia } from './fake-skrynia.mjs';
   BoardApi,
   BoardDeletedError,
   BoardMissingError,
@@ -20,49 +21,6 @@ function jsonResponse(value, status, etag) {
   const headers = { 'Content-Type': 'application/json' };
   if (etag !== undefined) headers.ETag = etag;
   return new Response(JSON.stringify(value), { status, headers });
-}
-
-function fakeSkrynia() {
-  const capability = 'a'.repeat(64);
-  let signed = null;
-  let revision = 0;
-  let beforePut = null;
-  const etag = () => `"v${revision}"`;
-
-  return {
-    capability,
-    get signed() { return signed; },
-    set beforePut(value) { beforePut = value; },
-    async fetch(url, init = {}) {
-      const method = init.method ?? 'GET';
-      if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
-      if (method === 'GET') {
-        return signed === null ? new Response(null, { status: 404 }) : jsonResponse(signed, 200, etag());
-      }
-      if (method === 'POST') {
-        if (signed !== null) return new Response(null, { status: 409 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return jsonResponse({ mode: 'capability-write', capability }, 201);
-      }
-      if (method === 'PUT') {
-        const headers = new Headers(init.headers);
-        if (headers.get('X-Skrynia-Capability') !== capability) {
-          return jsonResponse({ error: 'invalid capability' }, 403);
-        }
-        if (beforePut) {
-          const hook = beforePut;
-          beforePut = null;
-          await hook();
-        }
-        if (headers.get('If-Match') !== etag()) return new Response(null, { status: 412 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return new Response(null, { status: 200 });
-      }
-      return new Response(null, { status: 405 });
-    },
-  };
 }
 
 function api(server, options = {}) {

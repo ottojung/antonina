@@ -19,6 +19,7 @@ test('versioned OpenClaw skill stays in sync with canonical skill docs', () => {
     'description: Coordinate recurring software work through the Antonina board queue and append-only issue history.',
     '---',
     '',
+    '',
   ].join('\n');
 
   assert.equal(skill, frontmatter + orchestrator);

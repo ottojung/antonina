@@ -109,17 +109,18 @@ describe('browser board session', () => {
     });
     const owner = counting();
     const initialized = await owner.initialize();
-    // The existence probe and the create's own compare-and-set read; both belong
-    // to the one create, and neither is repeated inside our call.
-    expect(gets).toBe(2);
+    // A fresh client checks v3 and then legacy v2 before creating the board,
+    // followed by one read-back of the board it created. There is no duplicate
+    // v3 probe on that read-back.
+    expect(gets).toBe(3);
     expect(initialized.state.board.issues).toEqual([]);
     expect(initialized.state.queue).toEqual([]);
 
     const reader = counting();
     const state = await reader.trust(serializeBoardTrustAnchor(initialized.trustAnchor));
-    // One read: trusting a known anchor is a single verified pass over the log,
-    // and it returns that pass's state, so no read follows it.
-    expect(gets).toBe(3);
+    // A fresh reader probes v3 once, then reads/verifies legacy v2 once. It
+    // returns that verified state directly, so no third read follows it.
+    expect(gets).toBe(5);
     expect(state.board.issues).toEqual([]);
     expect(state.queue).toEqual([]);
   });

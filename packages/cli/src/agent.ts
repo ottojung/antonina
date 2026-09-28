@@ -467,10 +467,10 @@ async function followAttached(agentId: string, context: AgentCommandContext): Pr
 
 async function cmdRun(args: string[], context: AgentCommandContext): Promise<number> {
   const parsed = parse(args, ['--steer', '--detach', '--json']);
-  if (parsed.positionals.length > 1) throw new UsageError('run: expected one prompt');
+  if (parsed.positionals.length !== 0) throw new UsageError('run: unexpected positional arguments');
   const agentId = requireAgentId(parsed.values.get('--id'), 'run');
-  const prompt = parsed.values.get('--prompt') ?? parsed.positionals[0];
-  if (!prompt) throw new UsageError('run: a prompt is required');
+  const prompt = parsed.values.get('--prompt');
+  if (!prompt) throw new UsageError('run: --prompt is required');
   const observed = requireMeta(agentId, context);
   // Durable execution configuration must be canonical before this prompt can
   // acquire runner or invocation authority.

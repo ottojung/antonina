@@ -766,8 +766,12 @@ export class ShardedBoardStore {
     return { value: meta, etag: stored.etag };
   }
 
-  private async readChunk(boardId: string, chunk: number): Promise<JsonObject<ShardedLogChunk>> {
-    const stored = await this.getJson<unknown>(logKey(chunk));
+  private async readChunk(
+    boardId: string,
+    chunk: number,
+    storageCapability: string,
+  ): Promise<JsonObject<ShardedLogChunk>> {
+    const stored = await this.getJson<unknown>(logKey(chunk), storageCapability);
     if (stored === null || !isRecord(stored.value)
         || stored.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
         || stored.value.boardId !== boardId
@@ -786,12 +790,15 @@ export class ShardedBoardStore {
     };
   }
 
-  private async readLog(meta: ShardedBoardMeta): Promise<BoardOperationLog> {
+  private async readLog(meta: ShardedBoardMeta, storageCapability: string): Promise<BoardOperationLog> {
     if (meta.tailOperations.length < 1 || meta.tailOperations.length > V3_LOG_CHUNK_SIZE) {
       throw new ShardedBoardStoreError('Antonina v3 log tail size is malformed');
     }
     const chunks = await Promise.all(
-      Array.from({ length: meta.logChunkCount }, (_, index) => this.readChunk(meta.boardId, index + 1)),
+      Array.from(
+        { length: meta.logChunkCount },
+        (_, index) => this.readChunk(meta.boardId, index + 1, storageCapability),
+      ),
     );
     for (const chunk of chunks) {
       if (chunk.value.operations.length !== V3_LOG_CHUNK_SIZE) {
@@ -817,20 +824,20 @@ export class ShardedBoardStore {
     };
   }
 
-  async read(anchor: BoardTrustAnchor, previouslyAcceptedHead?: string | null): Promise<StoredSignedBoard | null> {
-    const metaStored = await this.loadMeta(anchor);
+  async read(
+    anchor: BoardTrustAnchor,
+    storageCapability: string,
+    previouslyAcceptedHead?: string | null,
+  ): Promise<StoredSignedBoard | null> {
+    const metaStored = await this.loadMeta(storageCapability, anchor);
     if (metaStored === null) return null;
-    const log = await this.readLog(metaStored.value);
-    const state = await verifyAndReplayOperationLog(
-      log,
-      anchor,
-      previouslyAcceptedHead === undefined ? {} : { previouslyAcceptedHead },
-    );
+    const log = await this.readLog(metaStored.value, storageCapability);
+    const state = await verifyTrustKeyLog(log, anchor, storageCapability, previouslyAcceptedHead);
     return { log, state, etag: metaStored.etag };
   }
 
   private async writeIssue(boardId: string, issue: BoardIssue, revision: number, storageCapability: string): Promise<void> {
-    await this.upsertShared(issueKey(issue.number), issueRecord(boardId, issue, revision), storageCapability);
+    await this.upsertPublic(issueKey(issue.number), issueRecord(boardId, issue, revision), storageCapability);
     const changedPage = issue.messages.length === 0
       ? 0
       : Math.floor((issue.messages.length - 1) / V3_COMMENT_PAGE_SIZE) + 1;
@@ -844,12 +851,12 @@ export class ShardedBoardStore {
         revision,
         messages: issue.messages.slice(offset, offset + V3_COMMENT_PAGE_SIZE),
       };
-      await this.upsertShared(commentKey(issue.number, changedPage), page, storageCapability);
+      await this.upsertPublic(commentKey(issue.number, changedPage), page, storageCapability);
     }
   }
 
   private async writeAllComments(boardId: string, issue: BoardIssue, revision: number, storageCapability: string): Promise<void> {
-    await this.upsertShared(issueKey(issue.number), issueRecord(boardId, issue, revision), storageCapability);
+    await this.upsertPublic(issueKey(issue.number), issueRecord(boardId, issue, revision), storageCapability);
     const pages = Math.ceil(issue.messages.length / V3_COMMENT_PAGE_SIZE);
     await Promise.all(Array.from({ length: pages }, async (_, index) => {
       const pageNumber = index + 1;
@@ -861,7 +868,7 @@ export class ShardedBoardStore {
         revision,
         messages: issue.messages.slice(index * V3_COMMENT_PAGE_SIZE, (index + 1) * V3_COMMENT_PAGE_SIZE),
       };
-      await this.upsertShared(commentKey(issue.number, pageNumber), page, storageCapability);
+      await this.upsertPublic(commentKey(issue.number, pageNumber), page, storageCapability);
     }));
   }
 
@@ -872,7 +879,7 @@ export class ShardedBoardStore {
       revision,
       numbers: [...state.queue],
     };
-    await this.upsertShared(SHARDED_QUEUE_KEY, value, storageCapability);
+    await this.upsertPublic(SHARDED_QUEUE_KEY, value, storageCapability);
   }
 
   private async writeCatalog(boardId: string, state: VerifiedBoardState, revision: number, storageCapability: string): Promise<void> {
@@ -884,7 +891,7 @@ export class ShardedBoardStore {
       targets: clone(state.board.targets),
       dispatches: clone(state.board.dispatches),
     };
-    await this.upsertShared(SHARDED_CATALOG_KEY, value, storageCapability);
+    await this.upsertPublic(SHARDED_CATALOG_KEY, value, storageCapability);
   }
 
   private async writeAuthorities(boardId: string, state: VerifiedBoardState, revision: number, storageCapability: string): Promise<void> {
@@ -894,7 +901,7 @@ export class ShardedBoardStore {
       revision,
       authorities: clone(state.authorities),
     };
-    await this.upsertShared(SHARDED_AUTHORITIES_KEY, value, storageCapability);
+    await this.upsertPublic(SHARDED_AUTHORITIES_KEY, value, storageCapability);
   }
 
   private async writeIssuePages(
@@ -906,7 +913,7 @@ export class ShardedBoardStore {
     storageCapability: string,
   ): Promise<void> {
     const pages = issuePages(boardId, state, log, issueState, revision);
-    await Promise.all(pages.map((page) => this.upsertShared(issuePageKey(issueState, page.page), page, storageCapability)));
+    await Promise.all(pages.map((page) => this.upsertPublic(issuePageKey(issueState, page.page), page, storageCapability)));
   }
 
   private async writeIssuePageContaining(
@@ -939,12 +946,12 @@ export class ShardedBoardStore {
         pageNumber * V3_ISSUE_PAGE_SIZE,
       ),
     };
-    await this.upsertShared(issuePageKey(issue.state, pageNumber), page, storageCapability);
+    await this.upsertPublic(issuePageKey(issue.state, pageNumber), page, storageCapability);
   }
 
   private async writeFeedPages(boardId: string, log: BoardOperationLog, revision: number, storageCapability: string): Promise<void> {
     const pages = feedPages(boardId, log, revision);
-    await Promise.all(pages.map((page) => this.upsertShared(feedPageKey(page.page), page, storageCapability)));
+    await Promise.all(pages.map((page) => this.upsertPublic(feedPageKey(page.page), page, storageCapability)));
   }
 
   private async writeAllMaterialized(
@@ -989,11 +996,11 @@ export class ShardedBoardStore {
       ),
     }));
 
-    await Promise.all(chunks.map((chunk) => this.upsertShared(logKey(chunk.chunk), chunk, storageCapability)));
+    await Promise.all(chunks.map((chunk) => this.upsertPublic(logKey(chunk.chunk), chunk, storageCapability)));
     await this.writeAllMaterialized(stored.state, stored.log, revision, storageCapability);
 
     const meta = metaFor(stored.log, stored.state, stored.state.head, revision);
-    const created = await this.createShared(SHARDED_META_KEY, meta, storageCapability);
+    const created = await this.createPublic(SHARDED_META_KEY, meta, storageCapability);
     if (!created) {
       const winner = await this.loadMeta();
       if (winner === null
@@ -1014,7 +1021,7 @@ export class ShardedBoardStore {
       chunk: chunkNumber,
       operations: clone(meta.tailOperations),
     };
-    const created = await this.createShared(logKey(chunkNumber), chunk, storageCapability);
+    const created = await this.createPublic(logKey(chunkNumber), chunk, storageCapability);
     if (created) return;
     const existing = await this.readChunk(meta.boardId, chunkNumber);
     const existingIds = existing.value.operations.map((operation) => operation.opId);
@@ -1068,7 +1075,7 @@ export class ShardedBoardStore {
       case 'issue.delete': {
         const number = payload.number;
         if (number === undefined) throw new ShardedBoardStoreError('Issue delete has no issue number');
-        await this.upsertShared(issueKey(number), deletedIssueRecord(boardId, number, revision), storageCapability);
+        await this.upsertPublic(issueKey(number), deletedIssueRecord(boardId, number, revision), storageCapability);
         await this.writeIssuePages(boardId, candidate, log, revision, 'open', storageCapability);
         await this.writeIssuePages(boardId, candidate, log, revision, 'closed', storageCapability);
         await this.writeQueue(boardId, candidate, revision, storageCapability);
@@ -1120,7 +1127,7 @@ export class ShardedBoardStore {
           revision,
           entries: [...entries, newest].sort((left, right) => left.position - right.position),
         };
-        await this.upsertShared(feedPageKey(pageNumber), page, storageCapability);
+        await this.upsertPublic(feedPageKey(pageNumber), page, storageCapability);
       }
     }
   }
@@ -1154,7 +1161,7 @@ export class ShardedBoardStore {
       if (meta.materializedRevision !== meta.operationCount) {
         await this.writeAllMaterialized(state, log, meta.operationCount, credential.storageCapability);
         const repaired = { ...meta, materializedRevision: meta.operationCount };
-        if (!await this.putShared(SHARDED_META_KEY, repaired, credential.storageCapability, metaStored.etag)) continue;
+        if (!await this.putPublic(SHARDED_META_KEY, repaired, credential.storageCapability, metaStored.etag)) continue;
         continue;
       }
 
@@ -1186,7 +1193,7 @@ export class ShardedBoardStore {
         meta.migratedFrom,
         meta.materializedRevision,
       );
-      if (!await this.putShared(SHARDED_META_KEY, committedMeta, credential.storageCapability, metaStored.etag)) continue;
+      if (!await this.putPublic(SHARDED_META_KEY, committedMeta, credential.storageCapability, metaStored.etag)) continue;
 
       // The signed operation is canonical now. Materialized objects are a
       // repairable acceleration layer, never the commit point.
@@ -1205,7 +1212,7 @@ export class ShardedBoardStore {
           && finalMeta.value.head === operation.opId
           && finalMeta.value.materializedRevision < revision) {
         const repaired = { ...finalMeta.value, materializedRevision: revision };
-        if (await this.putShared(SHARDED_META_KEY, repaired, credential.storageCapability, finalMeta.etag)) {
+        if (await this.putPublic(SHARDED_META_KEY, repaired, credential.storageCapability, finalMeta.etag)) {
           finalMeta = await this.loadMeta(anchor);
         }
       }

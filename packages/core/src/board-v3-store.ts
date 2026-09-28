@@ -42,6 +42,7 @@ import type {
 
 export const SHARDED_BOARD_SCHEMA_VERSION = 1 as const;
 export const SHARDED_META_KEY = 'board-v3-meta';
+export const SHARDED_PRESENT_KEY = 'board-v3-present';
 export const SHARDED_LOG_PREFIX = 'board-v3-log';
 export const SHARDED_ISSUE_PREFIX = 'board-v3-issue';
 export const SHARDED_COMMENT_PREFIX = 'board-v3-comments';
@@ -566,6 +567,43 @@ export class ShardedBoardStore {
     return (await this.getJson<unknown>(SHARDED_META_KEY, storageCapability)) !== null;
   }
 
+  /**
+   * Public marker contains no board contents. It only prevents a client with a
+   * wrong board key from silently falling back to the frozen public board-v2
+   * snapshot after the board has migrated.
+   */
+  async migrationMarker(): Promise<{ boardId: string; rootKeyId: string } | null> {
+    const response = await this.fetcher(
+      `${this.baseUrl}/store/antonina/${encodeURIComponent(SHARDED_PRESENT_KEY)}`,
+      { cache: 'no-store' },
+    );
+    if (response.status === 404) return null;
+    if (response.status !== 200) throw this.httpError('GET', SHARDED_PRESENT_KEY, response);
+    const value = await this.parseJson(response, 'Skrynia GET Antonina v3 migration marker');
+    if (!isRecord(value) || typeof value.boardId !== 'string' || typeof value.rootKeyId !== 'string') {
+      throw new ShardedBoardStoreError('Antonina v3 migration marker is malformed');
+    }
+    return { boardId: value.boardId, rootKeyId: value.rootKeyId };
+  }
+
+  private async ensureMigrationMarker(boardId: string, rootKeyId: string): Promise<void> {
+    const url = `${this.baseUrl}/store/antonina/${encodeURIComponent(SHARDED_PRESENT_KEY)}`;
+    const response = await this.fetcher(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Skrynia-Mode': 'immutable',
+      },
+      body: JSON.stringify({ boardId, rootKeyId }),
+    });
+    if (response.status === 201) return;
+    if (response.status !== 409) throw this.httpError('POST', SHARDED_PRESENT_KEY, response);
+    const existing = await this.migrationMarker();
+    if (existing?.boardId !== boardId || existing.rootKeyId !== rootKeyId) {
+      throw new ShardedBoardStoreError('Antonina v3 migration marker belongs to another board');
+    }
+  }
+
   async loadMeta(
     storageCapability: string,
     anchor?: BoardTrustAnchor,
@@ -827,6 +865,7 @@ export class ShardedBoardStore {
         throw new ShardedBoardStoreError('Concurrent Antonina v3 migration chose another trust root');
       }
     }
+    await this.ensureMigrationMarker(meta.boardId, meta.rootKeyId);
     return stored;
   }
 

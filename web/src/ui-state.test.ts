@@ -415,6 +415,11 @@ describe('the feed, as the browser presents it', () => {
     // The author and the body are the comment payload's, and are read only
     // there: no other kind carries them, and none is invented for one.
     expect(feedEntrySummary(feedEntry({ kind: 'comment-added', author: 'Lubko', body: 'on it' }))).toBe('commented by Lubko: on it');
+    expect(feedEntrySummary(feedEntry({
+      kind: 'comment-added',
+      author: undefined as unknown as null,
+      body: undefined as unknown as null,
+    }))).toBe('commented — Issue 4');
   });
 
   it('reports the issues the log never named, and only those', () => {

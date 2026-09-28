@@ -22,6 +22,7 @@ import { type BoardFeedPage, type BoardFeedRequest } from './feed.js';
 import {
   ShardedBoardStore,
   ShardedBoardStoreError,
+  type BoardOverview,
   type IssueListPage,
 } from './board-v3-store.js';
 
@@ -320,6 +321,20 @@ export class SignedBoardStore {
     if (await this.sharded.readPointer() !== null) return;
     const migrated = await this.readWithCredential(credential, previouslyAcceptedHead);
     if (migrated === null) throw new BoardMissingError();
+  }
+
+  async readOverview(
+    credentialValue: BoardCredential,
+    previouslyAcceptedHead?: string | null,
+  ): Promise<BoardOverview> {
+    const credential = await verifyBoardCredential(credentialValue);
+    await this.ensureMaterialized(credential, previouslyAcceptedHead);
+    try {
+      return await this.sharded.readOverview(credential);
+    } catch (error) {
+      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
+      throw error;
+    }
   }
 
   async getIssue(

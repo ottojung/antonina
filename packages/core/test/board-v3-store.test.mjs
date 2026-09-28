@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { SignedBoardStore } from '../dist/board-store.js';
-import { credentialTrustAnchor } from '../dist/credential.js';
 
 function jsonResponse(value, status, etag) {
   const headers = { 'Content-Type': 'application/json' };
@@ -32,7 +31,8 @@ function fakeSkrynia() {
     async fetch(url, init = {}) {
       const method = init.method ?? 'GET';
       const key = keyOf(url);
-      requests.push({ method, key });
+      const body = init.body === undefined ? null : JSON.parse(String(init.body));
+      requests.push({ method, key, body });
       const current = objects.get(key);
 
       if (method === 'GET') {
@@ -45,16 +45,12 @@ function fakeSkrynia() {
         if (current !== undefined) return new Response(null, { status: 409 });
         const headers = new Headers(init.headers);
         const mode = headers.get('X-Skrynia-Mode');
-        if (mode !== 'capability-write' && mode !== 'public-write') {
+        if (!['capability-write', 'public-write', 'immutable'].includes(mode)) {
           return jsonResponse({ error: 'mode required' }, 400);
         }
-        const headers = new Headers(init.headers);
-        const suppliedCapability = headers.get('X-Skrynia-Capability');
-        const objectCapability = mode === 'capability-write'
-          ? (suppliedCapability ?? capability)
-          : null;
+        const objectCapability = mode === 'capability-write' ? capability : null;
         const entry = {
-          value: JSON.parse(String(init.body)),
+          value: body,
           mode,
           capability: objectCapability,
           revision: 1,
@@ -77,7 +73,7 @@ function fakeSkrynia() {
         }
         const match = headers.get('If-Match');
         if (match !== null && match !== etag(current)) return new Response(null, { status: 412 });
-        current.value = JSON.parse(String(init.body));
+        current.value = body;
         current.revision += 1;
         return new Response(null, { status: 200 });
       }
@@ -85,6 +81,19 @@ function fakeSkrynia() {
       return new Response(null, { status: 405 });
     },
   };
+}
+
+function findObject(server, predicate) {
+  return [...server.objects.entries()].find(([, entry]) => predicate(entry.value)) ?? null;
+}
+
+function findMeta(server) {
+  return findObject(
+    server,
+    (value) => value && value.schemaVersion === 1
+      && Array.isArray(value.tailOperations)
+      && Number.isInteger(value.operationCount),
+  );
 }
 
 function deterministicStore(server) {
@@ -113,11 +122,13 @@ test('first mutation migrates board-v2 into chunked v3 and leaves board-v2 froze
 
   assert.equal(committed.state.board.issues.length, 1);
   assert.deepEqual(server.objects.get('board-v2').value, legacy);
-  assert.ok(server.objects.has('board-v3-meta'));
-  assert.ok(server.objects.has('board-v3-issue-000000001'));
-  assert.ok(server.objects.has('board-v3-issues-open-000000001'));
+  assert.ok(findObject(server, (value) => value?.issue?.number === 1));
+  assert.ok(findObject(server, (value) => value?.state === 'open' && Array.isArray(value.entries)));
+  assert.ok(server.objects.has('board-v3-present'));
 
-  const meta = server.objects.get('board-v3-meta').value;
+  const metaEntry = findMeta(server);
+  assert.ok(metaEntry);
+  const meta = metaEntry[1].value;
   assert.equal(meta.operationCount, 2);
   assert.equal(meta.tailOperations.length, 2);
   assert.equal(meta.logChunkCount, 0);
@@ -136,7 +147,7 @@ test('materialized issue reads do not fetch board-v2 or replay every log chunk',
     kind: 'issue.create',
     payload: { number: 1, title: 'One key', body: '' },
   }, initialized.state.head);
-  const afterCreate = await store.read(credentialTrustAnchor(initialized.credential));
+  const afterCreate = await store.readWithCredential(initialized.credential);
   assert.ok(afterCreate);
 
   await store.append(initialized.credential, {
@@ -145,17 +156,14 @@ test('materialized issue reads do not fetch board-v2 or replay every log chunk',
   }, afterCreate.state.head);
 
   server.clearRequests();
-  const issue = await store.getIssue(credentialTrustAnchor(initialized.credential), 1);
+  const issue = await store.getIssue(initialized.credential, 1);
 
   assert.equal(issue?.title, 'One key');
   assert.equal(issue?.messages.length, 1);
   assert.equal(issue?.messages[0].body, 'hello');
   assert.equal(server.requests.some((request) => request.key === 'board-v2'), false);
-  assert.equal(server.requests.some((request) => request.key.startsWith('board-v3-log-')), false);
-  assert.deepEqual(
-    server.requests.map((request) => request.key),
-    ['board-v3-meta', 'board-v3-meta', 'board-v3-issue-000000001', 'board-v3-comments-000000001-000000001'],
-  );
+  assert.equal(server.requests.length, 4);
+  assert.equal(server.requests.every((request) => request.method === 'GET'), true);
 });
 
 test('feed reads use only the v3 feed pages after migration', async () => {
@@ -173,39 +181,41 @@ test('feed reads use only the v3 feed pages after migration', async () => {
   }, created.state.head);
 
   server.clearRequests();
-  const page = await store.readFeed(credentialTrustAnchor(initialized.credential), { limit: 10 });
+  const page = await store.readFeed(initialized.credential, { limit: 10 });
 
   assert.equal(page?.entries.length, 2);
   assert.equal(page?.entries[0].kind, 'comment-added');
   assert.equal(server.requests.some((request) => request.key === 'board-v2'), false);
-  assert.equal(server.requests.some((request) => request.key.startsWith('board-v3-log-')), false);
-  assert.deepEqual(
-    server.requests.map((request) => request.key),
-    ['board-v3-meta', 'board-v3-meta', 'board-v3-feed-000000001'],
-  );
+  assert.equal(server.requests.length, 3);
+  assert.equal(server.requests.every((request) => request.method === 'GET'), true);
 });
 
-test('v3 writes keep using the existing signing key even if the old storage capability is stale', async () => {
+test('a credential without the shared board key cannot read or write migrated v3', async () => {
   const server = fakeSkrynia();
   const store = deterministicStore(server);
   const initialized = await store.initialize();
 
-  const created = await store.append(initialized.credential, {
+  await store.append(initialized.credential, {
     kind: 'issue.create',
     payload: { number: 1, title: 'Migrated', body: '' },
   }, initialized.state.head);
 
-  const oldKeyWithStaleV2StorageCapability = {
+  const wrongBoardKey = {
     ...initialized.credential,
     storageCapability: 'b'.repeat(64),
   };
-  const commented = await store.append(oldKeyWithStaleV2StorageCapability, {
-    kind: 'issue.comment',
-    payload: { number: 1, author: 'root', body: 'still the same signing identity' },
-  }, created.state.head);
 
-  assert.equal(commented.state.board.issues[0].messages.length, 1);
-  assert.equal(commented.state.board.issues[0].messages[0].body, 'still the same signing identity');
+  await assert.rejects(
+    () => store.readWithCredential(wrongBoardKey),
+    /does not carry the board key/,
+  );
+  await assert.rejects(
+    () => store.append(wrongBoardKey, {
+      kind: 'issue.comment',
+      payload: { number: 1, author: 'root', body: 'must not land' },
+    }),
+    /does not carry the board key/,
+  );
 });
 
 
@@ -240,7 +250,7 @@ test('concurrent v3 writers serialize through metadata CAS without losing either
     }, seed.state.head),
   ]);
 
-  const final = await first.read(credentialTrustAnchor(initialized.credential), seed.state.head);
+  const final = await first.readWithCredential(initialized.credential, seed.state.head);
   assert.ok(final);
   assert.equal(final.state.board.issues.length, 3);
   assert.deepEqual(
@@ -251,7 +261,9 @@ test('concurrent v3 writers serialize through metadata CAS without losing either
     new Set(final.state.board.issues.map((issue) => issue.title)),
     new Set(['Seed', 'Left', 'Right']),
   );
-  const meta = server.objects.get('board-v3-meta').value;
+  const metaEntry = findMeta(server);
+  assert.ok(metaEntry);
+  const meta = metaEntry[1].value;
   assert.equal(meta.operationCount, 4);
   assert.equal(meta.materializedRevision, 4);
   assert.equal(meta.tailOperations.length, 4);
@@ -290,8 +302,11 @@ test('commenting an issue rewrites only its one issue-list page', async () => {
     payload: { number: 1, author: 'tester', body: 'one-page update' },
   }, migrated.state.head);
 
-  const pageWrites = server.requests
-    .filter((request) => request.method === 'PUT' && request.key.startsWith('board-v3-issues-open-'))
-    .map((request) => request.key);
-  assert.deepEqual(pageWrites, ['board-v3-issues-open-000000001']);
+  const pageWrites = server.requests.filter(
+    (request) => request.method === 'PUT'
+      && request.body?.state === 'open'
+      && Array.isArray(request.body?.entries),
+  );
+  assert.equal(pageWrites.length, 1);
+  assert.equal(pageWrites[0].body.page, 1);
 });

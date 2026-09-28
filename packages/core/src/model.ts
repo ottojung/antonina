@@ -6,6 +6,7 @@ import {
   firstDefect,
   keySetDefect,
   notARecordDefect,
+  readKeyName,
   unclassifiedElementDefect,
   versionDefect,
   type BoardDefect,
@@ -713,7 +714,7 @@ function messageDefect(value: unknown, where: string): BoardDefect | null {
 
 /** {@link messageDefect} for one message, or the issue-level defect if the element is not even a record. */
 function messageElementDefect(issue: BoardIssue, index: number, value: unknown): BoardDefect {
-  const where = `board.issues.${issue.number}.messages`;
+  const where = `board issue ${issue.number} message at index ${index}`;
   const detail = messageDefect(value, where);
   if (detail === null) return unclassifiedElementDefect(where, index);
   return { ...detail, kind: 'element', subject: where, field: detail.field };
@@ -790,19 +791,14 @@ function resourceDefect(value: unknown, issueNumbers: Set<number>, index: number
       value: value.path,
     },
     { field: 'issueNumbers', expected: 'an array of issue numbers', ok: Array.isArray(issueList), value: issueList },
-    Array.isArray(issueList) && issueList.length > 0
-      ? {
-        field: 'issueNumbers',
-        expected: 'a non-empty list of issue numbers that exist on this board',
-        ok: true,
-        found: describeArray(issueList, 'at least one issue number'),
-      }
-      : {
-        field: 'issueNumbers',
-        expected: 'a non-empty list of issue numbers that exist on this board',
-        ok: false,
-        value: issueList,
-      },
+    {
+      field: 'issueNumbers',
+      expected: 'a non-empty list of issue numbers that exist on this board',
+      ok: Array.isArray(issueList) && issueList.length > 0,
+      // The count is what makes an empty list and a list of one different
+      // failures, and a count is not a value.
+      found: Array.isArray(issueList) ? describeArray(issueList, 'at least one issue number') : undefined,
+    },
     {
       field: 'createdAt',
       expected: 'a parseable timestamp string',
@@ -972,8 +968,7 @@ function targetKeySetDefect(subject: string, value: Record<string, unknown>): Bo
     found: 'a different set of keys',
     expected: `the required keys ${TARGET_REQUIRED_KEYS.join(', ')}, optionally plus ${TARGET_OPTIONAL_KEYS.join(', ')}`,
     missingKeys: missing,
-    unexpectedKeys: unexpected.map((key) =>
-      key.length > 0 && key.length <= 64 && /^[A-Za-z0-9._$-]+$/.test(key) ? key : 'a key name that is not a plain identifier'),
+    unexpectedKeys: unexpected.map(readKeyName),
   };
 }
 
@@ -1128,13 +1123,13 @@ export function parseCanonicalBoard(value: unknown): Board {
       const current = issue.messages[index];
       if (!previous || !current) {
         throw new BoardIncompatibilityError(corruptDefect(
-          `board.issues.${issue.number}.messages`, `index ${index}`,
+          `board issue ${issue.number} messages`, `index ${index}`,
           'is missing from an issue that has a message at the index before it',
           `Antonina issue ${issue.number} has malformed messages`));
       }
       if (Date.parse(previous.createdAt) > Date.parse(current.createdAt)) {
         throw new BoardIncompatibilityError(corruptDefect(
-          `board.issues.${issue.number}.messages`, `index ${index}`,
+          `board issue ${issue.number} messages`, `index ${index}`,
           'was created before the message before it',
           `Antonina issue ${issue.number} has messages out of chronological order`));
       }
@@ -1149,18 +1144,22 @@ export function parseCanonicalBoard(value: unknown): Board {
 
   const resources = new Set<string>();
   for (let index = 0; index < board.resources.length; index += 1) {
-    const resource = board.resources[index] as BoardResource;
+    const resource = board.resources[index];
+    // A resource that is not even a record is refused before the duplicate key
+    // is derived from it. The base reader read `host` and `path` first and so
+    // died on a `null` element with a TypeError; the board is refused either
+    // way, and refusing it with a diagnosis rather than a crash is the point.
+    if (resource === undefined || !isRecord(resource) || !isResource(resource, numbers)) {
+      throw new BoardIncompatibilityError(resourceDefect(resource, numbers, index));
+    }
     const key = JSON.stringify([resource.host, resource.path]);
     if (resources.has(key)) {
       throw new BoardIncompatibilityError(corruptDefect(
-        `board.resources`, `index ${index}`,
+        'board.resources', `index ${index}`,
         'repeats a host and path already on the board',
         'Antonina board contains duplicate resources'));
     }
     resources.add(key);
-    if (resource === undefined || !isResource(resource, numbers)) {
-      throw new BoardIncompatibilityError(resourceDefect(resource, numbers, index));
-    }
   }
 
   const targetIds = new Set<string>();

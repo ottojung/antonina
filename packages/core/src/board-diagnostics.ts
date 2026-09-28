@@ -193,12 +193,17 @@ export function readSchemaVersion(value: unknown): string {
 }
 
 /**
- * A key name, echoed only when it is short and made of characters that cannot
- * carry a secret. An unexpected key arriving from an untrusted payload is a
- * shape report, not a quotation of the payload.
+ * A key name is echoed only when it looks like an identifier this codebase
+ * writes: letters, digits, underscore and dash, at most 64 characters, not
+ * starting with a digit. Dots are excluded on purpose, so a credential-shaped
+ * key — anything with `a.b.c` structure — is described instead of quoted. An
+ * unexpected key arriving from an untrusted payload is a shape report, not a
+ * quotation of the payload.
  */
-function readKeyName(key: string): string {
-  return key.length > 0 && key.length <= 64 && /^[A-Za-z0-9._$-]+$/.test(key) ? key : '"' + 'a key name that is not a plain identifier"';
+const KEY_NAME = /^[A-Za-z_$][A-Za-z0-9_$-]{0,63}$/;
+const UNREADABLE_KEY_NAME = 'a key name that is not a plain identifier';
+export function readKeyName(key: string): string {
+  return KEY_NAME.test(key) ? key : UNREADABLE_KEY_NAME;
 }
 
 /** One named expectation, checked in the order the schema states it. */
@@ -209,7 +214,7 @@ export interface DefectCheck {
   /** The value the check read, reported by type only when it fails. */
   readonly value?: unknown;
   /** Overrides the type report when the diagnosis knows better. */
-  readonly found?: string;
+  readonly found?: string | undefined;
 }
 
 /**

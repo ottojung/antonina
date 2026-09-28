@@ -64,6 +64,191 @@ export const V3_FEED_PAGE_SIZE = 50;
 const DEFAULT_MAX_ATTEMPTS = 6;
 const textEncoder = new TextEncoder();
 
+function owned(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+function hexBytes(value: string): Uint8Array {
+  if (!/^[0-9a-f]{64}$/i.test(value)) {
+    throw new ShardedBoardStoreError('Antonina board key is malformed');
+  }
+  const result = new Uint8Array(value.length / 2);
+  for (let index = 0; index < result.length; index += 1) {
+    result[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+  }
+  return result;
+}
+
+async function trustKeyMac(storageCapability: string, bytes: Uint8Array): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    owned(hexBytes(storageCapability)),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, owned(bytes));
+  return base64UrlEncode(new Uint8Array(signature));
+}
+
+function unsignedFromSigned(operation: SignedBoardOperation): UnsignedBoardOperation {
+  return {
+    schemaVersion: operation.schemaVersion,
+    boardId: operation.boardId,
+    previous: operation.previous,
+    signerKeyId: operation.signerKeyId,
+    timestamp: operation.timestamp,
+    nonce: operation.nonce,
+    kind: operation.kind,
+    payload: operation.payload,
+  };
+}
+
+async function trustKeyOperation(
+  input: {
+    boardId: string;
+    rootKeyId: string;
+    previous: string | null;
+    timestamp: string;
+    nonce: string;
+    kind: Exclude<SignedBoardOperation['kind'], 'board.initialize'>;
+    payload: BoardOperationPayload;
+  },
+  storageCapability: string,
+): Promise<SignedBoardOperation> {
+  const unsigned = parseUnsignedBoardOperation({
+    schemaVersion: OPLOG_SCHEMA_VERSION,
+    boardId: input.boardId,
+    previous: input.previous,
+    signerKeyId: input.rootKeyId,
+    timestamp: input.timestamp,
+    nonce: input.nonce,
+    kind: input.kind,
+    payload: input.payload,
+  });
+  const bytes = canonicalBytes(unsigned as unknown as CanonicalValue);
+  return {
+    ...unsigned,
+    opId: await sha256Id('sha256', bytes),
+    signature: await trustKeyMac(storageCapability, bytes),
+  };
+}
+
+async function trustKeyLog(log: BoardOperationLog, storageCapability: string): Promise<BoardOperationLog> {
+  return {
+    ...clone(log),
+    operations: await Promise.all(log.operations.map(async (operation) => ({
+      ...operation,
+      signature: await trustKeyMac(
+        storageCapability,
+        canonicalBytes(unsignedFromSigned(operation) as unknown as CanonicalValue),
+      ),
+    }))),
+  };
+}
+
+async function verifyTrustKeyLog(
+  value: unknown,
+  anchor: BoardTrustAnchor,
+  storageCapability: string,
+  previouslyAcceptedHead?: string | null,
+): Promise<VerifiedBoardState> {
+  const log = parseOperationLog(value);
+  if (log.boardId !== anchor.boardId || log.rootKeyId !== anchor.rootKeyId || log.operations.length === 0) {
+    throw new ShardedBoardStoreError('Antonina v3 log does not match this board key');
+  }
+
+  let previous: string | null = null;
+  let previousTimestamp: string | null = null;
+  let board: Board | undefined;
+  let queue: number[] = [];
+  let deleted = false;
+  const seen = new Set<string>();
+
+  for (let index = 0; index < log.operations.length; index += 1) {
+    const operation = log.operations[index]!;
+    if (operation.boardId !== anchor.boardId || operation.previous !== previous) {
+      throw new ShardedBoardStoreError('Antonina v3 operation chain is invalid');
+    }
+    if (previousTimestamp !== null && operation.timestamp < previousTimestamp) {
+      throw new ShardedBoardStoreError('Antonina v3 operation timestamps are not monotonic');
+    }
+
+    const unsigned = unsignedFromSigned(operation);
+    const bytes = canonicalBytes(unsigned as unknown as CanonicalValue);
+    if (operation.opId !== await sha256Id('sha256', bytes)) {
+      throw new ShardedBoardStoreError('Antonina v3 operation identity is invalid');
+    }
+    if (operation.signature !== await trustKeyMac(storageCapability, bytes)) {
+      throw new ShardedBoardStoreError('Antonina v3 operation was not authorized by the board key');
+    }
+    if (seen.has(operation.opId)) throw new ShardedBoardStoreError('Antonina v3 operation is duplicated');
+    seen.add(operation.opId);
+
+    if (index === 0) {
+      if (operation.kind !== 'board.initialize' || operation.previous !== null) {
+        throw new ShardedBoardStoreError('Antonina v3 log has no valid initialization');
+      }
+      board = upgradePersistedBoard(
+        (operation.payload as { board: Parameters<typeof upgradePersistedBoard>[0] }).board,
+      );
+      queue = board.issues.filter((issue) => issue.state === 'open').map((issue) => issue.number);
+    } else {
+      if (operation.kind === 'board.initialize') {
+        throw new ShardedBoardStoreError('Antonina v3 board initialization may only appear once');
+      }
+      if (board === undefined || deleted) {
+        throw new ShardedBoardStoreError('Antonina v3 operation follows a deleted or missing board');
+      }
+      // Historical delegation/revocation records are retained for provenance
+      // but have no authorization meaning in v3. Possession of the one board
+      // key is the entire access model.
+      if (operation.kind !== 'authority.delegate' && operation.kind !== 'authority.revoke') {
+        const applied = applyBoardMutation(operation, board, queue);
+        board = applied.board;
+        queue = applied.queue;
+        deleted = applied.deleted;
+      }
+    }
+
+    previous = operation.opId;
+    previousTimestamp = operation.timestamp;
+  }
+
+  if (board === undefined || previous === null || log.head !== previous) {
+    throw new ShardedBoardStoreError('Antonina v3 log head is invalid');
+  }
+  if (previouslyAcceptedHead !== undefined
+      && previouslyAcceptedHead !== null
+      && !seen.has(previouslyAcceptedHead)) {
+    throw new ShardedBoardStoreError('Antonina v3 log would roll back the previously accepted board state');
+  }
+
+  return {
+    board,
+    queue,
+    authorities: [{
+      keyId: anchor.rootKeyId,
+      publicKey: anchor.rootPublicKey,
+      parentKeyId: null,
+      capabilities: [...BOARD_CAPABILITIES],
+      revoked: false,
+    }],
+    deleted,
+    head: previous,
+  };
+}
+
+async function objectLocator(storageCapability: string, logicalKey: string): Promise<string> {
+  const mac = await trustKeyMac(
+    storageCapability,
+    textEncoder.encode('antonina-v3-object:' + logicalKey),
+  );
+  return 'board-v3-' + mac;
+}
+
 export interface ShardedBoardMeta {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;

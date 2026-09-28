@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { createBrowserBoardApi, type BoardFeedEntry, type BoardFeedPage } from './api';
-import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, appendFeedPage, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, boardReadOutcome, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
+import { createBrowserBoardApi, type BoardFeedEntry, type BoardFeedPage, type IssueListSummary } from './api';
+import { resourceState, type BoardIssue, type BoardResource } from './model';
+import { COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, appendFeedPage, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, overviewLoaded, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type BoardSummary, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -20,6 +20,7 @@ export default function App() {
   const [load, setLoad] = useState<BoardLoad>({ status: 'loading' });
   const [view, setView] = useState<View>('issues');
   const [selectedNumber, setSelectedNumber] = useState<number>();
+  const [selectedIssue, setSelectedIssue] = useState<BoardIssue>();
   const [filter, setFilter] = useState<IssueFilter>('open');
   const [displayName, setDisplayName] = useState(() => window.localStorage.getItem(DISPLAY_NAME_KEY) ?? '');
   const [access, setAccess] = useState<BoardAccess>('read-only');
@@ -37,9 +38,9 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const verified = await session.readState();
-      setLoad(boardLoaded(verified));
-      if (verified === null) {
+      const overview = await session.readOverview();
+      setLoad(overviewLoaded(overview));
+      if (overview === null) {
         setAccess('read-only');
         setError(undefined);
         return;
@@ -79,8 +80,27 @@ export default function App() {
   const counts = issueCounts(board?.issues ?? []);
   const hasWriteAccess = access === 'editable';
   const empty = emptyIssueList(filter, hasWriteAccess);
-  const selected = board?.issues.find((issue) => issue.number === selectedNumber);
-  useEffect(() => { if (selected && !visible.some((issue) => issue.number === selected.number)) setSelectedNumber(undefined); }, [selected, visible]);
+  const selected = selectedIssue?.number === selectedNumber ? selectedIssue : undefined;
+  useEffect(() => {
+    if (selectedNumber !== undefined && !visible.some((issue) => issue.number === selectedNumber)) {
+      setSelectedNumber(undefined);
+    }
+  }, [selectedNumber, visible]);
+  useEffect(() => {
+    if (selectedNumber === undefined || ready === undefined
+        || !ready.board.issues.some((issue) => issue.number === selectedNumber)) {
+      setSelectedIssue(undefined);
+      return;
+    }
+    let live = true;
+    setSelectedIssue((current) => current?.number === selectedNumber ? current : undefined);
+    void api.getIssue(selectedNumber).then((issue) => {
+      if (live) setSelectedIssue(issue);
+    }).catch((cause) => {
+      if (live) setError(cause instanceof Error ? cause.message : 'The issue could not be loaded');
+    });
+    return () => { live = false; };
+  }, [api, selectedNumber, ready?.head]);
 
   const clearOutcome = useCallback(() => clearBothOutcomes(() => setError(undefined), () => setNotice(undefined)), []);
   /** Every write goes through the one commit path, so callers only say what to send. */
@@ -120,6 +140,7 @@ export default function App() {
     session.clearCredential();
     setAccess('read-only');
     setSelectedNumber(undefined);
+    setSelectedIssue(undefined);
     setSettingsOpen(false);
     setLoad({ status: 'untrusted' });
     setNotice(undefined);
@@ -133,11 +154,10 @@ export default function App() {
     event.preventDefault(); setUnlocking(true); setError(undefined);
     try {
       const enabled = await session.enableEditing(credentialInput);
-      const verified = await session.readState();
-      const outcome = boardReadOutcome(verified);
-      if (outcome.error) { setError(outcome.error); return; }
+      const overview = await session.readOverview();
+      if (overview === null) { setError('The board could not be read back'); return; }
       setAccess(enabled.canEdit ? 'editable' : 'rejected');
-      setLoad(outcome.load);
+      setLoad(overviewLoaded(overview));
       setCredentialInput('');
       setFeedGeneration((current) => current + 1);
     } catch (cause) {
@@ -194,7 +214,7 @@ export default function App() {
     </header>
     {error && <div className="notice error" role="alert"><span>{error}</span><button onClick={() => setError(undefined)} aria-label="Dismiss error">Dismiss</button></div>}
     {notice && <div className="notice success" role="status"><span>{notice}</span><button onClick={() => setNotice(undefined)} aria-label="Dismiss message">Dismiss</button></div>}
-    <main className={`workspace ${view}-view ${selected ? 'has-selection' : ''}`}>
+    <main className={`workspace ${view}-view ${selectedNumber !== undefined ? 'has-selection' : ''}`}>
       <aside className="issue-pane" aria-label={TAB_PANE_LABEL[view]}>
         <div className="pane-heading"><div><p className="eyebrow">One board, everyone’s work</p><h1>{TAB_TITLE[view]}</h1><p>{view === 'issues' ? <>{QUEUE_HINT} Track what needs attention and discuss the details together.</> : view === 'resources' ? 'Registered paths are protected while at least one dependent Antonina issue remains open.' : FEED_HINT}</p></div></div>
         {view === 'issues' ? <>
@@ -207,7 +227,9 @@ export default function App() {
           : <FeedView readFeed={session.readFeed} issues={board!.issues} generation={feedGeneration} onOpenIssue={openIssue} />}
       </aside>
       {view === 'issues' ? selected ? <Thread issue={selected} access={access} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.number, body), 'Description updated')} close={() => void run(() => api.close(selected.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.number), 'Issue reopened')} back={() => setSelectedNumber(undefined)} />
-        : <section className="thread welcome"><div className="welcome-mark" aria-hidden="true">A</div><p className="eyebrow">Shared issue board</p><h2>Choose an issue to join the conversation.</h2></section> : null}
+        : selectedNumber !== undefined
+          ? <section className="thread welcome"><div className="welcome-mark" aria-hidden="true">A</div><p className="eyebrow">Issue #{selectedNumber}</p><h2>Loading issue…</h2></section>
+          : <section className="thread welcome"><div className="welcome-mark" aria-hidden="true">A</div><p className="eyebrow">Shared issue board</p><h2>Choose an issue to join the conversation.</h2></section> : null}
     </main>
     {settingsOpen && <SettingsPanel displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} access={access} credentialInput={credentialInput} setCredentialInput={setCredentialInput} saveCredential={saveCredential} clearCredential={clearCredential} credentialText={session.credentialText()} copyKey={copyKey} close={closeSettings} />}
   </div>;
@@ -333,7 +355,7 @@ export function issueMovedToPosition(event: { preventDefault(): void }, order: n
 }
 
 export function IssueQueue({ issues, queue, hasWriteAccess, selectedNumber, onSelect, onReorder, empty }: {
-  issues: BoardIssue[];
+  issues: IssueListSummary[];
   queue: number[];
   hasWriteAccess: boolean;
   selectedNumber: number | undefined;
@@ -352,7 +374,7 @@ export function IssueQueue({ issues, queue, hasWriteAccess, selectedNumber, onSe
 }
 
 function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSelect, onReorder }: {
-  issue: BoardIssue;
+  issue: IssueListSummary;
   order: number[];
   position: number;
   hasWriteAccess: boolean;
@@ -377,7 +399,7 @@ function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSel
   return <div className={`issue-row ${selected ? 'selected' : ''}`} data-issue={issue.number}
     onDragOver={queued ? allowIssueDrop : undefined}
     onDrop={queued ? (event) => { void onReorder(issueDropped(event, order, issue.number)); } : undefined}>
-    <button className="issue-select" onClick={() => onSelect(issue.number)} aria-current={selected ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{issue.messages.length} messages{issue.body ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>
+    <button className="issue-select" onClick={() => onSelect(issue.number)} aria-current={selected ? 'true' : undefined}><span className="issue-summary"><span className="issue-line"><strong>#{issue.number}</strong><span className={`state-label ${issue.state}`}>{issue.state}</span><time dateTime={issue.updatedAt}>Updated {formatUpdatedAt(issue.updatedAt)}</time></span><span className="issue-title">{issue.title}</span><span className="issue-meta">{issue.messageCount} messages{issue.hasBody ? ' · has description' : ''}</span></span><span className="row-arrow" aria-hidden="true">›</span></button>
     {/* The badge carries its name as text: an aria-label on a span whose only
         role is the implicit generic is prohibited and is never announced, so
         the position was spoken as a bare digit. The wording is real text, the
@@ -474,7 +496,7 @@ function AccessNotice({ access, readOnly, className, onAction }: { access: ReadO
   return <div className={className}><div><strong>{callout.title}</strong><p>{callout.body}</p></div><button onClick={onAction}>{callout.action}</button></div>;
 }
 
-function ResourcesView({ board, issues, access, onOpenIssue, onAdd, onRemove, onEnableEditing }: { board: Board; issues: BoardIssue[]; access: BoardAccess; onOpenIssue: (number: number) => void; onAdd: (host: string, path: string, number: number) => Promise<unknown>; onRemove: (resource: BoardResource, number: number) => Promise<unknown>; onEnableEditing: () => void }) {
+function ResourcesView({ board, issues, access, onOpenIssue, onAdd, onRemove, onEnableEditing }: { board: BoardSummary; issues: IssueListSummary[]; access: BoardAccess; onOpenIssue: (number: number) => void; onAdd: (host: string, path: string, number: number) => Promise<unknown>; onRemove: (resource: BoardResource, number: number) => Promise<unknown>; onEnableEditing: () => void }) {
   const grouped = groupResources(board.resources);
   async function add(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await onAdd(String(data.get('host')), String(data.get('path')), Number(data.get('issue'))); if (result) form.reset(); }
   return <div className="resources-view">
@@ -485,7 +507,7 @@ function ResourcesView({ board, issues, access, onOpenIssue, onAdd, onRemove, on
     {!board.resources.length && <div className="empty-state"><h2>No resources registered</h2><p>Registered paths appear here grouped by Lubko host.</p></div>}
   </div>;
 }
-function AddDependency({ resource, issues, add }: { resource: BoardResource; issues: BoardIssue[]; add: (host: string, path: string, number: number) => Promise<unknown> }) { const options = issues.filter((issue) => issue.state === 'open' && !resource.issueNumbers.includes(issue.number)); if (!options.length) return null; return <form className="dependency-add" onSubmit={async (event) => { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await add(resource.host, resource.path, Number(data.get('issue'))); if (result) form.reset(); }}><select name="issue" required defaultValue=""><option value="" disabled>Add open issue dependency…</option>{options.map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add</button></form>; }
+function AddDependency({ resource, issues, add }: { resource: BoardResource; issues: IssueListSummary[]; add: (host: string, path: string, number: number) => Promise<unknown> }) { const options = issues.filter((issue) => issue.state === 'open' && !resource.issueNumbers.includes(issue.number)); if (!options.length) return null; return <form className="dependency-add" onSubmit={async (event) => { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await add(resource.host, resource.path, Number(data.get('issue'))); if (result) form.reset(); }}><select name="issue" required defaultValue=""><option value="" disabled>Add open issue dependency…</option>{options.map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add</button></form>; }
 
 /**
  * The feed tab's container. It owns nothing but the page it last read: every
@@ -497,7 +519,7 @@ function AddDependency({ resource, issues, add }: { resource: BoardResource; iss
  */
 export function FeedView({ readFeed, issues, generation, onOpenIssue }: {
   readFeed: FeedRead;
-  issues: BoardIssue[];
+  issues: IssueListSummary[];
   generation: number;
   onOpenIssue: (number: number) => void;
 }) {
@@ -572,7 +594,7 @@ export interface FeedThreadProps {
   /** How many entries the whole feed holds, per the same page. */
   total: number;
   /** The board view, used only to report the issues the log never recorded. */
-  issues: BoardIssue[];
+  issues: IssueListSummary[];
   loading: boolean;
   error: string | undefined;
   onShowMore: () => void;

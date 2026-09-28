@@ -286,6 +286,12 @@ export class SignedBoardStore {
   ): Promise<StoredSignedBoard> {
     const credential = await verifyBoardCredential(credentialValue);
     const anchor = credentialTrustAnchor(credential);
+    if (credential.keyId !== anchor.rootKeyId || credential.publicKey !== anchor.rootPublicKey) {
+      throw new SignedBoardStoreError('Antonina accepts only the shared root board credential');
+    }
+    if (request.kind === 'authority.delegate' || request.kind === 'authority.revoke') {
+      throw new SignedBoardStoreError('Antonina delegated credential operations are disabled');
+    }
 
     // A fresh client may attach after another client has already migrated the
     // board. Probe once while availability is unknown; a client that already

@@ -696,6 +696,21 @@ export class ShardedBoardStore {
     await Promise.all(pages.map((page) => this.upsertPublic(feedPageKey(page.page), page)));
   }
 
+  private async writeAllMaterialized(
+    state: VerifiedBoardState,
+    log: BoardOperationLog,
+    revision: number,
+  ): Promise<void> {
+    const boardId = log.boardId;
+    await Promise.all(state.board.issues.map((issue) => this.writeAllComments(boardId, issue, revision)));
+    await this.writeQueue(boardId, state, revision);
+    await this.writeCatalog(boardId, state, revision);
+    await this.writeAuthorities(boardId, state, revision);
+    await this.writeIssuePages(boardId, state, log, revision, 'open');
+    await this.writeIssuePages(boardId, state, log, revision, 'closed');
+    await this.writeFeedPages(boardId, log, revision);
+  }
+
   async migrate(stored: StoredSignedBoard): Promise<StoredSignedBoard> {
     const existing = await this.loadMeta();
     if (existing !== null) {
@@ -711,27 +726,21 @@ export class ShardedBoardStore {
     }
 
     const revision = stored.log.operations.length;
-    const chunks: ShardedLogChunk[] = [];
-    for (let offset = 0; offset < stored.log.operations.length; offset += V3_LOG_CHUNK_SIZE) {
-      chunks.push({
-        schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-        boardId: stored.log.boardId,
-        chunk: Math.floor(offset / V3_LOG_CHUNK_SIZE) + 1,
-        operations: stored.log.operations.slice(offset, offset + V3_LOG_CHUNK_SIZE),
-      });
-    }
+    const sealedChunkCount = Math.floor((stored.log.operations.length - 1) / V3_LOG_CHUNK_SIZE);
+    const chunks: ShardedLogChunk[] = Array.from({ length: sealedChunkCount }, (_, index) => ({
+      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+      boardId: stored.log.boardId,
+      chunk: index + 1,
+      operations: stored.log.operations.slice(
+        index * V3_LOG_CHUNK_SIZE,
+        (index + 1) * V3_LOG_CHUNK_SIZE,
+      ),
+    }));
 
     await Promise.all(chunks.map((chunk) => this.upsertPublic(logKey(chunk.chunk), chunk)));
-    await Promise.all(stored.state.board.issues.map((issue) =>
-      this.writeAllComments(stored.log.boardId, issue, revision)));
-    await this.writeQueue(stored.log.boardId, stored.state, revision);
-    await this.writeCatalog(stored.log.boardId, stored.state, revision);
-    await this.writeAuthorities(stored.log.boardId, stored.state, revision);
-    await this.writeIssuePages(stored.log.boardId, stored.state, stored.log, revision, 'open');
-    await this.writeIssuePages(stored.log.boardId, stored.state, stored.log, revision, 'closed');
-    await this.writeFeedPages(stored.log.boardId, stored.log, revision);
+    await this.writeAllMaterialized(stored.state, stored.log, revision);
 
-    const meta = metaFor(stored.log, stored.state, stored.state.head);
+    const meta = metaFor(stored.log, stored.state, stored.state.head, revision);
     const created = await this.createPublic(SHARDED_META_KEY, meta);
     if (!created) {
       const winner = await this.loadMeta();
@@ -744,48 +753,24 @@ export class ShardedBoardStore {
     return stored;
   }
 
-  private async commitLogOperation(
-    meta: ShardedBoardMeta,
-    operation: SignedBoardOperation,
-  ): Promise<boolean> {
-    const nextIndex = meta.operationCount;
-    const chunkNumber = Math.floor(nextIndex / V3_LOG_CHUNK_SIZE) + 1;
-    const offset = nextIndex % V3_LOG_CHUNK_SIZE;
-    const current = await this.getJson<unknown>(logKey(chunkNumber));
-
-    if (current === null) {
-      if (offset !== 0) {
-        throw new ShardedBoardStoreError('Antonina v3 tail log chunk is unexpectedly missing');
-      }
-      const chunk: ShardedLogChunk = {
-        schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-        boardId: meta.boardId,
-        chunk: chunkNumber,
-        operations: [operation],
-      };
-      return this.createPublic(logKey(chunkNumber), chunk);
-    }
-
-    if (!isRecord(current.value)
-        || current.value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
-        || current.value.boardId !== meta.boardId
-        || current.value.chunk !== chunkNumber
-        || !Array.isArray(current.value.operations)) {
-      throw new ShardedBoardStoreError('Antonina v3 tail log chunk is malformed');
-    }
-    // Only the prefix before the next global operation index is committed.
-    // A chunk that exists at offset zero can be an orphan from a writer that
-    // lost the metadata CAS; none of its operations are committed yet.
-    const committed = current.value.operations
-      .slice(0, offset)
-      .map(parseSignedBoardOperation);
-    const candidate: ShardedLogChunk = {
+  private async ensureSealedTail(meta: ShardedBoardMeta): Promise<void> {
+    if (meta.tailOperations.length !== V3_LOG_CHUNK_SIZE) return;
+    const chunkNumber = meta.logChunkCount + 1;
+    const chunk: ShardedLogChunk = {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId: meta.boardId,
       chunk: chunkNumber,
-      operations: [...committed, operation],
+      operations: clone(meta.tailOperations),
     };
-    return this.putPublic(logKey(chunkNumber), candidate, current.etag);
+    const created = await this.createPublic(logKey(chunkNumber), chunk);
+    if (created) return;
+    const existing = await this.readChunk(meta.boardId, chunkNumber);
+    const existingIds = existing.value.operations.map((operation) => operation.opId);
+    const expectedIds = chunk.operations.map((operation) => operation.opId);
+    if (existingIds.length !== expectedIds.length
+        || existingIds.some((id, index) => id !== expectedIds[index])) {
+      throw new ShardedBoardStoreError('Antonina v3 sealed log chunk conflicts with committed tail');
+    }
   }
 
   private async materializeOperation(
@@ -902,6 +887,16 @@ export class ShardedBoardStore {
       );
       if (state.deleted) throw new ShardedBoardStoreError('Antonina board has been deleted');
 
+      // A prior canonical commit can survive a cache-write failure. Repair all
+      // projections before accepting another mutation; fast readers fall back
+      // to the signed log while materializedRevision trails operationCount.
+      if (meta.materializedRevision !== meta.operationCount) {
+        await this.writeAllMaterialized(state, log, meta.operationCount);
+        const repaired = { ...meta, materializedRevision: meta.operationCount };
+        if (!await this.putPublic(SHARDED_META_KEY, repaired, metaStored.etag)) continue;
+        continue;
+      }
+
       const payload = typeof request.payload === 'function'
         ? request.payload(state)
         : request.payload;
@@ -918,19 +913,45 @@ export class ShardedBoardStore {
         previouslyAcceptedHead: state.head,
       });
 
-      if (!await this.commitLogOperation(meta, operation)) continue;
+      // When the bounded tail is full, publish it once as an immutable chunk.
+      // Both racing writers seal exactly the same committed tail, so a 409 is
+      // harmless only when the existing chunk has the same operation IDs.
+      await this.ensureSealedTail(meta);
 
       const revision = meta.operationCount + 1;
-      await this.materializeOperation(state, candidateState, candidateLog, operation, revision);
+      const committedMeta = metaFor(
+        candidateLog,
+        candidateState,
+        meta.migratedFrom,
+        meta.materializedRevision,
+      );
+      if (!await this.putPublic(SHARDED_META_KEY, committedMeta, metaStored.etag)) continue;
 
-      const nextMeta = metaFor(candidateLog, candidateState, meta.migratedFrom);
-      if (!await this.putPublic(SHARDED_META_KEY, nextMeta, metaStored.etag)) continue;
-
-      const committedMeta = await this.loadMeta(anchor);
-      if (committedMeta === null || committedMeta.value.head !== operation.opId) {
-        continue;
+      // The signed operation is canonical now. Materialized objects are a
+      // repairable acceleration layer, never the commit point.
+      let materialized = false;
+      try {
+        await this.materializeOperation(state, candidateState, candidateLog, operation, revision);
+        materialized = true;
+      } catch {
+        // Leave materializedRevision behind. Fast reads will fall back to the
+        // canonical signed log, and the next writer repairs all projections.
       }
-      return { log: candidateLog, state: candidateState, etag: committedMeta.etag };
+
+      let finalMeta = await this.loadMeta(anchor);
+      if (materialized
+          && finalMeta !== null
+          && finalMeta.value.head === operation.opId
+          && finalMeta.value.materializedRevision < revision) {
+        const repaired = { ...finalMeta.value, materializedRevision: revision };
+        if (await this.putPublic(SHARDED_META_KEY, repaired, finalMeta.etag)) {
+          finalMeta = await this.loadMeta(anchor);
+        }
+      }
+      if (finalMeta === null) {
+        throw new ShardedBoardStoreError('Antonina v3 metadata disappeared after commit');
+      }
+      return { log: candidateLog, state: candidateState, etag: finalMeta.etag };
     }
 
     throw new ShardedBoardStoreError('Antonina v3 board changed too often; signed operation was not committed');

@@ -182,17 +182,45 @@ export class SignedBoardStore {
           previouslyAcceptedHead,
         );
       }
+      const marker = await this.sharded.migrationMarker();
+      if (marker !== null
+          && marker.boardId === anchor.boardId
+          && marker.rootKeyId === anchor.rootKeyId) {
+        throw new SignedBoardStoreError('Antonina board credential does not carry the board key');
+      }
     } catch (error) {
+      if (error instanceof SignedBoardStoreError) throw error;
       if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
       throw error;
     }
+
     this.shardedAvailable = false;
-    const legacy = await this.readLegacy(anchor, previouslyAcceptedHead);
-    if (legacy !== null
-        && !legacy.state.authorities.some((authority) => authority.keyId === credential.keyId)) {
+    let legacy = await this.readLegacy(anchor, previouslyAcceptedHead);
+    if (legacy === null) return null;
+    if (!legacy.state.authorities.some((authority) => authority.keyId === credential.keyId)) {
       throw new SignedBoardStoreError('Antonina board credential was never issued for this board');
     }
-    return legacy;
+    legacy = await this.authenticateLegacyKey(credential, legacy);
+
+    // A valid board key opportunistically migrates on read. Old test doubles or
+    // older storage frontends that reject unknown shard objects stay on v2.
+    try {
+      await this.sharded.migrate(legacy, credential.storageCapability);
+      this.shardedAvailable = true;
+    } catch (error) {
+      if (error instanceof ShardedBoardStoreError
+          && (error.status === 404 || error.status === 405)) {
+        this.shardedAvailable = false;
+        return legacy;
+      }
+      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
+      throw error;
+    }
+    return this.sharded.read(
+      anchor,
+      credential.storageCapability,
+      previouslyAcceptedHead,
+    );
   }
 
   async require(anchor: BoardTrustAnchor, previouslyAcceptedHead?: string | null): Promise<StoredSignedBoard> {
@@ -240,6 +268,38 @@ export class SignedBoardStore {
     if (stored === null) throw new BoardMissingError();
     if (stored.state.deleted) throw new BoardDeletedError();
     return stored;
+  }
+
+  /**
+   * board-v2 is publicly readable, so before v3 exists we authenticate the one
+   * board key by conditionally writing the exact same bytes back. The content
+   * and ETag do not change; Skrynia merely proves that this credential carries
+   * the board's bearer write key.
+   */
+  private async authenticateLegacyKey(
+    credential: BoardCredential,
+    initial: StoredSignedBoard,
+  ): Promise<StoredSignedBoard> {
+    const anchor = credentialTrustAnchor(credential);
+    let stored = initial;
+    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
+      const response = await this.fetcher(this.url, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Skrynia-Capability': credential.storageCapability,
+          'If-Match': stored.etag,
+        },
+        body: JSON.stringify(stored.log),
+      });
+      if (response.status === 412) {
+        stored = await this.requireLegacyAppendable(anchor, stored.state.head);
+        continue;
+      }
+      if (response.status !== 200) throw this.httpError('PUT', SIGNED_BOARD_KEY, response);
+      return stored;
+    }
+    throw new SignedBoardStoreError('Antonina board changed too often while authenticating its board key');
   }
 
   async signedBoardExists(): Promise<boolean> {
@@ -311,14 +371,27 @@ export class SignedBoardStore {
     this.shardedAvailable = await this.sharded.exists(credential.storageCapability);
 
     if (!this.shardedAvailable) {
-      const legacy = await this.requireLegacyAppendable(anchor, previouslyAcceptedHead);
+      const marker = await this.sharded.migrationMarker();
+      if (marker !== null
+          && marker.boardId === anchor.boardId
+          && marker.rootKeyId === anchor.rootKeyId) {
+        throw new SignedBoardStoreError('Antonina board credential does not carry the board key');
+      }
+
+      let legacy = await this.requireLegacyAppendable(anchor, previouslyAcceptedHead);
       if (!legacy.state.authorities.some((authority) => authority.keyId === credential.keyId)) {
         throw new SignedBoardStoreError('Antonina board credential was never issued for this board');
       }
+      legacy = await this.authenticateLegacyKey(credential, legacy);
       try {
         await this.sharded.migrate(legacy, credential.storageCapability);
         this.shardedAvailable = true;
       } catch (error) {
+        if (error instanceof ShardedBoardStoreError
+            && (error.status === 404 || error.status === 405)) {
+          this.shardedAvailable = false;
+          return this.appendLegacy(credential, request, legacy.state.head);
+        }
         if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
         throw error;
       }

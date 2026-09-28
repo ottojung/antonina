@@ -788,10 +788,12 @@ export class ShardedBoardStore {
       for (const entry of directory.entries) issueRefs.set(entry.number, entry.ref);
     }
     const issueSnapshots = new Map<number, IssueSnapshot>();
+    const messageCounts = new Map<number, number>();
     const closedAt = new Map<number, string>();
     const issues = await Promise.all([...issueRefs.entries()].map(async ([number, ref]) => {
       const result = await this.readIssueSnapshot(credential, meta, ref, true);
       issueSnapshots.set(number, result.snapshot);
+      messageCounts.set(number, result.snapshot.messageCount);
       if (result.snapshot.closedAt !== null) closedAt.set(number, result.snapshot.closedAt);
       return result.issue;
     }));
@@ -817,8 +819,57 @@ export class ShardedBoardStore {
       },
       issueRefs,
       issueSnapshots,
+      messageCounts,
       closedAt,
       directoryPages,
+    };
+  }
+
+  private async readMutationBundle(
+    credential: BoardCredential,
+    pointer: ShardedBoardPointer,
+  ): Promise<StateBundle> {
+    const meta = await this.readMeta(pointer, credential);
+    const [queue, catalog, openPages, closedPages] = await Promise.all([
+      this.readQueue(credential, meta),
+      this.readCatalog(credential, meta),
+      Promise.all(meta.openPageRefs.map((_, index) =>
+        this.readIssuePageFromMeta(credential, meta, 'open', index + 1))),
+      Promise.all(meta.closedPageRefs.map((_, index) =>
+        this.readIssuePageFromMeta(credential, meta, 'closed', index + 1))),
+    ]);
+    const summaries = [
+      ...openPages.flatMap((page) => page.entries),
+      ...closedPages.flatMap((page) => page.entries),
+    ];
+    const closedAt = new Map<number, string>();
+    const messageCounts = new Map<number, number>();
+    for (const summary of summaries) {
+      messageCounts.set(summary.number, summary.messageCount);
+      if (summary.closedAt !== null) closedAt.set(summary.number, summary.closedAt);
+    }
+    const issues = summaries.map(issueFromSummary).sort((left, right) => left.number - right.number);
+    return {
+      meta,
+      state: {
+        board: {
+          schemaVersion: 3,
+          nextIssueNumber: meta.nextIssueNumber,
+          issues,
+          resources: catalog.resources,
+          targets: catalog.targets,
+          dispatches: catalog.dispatches,
+        },
+        queue,
+        authorities: [],
+        deleted: meta.deleted,
+        head: meta.head,
+      },
+      issueRefs: new Map(),
+      issueSnapshots: new Map(),
+      messageCounts,
+      closedAt,
+      directoryPages: new Map(),
     };
   }
 

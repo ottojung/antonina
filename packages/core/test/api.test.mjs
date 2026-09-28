@@ -4,7 +4,6 @@ import test from 'node:test';
 import { generateSigningKey } from '../dist/canonical.js';
 import { createBoardCredential } from '../dist/credential.js';
 import {
-import { fakeSkrynia } from './fake-skrynia.mjs';
   BoardApi,
   BoardDeletedError,
   BoardMissingError,
@@ -13,6 +12,7 @@ import { fakeSkrynia } from './fake-skrynia.mjs';
   BoardTrustRequiredError,
   SignedBoardStoreError,
 } from '../dist/api.js';
+import { fakeSkrynia } from './fake-skrynia.mjs';
 
 const STAMP = '2026-09-25T12:00:00.000Z';
 

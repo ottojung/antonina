@@ -113,8 +113,6 @@ describe('the feed container, mounted', () => {
     expect(screen.queryByText(FEED_EMPTY.title)).toBeNull();
   });
 
-  it.todo('characterisation: a failed read used to render the empty state too (issue 72 pin, replaced by issue 100)');
-
   it('asks for older entries with the token the backend issued and appends what comes back', async () => {
     const first = entry('comment-added', 3);
     const older = entry('issue-created', 2);

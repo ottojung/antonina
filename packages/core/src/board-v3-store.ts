@@ -699,6 +699,38 @@ export class ShardedBoardStore {
     await Promise.all(pages.map((page) => this.upsertPublic(issuePageKey(issueState, page.page), page)));
   }
 
+  private async writeIssuePageContaining(
+    boardId: string,
+    state: VerifiedBoardState,
+    log: BoardOperationLog,
+    revision: number,
+    number: number,
+  ): Promise<void> {
+    const issue = state.board.issues.find((entry) => entry.number === number);
+    if (issue === undefined) {
+      throw new ShardedBoardStoreError('Issue disappeared while updating its v3 list page');
+    }
+    const entries = summaries(state, log, issue.state);
+    const index = entries.findIndex((entry) => entry.number === number);
+    if (index < 0) {
+      throw new ShardedBoardStoreError('Issue is missing from its v3 list projection');
+    }
+    const pageNumber = Math.floor(index / V3_ISSUE_PAGE_SIZE) + 1;
+    const page: IssueListPage = {
+      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+      boardId,
+      state: issue.state,
+      page: pageNumber,
+      revision,
+      total: entries.length,
+      entries: entries.slice(
+        (pageNumber - 1) * V3_ISSUE_PAGE_SIZE,
+        pageNumber * V3_ISSUE_PAGE_SIZE,
+      ),
+    };
+    await this.upsertPublic(issuePageKey(issue.state, pageNumber), page);
+  }
+
   private async writeFeedPages(boardId: string, log: BoardOperationLog, revision: number): Promise<void> {
     const pages = feedPages(boardId, log, revision);
     await Promise.all(pages.map((page) => this.upsertPublic(feedPageKey(page.page), page)));
@@ -804,7 +836,15 @@ export class ShardedBoardStore {
         await this.writeIssue(boardId, issue, revision);
 
         if (operation.kind === 'issue.edit' || operation.kind === 'issue.comment') {
-          await this.writeIssuePages(boardId, candidate, log, revision, issue.state);
+          // These mutations do not change list membership or ordering, so only
+          // the one 50-entry page containing the issue needs a rewrite.
+          await this.writeIssuePageContaining(boardId, candidate, log, revision, number);
+        } else if (operation.kind === 'issue.create') {
+          // New issues are appended to the open queue. Only its final page can
+          // change; page totals are read from metadata, not trusted from older
+          // page snapshots.
+          await this.writeIssuePageContaining(boardId, candidate, log, revision, number);
+          await this.writeQueue(boardId, candidate, revision);
         } else {
           await this.writeIssuePages(boardId, candidate, log, revision, 'open');
           await this.writeIssuePages(boardId, candidate, log, revision, 'closed');
@@ -972,7 +1012,9 @@ export class ShardedBoardStore {
       return this.getIssueFromCanonical(anchor, number);
     }
     const stored = await this.getJson<unknown>(issueKey(number));
-    if (stored === null || !isRecord(stored.value)) return null;
+    if (stored === null || !isRecord(stored.value)) {
+      return this.getIssueFromCanonical(anchor, number);
+    }
     const value = stored.value;
     if (value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
         || value.boardId !== metaStored.value.boardId
@@ -1059,7 +1101,13 @@ export class ShardedBoardStore {
         || !Array.isArray(stored.value.entries)) {
       return null;
     }
-    return clone(stored.value as unknown as IssueListPage);
+    const pageValue = clone(stored.value as unknown as IssueListPage);
+    // Membership changes can leave older unaffected pages with an older total.
+    // The CAS-committed metadata owns the current count.
+    pageValue.total = state === 'open'
+      ? metaStored.value.openIssueCount
+      : metaStored.value.closedIssueCount;
+    return pageValue;
   }
 
   async getQueue(anchor: BoardTrustAnchor): Promise<number[] | null> {

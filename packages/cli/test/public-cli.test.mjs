@@ -86,7 +86,7 @@ test('the public CLI can retract a target caveat and its guidance references', (
   // way to learn that a note can be withdrawn at all.
   const help = preparePublicCommand('board', ['target', 'set', '--help']);
   assert.equal(help.kind, 'help');
-  assert.match(help.text, /--clear-limitations <value>|--clear-limitations/);
+  assert.match(help.text, /--clear-limitations/);
   assert.match(help.text, /Retract the target/);
   // `target add` states notes but has nothing to retract.
   const add = preparePublicCommand('board', ['target', 'add', '--help']);

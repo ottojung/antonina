@@ -16,8 +16,8 @@ A path is collectible only when it is registered on that host and no open Antoni
 
 ```sh
 antonina board resource list [--host HOST] [--issue NUMBER]
-antonina board resource add ISSUE HOST PATH
-antonina board resource remove ISSUE HOST PATH
+antonina board resource add --issue ISSUE --host HOST --path PATH
+antonina board resource remove --issue ISSUE --host HOST --path PATH
 ```
 
 `--host` and `--issue` narrow inspection; verify registrations rather than assuming a command succeeded.
@@ -68,15 +68,15 @@ For example, hand off `/workspace/project-worktree` from Antonina board issue `4
 
 ```sh
 antonina board resource list --issue 412
-antonina board resource add 419 lubko://phoebe-dev /workspace/project-worktree
+antonina board resource add --issue 419 --host lubko://phoebe-dev --path /workspace/project-worktree
 antonina board resource list --issue 419
-antonina board resource remove 412 lubko://phoebe-dev /workspace/project-worktree
+antonina board resource remove --issue 412 --host lubko://phoebe-dev --path /workspace/project-worktree
 ```
 
 Unregister a path when no issue needs it:
 
 ```sh
-antonina board resource remove 419 lubko://phoebe-dev /workspace/project-worktree
+antonina board resource remove --issue 419 --host lubko://phoebe-dev --path /workspace/project-worktree
 ```
 
 Host values are `lubko://<server>` with no trailing slash; paths are canonical absolute POSIX paths.

@@ -243,7 +243,7 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
   if (parsed.flags.has('--json')) {
     context.io.stdout(stableJson({ id: agentId, state: 'idle', cwd, created_at: meta.created_at }));
   } else {
-    context.io.stdout(`Created agent with id ${agentId} (idle). Start work with \`antonina agent prompt --id ${agentId} 'task'\`.`);
+    context.io.stdout(`Created agent with id ${agentId} (idle). Start work with \`antonina agent prompt --id ${agentId} --prompt 'task'\`.`);
   }
   return EXIT_OK;
 }

@@ -358,13 +358,13 @@ const AGENT_SPECS: readonly CommandSpec[] = [
     normalize: (p) => ['status', '--id', p.values.get('--id')!, ...flagArgs(p, ['--json'])],
   },
   {
-    path: ['prompt'],
+    path: ['run'],
     summary: 'Send work to a managed agent.',
     values: ['--id', '--prompt'],
     flags: ['--steer', '--detach', '--json'],
     required: ['--id', '--prompt'],
     normalize: (p) => [
-      'prompt',
+      'run',
       '--id',
       p.values.get('--id')!,
       '--prompt',

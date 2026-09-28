@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createBrowserBoardApi, type BoardFeedEntry, type BoardFeedPage } from './api';
 import { resourceState, type Board, type BoardIssue, type BoardResource } from './model';
-import { COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, appendFeedPage, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, boardReadOutcome, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, TRUST_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
+import { COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, appendFeedPage, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, boardReadOutcome, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -25,8 +25,7 @@ export default function App() {
   const [access, setAccess] = useState<BoardAccess>('read-only');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [credentialInput, setCredentialInput] = useState('');
-  const [anchorInput, setAnchorInput] = useState('');
-  const [trusting, setTrusting] = useState(false);
+  const [unlocking, setUnlocking] = useState(false);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [initializing, setInitializing] = useState(false);
@@ -117,23 +116,35 @@ export default function App() {
       setNotice('Write access saved in this browser');
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'The credential could not be saved'); }
   }
-  function clearCredential() { session.clearCredential(); setAccess('read-only'); setNotice('Write access cleared from this browser'); }
+  function clearCredential() {
+    session.clearCredential();
+    setAccess('read-only');
+    setSelectedNumber(undefined);
+    setSettingsOpen(false);
+    setLoad({ status: 'untrusted' });
+    setNotice(undefined);
+  }
   async function copyKey(text: string | null, label: string) {
     if (!text) return;
     try { await navigator.clipboard.writeText(text); setNotice(`${label} copied`); }
     catch { setError('The browser did not allow access to the clipboard'); }
   }
-  async function trustBoard(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setTrusting(true); setError(undefined);
+  async function unlockBoard(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setUnlocking(true); setError(undefined);
     try {
-      // Trusting verifies the whole log, so the load is the state that call
-      // verified: no second read, and no queue without its board.
-      const trusted = boardReadOutcome(await session.trust(anchorInput));
-      setAnchorInput('');
-      if (trusted.error) { setError(trusted.error); return; }
-      setLoad(trusted.load);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : 'The trust anchor could not be accepted'); }
-    finally { setTrusting(false); }
+      const enabled = await session.enableEditing(credentialInput);
+      const verified = await session.readState();
+      const outcome = boardReadOutcome(verified);
+      if (outcome.error) { setError(outcome.error); return; }
+      setAccess(enabled.canEdit ? 'editable' : 'rejected');
+      setLoad(outcome.load);
+      setCredentialInput('');
+      setFeedGeneration((current) => current + 1);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The board credential could not be accepted');
+    } finally {
+      setUnlocking(false);
+    }
   }
   async function initializeBoard() {
     setInitializing(true); setError(undefined); setNotice(undefined);
@@ -172,7 +183,7 @@ export default function App() {
   if (load.status === 'loading') return <main className="centered"><div><span className="loading-dot" /> Loading your shared board…</div></main>;
   if (load.status === 'failed') return <main className="centered"><section className="load-error"><p className="eyebrow">Antonina</p><h1>The board could not be loaded</h1><p>{load.message}</p><button className="primary" onClick={() => void refresh()}>Try again</button></section></main>;
   if (load.status === 'uninitialized') return <main className="centered"><FirstRun error={error} initializing={initializing} initialize={() => void initializeBoard()} recheck={() => void refresh()} /></main>;
-  if (load.status === 'untrusted') return <main className="centered"><TrustAnchor error={error} anchorInput={anchorInput} setAnchorInput={setAnchorInput} trusting={trusting} trust={trustBoard} retry={() => void refresh()} /></main>;
+  if (load.status === 'untrusted') return <main className="centered"><BoardKeyPrompt error={error} credentialInput={credentialInput} setCredentialInput={setCredentialInput} unlocking={unlocking} unlock={unlockBoard} retry={() => void refresh()} /></main>;
   if (load.status === 'deleted') return <main className="centered"><section className="first-run"><p className="eyebrow">Antonina</p><h1>{DELETED_COPY.title}</h1><p>{DELETED_COPY.body}</p></section></main>;
 
   return <div className="app-shell">
@@ -198,7 +209,7 @@ export default function App() {
       {view === 'issues' ? selected ? <Thread issue={selected} access={access} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.number, body), 'Description updated')} close={() => void run(() => api.close(selected.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.number), 'Issue reopened')} back={() => setSelectedNumber(undefined)} />
         : <section className="thread welcome"><div className="welcome-mark" aria-hidden="true">A</div><p className="eyebrow">Shared issue board</p><h2>Choose an issue to join the conversation.</h2></section> : null}
     </main>
-    {settingsOpen && <SettingsPanel displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} access={access} credentialInput={credentialInput} setCredentialInput={setCredentialInput} saveCredential={saveCredential} clearCredential={clearCredential} credentialText={session.credentialText()} trustAnchorText={session.trustAnchorText()} copyKey={copyKey} close={closeSettings} />}
+    {settingsOpen && <SettingsPanel displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} access={access} credentialInput={credentialInput} setCredentialInput={setCredentialInput} saveCredential={saveCredential} clearCredential={clearCredential} credentialText={session.credentialText()} copyKey={copyKey} close={closeSettings} />}
   </div>;
 }
 
@@ -454,8 +465,8 @@ function FirstRun({ error, initializing, initialize, recheck }: { error: string 
   return <section className="first-run"><p className="eyebrow">Antonina</p><h1>{FIRST_RUN_COPY.title}</h1><p>{FIRST_RUN_COPY.body}</p>{error && <p role="alert">{error}</p>}<div className="first-run-actions"><button className="primary" disabled={initializing} onClick={initialize}>{FIRST_RUN_COPY.action}</button><button className="quiet" disabled={initializing} onClick={recheck}>{FIRST_RUN_COPY.recheck}</button></div></section>;
 }
 
-function TrustAnchor({ error, anchorInput, setAnchorInput, trusting, trust, retry }: { error: string | undefined; anchorInput: string; setAnchorInput: (value: string) => void; trusting: boolean; trust: (event: FormEvent<HTMLFormElement>) => Promise<void>; retry: () => void }) {
-  return <section className="first-run"><p className="eyebrow">Antonina</p><h1>{TRUST_COPY.title}</h1><p>{TRUST_COPY.body}</p><form className="stacked-form" onSubmit={trust}><label htmlFor="trust-anchor">Board trust anchor</label><textarea id="trust-anchor" value={anchorInput} onChange={(event) => setAnchorInput(event.target.value)} required /><small>{TRUST_COPY.hint}</small>{error && <p role="alert">{error}</p>}<div className="first-run-actions"><button className="primary" disabled={trusting || !anchorInput.trim()} type="submit">{TRUST_COPY.action}</button><button className="quiet" disabled={trusting} onClick={retry}>{FIRST_RUN_COPY.recheck}</button></div></form></section>;
+function BoardKeyPrompt({ error, credentialInput, setCredentialInput, unlocking, unlock, retry }: { error: string | undefined; credentialInput: string; setCredentialInput: (value: string) => void; unlocking: boolean; unlock: (event: FormEvent<HTMLFormElement>) => Promise<void>; retry: () => void }) {
+  return <section className="first-run"><p className="eyebrow">Antonina</p><h1>{BOARD_KEY_COPY.title}</h1><p>{BOARD_KEY_COPY.body}</p><form className="stacked-form" onSubmit={unlock}><label htmlFor="board-credential">Board credential</label><textarea id="board-credential" value={credentialInput} onChange={(event) => setCredentialInput(event.target.value)} required /><small>{BOARD_KEY_COPY.hint}</small>{error && <p role="alert">{error}</p>}<div className="first-run-actions"><button className="primary" disabled={unlocking || !credentialInput.trim()} type="submit">{BOARD_KEY_COPY.action}</button><button className="quiet" type="button" disabled={unlocking} onClick={retry}>{FIRST_RUN_COPY.recheck}</button></div></form></section>;
 }
 
 function AccessNotice({ access, readOnly, className, onAction }: { access: ReadOnlyAccess; readOnly?: AccessCallout; className?: string; onAction: () => void }) {
@@ -606,7 +617,7 @@ function Thread({ issue, access, displayName, setDisplayName, saveDisplayName, o
   </article>;
 }
 
-function SettingsPanel({ displayName, setDisplayName, saveDisplayName, access, credentialInput, setCredentialInput, saveCredential, clearCredential, credentialText, trustAnchorText, copyKey, close }: { displayName: string; setDisplayName: (value: string) => void; saveDisplayName: (event: FormEvent<HTMLFormElement>) => void; access: BoardAccess; credentialInput: string; setCredentialInput: (value: string) => void; saveCredential: (event: FormEvent<HTMLFormElement>) => Promise<void>; clearCredential: () => void; credentialText: string | null; trustAnchorText: string | null; copyKey: (text: string | null, label: string) => Promise<void>; close: () => void }) {
+function SettingsPanel({ displayName, setDisplayName, saveDisplayName, access, credentialInput, setCredentialInput, saveCredential, clearCredential, credentialText, copyKey, close }: { displayName: string; setDisplayName: (value: string) => void; saveDisplayName: (event: FormEvent<HTMLFormElement>) => void; access: BoardAccess; credentialInput: string; setCredentialInput: (value: string) => void; saveCredential: (event: FormEvent<HTMLFormElement>) => Promise<void>; clearCredential: () => void; credentialText: string | null; copyKey: (text: string | null, label: string) => Promise<void>; close: () => void }) {
   const closeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
@@ -626,5 +637,5 @@ function SettingsPanel({ displayName, setDisplayName, saveDisplayName, access, c
     document.addEventListener('keydown', keydown);
     return () => { document.removeEventListener('keydown', keydown); document.body.style.overflow = overflow; previous?.focus(); };
   }, [close]);
-  return <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><header><h2 id="settings-title">Settings & access</h2><button ref={closeRef} className="dialog-close" onClick={close} aria-label="Close settings">×</button></header><div className="settings-content"><section><h3>Display name</h3><form className="stacked-form" onSubmit={saveDisplayName}><label htmlFor="settings-name">Display name</label><input id="settings-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} /><button type="submit" disabled={!displayName.trim()}>Save name</button></form></section><section><h3>Editing access</h3><p>{WRITE_ACCESS_SUMMARY}</p>{access === 'rejected' && <div className="access-state"><strong>{REJECTED_CREDENTIAL_COPY.title}</strong><p>{REJECTED_CREDENTIAL_COPY.body}</p></div>}{access === 'editable' ? <><div className="access-state">Editing is enabled</div><div className="technical-actions"><button onClick={() => void copyKey(credentialText, 'Board credential')}>Copy board credential</button><button onClick={() => void copyKey(trustAnchorText, 'Board trust anchor')}>Copy trust anchor</button><button className="danger" onClick={clearCredential}>Use read-only mode</button></div></> : <form className="stacked-form" onSubmit={saveCredential}><label htmlFor="credential">Board credential</label><textarea id="credential" placeholder="Paste the signed board credential JSON" value={credentialInput} onChange={(event) => setCredentialInput(event.target.value)} required /><small>The credential comes from another browser, user, or agent that can edit the board.</small><button type="submit" disabled={!credentialInput.trim()}>Enable editing</button></form>}</section></div></section></div>;
+  return <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><header><h2 id="settings-title">Settings & access</h2><button ref={closeRef} className="dialog-close" onClick={close} aria-label="Close settings">×</button></header><div className="settings-content"><section><h3>Display name</h3><form className="stacked-form" onSubmit={saveDisplayName}><label htmlFor="settings-name">Display name</label><input id="settings-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} /><button type="submit" disabled={!displayName.trim()}>Save name</button></form></section><section><h3>Board access</h3><p>{WRITE_ACCESS_SUMMARY}</p>{access === 'rejected' && <div className="access-state"><strong>{REJECTED_CREDENTIAL_COPY.title}</strong><p>{REJECTED_CREDENTIAL_COPY.body}</p></div>}{access === 'editable' ? <><div className="access-state">Board access is enabled</div><div className="technical-actions"><button onClick={() => void copyKey(credentialText, 'Board credential')}>Copy board credential</button><button className="danger" onClick={clearCredential}>Leave board</button></div></> : <form className="stacked-form" onSubmit={saveCredential}><label htmlFor="credential">Board credential</label><textarea id="credential" placeholder="Paste the signed board credential JSON" value={credentialInput} onChange={(event) => setCredentialInput(event.target.value)} required /><small>The credential comes from another browser, user, or agent that already has full board access.</small><button type="submit" disabled={!credentialInput.trim()}>Open board</button></form>}</section></div></section></div>;
 }

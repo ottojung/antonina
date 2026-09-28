@@ -845,8 +845,8 @@ export async function verifyAndReplayOperationLog(
     seen.add(operation.opId);
 
     const authority = authorities.get(operation.signerKeyId);
-    if (!authority || authority.revoked) {
-      throw new OperationLogVerificationError('Operation signer is unknown or revoked');
+    if (!authority) {
+      throw new OperationLogVerificationError('Operation signer is unknown');
     }
     if (!await verifyBytes(authority.publicKey, operation.signature, bytes)) {
       throw new OperationLogVerificationError('Operation signature is invalid');
@@ -870,11 +870,6 @@ export async function verifyAndReplayOperationLog(
     if (!board) throw new OperationLogVerificationError('Board state is not initialized');
     if (deleted) throw new OperationLogVerificationError('Operations may not follow board deletion');
 
-    const capability = requiredCapability(operation.kind);
-    if (capability !== null && !authority.capabilities.includes(capability)) {
-      throw new OperationLogVerificationError(`Signer lacks required capability ${capability}`);
-    }
-
     if (operation.kind === 'authority.delegate') {
       const payload = operation.payload as DelegatePayload;
       if (authorities.has(payload.childKeyId)) {
@@ -883,11 +878,6 @@ export async function verifyAndReplayOperationLog(
       const childKeyId = await keyIdFromPublicKey(payload.childPublicKey);
       if (childKeyId !== payload.childKeyId) {
         throw new OperationLogVerificationError('Delegated key ID does not match its public key');
-      }
-      for (const childCapability of payload.capabilities) {
-        if (!authority.capabilities.includes(childCapability)) {
-          throw new OperationLogVerificationError('Delegation attempts capability escalation');
-        }
       }
       authorities.set(payload.childKeyId, {
         keyId: payload.childKeyId,

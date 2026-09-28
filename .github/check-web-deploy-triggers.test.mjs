@@ -76,8 +76,11 @@ test('the traced make target comes from a run step, not from a comment', (t) => 
   // `make dist` is not a target of this repository's Makefile, so tracing it
   // instead of `build` would have emptied the input set rather than kept it. The
   // count is the traced bundle inputs this revision actually has, so adding a
-  // `web/**` source file is expected to move it and this number with it.
-  assert.match(result.stdout, /traced bundle inputs: 34/);
+  // `web/**` or `packages/core/src/**` source file is expected to move it and
+  // this number with it. 35 is this revision: 31 before, plus
+  // `packages/core/src/board-diagnostics.ts`, plus the `web/package.json`,
+  // `web/package-lock.json` and `web/vite.config.ts` the web suite needs.
+  assert.match(result.stdout, /traced bundle inputs: 35/);
 });
 
 test('an ambiguous make target fails instead of guessing', (t) => {

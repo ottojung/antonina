@@ -3,7 +3,20 @@ import { randomBytes } from 'node:crypto';
 import { closeSync, fstatSync, openSync } from 'node:fs';
 import { constants } from 'node:os';
 
-import { backendRetryDelay, buildAgentCommand, classifyBackendFailure, discoverSessionId, type BackendError } from './backend.js';
+import {
+  backendRetryDelay,
+  buildAgentCommand,
+  classifyBackendFailure,
+  classifySignalDeath,
+  describeSignalDeath,
+  discoverSessionId,
+  type BackendError,
+} from './backend.js';
+import {
+  readOomCounters,
+  type HostCapacityReadOptions,
+  type OomCounters,
+} from './host-capacity.js';
 import {
   finalizeTerminal,
   popSteerIntoPending,
@@ -37,11 +50,35 @@ const CONTROL_GRACE_MS = 10_000;
 
 export interface RunnerOptions extends StatePathsOptions {
   env?: Record<string, string | undefined>;
+  /**
+   * Seam for the host memory reading used to classify a death. Production
+   * leaves it unset so the runner reads the real cgroup; tests point it at
+   * synthetic values rather than asserting against live memory counters. It
+   * affects diagnosis only: no reading here can refuse, delay or suppress a
+   * launch.
+   */
+  capacity?: HostCapacityReadOptions;
+}
+
+/** The OOM bracket captured around one backend spawn. */
+interface OomBracket {
+  before: OomCounters | null;
+  startedAt: number;
 }
 
 interface ChildResult {
   code: number | null;
   signal: NodeJS.Signals | null;
+  /**
+   * True when this runner is the process that asked for the invocation to end.
+   *
+   * A steer, a stop and a kill are all operator decisions, and this runner
+   * signals the invocation for each of them. Without this flag the only
+   * evidence available at death is the persisted intent, and the intent alone
+   * cannot distinguish the death the operator asked for from a host kill that
+   * happened to land while the intent was pending.
+   */
+  operatorSignalled: boolean;
 }
 
 function signalNumber(signal: NodeJS.Signals | null): number | null {
@@ -52,28 +89,31 @@ function signalNumber(signal: NodeJS.Signals | null): number | null {
 function childResult(child: ChildProcess, agentId: string, options: RunnerOptions): Promise<ChildResult> {
   return new Promise((resolve) => {
     let controlStartedAt: number | null = null;
+    let operatorSignalled = false;
     const timer = setInterval(() => {
       const meta = readMeta(agentId, options);
       if (meta === null) return;
       const intent = persistedControlField(meta, 'intent');
       if (intent.malformed || intent.value === null) return;
       if (intent.value === 'kill') {
+        operatorSignalled = true;
         signalInvocation(meta, 'SIGKILL');
         return;
       }
       if (intent.value === 'stop' || intent.value === 'steer') {
         if (controlStartedAt === null) controlStartedAt = Date.now();
         const signal = Date.now() - controlStartedAt >= CONTROL_GRACE_MS ? 'SIGKILL' : 'SIGTERM';
+        operatorSignalled = true;
         signalInvocation(meta, signal);
       }
     }, CONTROL_POLL_MS);
     child.once('close', (code, signal) => {
       clearInterval(timer);
-      resolve({ code, signal });
+      resolve({ code, signal, operatorSignalled });
     });
     child.once('error', () => {
       clearInterval(timer);
-      resolve({ code: 127, signal: null });
+      resolve({ code: 127, signal: null, operatorSignalled });
     });
   });
 }
@@ -181,7 +221,13 @@ async function finalizeInvocation(
   result: ChildResult,
   backendError: BackendError | null,
   options: RunnerOptions,
+  oom: OomBracket | null,
+  isContinue: boolean,
 ): Promise<void> {
+  // Read outside the metadata callback: the callback runs under the state lock,
+  // and it should be doing durable-state work, not file I/O against /sys and
+  // /proc. A death is classified from the bracket, not from a live reading.
+  const oomAfter = readOomCounters(options.capacity);
   await updateMeta(agentId, (meta) => {
     if (meta.state !== 'running') return;
     const intent = persistedControlField(meta, 'intent');
@@ -189,14 +235,45 @@ async function finalizeInvocation(
     if (intent.malformed || stopReason.malformed) return;
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);
+    // Every operator intent that ends an invocation does so because *this*
+    // runner sent a signal for it, and the flag is set in the same poll that
+    // sends it. So the flag is the evidence for all three intents, and the
+    // persisted intent is not: an intent can be recorded and then lose the race
+    // to a host SIGKILL landing inside a poll interval, in which case the
+    // intent says the operator asked for this death and the flag says nobody
+    // did. Keying stop and kill off the intent alone therefore still recorded a
+    // host OOM kill as a clean `stopped` or `killed` with a null backend_error,
+    // which is the exact failure this classification exists to remove. A
+    // reparented runner does not weaken this argument: the poll belongs to the
+    // process that spawned the child, and a reparented runner polls the *next*
+    // invocation, never the one that just died under this process.
+    const operatorSignalled = result.operatorSignalled;
+    const externalSignalDeath = signal !== null && !operatorSignalled;
     let state: 'succeeded' | 'failed' | 'stopped' | 'killed';
     if (intent.value === 'stop') state = 'stopped';
     else if (intent.value === 'kill') state = 'killed';
-    else if (intent.value === 'steer') state = signal !== null ? 'stopped' : code === 0 ? 'succeeded' : 'failed';
+    else if (signal !== null) state = operatorSignalled ? 'stopped' : 'failed';
     else state = code === 0 ? 'succeeded' : 'failed';
+    // The pending steer is left recorded even when the invocation died without
+    // it taking effect: the operator did ask for it, and `error` below names the
+    // death that actually ended the invocation.
     meta.stop_reason = intent.value;
-    meta.backend_error = code === 0 ? null : backendError;
-    finalizeTerminal(meta, state, Date.now() / 1000, code, signal);
+    // An unsignalled death on a signal was killed from outside the agent. This
+    // is classified on the signal and the absence of a signalled request,
+    // deliberately independent of the resulting state, so that no path through
+    // the state mapping above can leave an external kill recorded as a clean
+    // terminal state with a null backend error.
+    const death = externalSignalDeath
+      ? classifySignalDeath({
+        signal,
+        isContinue,
+        before: oom?.before ?? null,
+        after: oomAfter,
+        lifetimeSeconds: oom === null ? null : Date.now() / 1000 - oom.startedAt,
+      })
+      : null;
+    meta.backend_error = code === 0 || death !== null ? death : backendError;
+    finalizeTerminal(meta, state, Date.now() / 1000, code, signal, death === null ? undefined : describeSignalDeath(death) ?? undefined);
   }, options);
 }
 
@@ -236,6 +313,7 @@ async function runInvocation(
     const logFile = logPath(agentId, options);
     const fd = openSync(logFile, 'a', 0o600);
     const invocationLogStart = fstatSync(fd).size;
+    const oom: OomBracket = { before: readOomCounters(options.capacity), startedAt: Date.now() / 1000 };
     const env = {
       ...process.env,
       ...options.env,
@@ -338,7 +416,7 @@ async function runInvocation(
     // interrupts it. Preserve that session whenever it can be discovered so
     // queued steering continues the same native conversation.
     if (!isContinue) await rememberFreshSession(agentId, options);
-    await finalizeInvocation(agentId, result, backendError, options);
+    await finalizeInvocation(agentId, result, backendError, options, oom, isContinue);
     return true;
   }
 }

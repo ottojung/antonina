@@ -60,6 +60,10 @@ function capture() {
 
 function context(work, state, captureIo, fs) {
   return {
+    // Nothing here pins a capacity threshold any more, and that is the point:
+    // the runtime no longer reads one, so no case in this suite can start
+    // failing because the machine happens to be busy. Host memory is observed
+    // for diagnostics only, through the seam in the runtime suite.
     env: { ...state.env, PATH: '' },
     home: state.home,
     cwd: work,

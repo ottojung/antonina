@@ -1,10 +1,24 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmdirSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 
+import { beginInvocation, beginStopLike, finalizeTerminal } from '../dist/packages/agent-runtime/src/lifecycle.js';
 import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
 import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import { runManagedRunner } from '../dist/packages/agent-runtime/src/runner.js';
@@ -639,4 +653,178 @@ test('e. a stop intent the runner itself signalled is still a clean stopped', as
   assert.equal(after.state, 'stopped');
   assert.equal(after.backend_error, null);
   assert.equal(after.error, null);
+});
+
+// Board 112. A spawn can be started and then rejected by a control path that
+// commits between the runner's own read of the record and its write of it:
+// recordSpawned's callback (runner.ts:199) returns early on
+// `deletePendingFlag(meta) !== false || stopLikeOrMalformed(meta)`, so
+// runInvocation kills the process group and returns false at runner.ts:396
+// without ever calling finalizeInvocation.
+//
+// The claim under test is that this is correct, and this test is what would fail
+// if it stopped being correct. The property is not "nothing happened": the
+// property is that the rejecting control path owns the durable record. The stop
+// is a real terminal `stopped` that has already released the claim
+// (active_runner false, runner_reservation null), so the runner must neither
+// record the spawn it just abandoned nor write a second terminal state over the
+// operator's. Either would destroy the only record of why the invocation ended:
+// a recorded spawn would leave a dead pid published as authoritative, and a
+// second terminal would overwrite `stopped` with a `failed` the operator never
+// asked for.
+//
+// The interleaving is injected rather than raced. The real window is the gap
+// between the runner's read and its write inside the metadata lock, which is
+// sub-millisecond, and a fixture that tried to win it from another process would
+// be a timing test that passes or fails with host load. The StoreFs seam
+// substitutes the interleaving and nothing else: the document the runner reads
+// under the lock is the one the stop really committed, written durably through
+// the ordinary writeMeta path, so the runner then runs its real callback, its
+// real rejection, its real process-group kill and its real return.
+function stopRaceFs(id, options, onCommit) {
+  const target = metaPath(id, options);
+  let committed = false;
+  const fs = {
+    closeSync,
+    fsyncSync,
+    mkdirSync,
+    openSync,
+    readFileSync(path, ...rest) {
+      const text = readFileSync(path, ...rest);
+      if (committed || path !== target || typeof text !== 'string') return text;
+      const observed = JSON.parse(text);
+      // The exact durable signature of the window: the runner has claimed the
+      // pass and consumed the prompt, and has published no identity yet.
+      if (observed.pending_prompt !== null || observed.active_runner !== true) return text;
+      if (observed.state !== 'running' || observed.pid !== null) return text;
+      committed = true;
+      // Byte for byte the CLI's own `!invocationAlive` branch of stopLike,
+      // packages/cli/src/agent.ts:727-737, committed through the real writer.
+      const stop = JSON.parse(text);
+      const now = Date.now() / 1000;
+      beginStopLike(stop, 'stop', now);
+      stop.pending_prompt = null;
+      stop.steer_queue = [];
+      stop.active_runner = false;
+      stop.runner_reservation = null;
+      finalizeTerminal(stop, 'stopped', now, null, null);
+      stop.stop_reason = 'stop';
+      writeMeta(id, stop, { env: options.env });
+      onCommit(stop);
+      return `${JSON.stringify(stop, null, 2)}\n`;
+    },
+    renameSync,
+    rmSync,
+    unlinkSync,
+    writeFileSync,
+  };
+  return { fs, didCommit: () => committed };
+}
+
+test('a spawn rejected by a stop between the runner read and its write leaves the stop record and no spawn record', async (t) => {
+  if (!requireProc(t)) return;
+  // A backend that outlives its spawn would hang the runner if the rejection
+  // ever stopped killing the process group, so it sleeps rather than exiting and
+  // the case doubles as the check that the group kill still happens.
+  const pidFile = join(tmpdir(), `antonina-rejected-spawn-${process.pid}.pid`);
+  const backend = fakeBackend(t, `#!/bin/sh\nprintf '%s\\n' "$$" > ${pidFile}\nexec sleep 300\n`);
+  if (backend === null) return;
+  // A second, ordinary backend for the resume below: the point of that half is
+  // the durable record, not the backend.
+  const resumeBackend = fakeBackend(t);
+  if (resumeBackend === null) return;
+  const options = scratch(t, backend);
+  const id = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    pending_prompt: 'work',
+  });
+
+  let stopped = null;
+  const race = stopRaceFs(id, options, (stop) => { stopped = stop; });
+  const run = { ...options, fs: race.fs, capacity: { readText: cgroup(1) } };
+
+  // Registered before the runner starts, and reading the pid file at teardown
+  // rather than capturing a pid, so that a regression which leaves the spawn
+  // running is still reaped: a leaked backend would keep the suite alive after
+  // the failure had already been reported.
+  const spawnedBackendPid = () => (existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8').trim()) : null);
+  const reapBackend = () => {
+    const pid = spawnedBackendPid();
+    if (pid === null) return;
+    try { process.kill(pid, 'SIGKILL'); } catch {}
+    try { process.kill(-pid, 'SIGKILL'); } catch {}
+    rmSync(pidFile, { force: true });
+  };
+  t.after(reapBackend);
+
+  // Bounded, so that a regression which forgets the process-group kill fails on
+  // a named assertion instead of hanging the suite on a sleeping backend.
+  let watchdog = null;
+  let backendPid = null;
+  try {
+    await Promise.race([
+      runManagedRunner(id, 'new', 7, run),
+      new Promise((_, reject) => {
+        watchdog = setTimeout(
+          () => reject(new Error('the runner did not return: the rejected spawn was left running')),
+          20_000,
+        );
+      }),
+    ]);
+    backendPid = spawnedBackendPid();
+  } finally {
+    clearTimeout(watchdog);
+    reapBackend();
+  }
+
+  assert.equal(race.didCommit(), true, 'the stop was committed inside the window, so the branch was exercised');
+  assert.ok(backendPid !== null, 'a real backend process was spawned before the rejection');
+  assert.throws(() => process.kill(backendPid, 0), /ESRCH/, 'the rejected spawn was killed, not left running');
+
+  const after = readMeta(id, options);
+  // The control path's record survives whole. A second terminal state here would
+  // replace the operator's `stopped` with a failure they never asked for.
+  assert.equal(after.state, 'stopped');
+  assert.equal(after.stop_reason, 'stop');
+  assert.equal(after.finished_at, stopped.finished_at);
+  assert.equal(after.last_activity_at, stopped.last_activity_at);
+  // No spawn record. The spawn was never accepted, so there is no invocation to
+  // point at, and a published identity here would be a dead pid presented as
+  // authoritative.
+  assert.equal(after.pid, null);
+  assert.equal(after.pgid, null);
+  assert.equal(after.start_time, null);
+  assert.equal(after.invocation_id, null);
+  assert.equal(after.started_at, null);
+  assert.equal(after.pending_prompt, null);
+  assert.equal(after.steer_queue.length, 0);
+  // The claim is released. This is the part a survivor of runner.ts:396 would
+  // get wrong: the runner returns without calling reclaimOrStop, so nothing but
+  // the stop itself clears the reservation.
+  assert.equal(after.active_runner, false);
+  assert.equal(after.runner_reservation, null);
+  assert.equal(after.error, null);
+  assert.equal(after.backend_error, null);
+
+  // And the agent is not wedged. The resume goes through beginInvocation, which
+  // is what `antonina run` does to the same record, rather than hand-patching
+  // the fields a naive resume would set: a stale stop_reason is stop-like and
+  // would refuse the next claim, so a resume that skipped it would be testing a
+  // state the CLI never produces.
+  const resumed = readMeta(id, options);
+  const now = Date.now() / 1000;
+  beginInvocation(resumed, 'work again', now, 2);
+  resumed.active_runner = true;
+  resumed.runner_gen = 8;
+  resumed.runner_reservation = reservation({ gen: 8, owner_pid: process.pid, reserved_at: now });
+  writeMeta(id, resumed, options);
+  await runManagedRunner(id, 'new', 8, {
+    env: { ...options.env, ANTONINA_OPENCODE_BIN: resumeBackend },
+    capacity: { readText: cgroup(1) },
+  });
+  const rerun = readMeta(id, options);
+  assert.equal(rerun.state, 'succeeded', 'a stop that rejected a spawn does not block the next run');
+  assert.equal(rerun.active_runner, false);
+  assert.equal(rerun.runner_reservation, null);
 });

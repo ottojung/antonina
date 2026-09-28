@@ -478,20 +478,18 @@ test('a resource registered on a catalogued host is related to that target', asy
   assert.deepEqual((await client.listTargets())[0].resources.map((entry) => entry.path), ['/workspace/project-worktree']);
 });
 
-test('target registration and dispatch need the target capability a credential may not hold', async () => {
+test('target registration uses the same full-access board key as every other mutation', async () => {
   const server = fakeSkrynia();
   const root = api(server);
-  const initialized = await root.initialize();
-  await root.createIssue('Delegated');
-  const child = await root.delegateCredential(['issue.create', 'target.read']);
-  const reader = api(server, { credential: child, trustAnchor: initialized.trustAnchor });
-
-  await assert.rejects(() => reader.registerTarget({
+  await root.initialize();
+  await root.createIssue('Target work');
+  const target = await root.registerTarget({
     id: 'phoebe-dev',
     backend: 'lubko',
     kind: 'persistent-host',
     capabilities: ['persistent-filesystem'],
     address: 'lubko://phoebe-dev',
-  }), /target.modify/);
-  assert.deepEqual(await reader.listTargets(), [], 'reading the catalog needs no write access');
+  });
+  assert.equal(target.id, 'phoebe-dev');
+  assert.equal((await root.listTargets())[0].id, 'phoebe-dev');
 });

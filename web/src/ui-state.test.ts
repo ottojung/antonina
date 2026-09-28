@@ -248,15 +248,31 @@ describe('board copy', () => {
 describe('board load state', () => {
   const board: Board = { ...emptyBoard(), nextIssueNumber: 2, issues: [issue(1, 'open')] };
   const verified = state({ board, queue: [1] });
+  const summaryBoard = {
+    issues: [{
+      number: 1,
+      title: 'Issue 1',
+      state: 'open' as const,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      closedAt: null,
+      messageCount: 0,
+      hasBody: false,
+    }],
+    resources: [],
+    targets: [],
+    dispatches: [],
+  };
+  const ready: BoardLoad = { status: 'ready', board: summaryBoard, queue: [1], head: 'head' };
 
   it('resolves a read to the first-run state while the board is missing', () => {
     expect(boardLoaded(null)).toEqual({ status: 'uninitialized' });
-    expect(boardLoaded(verified)).toEqual({ status: 'ready', board, queue: [1] });
+    expect(boardLoaded(verified)).toEqual(ready);
   });
 
   it('turns a failed initialization whose board now exists into a read-only board', () => {
     const resolved = firstRunResolved(boardLoaded(verified), new Error('The Antonina board already exists'));
-    expect(resolved.load).toEqual({ status: 'ready', board, queue: [1] });
+    expect(resolved.load).toEqual(ready);
     expect(resolved.error).toBeUndefined();
   });
 
@@ -279,7 +295,7 @@ describe('board load state', () => {
 
   it('reports a board this browser created as ready, with the queue that create verified', () => {
     const outcome = firstRunOutcome({ state: verified });
-    expect(outcome.load).toEqual({ status: 'ready', board, queue: [1] });
+    expect(outcome.load).toEqual(ready);
     expect(outcome.error).toBeUndefined();
     expect(outcome.notice).toBe(FIRST_RUN_COPY.initialized);
   });
@@ -289,7 +305,7 @@ describe('board load state', () => {
       { failure: new Error('The Antonina signed board already exists') },
       { state: verified },
     );
-    expect(outcome.load).toEqual({ status: 'ready', board, queue: [1] });
+    expect(outcome.load).toEqual(ready);
     expect(outcome.error).toBeUndefined();
     expect(outcome.notice).toBe(FIRST_RUN_COPY.raced);
   });
@@ -322,7 +338,7 @@ describe('board load state', () => {
   });
 
   it('applies the same no-board rule to the trust path', () => {
-    expect(boardReadOutcome(verified)).toEqual({ load: { status: 'ready', board, queue: [1] } });
+    expect(boardReadOutcome(verified)).toEqual({ load: ready });
     expect(boardReadOutcome(null)).toEqual({
       load: { status: 'failed', message: FIRST_RUN_COPY.readFailed },
       error: FIRST_RUN_COPY.readFailed,
@@ -349,9 +365,8 @@ describe('board load state', () => {
   });
 
   it('keeps the last good board when a later read fails', () => {
-    const ready: BoardLoad = { status: 'ready', board, queue: [1] };
     expect(boardLoadFailed(ready, 'Skrynia GET failed (503)')).toBe(ready);
-    expect(loadedBoard(boardLoadFailed(ready, 'Skrynia GET failed (503)'))).toBe(board);
+    expect(loadedBoard(boardLoadFailed(ready, 'Skrynia GET failed (503)'))).toBe(summaryBoard);
   });
 
   it('fails terminally only while no board has ever loaded', () => {

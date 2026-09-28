@@ -970,46 +970,52 @@ export class ShardedBoardStore {
     await this.writeFeedPages(boardId, log, revision, storageCapability);
   }
 
-  async migrate(stored: StoredSignedBoard, storageCapability: string): Promise<StoredSignedBoard> {
-    const existing = await this.loadMeta();
+  async migrate(
+    stored: StoredSignedBoard,
+    anchor: BoardTrustAnchor,
+    storageCapability: string,
+  ): Promise<StoredSignedBoard> {
+    const existing = await this.loadMeta(storageCapability, anchor);
     if (existing !== null) {
-      const anchor = {
-        boardId: stored.log.boardId,
-        rootKeyId: stored.log.rootKeyId,
-        rootPublicKey: '',
-      };
-      if (existing.value.boardId !== anchor.boardId || existing.value.rootKeyId !== anchor.rootKeyId) {
-        throw new ShardedBoardStoreError('Existing Antonina v3 board belongs to another trust root');
-      }
-      return stored;
+      const current = await this.read(anchor, storageCapability, stored.state.head);
+      if (current === null) throw new ShardedBoardStoreError('Antonina v3 metadata disappeared during migration');
+      return current;
     }
 
-    const revision = stored.log.operations.length;
-    const sealedChunkCount = Math.floor((stored.log.operations.length - 1) / V3_LOG_CHUNK_SIZE);
+    // V2 is verified once before this call. Re-MAC the same operation headers
+    // with the one board key, preserving operation IDs, timestamps and message
+    // IDs while dropping delegated authority from the v3 authorization model.
+    const log = await trustKeyLog(stored.log, storageCapability);
+    const state = await verifyTrustKeyLog(log, anchor, storageCapability, stored.state.head);
+    const revision = log.operations.length;
+    const sealedChunkCount = Math.floor((log.operations.length - 1) / V3_LOG_CHUNK_SIZE);
     const chunks: ShardedLogChunk[] = Array.from({ length: sealedChunkCount }, (_, index) => ({
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-      boardId: stored.log.boardId,
+      boardId: log.boardId,
       chunk: index + 1,
-      operations: stored.log.operations.slice(
+      operations: log.operations.slice(
         index * V3_LOG_CHUNK_SIZE,
         (index + 1) * V3_LOG_CHUNK_SIZE,
       ),
     }));
 
-    await Promise.all(chunks.map((chunk) => this.upsertPublic(logKey(chunk.chunk), chunk, storageCapability)));
-    await this.writeAllMaterialized(stored.state, stored.log, revision, storageCapability);
+    await Promise.all(chunks.map((chunk) =>
+      this.upsertPublic(logKey(chunk.chunk), chunk, storageCapability)));
+    await this.writeAllMaterialized(state, log, revision, storageCapability);
 
-    const meta = metaFor(stored.log, stored.state, stored.state.head, revision);
+    const meta = metaFor(log, state, stored.state.head, revision);
     const created = await this.createPublic(SHARDED_META_KEY, meta, storageCapability);
     if (!created) {
-      const winner = await this.loadMeta();
+      const winner = await this.loadMeta(storageCapability, anchor);
       if (winner === null
           || winner.value.boardId !== meta.boardId
           || winner.value.rootKeyId !== meta.rootKeyId) {
-        throw new ShardedBoardStoreError('Concurrent Antonina v3 migration chose another trust root');
+        throw new ShardedBoardStoreError('Concurrent Antonina v3 migration chose another board');
       }
     }
-    return stored;
+    const committed = await this.read(anchor, storageCapability, stored.state.head);
+    if (committed === null) throw new ShardedBoardStoreError('Antonina v3 migration did not become readable');
+    return committed;
   }
 
   private async ensureSealedTail(meta: ShardedBoardMeta, storageCapability: string): Promise<void> {
@@ -1023,7 +1029,7 @@ export class ShardedBoardStore {
     };
     const created = await this.createPublic(logKey(chunkNumber), chunk, storageCapability);
     if (created) return;
-    const existing = await this.readChunk(meta.boardId, chunkNumber);
+    const existing = await this.readChunk(meta.boardId, chunkNumber, storageCapability);
     const existingIds = existing.value.operations.map((operation) => operation.opId);
     const expectedIds = chunk.operations.map((operation) => operation.opId);
     if (existingIds.length !== expectedIds.length
@@ -1115,7 +1121,7 @@ export class ShardedBoardStore {
       const newest = afterFeed[0];
       if (newest !== undefined) {
         const pageNumber = Math.floor(beforeFeed / V3_FEED_PAGE_SIZE) + 1;
-        const existing = await this.getJson<unknown>(feedPageKey(pageNumber));
+        const existing = await this.getJson<unknown>(feedPageKey(pageNumber), storageCapability);
         let entries: BoardFeedEntry[] = [];
         if (existing !== null && isRecord(existing.value) && Array.isArray(existing.value.entries)) {
           entries = (existing.value.entries as BoardFeedEntry[]).filter((entry) => entry.position < newest.position);
@@ -1139,52 +1145,60 @@ export class ShardedBoardStore {
   ): Promise<StoredSignedBoard> {
     const credential = await verifyBoardCredential(credentialValue);
     const anchor = credentialTrustAnchor(credential);
-    const signer = credentialSigningKey(credential);
+    const storageCapability = credential.storageCapability;
     const requestedTimestamp = request.timestamp ?? this.now().toISOString();
     const nonce = request.nonce ?? this.newId();
 
+    if (request.kind === 'authority.delegate' || request.kind === 'authority.revoke') {
+      throw new ShardedBoardStoreError(
+        'Antonina v3 has one board key; delegation and revocation are not supported',
+      );
+    }
+
     for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-      const metaStored = await this.loadMeta(anchor);
+      const metaStored = await this.loadMeta(storageCapability, anchor);
       if (metaStored === null) throw new ShardedBoardStoreError('Antonina v3 metadata does not exist');
       const meta = metaStored.value;
-      const log = await this.readLog(meta);
-      const state = await verifyAndReplayOperationLog(
+      const log = await this.readLog(meta, storageCapability);
+      const state = await verifyTrustKeyLog(
         log,
         anchor,
-        previouslyAcceptedHead === undefined ? {} : { previouslyAcceptedHead },
+        storageCapability,
+        previouslyAcceptedHead,
       );
       if (state.deleted) throw new ShardedBoardStoreError('Antonina board has been deleted');
 
-      // A prior canonical commit can survive a cache-write failure. Repair all
-      // projections before accepting another mutation; fast readers fall back
-      // to the signed log while materializedRevision trails operationCount.
       if (meta.materializedRevision !== meta.operationCount) {
-        await this.writeAllMaterialized(state, log, meta.operationCount, credential.storageCapability);
+        await this.writeAllMaterialized(state, log, meta.operationCount, storageCapability);
         const repaired = { ...meta, materializedRevision: meta.operationCount };
-        if (!await this.putPublic(SHARDED_META_KEY, repaired, credential.storageCapability, metaStored.etag)) continue;
+        if (!await this.putPublic(SHARDED_META_KEY, repaired, storageCapability, metaStored.etag)) continue;
         continue;
       }
 
       const payload = typeof request.payload === 'function'
         ? request.payload(state)
         : request.payload;
-      const operation = await signBoardOperation({
+      const operation = await trustKeyOperation({
         boardId: anchor.boardId,
+        rootKeyId: anchor.rootKeyId,
         previous: log.head,
-        timestamp: canonicalTimestampAtOrAfter(requestedTimestamp, log.operations.at(-1)?.timestamp),
+        timestamp: canonicalTimestampAtOrAfter(
+          requestedTimestamp,
+          log.operations.at(-1)?.timestamp,
+        ),
         nonce,
         kind: request.kind,
         payload,
-      }, signer);
+      }, storageCapability);
       const candidateLog = appendToLog(log, operation);
-      const candidateState = await verifyAndReplayOperationLog(candidateLog, anchor, {
-        previouslyAcceptedHead: state.head,
-      });
+      const candidateState = await verifyTrustKeyLog(
+        candidateLog,
+        anchor,
+        storageCapability,
+        state.head,
+      );
 
-      // When the bounded tail is full, publish it once as an immutable chunk.
-      // Both racing writers seal exactly the same committed tail, so a 409 is
-      // harmless only when the existing chunk has the same operation IDs.
-      await this.ensureSealedTail(meta, credential.storageCapability);
+      await this.ensureSealedTail(meta, storageCapability);
 
       const revision = meta.operationCount + 1;
       const committedMeta = metaFor(
@@ -1193,27 +1207,42 @@ export class ShardedBoardStore {
         meta.migratedFrom,
         meta.materializedRevision,
       );
-      if (!await this.putPublic(SHARDED_META_KEY, committedMeta, credential.storageCapability, metaStored.etag)) continue;
+      if (!await this.putPublic(
+        SHARDED_META_KEY,
+        committedMeta,
+        storageCapability,
+        metaStored.etag,
+      )) continue;
 
-      // The signed operation is canonical now. Materialized objects are a
-      // repairable acceleration layer, never the commit point.
       let materialized = false;
       try {
-        await this.materializeOperation(state, candidateState, candidateLog, operation, revision, credential.storageCapability);
+        await this.materializeOperation(
+          state,
+          candidateState,
+          candidateLog,
+          operation,
+          revision,
+          storageCapability,
+        );
         materialized = true;
       } catch {
-        // Leave materializedRevision behind. Fast reads will fall back to the
-        // canonical signed log, and the next writer repairs all projections.
+        // The canonical trust-key log is committed. A later writer repairs
+        // projections before accepting another mutation.
       }
 
-      let finalMeta = await this.loadMeta(anchor);
+      let finalMeta = await this.loadMeta(storageCapability, anchor);
       if (materialized
           && finalMeta !== null
           && finalMeta.value.head === operation.opId
           && finalMeta.value.materializedRevision < revision) {
         const repaired = { ...finalMeta.value, materializedRevision: revision };
-        if (await this.putPublic(SHARDED_META_KEY, repaired, credential.storageCapability, finalMeta.etag)) {
-          finalMeta = await this.loadMeta(anchor);
+        if (await this.putPublic(
+          SHARDED_META_KEY,
+          repaired,
+          storageCapability,
+          finalMeta.etag,
+        )) {
+          finalMeta = await this.loadMeta(storageCapability, anchor);
         }
       }
       if (finalMeta === null) {
@@ -1222,7 +1251,7 @@ export class ShardedBoardStore {
       return { log: candidateLog, state: candidateState, etag: finalMeta.etag };
     }
 
-    throw new ShardedBoardStoreError('Antonina v3 board changed too often; signed operation was not committed');
+    throw new ShardedBoardStoreError('Antonina v3 board changed too often; operation was not committed');
   }
 
   async getIssue(anchor: BoardTrustAnchor, number: number): Promise<BoardIssue | null> {

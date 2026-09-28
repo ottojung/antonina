@@ -74,8 +74,10 @@ test('the traced make target comes from a run step, not from a comment', (t) => 
   assert.match(result.stdout, /RESULT: PASS/);
   assert.doesNotMatch(result.stdout, /WARNING: no make target/);
   // `make dist` is not a target of this repository's Makefile, so tracing it
-  // instead of `build` would have emptied the input set rather than kept 29.
-  assert.match(result.stdout, /traced bundle inputs: 29/);
+  // instead of `build` would have emptied the input set rather than kept it. The
+  // count is the traced bundle inputs this revision actually has, so adding a
+  // `web/**` source file is expected to move it and this number with it.
+  assert.match(result.stdout, /traced bundle inputs: 31/);
 });
 
 test('an ambiguous make target fails instead of guessing', (t) => {

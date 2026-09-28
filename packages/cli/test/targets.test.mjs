@@ -280,3 +280,113 @@ test('an empty catalog is reported as empty rather than as a failure', async () 
   assert.equal(unroutable.code, 1);
   assert.match(unroutable.err[0], /no execution targets are registered/);
 });
+
+test('the CLI registers and reports the descriptive metadata of a target', async () => {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  await owner.initialize();
+
+  const added = await run([...PHOEBE, '--display-name', 'Phoebe (Lubko)', '--garbage-collection', 'none',
+    '--limitation', 'no managed collection roots are configured on this host'], owner);
+  assert.equal(added.code, 0);
+  const shown = await run(['target', 'show', 'phoebe-dev', '--json'], owner);
+  assert.equal(JSON.parse(shown.out[0]).displayName, 'Phoebe (Lubko)');
+  assert.equal(JSON.parse(shown.out[0]).garbageCollection, 'none');
+  assert.deepEqual(JSON.parse(shown.out[0]).limitations, ['no managed collection roots are configured on this host']);
+
+  // The human form reports the access facts a scheduler needs, resolved from the
+  // record, so an operator does not have to know the defaults by heart.
+  const human = await run(['target', 'show', 'phoebe-dev'], owner);
+  assert.equal(human.code, 0, human.err.join(String.fromCharCode(10)));
+  const block = human.out.join(String.fromCharCode(10));
+  assert.match(block, /name Phoebe \(Lubko\)/);
+  assert.match(block, /access lubko-transport/);
+  assert.match(block, /persistence durable-host-filesystem/);
+  assert.match(block, /cleanup none/);
+  assert.match(block, /guidance docs\/skills\/target-lubko-persistent-host\.md/);
+  assert.match(block, /caveat: no managed collection roots are configured on this host/);
+
+  // A target that states none of it still reports the same answers from defaults.
+  assert.equal((await run(ACTIONS, owner)).code, 0);
+  const ephemeral = await run(['target', 'show', 'github-actions'], owner);
+  assert.match(ephemeral.out.join(String.fromCharCode(10)), /access github-workflow-dispatch/);
+  assert.match(ephemeral.out.join(String.fromCharCode(10)), /persistence per-job-workspace/);
+  assert.match(ephemeral.out.join(String.fromCharCode(10)), /cleanup provider-managed/);
+  assert.match(ephemeral.out.join(String.fromCharCode(10)), /guidance docs\/skills\/target-github-actions-ephemeral\.md/);
+});
+
+test('the CLI refuses descriptive metadata that contradicts the backend or kind', async () => {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  await owner.initialize();
+
+  const wrongAccess = await run([...PHOEBE, '--access-method', 'github-workflow-dispatch'], owner);
+  assert.equal(wrongAccess.code, 1);
+  assert.match(wrongAccess.err[0], /the lubko backend is reached by lubko-transport/);
+
+  const wrongPersistence = await run([
+    'target', 'add', 'github-actions', '--backend', 'github-actions', '--kind', 'ephemeral-environment',
+    '--persistence', 'durable-host-filesystem',
+  ], owner);
+  assert.equal(wrongPersistence.code, 1);
+  assert.match(wrongPersistence.err[0], /a target of kind ephemeral-environment has per-job-workspace persistence/);
+
+  const wrongCleanup = await run([...PHOEBE, '--garbage-collection', 'provider-managed'], owner);
+  assert.equal(wrongCleanup.code, 1);
+  assert.match(wrongCleanup.err[0], /persistent host cannot declare/);
+
+  const unknown = await run([...PHOEBE, '--limitation', ''], owner);
+  assert.equal(unknown.code, 1);
+
+  assert.equal((await owner.loadBoard()).targets.length, 0, 'a refused registration writes nothing');
+});
+
+test('the CLI keeps what a target says about itself when only its status changes', async () => {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  await owner.initialize();
+  await run([...PHOEBE, '--display-name', 'Phoebe (Lubko)', '--limitation', 'shares a LAN with the build farm'], owner);
+
+  const retired = await run(['target', 'set', 'phoebe-dev', '--status', 'unavailable', '--json'], owner);
+  const record = JSON.parse(retired.out[0]);
+  assert.equal(record.status, 'unavailable');
+  assert.equal(record.displayName, 'Phoebe (Lubko)');
+  assert.deepEqual(record.limitations, ['shares a LAN with the build farm']);
+});
+
+test('the CLI states an unknown or inapplicable capacity rather than a number', async () => {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  await owner.initialize();
+  await run(PHOEBE, owner);
+  await run(ACTIONS, owner);
+
+  // `run` gives the command an empty env and a home that cannot exist, so the
+  // daemon paths resolve under a directory that is not there. This assertion
+  // therefore also pins that a `--telemetry` read resolves its paths from the
+  // command context and not from `process.env`: on a host whose own daemon has
+  // published a report, a context-blind read would find it and fail here.
+  const hosts = await run(['target', 'list', '--telemetry'], owner);
+  assert.equal(hosts.code, 0);
+  const phoebe = hosts.out.find((line) => line.startsWith('phoebe-dev ['));
+  assert.match(phoebe, /telemetry unknown \(no host-local daemon report was readable on this machine\)/);
+  assert.equal(/free of/.test(phoebe), false, 'no capacity is invented for a host that reported nothing');
+
+  // An ephemeral environment has no host at all, which is a different answer
+  // from not knowing, and neither of them is a measurement.
+  const runner = hosts.out.find((line) => line.startsWith('github-actions ['));
+  assert.match(runner, /capacity not applicable \(an ephemeral environment has no host RAM, disk or CPU of its own to report\)/);
+  assert.match(runner, /quota unknown \(Antonina holds no provider account quota/);
+  assert.equal(/free of|logical cores/.test(runner), false);
+
+  // The JSON form carries the same answer, so a scheduler is not told the
+  // flag was honoured in the human form and ignored here.
+  const json = await run(['target', 'list', '--telemetry', '--json'], owner);
+  const parsed = JSON.parse(json.out[0]);
+  assert.equal(Array.isArray(parsed.targets), true);
+  assert.deepEqual(parsed.hosts, []);
+
+  // Without the flag the catalog says nothing about live state at all.
+  const plain = await run(['target', 'list'], owner);
+  assert.equal(plain.out.join('\n').includes('telemetry unknown'), false);
+});

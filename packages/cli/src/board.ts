@@ -22,16 +22,24 @@ import {
   type BoardFeedRequest,
 } from '../../core/src/feed.js';
 import {
+  defaultExecutionTargetAccessMethod,
+  defaultExecutionTargetPersistence,
+  executionTargetAccess,
+  parseExecutionTargetAccessMethod,
   parseExecutionTargetBackend,
   parseExecutionTargetCapability,
+  parseExecutionTargetGarbageCollection,
   parseExecutionTargetKind,
+  parseExecutionTargetPersistence,
   parseExecutionTargetStatus,
   type BoardDispatch,
   type BoardExecutionTarget,
   type BoardIssue,
   type BoardResource,
+  type ExecutionTargetAccessMethod,
   type ExecutionTargetBackend,
   type ExecutionTargetKind,
+  type ExecutionTargetPersistence,
   type ExecutionTargetStatus,
   type IssueState,
   type ResourceView,
@@ -39,6 +47,15 @@ import {
   type TargetSelection,
   type TargetView,
 } from '../../core/src/model.js';
+import {
+  formatHostBytes,
+  hostViewForTarget,
+  type DaemonHostReport,
+  type DaemonHostView,
+  type HostBytesMeasurement,
+} from '../../core/src/host-daemon.js';
+import { daemonPaths } from '../../host-daemon/src/identity.js';
+import { readHostReport } from '../../host-daemon/src/state.js';
 import {
   parseBoardCapability,
   type BoardCapability,
@@ -116,6 +133,12 @@ interface ParsedCommand {
 interface CommandResult {
   mode: string;
   value: CommandValue;
+  /**
+   * The host-local daemon views a `target list --telemetry` asked for, or
+   * `null` when it did not. It rides on the result rather than being a second
+   * command so the human and JSON forms of one answer are the same answer.
+   */
+  hosts?: DaemonHostView[] | null;
 }
 
 function requireArg(raw: string | undefined, name: string): string {
@@ -293,7 +316,7 @@ function boardStateAdvice(error: unknown): string | null {
 async function execute(
   parsed: ParsedCommand,
   client: BoardApi,
-  env: Record<string, string | undefined>,
+  context: BoardCommandContext,
 ): Promise<CommandResult> {
   switch (parsed.command) {
     case 'initialize': {
@@ -406,7 +429,7 @@ async function execute(
     case 'comment': {
       const authorOption = option(parsed.args, '--author');
       if (authorOption.rest.length !== 2) throw new AntoninaApiError('comment requires NUMBER BODY');
-      const author = authorOption.value ?? env[BOARD_AUTHOR_ENV];
+      const author = authorOption.value ?? context.env[BOARD_AUTHOR_ENV];
       if (!author) throw new AntoninaApiError('Message author is required; use --author or ' + BOARD_AUTHOR_ENV);
       return {
         mode: 'issue',
@@ -464,7 +487,8 @@ async function execute(
       if (subcommand === 'list') {
         const backendOption = option(args, '--backend');
         const kindOption = option(backendOption.rest, '--kind');
-        if (kindOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for target list');
+        const telemetryFlag = flag(kindOption.rest, '--telemetry');
+        if (telemetryFlag.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for target list');
         // Both filters are parsed before they are applied, so an unknown value
         // is refused whether or not any target happens to match it.
         const backend = backendOption.value === undefined ? null : parseExecutionTargetBackend(backendOption.value);
@@ -474,18 +498,30 @@ async function execute(
           mode: 'targets',
           value: targets.filter((target) =>
             (backend === null || target.backend === backend) && (kind === null || target.kind === kind)),
+          hosts: telemetryFlag.value ? await client.daemonHosts(localHostReports(context), { nowMs: Date.now() }) : null,
         };
       }
       if (subcommand === 'show') {
-        if (args.length !== 1) throw new AntoninaApiError('target show requires ID');
-        return { mode: 'target', value: await client.getTarget(requireArg(args[0], 'ID')) };
+        const telemetryFlag = flag(args, '--telemetry');
+        if (telemetryFlag.rest.length !== 1) throw new AntoninaApiError('target show requires ID');
+        return {
+          mode: 'target',
+          value: await client.getTarget(requireArg(telemetryFlag.rest[0], 'ID')),
+          hosts: telemetryFlag.value ? await client.daemonHosts(localHostReports(context), { nowMs: Date.now() }) : null,
+        };
       }
       if (subcommand === 'add') {
         const backendOption = option(args, '--backend');
         const kindOption = option(backendOption.rest, '--kind');
         const addressOption = option(kindOption.rest, '--address');
         const descriptionOption = option(addressOption.rest, '--description');
-        const capabilityOption = repeatedOption(descriptionOption.rest, '--capability');
+        const displayNameOption = option(descriptionOption.rest, '--display-name');
+        const accessMethodOption = option(displayNameOption.rest, '--access-method');
+        const persistenceOption = option(accessMethodOption.rest, '--persistence');
+        const garbageCollectionOption = option(persistenceOption.rest, '--garbage-collection');
+        const limitationOption = repeatedOption(garbageCollectionOption.rest, '--limitation');
+        const guidanceOption = repeatedOption(limitationOption.rest, '--guidance');
+        const capabilityOption = repeatedOption(guidanceOption.rest, '--capability');
         if (capabilityOption.rest.length !== 1) {
           throw new AntoninaApiError('target add requires ID --backend BACKEND --kind KIND');
         }
@@ -494,22 +530,48 @@ async function execute(
         if (address === null && kindOption.value === 'persistent-host') {
           throw new AntoninaApiError('target add --kind persistent-host requires --address lubko://<server>');
         }
+        const backend = parseExecutionTargetBackend(requireArg(backendOption.value, 'target add --backend'));
+        const kind = parseExecutionTargetKind(requireArg(kindOption.value, 'target add --kind'));
         return {
           mode: 'target',
           value: await client.registerTarget({
             id,
-            backend: parseExecutionTargetBackend(requireArg(backendOption.value, 'target add --backend')),
-            kind: parseExecutionTargetKind(requireArg(kindOption.value, 'target add --kind')),
+            backend,
+            kind,
             capabilities: capabilityOption.values.map(parseExecutionTargetCapability),
             address,
             description: descriptionOption.value ?? '',
+            // A flag the caller did not give is not written at all, so the
+            // target keeps reading through the same default a target registered
+            // before these fields existed reads through. A flag the caller gave
+            // is validated against the backend and kind it is registering for,
+            // here rather than at the model, so the refusal names the field.
+            ...(displayNameOption.value === undefined
+              ? {}
+              : { displayName: displayNameOption.value }),
+            ...(accessMethodOption.value === undefined
+              ? {}
+              : { accessMethod: checkedAccessMethod(backend, accessMethodOption.value) }),
+            ...(persistenceOption.value === undefined
+              ? {}
+              : { persistence: checkedPersistence(kind, persistenceOption.value) }),
+            ...(garbageCollectionOption.value === undefined
+              ? {}
+              : { garbageCollection: parseExecutionTargetGarbageCollection(garbageCollectionOption.value) }),
+            ...(limitationOption.values.length === 0
+              ? {}
+              : { limitations: limitationOption.values }),
+            ...(guidanceOption.values.length === 0 ? {} : { guidance: guidanceOption.values }),
           }),
         };
       }
       if (subcommand === 'set') {
         const statusOption = option(args, '--status');
         const descriptionOption = option(statusOption.rest, '--description');
-        const capabilityOption = repeatedOption(descriptionOption.rest, '--capability');
+        const displayNameOption = option(descriptionOption.rest, '--display-name');
+        const limitationOption = repeatedOption(displayNameOption.rest, '--limitation');
+        const guidanceOption = repeatedOption(limitationOption.rest, '--guidance');
+        const capabilityOption = repeatedOption(guidanceOption.rest, '--capability');
         if (capabilityOption.rest.length !== 1) throw new AntoninaApiError('target set requires ID');
         const id = requireArg(capabilityOption.rest[0], 'ID');
         const existing = await client.getTarget(id);
@@ -517,7 +579,9 @@ async function execute(
           ? existing.status
           : parseExecutionTargetStatus(statusOption.value);
         // An absent `--capability` keeps the declared capabilities, so a
-        // status change cannot silently strip what a target can do.
+        // status change cannot silently strip what a target can do. The
+        // descriptive notes behave the same way, and a field the target never
+        // had stays absent rather than being written out empty.
         const capabilities = capabilityOption.values.length === 0
           ? existing.capabilities
           : capabilityOption.values.map(parseExecutionTargetCapability);
@@ -527,6 +591,15 @@ async function execute(
             status,
             capabilities,
             description: descriptionOption.value ?? existing.description,
+            ...(displayNameOption.value !== undefined
+              ? { displayName: displayNameOption.value }
+              : existing.displayName !== undefined ? { displayName: existing.displayName } : {}),
+            ...(limitationOption.values.length > 0
+              ? { limitations: limitationOption.values }
+              : existing.limitations !== undefined ? { limitations: existing.limitations } : {}),
+            ...(guidanceOption.values.length > 0
+              ? { guidance: guidanceOption.values }
+              : existing.guidance !== undefined ? { guidance: existing.guidance } : {}),
           }),
         };
       }
@@ -568,7 +641,7 @@ async function execute(
           host: requireArg(hostOption.value, 'collect delete --host'),
           path: requireArg(pathOption.value, 'collect delete --path'),
           confirm: confirmFlag.value,
-          env,
+          env: context.env,
         });
         return { mode: collected.mode, value: collected.value };
       }
@@ -598,11 +671,24 @@ const REMOVAL_OUTCOME: { readonly [K in CollectDeleteReport['removal']]: string 
 };
 
 function humanTargetRecord(target: BoardExecutionTarget): string[] {
+  // Every line here is read off `executionTargetAccess`, so the CLI prints the
+  // same access method, persistence, garbage collection and guidance a board
+  // view prints. A field the record leaves absent is reported from its default
+  // rather than omitted, because "this target says nothing about how it is
+  // cleaned up" and "this target is cleaned up by the provider" are different
+  // things for an operator and only one of them is true.
+  const access = executionTargetAccess(target);
   return [
     target.id + ' [' + target.backend + '/' + target.kind + '] ' + target.status
       + ' [' + target.capabilities.join(', ') + ']'
       + (target.address === null ? ' no-host' : ' ' + target.address),
+    '  name ' + access.displayName,
+    '  access ' + access.accessMethod,
+    '  persistence ' + access.persistence,
+    '  cleanup ' + access.garbageCollection,
+    '  guidance ' + access.guidance.join(', '),
     ...(target.description === '' ? [] : ['  ' + target.description]),
+    ...access.limitations.map((limitation) => '  caveat: ' + limitation),
   ];
 }
 
@@ -615,6 +701,130 @@ function humanTarget(target: TargetView): string {
     lines.push('  dispatched ' + target.dispatchedIssues.map((number) => '#' + number).join(', '));
   }
   return lines.join('\n');
+}
+
+/**
+ * The access method a flag names, refused here when it contradicts the backend
+ * being registered. The model would refuse the same record; refusing at the
+ * command line means the operator is told which flag disagrees with which
+ * backend before anything is signed.
+ */
+function checkedAccessMethod(backend: ExecutionTargetBackend, raw: string): ExecutionTargetAccessMethod {
+  const method = parseExecutionTargetAccessMethod(raw);
+  const expected = defaultExecutionTargetAccessMethod(backend);
+  if (method !== expected) {
+    throw new AntoninaApiError(`the ${backend} backend is reached by ${expected}, not ${method}`);
+  }
+  return method;
+}
+
+/** The persistence a flag names, refused when it contradicts the kind being registered. */
+function checkedPersistence(kind: ExecutionTargetKind, raw: string): ExecutionTargetPersistence {
+  const persistence = parseExecutionTargetPersistence(raw);
+  const expected = defaultExecutionTargetPersistence(kind);
+  if (persistence !== expected) {
+    throw new AntoninaApiError(`a target of kind ${kind} has ${expected} persistence, not ${persistence}`);
+  }
+  return persistence;
+}
+
+/**
+ * The host-local daemon report, read at most once per command.
+ *
+ * Telemetry is opt-in because it is a filesystem read of state the operator's
+ * own machine owns, and because a report is evidence about a host rather than a
+ * board fact. A host that has never published one contributes nothing here, and
+ * `humanHostTelemetry` turns that absence into a stated `unknown` rather than
+ * into silence.
+ *
+ * The paths come from the command context, never from `process.env`, exactly as
+ * `antonina daemon` resolves them. A `--telemetry` read that fell through to the
+ * ambient environment would let a test — or any caller with an injected `env` —
+ * read the operator's own state tree, which is not a thing a board command may
+ * do behind the caller's back.
+ */
+function localHostReports(context: BoardCommandContext): DaemonHostReport[] {
+  const report = readHostReport({
+    paths: daemonPaths({
+      env: context.env,
+      ...(context.home === undefined ? {} : { home: context.home }),
+    }),
+  });
+  return report === null ? [] : [report];
+}
+
+/** One byte measurement as an operator reads it, keeping the reason it is absent. */
+function humanBytes(measurement: HostBytesMeasurement): string {
+  return measurement.ok
+    ? formatHostBytes(measurement.bytes) + ' (' + measurement.bytes + ' bytes)'
+    : 'unknown (' + measurement.reason + (measurement.detail === '' ? '' : ': ' + measurement.detail) + ')';
+}
+
+/**
+ * The live capacity of a persistent host, exactly as far as the last report
+ * supports it.
+ *
+ * Every absent measurement keeps its own reason, and the liveness line is
+ * printed even when there is no telemetry at all: a host that is offline, a
+ * host that reports no telemetry, and a host with no free memory are three
+ * different facts and none of them is silence.
+ */
+function humanHostTelemetry(host: DaemonHostView | undefined): string[] {
+  if (host === undefined) {
+    return ['  telemetry unknown (no host-local daemon report was readable on this machine)'];
+  }
+  const lines = [
+    '  host ' + host.hostId + ' ' + host.liveness.status
+      + (host.liveness.ageMs === null ? ' (never reported)' : ' (last report ' + host.liveness.ageMs + 'ms ago)')
+      + (host.health === null ? '' : ', daemon ' + host.health),
+  ];
+  if (host.telemetry === null) {
+    lines.push('  capacity unknown (the report carried no telemetry)');
+    return lines;
+  }
+  const telemetry = host.telemetry;
+  lines.push('  memory ' + humanBytes(telemetry.memory.available) + ' free of ' + humanBytes(telemetry.memory.total));
+  for (const filesystem of telemetry.filesystems) {
+    lines.push('  filesystem ' + filesystem.path + ' ' + humanBytes(filesystem.available)
+      + ' free of ' + humanBytes(filesystem.total));
+  }
+  lines.push('  cpu '
+    + (telemetry.cpu.logicalCores === null ? 'unknown (cores not reported)' : telemetry.cpu.logicalCores + ' logical cores')
+    + (telemetry.cpu.model === null ? '' : ', ' + telemetry.cpu.model)
+    + (telemetry.cpu.loadAverage === null ? ', load unknown (not reported)' : ', load ' + telemetry.cpu.loadAverage.join(' ')));
+  lines.push('  quota not applicable (a host is not a metered external execution service)');
+  if (telemetry.problems.length > 0) lines.push('  report problems: ' + telemetry.problems.join(', '));
+  return lines;
+}
+
+/** Telemetry for a target that is not a persistent host, stated rather than measured. */
+function nonHostTelemetry(target: BoardExecutionTarget): string[] {
+  if (target.kind === 'ephemeral-environment') {
+    return [
+      '  capacity not applicable (an ephemeral environment has no host RAM, disk or CPU of its own to report)',
+      '  quota unknown (Antonina holds no provider account quota; read it from the provider)',
+    ];
+  }
+  return ['  capacity unknown (no host-local daemon report was readable on this machine)'];
+}
+
+/**
+ * One target as one block. The lines are joined into a single string rather
+ * than emitted separately so a target stays one unit of output the way the feed
+ * keeps one entry to one line: a caller reading the catalog can address a target
+ * without counting the lines beneath it.
+ */
+function humanTargetBlock(target: TargetView, hosts: readonly DaemonHostView[] | null): string {
+  const lines = humanTarget(target).split('\n');
+  if (hosts === null) return lines.join('\n');
+  if (target.kind !== 'persistent-host') return [...lines, ...nonHostTelemetry(target)].join('\n');
+  return [...lines, ...humanHostTelemetry(hostViewForTarget(target, hosts))].join('\n');
+}
+
+/** The catalog as a list, each target carrying its live state only when asked for. */
+function humanTargetList(targets: readonly TargetView[], hosts: readonly DaemonHostView[] | null): string[] {
+  if (targets.length === 0) return ['No execution targets are registered.'];
+  return targets.map((target) => humanTargetBlock(target, hosts));
 }
 
 /**
@@ -751,12 +961,21 @@ function humanLines(result: CommandResult): string[] {
     ];
   }
 
-  if (result.mode === 'target') return humanTargetRecord(result.value as BoardExecutionTarget);
-  if (result.mode === 'targets') {
-    const targets = result.value as TargetView[];
-    if (targets.length === 0) return ['No execution targets are registered.'];
-    return targets.map(humanTarget);
+  if (result.mode === 'target') {
+    // `target show` hands back the record itself, with no resource or dispatch
+    // projection beside it, so it is printed from the record and never routed
+    // through the catalog listing that needs those.
+    const target = result.value as BoardExecutionTarget;
+    const lines = humanTargetRecord(target);
+    if (result.hosts === undefined || result.hosts === null) return lines;
+    return [
+      ...lines,
+      ...(target.kind === 'persistent-host'
+        ? humanHostTelemetry(hostViewForTarget(target, result.hosts))
+        : nonHostTelemetry(target)),
+    ];
   }
+  if (result.mode === 'targets') return humanTargetList(result.value as TargetView[], result.hosts ?? null);
   if (result.mode === 'selection') return humanSelection(result.value as TargetSelection);
   if (result.mode === 'dispatch') {
     const dispatch = result.value as BoardDispatch;
@@ -785,9 +1004,15 @@ export async function runBoardCommand(argv: string[], context: BoardCommandConte
   try {
     const parsed = parseCommand(argv);
     const client = context.createClient?.() ?? defaultClient(context);
-    const result = await execute(parsed, client, context.env);
+    const result = await execute(parsed, client, context);
     if (parsed.json) {
-      context.io.stdout(canonicalJson(result.value as unknown as CanonicalValue));
+      // A JSON reader that asked for telemetry must receive it. Leaving the
+      // hosts out would make `--telemetry` look honoured in the human form and
+      // silently ignored here, which is the one answer a scheduler cannot check.
+      const payload = result.hosts === undefined || result.hosts === null
+        ? result.value
+        : { [result.mode === 'targets' ? 'targets' : 'target']: result.value, hosts: result.hosts };
+      context.io.stdout(canonicalJson(payload as unknown as CanonicalValue));
       return 0;
     }
     for (const line of humanLines(result)) context.io.stdout(line);

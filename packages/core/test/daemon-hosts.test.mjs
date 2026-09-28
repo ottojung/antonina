@@ -7,8 +7,10 @@ import {
   MalformedDaemonHostReportError,
   daemonHostReportDefect,
   daemonHostViews,
+  formatHostBytes,
   hostBytes,
   hostLiveness,
+  hostViewForTarget,
   measurementDefect,
   parseDaemonHostReport,
   unavailableHostBytes,
@@ -181,4 +183,43 @@ test('the board surface is read-only: an unreadable board yields hosts, not an e
   assert.equal(views[0].targetId, null);
   assert.equal(client.hasWriteAccess(), false, 'reading host state grants nothing');
   assert.equal(client.getCredential(), null, 'reporting host telemetry requires no board credential');
+});
+
+test('the host view related to a target is the one place that relation is decided', () => {
+  // The board view and the CLI both ask this question, so it is answered here
+  // rather than written twice in the two surfaces that render it.
+  const board = emptyBoard();
+  const target = {
+    id: 'phoebe-dev',
+    backend: 'lubko',
+    kind: 'persistent-host',
+    status: 'available',
+    capabilities: ['persistent-filesystem'],
+    address: 'lubko://phoebe-dev',
+    description: '',
+    createdAt: STAMP,
+    updatedAt: STAMP,
+  };
+  board.targets.push(target);
+  const [related, uncatalogued] = daemonHostViews([
+    parseDaemonHostReport(report()),
+    parseDaemonHostReport(report({ hostId: 'zeta-host', address: 'lubko://zeta-host' })),
+  ], { nowMs: Date.parse(STAMP), board });
+
+  assert.equal(hostViewForTarget(target, [uncatalogued, related])?.hostId, 'phoebe-dev');
+  assert.equal(hostViewForTarget(target, [uncatalogued]), undefined,
+    'a report no target claims is never attached to the nearest one');
+  assert.equal(hostViewForTarget({ id: 'nowhere', address: null }, [related]), undefined);
+  assert.equal(hostViewForTarget(target, []), undefined);
+});
+
+test('a byte count is printed at one scale everywhere it is printed', () => {
+  // The CLI and the board view render the same measurement; a second copy of
+  // this loop is how they would start disagreeing about the same number.
+  assert.equal(formatHostBytes(0), '0 B');
+  assert.equal(formatHostBytes(1023), '1023 B');
+  assert.equal(formatHostBytes(1024), '1.0 KiB');
+  assert.equal(formatHostBytes(1024 ** 3), '1.0 GiB');
+  assert.equal(formatHostBytes(1024 ** 5 * 2), '2.0 PiB');
+  assert.equal(formatHostBytes(1024 ** 6 * 3), '3072.0 PiB', 'the scale stops at the largest unit');
 });

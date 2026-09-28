@@ -1,4 +1,10 @@
-import { canonicalHost, canonicalTargetId, targetIdForHost, type Board } from './model.js';
+import {
+  canonicalHost,
+  canonicalTargetId,
+  targetIdForHost,
+  type Board,
+  type BoardExecutionTarget,
+} from './model.js';
 
 /**
  * The host-local Antonina daemon, described as shared vocabulary.
@@ -260,6 +266,41 @@ export function daemonHostViews(
         heartbeatCount: report.heartbeatCount,
       };
     });
+}
+
+/**
+ * The one host view that reports about this target, or `undefined` when none
+ * does.
+ *
+ * A report is related to a target by address, which is what
+ * {@link daemonHostViews} already resolved into `targetId`; a view whose
+ * `targetId` is `null` belongs to a host the catalog does not claim, and is
+ * never attached to the nearest target. This is the single place that relation
+ * is decided, so a board view and a CLI command cannot disagree about which
+ * report belongs to which target.
+ */
+export function hostViewForTarget(
+  target: Pick<BoardExecutionTarget, 'id' | 'address'>,
+  hosts: readonly DaemonHostView[],
+): DaemonHostView | undefined {
+  return hosts.find((host) => host.targetId === target.id
+    || (target.address !== null && host.address === target.address));
+}
+
+const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'] as const;
+
+/**
+ * A byte count at the scale a person reads, for every surface that prints one.
+ *
+ * It is deliberately the shortest honest spelling of the number: the exact count
+ * is never invented and never rounded away silently, because a surface that
+ * wants it can print `bytes` beside this string rather than recovering it.
+ */
+export function formatHostBytes(bytes: number): string {
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < BYTE_UNITS.length - 1) { value /= 1024; unit += 1; }
+  return (unit === 0 ? String(value) : value.toFixed(1)) + ' ' + BYTE_UNITS[unit];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

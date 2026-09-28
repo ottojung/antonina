@@ -40,9 +40,12 @@ import {
   canonicalPath,
   canonicalTargetId,
   emptyBoard,
+  parseExecutionTargetAccessMethod,
   parseExecutionTargetBackend,
   parseExecutionTargetCapability,
+  parseExecutionTargetGarbageCollection,
   parseExecutionTargetKind,
+  parseExecutionTargetPersistence,
   parseExecutionTargetStatus,
   resourceViews,
   selectExecutionTarget,
@@ -52,9 +55,12 @@ import {
   type BoardExecutionTarget,
   type BoardIssue,
   type BoardResource,
+  type ExecutionTargetAccessMethod,
   type ExecutionTargetBackend,
   type ExecutionTargetCapability,
+  type ExecutionTargetGarbageCollection,
   type ExecutionTargetKind,
+  type ExecutionTargetPersistence,
   type ExecutionTargetStatus,
   type IssueState,
   type ResourceView,
@@ -66,6 +72,7 @@ import {
   daemonHostViews,
   type DaemonHostReport,
   type DaemonHostView,
+  type HostBytesMeasurement,
 } from './host-daemon.js';
 import {
   BOARD_CAPABILITIES,
@@ -102,6 +109,51 @@ const MUTATING_CAPABILITIES = new Set<BoardCapability>([
 ]);
 
 export class AntoninaApiError extends Error {}
+
+/**
+ * The descriptive fields of a target operation, canonicalized and carried only
+ * where the caller supplied them. A caller who omits a field does not write an
+ * empty one: an absent field reads through the backend's and kind's own defaults,
+ * which is what a target registered before these fields existed reads as, so
+ * omitting a field never has to mean "clear it".
+ *
+ * A note list is canonicalized all the way here rather than left half-done for
+ * the model: the record a caller builds is refused downstream if it repeats a
+ * note or carries a blank one, and a refusal that arrives only after the
+ * operation has been signed is a refusal the caller never gets to act on. So
+ * the API produces the sorted, duplicate-free, non-empty list the model
+ * requires, or refuses before anything is signed.
+ */
+function canonicalNoteList(notes: readonly string[], label: string): string[] {
+  if (notes.some((note) => note.trim() === '')) {
+    throw new AntoninaApiError(`An execution target ${label} cannot be blank`);
+  }
+  return [...new Set(notes)].sort();
+}
+
+function canonicalTargetNotes(input: {
+  displayName?: string;
+  accessMethod?: ExecutionTargetAccessMethod;
+  persistence?: ExecutionTargetPersistence;
+  garbageCollection?: ExecutionTargetGarbageCollection;
+  limitations?: readonly string[];
+  guidance?: readonly string[];
+}): Record<string, unknown> {
+  const displayName = input.displayName;
+  if (displayName !== undefined && displayName.trim() === '') {
+    throw new AntoninaApiError('An execution target display name cannot be blank');
+  }
+  return {
+    ...(displayName !== undefined ? { displayName: displayName.trim() } : {}),
+    ...(input.accessMethod !== undefined ? { accessMethod: parseExecutionTargetAccessMethod(input.accessMethod) } : {}),
+    ...(input.persistence !== undefined ? { persistence: parseExecutionTargetPersistence(input.persistence) } : {}),
+    ...(input.garbageCollection !== undefined
+      ? { garbageCollection: parseExecutionTargetGarbageCollection(input.garbageCollection) }
+      : {}),
+    ...(input.limitations !== undefined ? { limitations: canonicalNoteList(input.limitations, 'limitation') } : {}),
+    ...(input.guidance !== undefined ? { guidance: canonicalNoteList(input.guidance, 'guidance reference') } : {}),
+  };
+}
 
 /** The signed board exists but this client cannot verify it without a trust anchor. */
 export class BoardTrustRequiredError extends AntoninaApiError {}
@@ -487,6 +539,12 @@ export class BoardApi {
     capabilities: readonly ExecutionTargetCapability[];
     address: string | null;
     description?: string;
+    displayName?: string;
+    accessMethod?: ExecutionTargetAccessMethod;
+    persistence?: ExecutionTargetPersistence;
+    garbageCollection?: ExecutionTargetGarbageCollection;
+    limitations?: readonly string[];
+    guidance?: readonly string[];
   }): Promise<BoardExecutionTarget> {
     const id = canonicalTargetId(input.id);
     const address = input.address === null ? null : canonicalHost(input.address);
@@ -500,6 +558,7 @@ export class BoardApi {
         capabilities: capabilities.map(parseExecutionTargetCapability),
         address,
         description: input.description ?? '',
+        ...canonicalTargetNotes(input),
       },
       'target.modify',
     );
@@ -517,6 +576,9 @@ export class BoardApi {
       status: ExecutionTargetStatus;
       capabilities: readonly ExecutionTargetCapability[];
       description: string;
+      displayName?: string;
+      limitations?: readonly string[];
+      guidance?: readonly string[];
     },
   ): Promise<BoardExecutionTarget> {
     const targetId = canonicalTargetId(id);
@@ -527,6 +589,7 @@ export class BoardApi {
         status: parseExecutionTargetStatus(changes.status),
         capabilities: [...changes.capabilities].sort().map(parseExecutionTargetCapability),
         description: changes.description,
+        ...canonicalTargetNotes(changes),
       },
       'target.modify',
     );
@@ -754,20 +817,53 @@ export {
 } from './feed.js';
 export type { BoardFeedEntry, BoardFeedEntryKind, BoardFeedPage, BoardFeedRequest } from './feed.js';
 export {
+  EXECUTION_TARGET_ACCESS_METHODS,
   EXECUTION_TARGET_BACKENDS,
   EXECUTION_TARGET_CAPABILITIES,
+  EXECUTION_TARGET_GARBAGE_COLLECTION,
+  EXECUTION_TARGET_GUIDANCE,
   EXECUTION_TARGET_KINDS,
+  EXECUTION_TARGET_PERSISTENCE,
   EXECUTION_TARGET_STATUSES,
   canonicalTargetId,
   canonicalTargetRequirements,
+  defaultExecutionTargetAccessMethod,
+  defaultExecutionTargetPersistence,
+  executionTargetAccess,
+  guidancePathDefect,
+  parseExecutionTargetAccessMethod,
   parseExecutionTargetBackend,
   parseExecutionTargetCapability,
+  parseExecutionTargetGarbageCollection,
   parseExecutionTargetKind,
+  parseExecutionTargetPersistence,
   parseExecutionTargetStatus,
   selectExecutionTarget,
   targetIdForHost,
   targetViews,
+  type ExecutionTargetAccess,
 } from './model.js';
+export {
+  DAEMON_HEALTHS,
+  DEFAULT_STALE_AFTER_MS,
+  HOST_LIVENESSES,
+  HOST_MEASUREMENT_REASONS,
+  formatHostBytes,
+  hostBytes,
+  hostLiveness,
+  hostViewForTarget,
+  unavailableHostBytes,
+  type DaemonHostReport,
+  type DaemonHostView,
+  type HostBytes,
+  type HostBytesMeasurement,
+  type HostCpu,
+  type HostFilesystem,
+  type HostLiveness,
+  type HostMeasurementReason,
+  type HostMemory,
+  type HostTelemetry,
+} from './host-daemon.js';
 export {
   boardApiCollectionReader,
   collectiblePaths,

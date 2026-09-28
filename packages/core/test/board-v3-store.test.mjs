@@ -153,6 +153,52 @@ test('issue reads use only the pointer and materialized snapshots', async () => 
   assert.equal(server.requests.some((request) => Array.isArray(request.body?.operations)), false);
 });
 
+test('overview reads list pages without fetching issue bodies or comments', async () => {
+  const server = fakeSkrynia();
+  const store = deterministicStore(server);
+  const issues = Array.from({ length: 51 }, (_, index) => ({
+    number: index + 1,
+    title: `Issue ${index + 1}`,
+    body: index === 0 ? 'large body stays in its issue shard' : '',
+    state: 'open',
+    createdAt: '2026-09-28T17:00:00.000Z',
+    updatedAt: '2026-09-28T17:00:00.000Z',
+    messages: index === 0 ? [{
+      id: 'sha256:' + 'A'.repeat(43),
+      author: 'tester',
+      body: 'large comment stays in its comment shard',
+      createdAt: '2026-09-28T17:00:00.000Z',
+    }] : [],
+  }));
+  const initialized = await store.initialize({
+    schemaVersion: 3,
+    nextIssueNumber: 52,
+    issues,
+    resources: [],
+    targets: [],
+    dispatches: [],
+  });
+
+  const detailKeys = new Set(
+    [...server.objects.entries()]
+      .filter(([, entry]) => entry.value?.issue !== undefined || Array.isArray(entry.value?.messages))
+      .map(([key]) => key),
+  );
+
+  server.clearRequests();
+  const overview = await store.readOverview(initialized.credential);
+
+  assert.equal(overview.issues.length, 51);
+  assert.equal(overview.issues[0].messageCount, 1);
+  assert.equal(overview.issues[0].hasBody, true);
+  assert.equal(
+    server.requests.some((request) => detailKeys.has(request.key)),
+    false,
+    'overview must not fetch issue or comment snapshots',
+  );
+  assert.equal(server.requests.every((request) => request.method === 'GET'), true);
+});
+
 test('feed entries are materialized directly and read without history', async () => {
   const server = fakeSkrynia();
   const store = deterministicStore(server);

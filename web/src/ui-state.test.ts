@@ -199,9 +199,8 @@ describe('board copy', () => {
     expect(emptyIssueList('open', false)).toEqual({ title: 'No open issues', body: 'No issues match this filter yet.' });
   });
 
-  it('names priority as part of what write access allows, and says the order is shared', () => {
-    expect(WRITE_ACCESS_SUMMARY).toContain('priority order');
-    expect(WRITE_ACCESS_SUMMARY).toContain('status');
+  it('states that the one board credential grants full access', () => {
+    expect(WRITE_ACCESS_SUMMARY).toContain('full read and write access');
     expect(QUEUE_HINT).toContain('shared priority order');
   });
 
@@ -239,7 +238,7 @@ describe('board copy', () => {
     expect(accessCallout('read-only', COMPOSER_READ_ONLY_CALLOUT)).toBe(COMPOSER_READ_ONLY_CALLOUT);
     expect(accessCallout('rejected', COMPOSER_READ_ONLY_CALLOUT)).toBe(REJECTED_CREDENTIAL_COPY);
 
-    expect(COMPOSER_READ_ONLY_CALLOUT.title).toBe('Want to join the conversation?');
+    expect(COMPOSER_READ_ONLY_CALLOUT.title).toBe('Board credential required');
     expect(REJECTED_CREDENTIAL_COPY.body).not.toBe(READ_ONLY_CALLOUT.body);
     expect(REJECTED_CREDENTIAL_COPY.body).not.toBe(COMPOSER_READ_ONLY_CALLOUT.body);
     expect(REJECTED_CREDENTIAL_COPY.action).not.toBe(READ_ONLY_CALLOUT.action);
@@ -343,9 +342,10 @@ describe('board load state', () => {
       .toEqual({ status: 'failed', message: 'Skrynia GET antonina/board-v2 failed (503)' });
   });
 
-  it('explains that the trust anchor is public and only unlocks reading', () => {
-    expect(BOARD_KEY_COPY.action).toBe('Trust this board');
-    expect(BOARD_KEY_COPY.body).toContain('public trust anchor');
+  it('explains that the shared board credential is required for access', () => {
+    expect(BOARD_KEY_COPY.action).toBe('Open board');
+    expect(BOARD_KEY_COPY.body).toContain('shared credential');
+    expect(BOARD_KEY_COPY.body).toContain('full read and write access');
   });
 
   it('keeps the last good board when a later read fails', () => {

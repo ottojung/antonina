@@ -700,6 +700,35 @@ test('legacy top-level agent command spellings are not accepted', (t) => {
 });
 
 
+test('public CLI help is available at the top level, namespaces, groups, and leaf commands', (t) => {
+  const { env } = fixture(t);
+  for (const args of [
+    ['--help'],
+    ['-h'],
+    ['agent', '--help'],
+    ['board', 'queue', '--help'],
+    ['board', 'create', '-h'],
+    ['daemon', 'status', '--help'],
+  ]) {
+    const result = run(args, env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Usage: antonina /, args.join(' '));
+  }
+});
+
+
+test('public CLI rejects positional data arguments', (t) => {
+  const { env } = fixture(t);
+  const board = run(['board', 'show', '1'], env);
+  assert.equal(board.status, 2);
+  assert.match(board.stderr, /every data argument must use a named --option/);
+
+  const agent = run(['agent', 'prompt', '--id', 'a11d', 'do work'], env);
+  assert.equal(agent.status, 2);
+  assert.match(agent.stderr, /every data argument must use a named --option/);
+});
+
+
 test('attached prompt streams output and returns invocation status', (t) => {
   const handle = fixture(t);
   const { work, env } = handle;

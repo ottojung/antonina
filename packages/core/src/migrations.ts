@@ -90,6 +90,12 @@ export interface PersistedBoardMigration {
  * {@link SUPPORTED_PERSISTED_BOARD_VERSIONS} without registering its migration
  * is a typecheck failure rather than a runtime surprise: a version bump cannot
  * merge with no way to read what the previous release wrote.
+ *
+ * The registry is also the *only* dispatch: {@link migrationFrom} is the single
+ * place a version is turned into a step, and it reads this map. A second,
+ * hand-written branch over version constants would leave the mapped type
+ * checking a table the gate never consults, which is how a registered v3
+ * migration could be refused at runtime on a green build.
  */
 const PERSISTED_BOARD_MIGRATIONS: { [V in SupersededPersistedBoardVersion]: PersistedBoardMigration } = {
   [LEGACY_BOARD_SCHEMA_VERSION]: {
@@ -147,9 +153,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * A version this build reads that is not the one it writes, and therefore has
+ * a registered step. This is the same test as the one
+ * {@link everySupersededVersionHasAMigration} applies, narrowed so the
+ * registry can be indexed by it.
+ */
+function isSupersededPersistedBoardVersion(version: number): version is SupersededPersistedBoardVersion {
+  return version !== CURRENT_PERSISTED_BOARD_VERSION
+    && (SUPPORTED_PERSISTED_BOARD_VERSIONS as readonly number[]).includes(version);
+}
+
+/**
+ * The registered step out of `version`, or `undefined` when the version is
+ * neither current nor a key of the registry. The registry is the dispatch, so
+ * registering a step is what makes the gate use it.
+ */
 function migrationFrom(version: number): PersistedBoardMigration | undefined {
-  if (version === LEGACY_BOARD_SCHEMA_VERSION) return PERSISTED_BOARD_MIGRATIONS[LEGACY_BOARD_SCHEMA_VERSION];
-  return undefined;
+  if (!isSupersededPersistedBoardVersion(version)) return undefined;
+  return PERSISTED_BOARD_MIGRATIONS[version];
 }
 
 /**
@@ -267,14 +289,18 @@ export function requirePersistedBoardCompatibility(log: unknown): number | null 
  * The mapped type above makes this a typecheck obligation; this is the runtime
  * half, and it is what a test asserts, so a registry edited to be incomplete
  * cannot pass unnoticed.
+ *
+ * The comparison is over the registry's *keys*, not over the `from` each entry
+ * restates, so an entry whose `from` contradicts its own key cannot make an
+ * unregistered version look covered.
  */
 export function everySupersededVersionHasAMigration(): boolean {
   const superseded = SUPPORTED_PERSISTED_BOARD_VERSIONS
-    .filter((version) => version !== CURRENT_PERSISTED_BOARD_VERSION)
+    .filter((version) => isSupersededPersistedBoardVersion(version))
     .slice()
     .sort((left, right) => left - right);
-  const registered = Object.values(PERSISTED_BOARD_MIGRATIONS)
-    .map((migration) => migration.from)
+  const registered = Object.keys(PERSISTED_BOARD_MIGRATIONS)
+    .map(Number)
     .sort((left, right) => left - right);
   return superseded.length === registered.length
     && superseded.every((version, index) => version === registered[index]);

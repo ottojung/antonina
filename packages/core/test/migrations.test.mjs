@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import { SignedBoardStore } from '../dist/board-store.js';
@@ -13,6 +13,11 @@ import { signBoardOperation, verifyAndReplayOperationLog } from '../dist/operati
 
 const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
 const FIXTURE_PATH = join(fixtureDir, 'board-v2-populated-operation-log.json');
+
+/** The compiled core, beside which the version-bump probe is written. */
+function distDir() {
+  return join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
+}
 
 /** The fixture as it is written on disk, read fresh so no test can share a mutation. */
 function storedLog() {
@@ -111,6 +116,82 @@ test('every supported version that is not current has a registered migration', (
   for (const version of migrations.SUPPORTED_PERSISTED_BOARD_VERSIONS) {
     const chain = migrations.persistedBoardMigrationChain(version);
     assert.equal(chain.at(-1)?.to ?? version, migrations.CURRENT_PERSISTED_BOARD_VERSION);
+  }
+});
+
+test('every step a chain returns agrees with the version it was asked to leave', () => {
+  // The registry key and the `from` the entry restates are two statements of
+  // the same thing, and only one of them is the key the walk dispatches on. So
+  // every chain is checked to start at the version asked for, to step strictly
+  // forward, to have each `to` be the next step's `from`, and to land on the
+  // current version. An entry whose `from` contradicts its own key, or whose
+  // `to` jumps or goes backwards, cannot pass.
+  for (const version of migrations.SUPPORTED_PERSISTED_BOARD_VERSIONS) {
+    const chain = migrations.persistedBoardMigrationChain(version);
+    for (const [index, step] of chain.entries()) {
+      assert.equal(step.from, index === 0 ? version : chain[index - 1].to, `chain from ${version} step ${index}`);
+      assert.ok(step.to > step.from, `chain from ${version} step ${index} must step forward`);
+      assert.ok(
+        migrations.SUPPORTED_PERSISTED_BOARD_VERSIONS.includes(step.to),
+        `chain from ${version} step ${index} lands on unsupported version ${step.to}`,
+      );
+    }
+    assert.equal(chain.at(-1)?.to ?? version, migrations.CURRENT_PERSISTED_BOARD_VERSION);
+  }
+});
+
+test('a step registered at the next version bump is used automatically, with no other edit to the gate', async () => {
+  // The version bump this build has not made yet: v4 becomes current, v3 joins
+  // the supported list, and a v3 -> v4 step joins the registry. Nothing else
+  // about the gate changes, in particular nothing about how it turns a version
+  // into a step. This is built by rewriting the *compiled* module into a probe
+  // beside it, because the version bump must not be declared in the real
+  // source: the point is to show that registering a step is sufficient, not to
+  // ship a v4.
+  const compiled = readFileSync(join(distDir(), 'migrations.js'), 'utf8');
+  const NEXT = migrations.CURRENT_PERSISTED_BOARD_VERSION + 1;
+  const SUPERSEDED = migrations.CURRENT_PERSISTED_BOARD_VERSION;
+  const rewrites = [
+    // v4 is what this build writes.
+    ['export const CURRENT_PERSISTED_BOARD_VERSION = BOARD_SCHEMA_VERSION;',
+      `export const CURRENT_PERSISTED_BOARD_VERSION = ${NEXT};`],
+    // v3 is still in the world and still needs reading, and v4 is what is written.
+    ['    LEGACY_BOARD_SCHEMA_VERSION,\n    BOARD_SCHEMA_VERSION,\n];',
+      `    LEGACY_BOARD_SCHEMA_VERSION,\n    ${SUPERSEDED},\n    ${NEXT},\n];`],
+    // the v3 -> v4 step, registered and nothing else.
+    ['const PERSISTED_BOARD_MIGRATIONS = {',
+      `const PERSISTED_BOARD_MIGRATIONS = {\n    ${SUPERSEDED}: {\n`
+      + `        from: ${SUPERSEDED},\n        to: ${NEXT},\n`
+      + "        summary: 'the step the next bump registers',\n"
+      + `        migrate(value) {\n            return { ...value, schemaVersion: ${NEXT} };\n        },\n    },`],
+    // and the existing v2 step now leads to v3 rather than to the end of the line.
+    ['        to: BOARD_SCHEMA_VERSION,', `        to: ${SUPERSEDED},`],
+    ['return { ...legacy, schemaVersion: BOARD_SCHEMA_VERSION, targets: [], dispatches: [] };',
+      `return { ...legacy, schemaVersion: ${SUPERSEDED}, targets: [], dispatches: [] };`],
+  ];
+  let probe = compiled;
+  for (const [from, to] of rewrites) {
+    assert.ok(probe.includes(from), `the compiled gate no longer contains ${JSON.stringify(from)}, so this probe cannot be built`);
+    probe = probe.replace(from, to);
+  }
+
+  const probePath = join(distDir(), 'migrations-next-version-bump.probe.js');
+  writeFileSync(probePath, probe);
+  try {
+    const bumped = await import(pathToFileURL(probePath).href);
+    assert.equal(bumped.CURRENT_PERSISTED_BOARD_VERSION, NEXT);
+    assert.equal(bumped.everySupersededVersionHasAMigration(), true);
+    // The step registered for v3 is reached from v3, and from v2, in one chain.
+    assert.deepEqual(
+      bumped.persistedBoardMigrationChain(SUPERSEDED).map((step) => [step.from, step.to]),
+      [[SUPERSEDED, NEXT]],
+    );
+    assert.deepEqual(
+      bumped.persistedBoardMigrationChain(2).map((step) => [step.from, step.to]),
+      [[2, SUPERSEDED], [SUPERSEDED, NEXT]],
+    );
+  } finally {
+    rmSync(probePath, { force: true });
   }
 });
 

@@ -293,6 +293,22 @@ test('a. a completely full host still launches, because launch is not host-capac
 // and the two cases below are precisely about what happens when the intent
 // lands while an invocation is already live. `die` selects whether the fixture
 // then SIGKILLs itself; it is the whole difference between the two cases.
+//
+// The fixture waits for the spawn to be on the record before it writes. It is
+// the backend the runner itself spawned, so it used to start racing the
+// runner's own `recordSpawned` read-modify-write on the very same `meta.json`,
+// and only one of the three possible orderings is safe. If the intent landed
+// before `recordSpawned` read, `stopLikeOrMalformed` made `recordSpawned`
+// refuse, and the runner killed its own child and returned without finalising
+// anything, leaving `state: 'running'`. If it landed inside that read/write
+// window the intent was silently clobbered, the control poll never saw an
+// intent, no signal was ever sent, and the run hung forever leaving an orphan.
+// Waiting for `pid` to be non-null puts the write strictly after `recordSpawned`
+// has committed, which is the only safe ordering; the runner performs no other
+// metadata write between that commit and finalisation, so nothing can clobber
+// the intent afterwards either. This is the test's ordering obligation, not a
+// product change: in production the intent is written through `updateMeta`
+// under the metadata lock, which serialises the two read-modify-writes instead.
 function intentFixture(t, id, options, { intent, marker = '', die = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'antonina-intent-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -300,7 +316,24 @@ function intentFixture(t, id, options, { intent, marker = '', die = false } = {}
   writeFileSync(helper, [
     "import { readFileSync, writeFileSync } from 'node:fs';",
     'const [path, intent, marker, die] = process.argv.slice(2);',
-    'const meta = JSON.parse(readFileSync(path, "utf8"));',
+    'const sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };',
+    // `pid` is set only by `recordSpawned`, and only after it has taken the
+    // metadata lock, committed, and released it.
+    'const deadline = Date.now() + 30000;',
+    'let meta = null;',
+    'while (Date.now() < deadline) {',
+    '  try { meta = JSON.parse(readFileSync(path, "utf8")); } catch { meta = null; }',
+    '  if (meta !== null && meta.pid !== null && meta.pid !== undefined) break;',
+    '  sleep(2);',
+    '}',
+    'if (meta === null || meta.pid === null || meta.pid === undefined) {',
+    '  // The spawn never reached the record, so there is no safe ordering to',
+    '  // write into. Exiting non-zero ends the invocation immediately instead',
+    '  // of racing it, so a regression here fails the assertions rather than',
+    '  // hanging the suite and leaking a detached child.',
+    '  process.stderr.write("record-intent: recordSpawned never committed; refusing to race it\\n");',
+    '  process.exit(3);',
+    '}',
     'meta.intent = intent;',
     'meta.stop_reason = intent;',
     'writeFileSync(path, JSON.stringify(meta));',

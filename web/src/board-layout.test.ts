@@ -1,8 +1,13 @@
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+// The stylesheet is located with `import.meta.dirname` and not through the
+// global `URL`: the suite runs in a DOM environment (board issue 72), where the
+// global `URL` is jsdom's own and resolves a relative path against the page's
+// location rather than against this file, so the read would be attempted over
+// HTTP and fail. The assertion is unchanged; only its path resolution moved.
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-const css = readFileSync(fileURLToPath(new URL('./styles.css', import.meta.url)), 'utf8');
+const css = readFileSync(resolve(import.meta.dirname, 'styles.css'), 'utf8');
 
 interface Rule {
   selector: string;

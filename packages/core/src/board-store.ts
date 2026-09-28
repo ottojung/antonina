@@ -54,14 +54,14 @@ function fromShardedError(error: ShardedBoardStoreError): SignedBoardStoreError 
   return new SignedBoardStoreError(error.message, options);
 }
 
-/** The signed board does not exist at its Skrynia key. */
+/** The Antonina board does not exist at its Skrynia key. */
 export class BoardMissingError extends SignedBoardStoreError {
   constructor() {
-    super('Antonina signed board does not exist');
+    super('Antonina board does not exist');
   }
 }
 
-/** The signed board was deliberately deleted, so its key can never be used again. */
+/** The board was deliberately deleted, so its key can never be used again. */
 export class BoardDeletedError extends SignedBoardStoreError {
   constructor() {
     super('Antonina board has been deleted');
@@ -103,11 +103,11 @@ function defaultId(): string {
 function canonicalTimestampAtOrAfter(value: string, floor?: string): string {
   const millis = Date.parse(value);
   if (!Number.isFinite(millis) || new Date(millis).toISOString() !== value) {
-    throw new SignedBoardStoreError('Signed board operation timestamp must be canonical ISO-8601 UTC');
+    throw new SignedBoardStoreError('Board timestamp must be canonical ISO-8601 UTC');
   }
   if (floor === undefined) return value;
   const floorMillis = Date.parse(floor);
-  if (!Number.isFinite(floorMillis)) throw new SignedBoardStoreError('Signed board timestamp floor is malformed');
+  if (!Number.isFinite(floorMillis)) throw new SignedBoardStoreError('Board timestamp floor is malformed');
   return new Date(Math.max(millis, floorMillis)).toISOString();
 }
 

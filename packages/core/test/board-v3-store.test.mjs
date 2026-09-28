@@ -251,3 +251,42 @@ test('concurrent v3 writers serialize through metadata CAS without losing either
   assert.equal(meta.materializedRevision, 4);
   assert.equal(meta.tailOperations.length, 4);
 });
+
+
+test('commenting an issue rewrites only its one issue-list page', async () => {
+  const server = fakeSkrynia();
+  const store = deterministicStore(server);
+  const issues = Array.from({ length: 51 }, (_, index) => ({
+    number: index + 1,
+    title: `Issue ${index + 1}`,
+    body: '',
+    state: 'open',
+    createdAt: '2026-09-28T17:00:00.000Z',
+    updatedAt: '2026-09-28T17:00:00.000Z',
+    messages: [],
+  }));
+  const initialized = await store.initialize({
+    schemaVersion: 3,
+    nextIssueNumber: 52,
+    issues,
+    resources: [],
+    targets: [],
+    dispatches: [],
+  });
+
+  const migrated = await store.append(initialized.credential, {
+    kind: 'issue.create',
+    payload: { number: 52, title: 'Migration trigger', body: '' },
+  }, initialized.state.head);
+
+  server.clearRequests();
+  await store.append(initialized.credential, {
+    kind: 'issue.comment',
+    payload: { number: 1, author: 'tester', body: 'one-page update' },
+  }, migrated.state.head);
+
+  const pageWrites = server.requests
+    .filter((request) => request.method === 'PUT' && request.key.startsWith('board-v3-issues-open-'))
+    .map((request) => request.key);
+  assert.deepEqual(pageWrites, ['board-v3-issues-open-000000001']);
+});

@@ -187,7 +187,12 @@ export class SignedBoardStore {
       throw error;
     }
     this.shardedAvailable = false;
-    return this.readLegacy(anchor, previouslyAcceptedHead);
+    const legacy = await this.readLegacy(anchor, previouslyAcceptedHead);
+    if (legacy !== null
+        && !legacy.state.authorities.some((authority) => authority.keyId === credential.keyId)) {
+      throw new SignedBoardStoreError('Antonina board credential was never issued for this board');
+    }
+    return legacy;
   }
 
   async require(anchor: BoardTrustAnchor, previouslyAcceptedHead?: string | null): Promise<StoredSignedBoard> {
@@ -299,9 +304,6 @@ export class SignedBoardStore {
   ): Promise<StoredSignedBoard> {
     const credential = await verifyBoardCredential(credentialValue);
     const anchor = credentialTrustAnchor(credential);
-    if (credential.keyId !== anchor.rootKeyId || credential.publicKey !== anchor.rootPublicKey) {
-      throw new SignedBoardStoreError('Antonina accepts only the shared root board credential');
-    }
     if (request.kind === 'authority.delegate' || request.kind === 'authority.revoke') {
       throw new SignedBoardStoreError('Antonina delegated credential operations are disabled');
     }
@@ -310,8 +312,11 @@ export class SignedBoardStore {
 
     if (!this.shardedAvailable) {
       const legacy = await this.requireLegacyAppendable(anchor, previouslyAcceptedHead);
+      if (!legacy.state.authorities.some((authority) => authority.keyId === credential.keyId)) {
+        throw new SignedBoardStoreError('Antonina board credential was never issued for this board');
+      }
       try {
-        await this.sharded.migrate(legacy, anchor, credential.storageCapability);
+        await this.sharded.migrate(legacy, credential.storageCapability);
         this.shardedAvailable = true;
       } catch (error) {
         if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);

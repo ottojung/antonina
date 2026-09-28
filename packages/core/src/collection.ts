@@ -42,9 +42,10 @@ import {
  * unverified state and the snapshot is fail-closed.
  *
  * What makes a revision *verified* is the read itself, not this module: only
- * the reader `boardApiCollectionReader` builds over a `BoardApi` verifies the
- * signed log. All this module does with a revision is put it back through the
- * canonical parser, so it can refuse state that is not a well-formed board.
+ * the reader `boardApiCollectionReader` builds over a `BoardApi` opens the
+ * current materialized board through its shared credential and validates the
+ * resulting state. All this module does with a revision is put it back through
+ * the canonical parser, so it can refuse state that is not a well-formed board.
  *
  * A snapshot may be read through any `CollectionReader`, so a snapshot is only
  * ever as trustworthy as the reader behind it. The destructive path is not: the
@@ -183,9 +184,9 @@ function scopedHost(host: string): { host: string; canonical: boolean } {
  * The only constructor of a snapshot that claims anything, and it is
  * module-private: `readCollectionSnapshot` is the sole public way to obtain a
  * verified snapshot, so a caller cannot mint one and choose its `boardId` or
- * revision. It requires a `VerifiedBoardRead`, which the board store produces
- * only after replaying and verifying the signed log, so no snapshot can be built
- * from state that was merely fetched. The board is put back through the
+ * revision. It requires a `VerifiedBoardRead`, which the board API produces
+ * only after opening and validating the authenticated materialized board, so no
+ * snapshot can be built from state that was merely fetched. The board is put back through the
  * canonical parser before any decision is derived from it, so a resource
  * registered against an issue that does not exist, or against no issue at all,
  * cannot be decided here: it is rejected as unverified state instead of read as
@@ -687,10 +688,11 @@ type OmitSeal<T> = T extends unknown ? Omit<T, typeof authorizationSeal> : never
  * `packages/agent-runtime`.
  *
  * The residual window is the interval between the completed re-check read and
- * the destructive step itself. The signed board log is append-only with no
- * compare-and-delete or lease primitive, so this protocol can only promise
- * that the path was unowed at the last authoritative read, and the integrating
- * collector must keep that interval as small as it can make it.
+ * the destructive step itself. The materialized board pointer has atomic CAS
+ * for board commits but no compare-and-delete or lease primitive spanning a
+ * host filesystem removal, so this protocol can only promise that the path was
+ * unowed at the last authoritative read, and the integrating collector must
+ * keep that interval as small as it can make it.
  *
  * This module shrinks its own end of that window rather than only documenting
  * it. The managed-root judgment needs the candidate's own filesystem facts, and

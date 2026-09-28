@@ -118,7 +118,7 @@ test('no board CLI command creates a missing board', async () => {
 
 test('every read command names initialization while the board is missing', async () => {
   const server = fakeSkrynia();
-  const missing = 'antonina board: Antonina signed board does not exist; run: antonina board initialize to create it';
+  const missing = 'antonina board: Antonina board does not exist; run: antonina board initialize to create it';
 
   for (const command of [
     ['list'],
@@ -138,7 +138,7 @@ test('every read command names initialization while the board is missing', async
 
 test('mutating commands name initialization before they demand a credential', async () => {
   const server = fakeSkrynia();
-  const missing = 'antonina board: Antonina signed board does not exist; run: antonina board initialize to create it';
+  const missing = 'antonina board: Antonina board does not exist; run: antonina board initialize to create it';
   const methods = [];
   const reader = client(server, { fetch: async (url, init = {}) => { methods.push(init.method); return server.fetch(url, init); } });
 
@@ -200,7 +200,7 @@ test('a missing board fails closed for a client that holds a valid credential', 
   const { code, err } = await run(['create', 'Mine'], { createClient: () => writer });
 
   assert.equal(code, 1);
-  assert.equal(err[0], 'antonina board: Antonina signed board does not exist; run: antonina board initialize to create it');
+  assert.equal(err[0], 'antonina board: Antonina board does not exist; run: antonina board initialize to create it');
   assert.equal(server.signed, null);
 });
 

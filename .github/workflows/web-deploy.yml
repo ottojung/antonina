@@ -80,6 +80,34 @@ jobs:
           builder: ghcr.io/ottojung/skrynia-builder:1.0.0-122-g9829feb
           token: ${{ secrets.SKRYNIA_TOKEN }}
       - name: Smoke test
+        # A functional probe, not a status code. `curl --fail` on index.html
+        # passes for a deployment whose board cannot be loaded at all, which is
+        # what the 0.1.1 rollout was: the page was served and the board was
+        # not readable. Board issue 74. scripts/deploy-smoke.mjs drives headless
+        # Chromium against the deployed URL and requires the application to
+        # start, the board to load *and verify* against the public trust anchor
+        # in ANTONINA_BOARD_TRUST_ANCHOR, the issue list to be populated and the
+        # feed to be populated, and it prints the application's own error text
+        # when it is not.
+        #
+        # Read-only by construction: the probe only navigates and reads. It
+        # stores a public trust anchor in a throwaway browser profile, submits no
+        # form, and never holds a board credential.
+        #
+        # ANTONINA_BOARD_TRUST_ANCHOR is the board's public trust anchor, from
+        # `$XDG_CONFIG_HOME/antonina/trust.json` or `antonina board credential
+        # trust`. Without it the probe cannot ask the app to verify anything, so
+        # the guard below fails the deploy rather than passing a board nobody
+        # read. That is deliberate: a smoke test that silently degrades to a
+        # status check is the bug this step exists to fix.
+        env:
+          ANTONINA_BOARD_TRUST_ANCHOR: ${{ secrets.ANTONINA_BOARD_TRUST_ANCHOR }}
         run: |
-          curl --fail --retry 5 --retry-delay 5 https://vau.place/a/antonina/
+          set -euo pipefail
+          if [ -z "${ANTONINA_BOARD_TRUST_ANCHOR:-}" ]; then
+            echo "ERROR: ANTONINA_BOARD_TRUST_ANCHOR is not set. The smoke test cannot read and verify the board without it, and it refuses to pass a board it did not read." >&2
+            echo "Set the repository secret to the board's public trust anchor (antonina board credential trust)." >&2
+            exit 1
+          fi
           curl --fail --retry 5 --retry-delay 5 https://vau.place/_skrynia/health
+          node scripts/deploy-smoke.mjs --url https://vau.place/a/antonina/ --min-issues 1 --min-feed 1

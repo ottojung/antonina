@@ -17,6 +17,57 @@ import {
 } from '../../packages/core/src/credential';
 import type { BoardTrustAnchor, VerifiedBoardState } from '../../packages/core/src/operations';
 import type { BoardFeedPage, BoardFeedRequest } from '../../packages/core/src/feed';
+import {
+  BoardIncompatibilityError,
+  isBoardIncompatibilityError,
+  type BoardDefect,
+  type BoardDefectKind,
+} from '../../packages/core/src/board-diagnostics';
+
+export { BoardIncompatibilityError, isBoardIncompatibilityError };
+export type { BoardDefect, BoardDefectKind };
+
+/**
+ * What the browser should show when a board read fails.
+ *
+ * The app already prints `error.message`, and the board parser's message is now
+ * the specific diagnosis rather than a generic complaint, so a version
+ * mismatch and a malformed field read differently with no change to the view
+ * layer. This type exists so the difference is also available as data: a view
+ * that wants to style a version mismatch apart from corrupt data can branch on
+ * `kind` instead of matching on prose, and nothing here re-derives the reason
+ * from the message.
+ */
+export interface BoardReadFailure {
+  readonly message: string;
+  readonly kind: BoardDefectKind | 'other';
+  /** The field the parser named, or `null` when it named none. */
+  readonly field: string | null;
+  /** The subject the parser named, such as `board execution target at index 1`. */
+  readonly subject: string | null;
+}
+
+/**
+ * Classifies a failed board read. A parser failure carries its own defect; any
+ * other failure is reported as `other` with a message, so this never invents a
+ * diagnosis it does not have.
+ */
+export function boardReadFailure(cause: unknown): BoardReadFailure {
+  if (isBoardIncompatibilityError(cause)) {
+    return {
+      message: cause.message,
+      kind: cause.defect.kind,
+      field: cause.defect.field === '' ? null : cause.defect.field,
+      subject: cause.defect.subject,
+    };
+  }
+  return {
+    message: cause instanceof Error ? cause.message : 'Could not load Antonina',
+    kind: 'other',
+    field: null,
+    subject: null,
+  };
+}
 
 export {
   parseBoardCredentialText,

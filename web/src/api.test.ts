@@ -8,12 +8,15 @@ process.env.XDG_STATE_HOME = '/nonexistent-antonina-web-feed-state';
 process.env.XDG_CONFIG_HOME = '/nonexistent-antonina-web-feed-config';
 
 import { generateSigningKey } from '../../packages/core/src/canonical';
+import { parseBoard } from '../../packages/core/src/model';
 import {
+  boardReadFailure,
   BrowserBoardSession,
   BoardTrustRequiredError,
   createBrowserBoardApi,
   DEFAULT_FEED_LIMIT,
   serializeBoardCredential,
+  isBoardIncompatibilityError,
   serializeBoardTrustAnchor,
   type BoardCredential,
   type BoardKeyStorage,
@@ -588,5 +591,76 @@ describe('the board feed through the session', () => {
     expect(reader.hasCredential()).toBe(false);
     expect(server.signed).toBe(before);
     expect(methods.every((method) => method === undefined)).toBe(true);
+  });
+});
+
+/** The refusal a board read reports, as an error, for a board that must not parse. */
+function refusalOf(value: unknown): Error {
+  try {
+    parseBoard(value);
+  } catch (error) {
+    return error as Error;
+  }
+  throw new Error('expected the board to be refused');
+}
+
+const timestamp = '2026-09-24T00:00:00.000Z';
+const board = (overrides: Record<string, unknown> = {}) => ({
+  schemaVersion: 3,
+  nextIssueNumber: 2,
+  issues: [{ number: 1, title: 'Issue 1', body: '', state: 'open', createdAt: timestamp, updatedAt: timestamp, messages: [] }],
+  resources: [],
+  targets: [],
+  dispatches: [],
+  ...overrides,
+});
+
+/**
+ * A failed board read is classified, not just stringified. The page already
+ * prints `error.message`, so the specific diagnosis reaches it with no view
+ * change; these cases pin the data form as well, so a view can branch on
+ * `kind` rather than matching on prose.
+ */
+describe('a failed board read is classified, not just stringified', () => {
+  it('names a version mismatch as one', () => {
+    const failure = boardReadFailure(refusalOf(board({ schemaVersion: 2 })));
+    expect(failure.kind).toBe('schema-version-mismatch');
+    expect(failure.field).toBe('schemaVersion');
+    expect(failure.message).toContain('schema version is 2, but this build reads schema version 3');
+  });
+
+  it('names the field and the index of a malformed record', () => {
+    const failure = boardReadFailure(refusalOf(board({ nextIssueNumber: '2' })));
+    expect(failure.kind).toBe('field');
+    expect(failure.field).toBe('nextIssueNumber');
+    expect(failure.subject).toBe('board');
+    expect(failure.message).toContain('malformed field nextIssueNumber');
+
+    const nested = boardReadFailure(refusalOf(board({
+      issues: [{ number: 1, title: 'x', body: '', state: 'nope', createdAt: timestamp, updatedAt: timestamp, messages: [] }],
+    })));
+    expect(nested.kind).toBe('element');
+    expect(nested.subject).toBe('board issue at index 0');
+    expect(nested.field).toBe('state');
+  });
+
+  it('keeps corrupt data apart from a version mismatch', () => {
+    const corrupt = boardReadFailure(refusalOf(board({ nextIssueNumber: 1 })));
+    expect(corrupt.kind).toBe('corrupt');
+    expect(corrupt.kind).not.toBe('schema-version-mismatch');
+  });
+
+  it('reports a failure it has no diagnosis for without inventing one', () => {
+    const failure = boardReadFailure(new Error('the backend is unreachable'));
+    expect(failure).toEqual({
+      message: 'the backend is unreachable', kind: 'other', field: null, subject: null,
+    });
+    expect(boardReadFailure('not an error').message).toBe('Could not load Antonina');
+  });
+
+  it('recognises the error without reading its message', () => {
+    const error = refusalOf(board({ schemaVersion: 2 }));
+    expect(isBoardIncompatibilityError(error)).toBe(true);
+    expect(isBoardIncompatibilityError(new Error('Antonina board schema version is 2'))).toBe(false);
   });
 });

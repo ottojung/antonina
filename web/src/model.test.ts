@@ -11,15 +11,15 @@ function resource(overrides: Partial<BoardResource> = {}): BoardResource {
 
 describe('board schema', () => {
   it('rejects non-canonical schemas', () => {
-    expect(() => parseBoard({ schemaVersion: 1, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] })).toThrow('incompatible');
+    expect(() => parseBoard({ schemaVersion: 1, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] })).toThrow('schema version is 1, but this build reads schema version 3');
   });
 
   it('enforces exact keys, canonical resources, and referenced issues', () => {
     const valid: Board = { schemaVersion: 3, nextIssueNumber: 3, issues: [issue(1), issue(2, 'closed')], resources: [resource({ issueNumbers: [1, 2] })], targets: [], dispatches: [] };
     expect(parseBoard(valid)).toEqual(valid);
-    expect(() => parseBoard({ ...valid, resources: [resource({ issueNumbers: [3] })] })).toThrow('malformed resource');
+    expect(() => parseBoard({ ...valid, resources: [resource({ issueNumbers: [3] })] })).toThrow('issueNumbers index 0: found a number, expected an issue number that exists on this board');
     expect(() => parseBoard({ ...valid, resources: [resource(), resource()] })).toThrow('duplicate resource');
-    expect(() => parseBoard({ ...valid, extra: true })).toThrow('incompatible');
+    expect(() => parseBoard({ ...valid, extra: true })).toThrow("wrong keys (unexpected 'extra')");
   });
 
   it('canonicalizes and validates hosts and paths', () => {

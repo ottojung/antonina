@@ -6,6 +6,7 @@ import {
   TargetSelectionError,
 } from '../dist/api.js';
 import {
+  BoardIncompatibilityError,
   canonicalTargetRequirements,
   executionTargetDefect,
   parseBoard,
@@ -81,7 +82,11 @@ test('a target record carries its identity, backend, kind, capabilities, and hos
 test('the canonical board parser refuses the schema that had no execution targets', () => {
   assert.throws(
     () => parseBoard({ schemaVersion: 2, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] }),
-    /incompatible/,
+    (error) => {
+      assert.ok(error instanceof BoardIncompatibilityError);
+      assert.equal(error.defect.kind, 'schema-version-mismatch');
+      return /schema version is 2/.test(error.message);
+    },
   );
 });
 

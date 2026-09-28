@@ -6,7 +6,6 @@ import {
   TargetSelectionError,
 } from '../dist/api.js';
 import {
-import { fakeSkrynia } from './fake-skrynia.mjs';
   canonicalTargetRequirements,
   executionTargetDefect,
   parseBoard,
@@ -14,6 +13,7 @@ import { fakeSkrynia } from './fake-skrynia.mjs';
   selectExecutionTarget,
   targetViews,
 } from '../dist/model.js';
+import { fakeSkrynia } from './fake-skrynia.mjs';
 
 const timestamp = '2026-09-24T00:00:00.000Z';
 

@@ -116,7 +116,21 @@ export class AntoninaApiError extends Error {}
  * empty one: an absent field reads through the backend's and kind's own defaults,
  * which is what a target registered before these fields existed reads as, so
  * omitting a field never has to mean "clear it".
+ *
+ * A note list is canonicalized all the way here rather than left half-done for
+ * the model: the record a caller builds is refused downstream if it repeats a
+ * note or carries a blank one, and a refusal that arrives only after the
+ * operation has been signed is a refusal the caller never gets to act on. So
+ * the API produces the sorted, duplicate-free, non-empty list the model
+ * requires, or refuses before anything is signed.
  */
+function canonicalNoteList(notes: readonly string[], label: string): string[] {
+  if (notes.some((note) => note.trim() === '')) {
+    throw new AntoninaApiError(`An execution target ${label} cannot be blank`);
+  }
+  return [...new Set(notes)].sort();
+}
+
 function canonicalTargetNotes(input: {
   displayName?: string;
   accessMethod?: ExecutionTargetAccessMethod;
@@ -136,8 +150,8 @@ function canonicalTargetNotes(input: {
     ...(input.garbageCollection !== undefined
       ? { garbageCollection: parseExecutionTargetGarbageCollection(input.garbageCollection) }
       : {}),
-    ...(input.limitations !== undefined ? { limitations: [...input.limitations].sort() } : {}),
-    ...(input.guidance !== undefined ? { guidance: [...input.guidance].sort() } : {}),
+    ...(input.limitations !== undefined ? { limitations: canonicalNoteList(input.limitations, 'limitation') } : {}),
+    ...(input.guidance !== undefined ? { guidance: canonicalNoteList(input.guidance, 'guidance reference') } : {}),
   };
 }
 
@@ -834,8 +848,10 @@ export {
   DEFAULT_STALE_AFTER_MS,
   HOST_LIVENESSES,
   HOST_MEASUREMENT_REASONS,
+  formatHostBytes,
   hostBytes,
   hostLiveness,
+  hostViewForTarget,
   unavailableHostBytes,
   type DaemonHostReport,
   type DaemonHostView,

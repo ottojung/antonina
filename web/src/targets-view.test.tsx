@@ -12,8 +12,8 @@ process.env.XDG_CONFIG_HOME = '/nonexistent-antonina-web-targets-config';
 
 import { TargetsView } from './App';
 import type { DaemonHostView, HostBytesMeasurement, TargetView } from './api';
-import { EXECUTION_TARGET_GUIDANCE, executionTargetAccess } from './api';
-import { formatBytes, formatBytesMeasurement, targetStateLines, TARGET_PERSISTENCE_LABEL } from './targets';
+import { EXECUTION_TARGET_GUIDANCE, executionTargetAccess, formatHostBytes } from './api';
+import { formatBytesMeasurement, targetStateLines, TARGET_PERSISTENCE_LABEL } from './targets';
 
 // This suite runs in a node environment: no document, no layout engine, no
 // `App`. What is provable here is that `TargetsView` renders what it is handed
@@ -231,7 +231,9 @@ describe('the execution target overview', () => {
   it('formats an absent measurement as its reason and a present one as bytes', () => {
     expect(formatBytesMeasurement(missing('not-configured', 'no workspace path was configured')))
       .toBe('unknown (not-configured)');
-    expect(formatBytes(gib)).toBe('1.0 GiB');
-    expect(formatBytes(0)).toBe('0 B');
+    // The byte scale itself is core vocabulary, not web formatting, so the page
+    // and the CLI cannot print the same number two different ways.
+    expect(formatHostBytes(gib)).toBe('1.0 GiB');
+    expect(formatHostBytes(0)).toBe('0 B');
   });
 });

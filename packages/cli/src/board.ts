@@ -48,6 +48,8 @@ import {
   type TargetView,
 } from '../../core/src/model.js';
 import {
+  formatHostBytes,
+  hostViewForTarget,
   type DaemonHostReport,
   type DaemonHostView,
   type HostBytesMeasurement,
@@ -314,7 +316,7 @@ function boardStateAdvice(error: unknown): string | null {
 async function execute(
   parsed: ParsedCommand,
   client: BoardApi,
-  env: Record<string, string | undefined>,
+  context: BoardCommandContext,
 ): Promise<CommandResult> {
   switch (parsed.command) {
     case 'initialize': {
@@ -427,7 +429,7 @@ async function execute(
     case 'comment': {
       const authorOption = option(parsed.args, '--author');
       if (authorOption.rest.length !== 2) throw new AntoninaApiError('comment requires NUMBER BODY');
-      const author = authorOption.value ?? env[BOARD_AUTHOR_ENV];
+      const author = authorOption.value ?? context.env[BOARD_AUTHOR_ENV];
       if (!author) throw new AntoninaApiError('Message author is required; use --author or ' + BOARD_AUTHOR_ENV);
       return {
         mode: 'issue',
@@ -496,7 +498,7 @@ async function execute(
           mode: 'targets',
           value: targets.filter((target) =>
             (backend === null || target.backend === backend) && (kind === null || target.kind === kind)),
-          hosts: telemetryFlag.value ? await client.daemonHosts(localHostReports(), { nowMs: Date.now() }) : null,
+          hosts: telemetryFlag.value ? await client.daemonHosts(localHostReports(context), { nowMs: Date.now() }) : null,
         };
       }
       if (subcommand === 'show') {
@@ -505,7 +507,7 @@ async function execute(
         return {
           mode: 'target',
           value: await client.getTarget(requireArg(telemetryFlag.rest[0], 'ID')),
-          hosts: telemetryFlag.value ? await client.daemonHosts(localHostReports(), { nowMs: Date.now() }) : null,
+          hosts: telemetryFlag.value ? await client.daemonHosts(localHostReports(context), { nowMs: Date.now() }) : null,
         };
       }
       if (subcommand === 'add') {
@@ -639,7 +641,7 @@ async function execute(
           host: requireArg(hostOption.value, 'collect delete --host'),
           path: requireArg(pathOption.value, 'collect delete --path'),
           confirm: confirmFlag.value,
-          env,
+          env: context.env,
         });
         return { mode: collected.mode, value: collected.value };
       }
@@ -734,27 +736,27 @@ function checkedPersistence(kind: ExecutionTargetKind, raw: string): ExecutionTa
  * board fact. A host that has never published one contributes nothing here, and
  * `humanHostTelemetry` turns that absence into a stated `unknown` rather than
  * into silence.
+ *
+ * The paths come from the command context, never from `process.env`, exactly as
+ * `antonina daemon` resolves them. A `--telemetry` read that fell through to the
+ * ambient environment would let a test — or any caller with an injected `env` —
+ * read the operator's own state tree, which is not a thing a board command may
+ * do behind the caller's back.
  */
-function localHostReports(): DaemonHostReport[] {
-  const report = readHostReport({ paths: daemonPaths() });
+function localHostReports(context: BoardCommandContext): DaemonHostReport[] {
+  const report = readHostReport({
+    paths: daemonPaths({
+      env: context.env,
+      ...(context.home === undefined ? {} : { home: context.home }),
+    }),
+  });
   return report === null ? [] : [report];
-}
-
-const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'] as const;
-
-/** A byte count at a scale a person can read, with the exact count kept in reserve. */
-function formatBytes(bytes: number): string {
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < BYTE_UNITS.length - 1) { value /= 1024; unit += 1; }
-  const rounded = unit === 0 ? String(value) : value.toFixed(1);
-  return rounded + ' ' + BYTE_UNITS[unit] + ' (' + bytes + ' bytes)';
 }
 
 /** One byte measurement as an operator reads it, keeping the reason it is absent. */
 function humanBytes(measurement: HostBytesMeasurement): string {
   return measurement.ok
-    ? formatBytes(measurement.bytes)
+    ? formatHostBytes(measurement.bytes) + ' (' + measurement.bytes + ' bytes)'
     : 'unknown (' + measurement.reason + (measurement.detail === '' ? '' : ': ' + measurement.detail) + ')';
 }
 
@@ -795,12 +797,6 @@ function humanHostTelemetry(host: DaemonHostView | undefined): string[] {
   return lines;
 }
 
-/** The one target a host report is about, matched on the relation the board derives. */
-function hostForTarget(hosts: readonly DaemonHostView[] | null | undefined, target: BoardExecutionTarget): DaemonHostView | undefined {
-  return (hosts ?? []).find((host) => host.targetId === target.id
-    || (target.address !== null && host.address === target.address));
-}
-
 /** Telemetry for a target that is not a persistent host, stated rather than measured. */
 function nonHostTelemetry(target: BoardExecutionTarget): string[] {
   if (target.kind === 'ephemeral-environment') {
@@ -822,7 +818,7 @@ function humanTargetBlock(target: TargetView, hosts: readonly DaemonHostView[] |
   const lines = humanTarget(target).split('\n');
   if (hosts === null) return lines.join('\n');
   if (target.kind !== 'persistent-host') return [...lines, ...nonHostTelemetry(target)].join('\n');
-  return [...lines, ...humanHostTelemetry(hostForTarget(hosts, target))].join('\n');
+  return [...lines, ...humanHostTelemetry(hostViewForTarget(target, hosts))].join('\n');
 }
 
 /** The catalog as a list, each target carrying its live state only when asked for. */
@@ -975,7 +971,7 @@ function humanLines(result: CommandResult): string[] {
     return [
       ...lines,
       ...(target.kind === 'persistent-host'
-        ? humanHostTelemetry(hostForTarget(result.hosts, target))
+        ? humanHostTelemetry(hostViewForTarget(target, result.hosts))
         : nonHostTelemetry(target)),
     ];
   }
@@ -1008,7 +1004,7 @@ export async function runBoardCommand(argv: string[], context: BoardCommandConte
   try {
     const parsed = parseCommand(argv);
     const client = context.createClient?.() ?? defaultClient(context);
-    const result = await execute(parsed, client, context.env);
+    const result = await execute(parsed, client, context);
     if (parsed.json) {
       // A JSON reader that asked for telemetry must receive it. Leaving the
       // hosts out would make `--telemetry` look honoured in the human form and

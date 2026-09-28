@@ -361,8 +361,11 @@ test('the CLI states an unknown or inapplicable capacity rather than a number', 
   await run(PHOEBE, owner);
   await run(ACTIONS, owner);
 
-  // No daemon report is readable in this environment, so a persistent host
-  // reports that it does not know rather than reporting no memory.
+  // `run` gives the command an empty env and a home that cannot exist, so the
+  // daemon paths resolve under a directory that is not there. This assertion
+  // therefore also pins that a `--telemetry` read resolves its paths from the
+  // command context and not from `process.env`: on a host whose own daemon has
+  // published a report, a context-blind read would find it and fail here.
   const hosts = await run(['target', 'list', '--telemetry'], owner);
   assert.equal(hosts.code, 0);
   const phoebe = hosts.out.find((line) => line.startsWith('phoebe-dev ['));

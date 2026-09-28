@@ -304,3 +304,37 @@ test('executionTargetAccess hands back copies of the arrays it read', () => {
   assert.equal(target.guidance, undefined);
   assert.deepEqual(executionTargetAccess(target).guidance, [EXECUTION_TARGET_GUIDANCE.lubko]);
 });
+
+test('the API canonicalizes a note list before anything is signed', async () => {
+  const board = api(fakeSkrynia());
+  await board.initialize();
+
+  // A blank note is refused here rather than reaching the model as a record the
+  // model itself would reject: that rejection would arrive only after the
+  // operation had been signed, as a log-verification error the caller never
+  // gets to act on.
+  await assert.rejects(() => board.registerTarget({
+    id: 'phoebe-dev', backend: 'lubko', kind: 'persistent-host',
+    capabilities: ['persistent-filesystem'], address: 'lubko://phoebe-dev',
+    limitations: ['   '],
+  }), /cannot be blank/);
+  await assert.rejects(() => board.registerTarget({
+    id: 'phoebe-dev', backend: 'lubko', kind: 'persistent-host',
+    capabilities: ['persistent-filesystem'], address: 'lubko://phoebe-dev',
+    displayName: '   ',
+  }), /display name cannot be blank/);
+  assert.deepEqual((await board.loadBoard()).targets, [], 'a refused registration writes nothing');
+
+  // An unordered and repeated list is not an error; it is the one spelling the
+  // board stores, so two callers that write the same caveats sign the same bytes.
+  // The model refuses a duplicate outright, so the API is where it is resolved.
+  const registered = await board.registerTarget({
+    id: 'phoebe-dev', backend: 'lubko', kind: 'persistent-host',
+    capabilities: ['persistent-filesystem'], address: 'lubko://phoebe-dev',
+    displayName: '  Phoebe  ',
+    limitations: ['second caveat', 'first caveat', 'second caveat'],
+    guidance: ['docs/skills/target-lubko-persistent-host.md'],
+  });
+  assert.equal(registered.displayName, 'Phoebe');
+  assert.deepEqual(registered.limitations, ['first caveat', 'second caveat']);
+});

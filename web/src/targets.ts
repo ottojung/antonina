@@ -1,6 +1,12 @@
 import type { DaemonHostView, HostBytesMeasurement } from './api';
-import { executionTargetAccess, type BoardExecutionTarget, type ExecutionTargetAccess } from './api';
-import type { TargetView } from './api';
+import {
+  executionTargetAccess,
+  formatHostBytes,
+  hostViewForTarget,
+  type BoardExecutionTarget,
+  type ExecutionTargetAccess,
+  type TargetView,
+} from './api';
 
 /**
  * The words the execution-target overview uses, kept out of the component so
@@ -49,20 +55,10 @@ export const TARGET_STATUS_LABEL: { readonly [S in ExecutionTargetAccess['status
   unavailable: 'Unavailable — refused by name, not routed around',
 };
 
-const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'] as const;
-
-/** A byte count at a scale a person can read, with the exact count kept beside it. */
-export function formatBytes(bytes: number): string {
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < BYTE_UNITS.length - 1) { value /= 1024; unit += 1; }
-  return (unit === 0 ? String(value) : value.toFixed(1)) + ' ' + BYTE_UNITS[unit];
-}
-
 /** A reported measurement, or the reason it is absent. A missing measurement is never a zero. */
 export function formatBytesMeasurement(measurement: HostBytesMeasurement): string {
   return measurement.ok
-    ? formatBytes(measurement.bytes)
+    ? formatHostBytes(measurement.bytes)
     : 'unknown (' + measurement.reason + ')';
 }
 
@@ -178,9 +174,7 @@ export function targetStateLines(
   hosts: readonly DaemonHostView[],
 ): TargetStateLine[] {
   if (target.kind !== 'persistent-host') return ephemeralStateLines();
-  const host = hosts.find((entry) => entry.targetId === target.id
-    || (target.address !== null && entry.address === target.address));
-  return hostStateLines(host);
+  return hostStateLines(hostViewForTarget(target, hosts));
 }
 
 /** The catalog, ordered as the board ordered it, with each target's own view of itself. */

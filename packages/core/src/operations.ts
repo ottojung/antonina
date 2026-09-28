@@ -316,74 +316,70 @@ function parseNoteList(value: unknown, label: string): string[] {
 }
 
 /**
- * The descriptive fields of a registration, present only where the payload
- * carried them. An absent field is never written as `undefined`: under
- * `exactOptionalPropertyTypes` that is a different value from an absent one, and
- * a target registered with these fields must read exactly as one registered
- * without them did.
+ * How each descriptive field is read back off a signed payload. The set is
+ * closed, so the field list a caller reads is a choice about *which* fields
+ * apply and never about how one is spelled.
  */
-function parseTargetDescriptionFields(value: Record<string, unknown>): TargetDescriptionFields {
-  const fields: TargetDescriptionFields = {};
-  if (value.displayName !== undefined) {
-    if (!isText(value.displayName)) throw new Error('Execution target display name is malformed');
-    fields.displayName = value.displayName;
+const DESCRIPTION_FIELD_READERS = {
+  displayName(value: unknown): string {
+    if (!isText(value)) throw new Error('Execution target display name is malformed');
+    return value;
+  },
+  accessMethod: (value: unknown) => parseExecutionTargetAccessMethod(String(value)),
+  persistence: (value: unknown) => parseExecutionTargetPersistence(String(value)),
+  garbageCollection: (value: unknown) => parseExecutionTargetGarbageCollection(String(value)),
+  limitations: (value: unknown) => parseNoteList(value, 'Execution target limitations'),
+  guidance: (value: unknown) => parseNoteList(value, 'Execution target guidance'),
+} satisfies { [F in keyof TargetDescriptionFields]-?: (value: unknown) => NonNullable<TargetDescriptionFields[F]> };
+
+/** Every descriptive field a `target.register` payload may carry. */
+const REGISTERED_FIELDS = ['displayName', 'accessMethod', 'persistence', 'garbageCollection', 'limitations', 'guidance'] as const;
+
+/**
+ * The subset a `target.set` payload may carry. The backend, the kind, the
+ * address, the access method, the persistence and the cleanup mode are fixed at
+ * registration because changing any of them makes a different target, not a
+ * reconfigured one; what an operator can still correct is what the target says
+ * about itself.
+ */
+const CORRECTABLE_FIELDS = ['displayName', 'limitations', 'guidance'] as const;
+
+type Fields<F extends readonly (keyof TargetDescriptionFields)[]> = Pick<TargetDescriptionFields, F[number]>;
+
+/**
+ * The named fields of a payload, present only where the payload carried them.
+ * An absent field is never read as `undefined`: under `exactOptionalPropertyTypes`
+ * that is a different value from an absent one, and a target registered with
+ * these fields must read exactly as one registered without them did.
+ */
+function parseDescriptionFields<F extends readonly (keyof TargetDescriptionFields)[]>(
+  value: Record<string, unknown>,
+  fields: F,
+): Fields<F> {
+  const parsed: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (value[field] !== undefined) parsed[field] = DESCRIPTION_FIELD_READERS[field](value[field]);
   }
-  if (value.accessMethod !== undefined) {
-    fields.accessMethod = parseExecutionTargetAccessMethod(String(value.accessMethod));
-  }
-  if (value.persistence !== undefined) {
-    fields.persistence = parseExecutionTargetPersistence(String(value.persistence));
-  }
-  if (value.garbageCollection !== undefined) {
-    fields.garbageCollection = parseExecutionTargetGarbageCollection(String(value.garbageCollection));
-  }
-  if (value.limitations !== undefined) {
-    fields.limitations = parseNoteList(value.limitations, 'Execution target limitations');
-  }
-  if (value.guidance !== undefined) {
-    fields.guidance = parseNoteList(value.guidance, 'Execution target guidance');
-  }
-  return fields;
+  return parsed as Fields<F>;
 }
 
 /**
- * Carries the payload's descriptive fields onto a board record, omitting the
- * ones it did not carry. Spreading the payload directly would write absent
- * fields as explicit `undefined`, which is a different stored value and would
- * make a record written two ways compare unequal for no reason.
+ * The same carry-over onto a board record, omitting the ones the payload did not
+ * carry. Spreading the payload directly would write absent fields as explicit
+ * `undefined`, which is a different stored value and would make a record written
+ * two ways compare unequal for no reason.
  */
-function targetDescriptionRecord(payload: TargetDescriptionFields): TargetDescriptionFields {
-  return {
-    ...(payload.displayName !== undefined ? { displayName: payload.displayName } : {}),
-    ...(payload.accessMethod !== undefined ? { accessMethod: payload.accessMethod } : {}),
-    ...(payload.persistence !== undefined ? { persistence: payload.persistence } : {}),
-    ...(payload.garbageCollection !== undefined ? { garbageCollection: payload.garbageCollection } : {}),
-    ...(payload.limitations !== undefined ? { limitations: [...payload.limitations] } : {}),
-    ...(payload.guidance !== undefined ? { guidance: [...payload.guidance] } : {}),
-  };
-}
-
-/**
- * The same carry-over for the fields `target.set` may correct. A field the
- * payload omitted keeps whatever the registration already said, so a status
- * change cannot silently drop a target's caveats or its guidance.
- */
-function settableTargetNotes(payload: TargetSetPayload): Pick<TargetDescriptionFields, 'displayName' | 'limitations' | 'guidance'> {
-  return targetDescriptionRecord(payload);
-}
-function parseSettableTargetNotes(value: Record<string, unknown>): Pick<TargetSetPayload, 'displayName' | 'limitations' | 'guidance'> {
-  const fields: Pick<TargetSetPayload, 'displayName' | 'limitations' | 'guidance'> = {};
-  if (value.displayName !== undefined) {
-    if (!isText(value.displayName)) throw new Error('Execution target display name is malformed');
-    fields.displayName = value.displayName;
+function descriptionRecord<F extends readonly (keyof TargetDescriptionFields)[]>(
+  payload: TargetDescriptionFields,
+  fields: F,
+): Fields<F> {
+  const carried: Record<string, unknown> = {};
+  for (const field of fields) {
+    const value = payload[field];
+    if (value === undefined) continue;
+    carried[field] = Array.isArray(value) ? [...value] : value;
   }
-  if (value.limitations !== undefined) {
-    fields.limitations = parseNoteList(value.limitations, 'Execution target limitations');
-  }
-  if (value.guidance !== undefined) {
-    fields.guidance = parseNoteList(value.guidance, 'Execution target guidance');
-  }
-  return fields;
+  return carried as Fields<F>;
 }
 
 function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationPayload {
@@ -472,7 +468,7 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
         capabilities: parseTargetCapabilityList(value.capabilities),
         address: value.address === null ? null : canonicalHost(value.address),
         description: value.description,
-        ...parseTargetDescriptionFields(value),
+        ...parseDescriptionFields(value, REGISTERED_FIELDS),
       };
     }
     case 'target.set': {
@@ -488,7 +484,7 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
         status: parseExecutionTargetStatus(value.status),
         capabilities: parseTargetCapabilityList(value.capabilities),
         description: value.description,
-        ...parseSettableTargetNotes(value),
+        ...parseDescriptionFields(value, CORRECTABLE_FIELDS),
       };
     }
     case 'dispatch.record': {
@@ -855,7 +851,7 @@ function applyBoardMutation(
         capabilities: [...payload.capabilities],
         address: payload.address,
         description: payload.description,
-        ...targetDescriptionRecord(payload),
+        ...descriptionRecord(payload, REGISTERED_FIELDS),
         createdAt: operation.timestamp,
         updatedAt: operation.timestamp,
       };
@@ -877,7 +873,7 @@ function applyBoardMutation(
         status: payload.status,
         capabilities: [...payload.capabilities],
         description: payload.description,
-        ...settableTargetNotes(payload),
+        ...descriptionRecord(payload, CORRECTABLE_FIELDS),
         updatedAt: operation.timestamp,
       };
       const defect = executionTargetDefect(updated);

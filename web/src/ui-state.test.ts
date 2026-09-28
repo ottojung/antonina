@@ -50,7 +50,7 @@ import {
   unplacedIssueNumbers,
   untrackedIssueNumbers,
   visibleIssues,
-  TRUST_COPY,
+  BOARD_KEY_COPY,
   READ_ONLY_CALLOUT,
   type BoardLoad,
 } from './ui-state';
@@ -344,8 +344,8 @@ describe('board load state', () => {
   });
 
   it('explains that the trust anchor is public and only unlocks reading', () => {
-    expect(TRUST_COPY.action).toBe('Trust this board');
-    expect(TRUST_COPY.body).toContain('public trust anchor');
+    expect(BOARD_KEY_COPY.action).toBe('Trust this board');
+    expect(BOARD_KEY_COPY.body).toContain('public trust anchor');
   });
 
   it('keeps the last good board when a later read fails', () => {

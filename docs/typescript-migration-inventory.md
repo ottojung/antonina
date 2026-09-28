@@ -8,10 +8,10 @@ The public executable is `antonina`, shipped as precompiled JavaScript for Node.
 
 The supported command namespaces are:
 
-- `antonina agent ...`: `new`, `list`, `status`, `prompt`, `log`, `wait`, `stop`, `kill`, `delete`, and `clean`;
+- `antonina agent ...`: `new`, `list`, `status`, `run`, `log`, `wait`, `stop`, `kill`, `delete`, and `clean`;
 - `antonina board ...`: `list`, `show`, `create`, `edit`, `comment`, `close`, `reopen`, and resource operations.
 
-`_runner` is an implementation-private entry point.
+`_runner` is an implementation-private entry point. Public CLI syntax reserves positional words for command/subcommand selection only. Every data argument is a named `--option`, and every public command level supports both `-h` and `--help`. Board issue numbers are returned by `board create`; callers do not assign them.
 
 ## Shared board contract
 

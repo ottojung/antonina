@@ -1,3 +1,8 @@
+---
+name: antonina-orchestrator
+description: Coordinate recurring software work through the Antonina board queue and append-only issue history.
+---
+
 # Antonina board orchestrator
 
 Use this skill for a recurring orchestrator that selects, continues, and hands off work through an Antonina board.

@@ -28,9 +28,21 @@ npm install -g ./antonina-cli-*.tgz
 
 This installs the `antonina` executable. Release artifacts should ship the already-built package, so execution hosts do not compile TypeScript.
 
+### OpenClaw orchestrator skill
+
+The OpenClaw skill used by Antonina hosts is versioned in this repository at `skills/antonina-orchestrator/`. Deploy that directory as a unit so the skill and its companion resource instructions stay on the same revision as the CLI:
+
+```sh
+mkdir -p "$HOME/.openclaw/skills"
+rm -rf "$HOME/.openclaw/skills/antonina-orchestrator"
+cp -a skills/antonina-orchestrator "$HOME/.openclaw/skills/"
+```
+
+The versioned skill is mechanically checked against `docs/skills/orchestrator.md` and `docs/skills/resources.md` in CI so the human-readable documentation and installed OpenClaw skill cannot silently drift.
+
 ## Board
 
-The Antonina board stores issues and durable resources in Skrynia as a signed operation log under `antonina/board-v2`. The CLI is available as `antonina board`. It reads its trust anchor from `$XDG_CONFIG_HOME/antonina/trust.json` and its credential from `$XDG_CONFIG_HOME/antonina/credential.json`, falling back to `$HOME/.config/antonina` when `XDG_CONFIG_HOME` is unset. Those two files are the only source: there is no environment override for either, so a fresh shell needs nothing exported. Unrelated settings — `ANTONINA_BOARD_URL`, `ANTONINA_BOARD_HEAD`, `ANTONINA_BOARD_AUTHOR` — remain environment variables.
+The Antonina board stores issues and durable resources in Skrynia as a signed operation log under `antonina/board-v2`. The CLI is available as `antonina board`. Command and subcommand words are positional, but every data argument is an explicit named option: for example, `antonina board show --id 12`, `antonina board create --title "Fix it" --body "Details"`, and `antonina board comment --id 12 --body "Done"`. Every public command and subcommand supports `-h` and `--help`. It reads its trust anchor from `$XDG_CONFIG_HOME/antonina/trust.json` and its credential from `$XDG_CONFIG_HOME/antonina/credential.json`, falling back to `$HOME/.config/antonina` when `XDG_CONFIG_HOME` is unset. Those two files are the only source: there is no environment override for either, so a fresh shell needs nothing exported. Unrelated settings — `ANTONINA_BOARD_URL`, `ANTONINA_BOARD_HEAD`, `ANTONINA_BOARD_AUTHOR` — remain environment variables.
 
 Reading the board never creates it. Creation is deliberate and has a single path, `BoardApi.initialize()`, reached either from the web board's first-run **Initialize board** action or from `antonina board initialize`; there is no second or fallback creation path, and a second initializer is refused with a non-zero exit instead of taking the trust root. The initializer keeps the board's root signing credential and its public trust anchor, both copyable from the web board's Settings; share the anchor with readers and the credential with editors.
 
@@ -58,9 +70,9 @@ chmod 600 "$config/"*.json
 
 `credential.json` holds a private key, so the directory is not readable by other users. A file that is present but unparseable is reported by path with a non-zero exit rather than ignored; a file that is absent simply configures nothing, so a reader needs only `trust.json` and an editor needs only `credential.json`.
 
-`antonina board credential delegate` mints attenuated credentials.
+`antonina board credential delegate --capability CAPABILITY` mints attenuated credentials; repeat `--capability` to delegate more than one.
 
-The board's issue queue is durable shared state, not a browser-local sort. The queue is exactly the set of currently open issues, each once: creating an issue appends it, closing or deleting one removes it, and reopening one adds it back. `antonina board queue list` prints that order as `#1 #3 #2`, or as a bare JSON array with `--json`. `antonina board queue reorder 3 1 2` replaces the whole order with a permutation of the open issues; it is rejected, without writing anything, if the list is partial, repeats an issue, or names a closed or unknown issue. Both commands need only the board's trust anchor to read, and reordering additionally needs a credential holding the `queue.reorder` capability, which `antonina board credential delegate queue.reorder` can mint.
+The board's issue queue is durable shared state, not a browser-local sort. The queue is exactly the set of currently open issues, each once: creating an issue appends it, closing or deleting one removes it, and reopening one adds it back. `antonina board queue list` prints that order as `#1 #3 #2`, or as a bare JSON array with `--json`. `antonina board queue reorder --id 3 --id 1 --id 2` replaces the whole order with a permutation of the open issues; it is rejected, without writing anything, if the list is partial, repeats an issue, or names a closed or unknown issue. Both commands need only the board's trust anchor to read, and reordering additionally needs a credential holding the `queue.reorder` capability, which `antonina board credential delegate --capability queue.reorder` can mint.
 
 `antonina board feed` is the board's chronological activity stream: one line per recorded operation, newest first, in the order the signed log committed them. Every line is a real event the log recorded — `created`, `edited`, `commented by <author>`, `closed`, `reopened`, `deleted` — so an edit, a comment, a closure and a reopen are four distinguishable lines rather than one "last changed" line. `--json` emits the same page as a machine-readable object. The page holds 50 entries by default, `--limit N` changes that (up to 500), and when a board is longer than one page a `next: <token>` line is printed; pass that token back as `--cursor <token>` for the entries after it. Paging is lossless across operations that share a timestamp. Like `queue list`, the feed needs only the board's trust anchor to read and never writes.
 
@@ -85,7 +97,7 @@ The current local runtime is available through the `antonina agent` namespace:
 
 ```sh
 antonina agent new --id a13f09c2 --cwd /workspace/project
-antonina agent prompt --id a13f09c2 'Investigate the issue and implement the fix.'
+antonina agent run --id a13f09c2 --prompt 'Investigate the issue and implement the fix.'
 antonina agent status --id a13f09c2
 antonina agent log --id a13f09c2
 antonina agent wait --id a13f09c2 --timeout 3600

@@ -201,6 +201,6 @@ recovery, and multiple-steer races all satisfy the invariants above. The current
 - Issue #597 — architectural request and acceptance criteria.
 - `packages/agent-runtime/` — managed-agent prompt/steer lifecycle and durable
   steer queue.
-- `packages/cli/` — `antonina agent prompt --steer` command surface.
+- `packages/cli/` — `antonina agent run --steer` command surface.
 - TypeScript lifecycle, process, and built-runtime integration tests under
   `packages/agent-runtime/test/` and `packages/cli/test/`.

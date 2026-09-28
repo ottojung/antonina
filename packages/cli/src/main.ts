@@ -6,6 +6,12 @@ import { runManagedRunner } from '../../agent-runtime/src/runner.js';
 import { runAgentCommand, type AgentCommandContext } from './agent.js';
 import { runBoardCommand } from './board.js';
 import { runDaemonCommand } from './daemon.js';
+import {
+  PublicCliUsageError,
+  TOP_LEVEL_HELP,
+  preparePublicCommand,
+  type PublicNamespace,
+} from './public-cli.js';
 
 
 function io() {
@@ -26,8 +32,32 @@ function agentContext(): AgentCommandContext {
   };
 }
 
+async function runPublicNamespace(namespace: PublicNamespace, args: string[]): Promise<number> {
+  let plan;
+  try {
+    plan = preparePublicCommand(namespace, args);
+  } catch (error) {
+    if (!(error instanceof PublicCliUsageError)) throw error;
+    process.stderr.write(`antonina: ${error.message}\n`);
+    process.stderr.write(`Try 'antonina ${namespace} --help'.\n`);
+    return 2;
+  }
+
+  if (plan.kind === 'help') {
+    process.stdout.write(plan.text + '\n');
+    return 0;
+  }
+  if (namespace === 'board') return runBoardCommand(plan.args, { env: process.env, io: io() });
+  if (namespace === 'daemon') return runDaemonCommand(plan.args, { env: process.env, io: io() });
+  return runAgentCommand(plan.args, agentContext());
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const [namespace, ...args] = argv;
+  if (namespace === '--help' || namespace === '-h') {
+    process.stdout.write(TOP_LEVEL_HELP + '\n');
+    return 0;
+  }
   if (namespace === '_runner') {
     const [agentId, mode, generationRaw] = args;
     if (
@@ -41,16 +71,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     await runManagedRunner(agentId, mode, generation, { env: process.env });
     return 0;
   }
-  if (namespace === 'board') {
-    return runBoardCommand(args, { env: process.env, io: io() });
-  }
-  if (namespace === 'daemon') {
-    return runDaemonCommand(args, { env: process.env, io: io() });
-  }
-  if (namespace === 'agent') {
-    return runAgentCommand(args, agentContext());
+  if (namespace === 'board' || namespace === 'daemon' || namespace === 'agent') {
+    return runPublicNamespace(namespace, args);
   }
   process.stderr.write('antonina: expected "agent", "board" or "daemon" command namespace\n');
+  process.stderr.write("Try 'antonina --help'.\n");
   return 2;
 }
 

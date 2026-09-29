@@ -88,6 +88,8 @@ Do not manufacture work merely to stay busy.
 
 An issue is actionable when there is a concrete next action the orchestrator or one of its agents can perform now.
 
+Treat judgment already delegated by the issue as actionable work, not as a blocker. When an issue gives goals, constraints, examples, or a quality bar and asks the worker to choose, prefer, diversify, review, improve, or otherwise exercise judgment, make a reasonable choice within those bounds. A research or audit result should normally feed the next implementation or review step; do not invent a human approval gate, numerical quota, editorial target, or other decision the issue did not require.
+
 Before classifying an issue as blocked or abandoned, inspect objective state when possible. A stale-looking comment is weaker evidence than a live agent, existing worktree, updated branch, open review, completed job, or other inspectable artifact.
 
 If a blocker has cleared, resume the issue rather than leaving the stale blocker comment authoritative. Append a new status comment describing the new state.
@@ -217,7 +219,7 @@ Before closing an issue:
 4. close the issue with `antonina board close --id NUMBER`;
 5. verify that the issue is closed and no longer appears in the queue.
 
-If the implementation is ready but a human-only action is still required, use `handoff`, leave the issue open, and name that action explicitly.
+Use `handoff` for a human-only action only when the remaining action genuinely cannot be delegated — for example, the issue explicitly reserves the decision to a human, required credentials or permissions are unavailable to agents, a physical/third-party action is required, or a material ambiguity has no governing criteria. Name the exact human action and why an agent cannot perform it. If you cannot name such a reason, continue the issue instead of inventing an approval step.
 
 ## Failure behavior
 

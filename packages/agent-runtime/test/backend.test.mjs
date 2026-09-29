@@ -433,11 +433,18 @@ test('continuation command uses persisted session and configured variant', () =>
 
 
 test('agent command rejects malformed durable cwd and variant', () => {
-  for (const cwd of ['', 0, false, null, [], 'relative', './relative', '../relative']) {
+  for (const cwd of ['', 0, false, [], 'relative', './relative', '../relative']) {
     const meta = idleMeta('a11d', '/tmp', null, 1);
     meta.cwd = cwd;
     assert.throws(() => buildAgentCommand(meta, 'work', false, {}), /cwd is malformed/);
   }
+  // A null cwd is a canonical state, not a malformed one: it means no working
+  // directory was ever declared. It still cannot launch a backend, because
+  // there is no honest `--dir` to give it, and the refusal says exactly that
+  // rather than blaming the record's shape.
+  const undeclared = idleMeta('a11d', null, null, 1);
+  assert.equal(validateAgentMetadata(undeclared), undefined);
+  assert.throws(() => buildAgentCommand(undeclared, 'work', false, {}), /cwd is undeclared/);
   for (const variant of [null, '', 0, 123, true, false, 1.5, [], {}]) {
     const meta = idleMeta('a11d', '/tmp', null, 1);
     meta.variant = variant;

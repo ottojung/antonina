@@ -97,11 +97,13 @@ The current local runtime is available through the `antonina agent` namespace:
 
 ```sh
 antonina agent new --id a13f09c2 --cwd /workspace/project
-antonina agent run --id a13f09c2 --prompt 'Investigate the issue and implement the fix.'
+antonina agent run --id a13f09c2 --cwd /workspace/project --prompt 'Investigate the issue and implement the fix.'
 antonina agent status --id a13f09c2
 antonina agent log --id a13f09c2
 antonina agent wait --id a13f09c2 --timeout 3600
 ```
+
+A managed front runs in a working directory an operator declares with `--cwd`; it never inherits the directory of the shell that created it. `agent new` without `--cwd` records no working directory, `agent run` without `--cwd` refuses to launch such an agent, and `agent status` and `agent list` report `cwd: null` for it rather than naming a directory nobody chose. `--cwd` may be repeated on `run` to correct or declare the directory, and only while the agent owns no work: a live front's directory is never rewritten underneath it. The reported `cwd` is the directory the front runs in, which is not the same thing as wherever the front has since worked -- read `agent log` for that.
 
 Lifecycle controls are available through `stop`, `kill`, `delete`, and `clean`. Local runtime state is stored under `$XDG_STATE_HOME/antonina`, defaulting to `$HOME/.local/state/antonina`. That is a different tree from the board configuration above: `clean` sweeps runtime state and never touches your board trust anchor or credential.
 

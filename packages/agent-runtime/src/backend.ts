@@ -3,7 +3,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { constants } from 'node:os';
 import { isAbsolute } from 'node:path';
 
-import { DEFAULT_VARIANT, persistedAgentCwd, persistedNativeSessionId, persistedVariant, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
+import { DEFAULT_VARIANT, persistedNativeSessionId, persistedVariant, requiredAgentCwd, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
 
 export const AGENT_MODEL = 'opencode/space-bunny-free';
@@ -271,7 +271,7 @@ export function buildAgentCommand(
   env: Record<string, string | undefined> = process.env,
 ): string[] | null {
   const agentId = requiredPersistedAgentId(meta);
-  const cwd = persistedAgentCwd(meta);
+  const cwd = requiredAgentCwd(meta);
   const variant = persistedVariant(meta) || DEFAULT_VARIANT;
   const executable = resolveOpencode(env);
   if (isContinue) {

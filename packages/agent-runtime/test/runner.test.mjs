@@ -13,6 +13,14 @@ import { createAgentDirectory, metaPath, readMeta, writeMeta } from '../dist/pac
 const REPO_FIXTURE_PARENT = resolve('.antonina-test-tmp');
 const PROBE_SENTINEL = 'ANTONINA-RUNNER-FIXTURE-EXEC-OK';
 
+// The two intent cases drive a real detached backend and wait for a recorded
+// signal, so they are the only tests in this file that can wedge rather than
+// fail. A wall-clock bound turns a hang into a failed test with a number on it,
+// which is the difference between a usable gate and an unusable one; it is
+// deliberately generous, because the bound is here to stop a deadlock and not
+// to ration a passing run.
+const INTENT_TEST_TIMEOUT_MS = 120_000;
+
 // The runner spawns its backend detached and awaits it, so the fixture backend
 // has to be a real executable. On a host whose tmpdir() is mounted noexec a
 // fixture there would fail with EACCES; probe the candidate parents and skip
@@ -294,7 +302,8 @@ test('a. a completely full host still launches, because launch is not host-capac
 // lands while an invocation is already live. `die` selects whether the fixture
 // then SIGKILLs itself; it is the whole difference between the two cases.
 //
-// The fixture waits for the spawn to be on the record before it writes. It is
+// The fixture waits for the spawn to be on the record before it writes, and it
+// writes through the store's own `updateMeta` rather than onto the file. It is
 // the backend the runner itself spawned, so it used to start racing the
 // runner's own `recordSpawned` read-modify-write on the very same `meta.json`,
 // and only one of the three possible orderings is safe. If the intent landed
@@ -303,26 +312,46 @@ test('a. a completely full host still launches, because launch is not host-capac
 // anything, leaving `state: 'running'`. If it landed inside that read/write
 // window the intent was silently clobbered, the control poll never saw an
 // intent, no signal was ever sent, and the run hung forever leaving an orphan.
-// Waiting for `pid` to be non-null puts the write strictly after `recordSpawned`
-// has committed, which is the only safe ordering; the runner performs no other
+// Both halves of that window were real at different rates: the ordering was
+// only ever narrowed by waiting, and the write itself was a plain
+// `writeFileSync` that the runner's reader could observe truncated. So the
+// helper does what production does -- `updateMeta` under the metadata lock,
+// committed by a temp file and an atomic rename -- and the wait for a non-null
+// `pid` stays as well, putting the write strictly after `recordSpawned` has
+// committed, which is the only safe ordering. The runner performs no other
 // metadata write between that commit and finalisation, so nothing can clobber
 // the intent afterwards either. This is the test's ordering obligation, not a
-// product change: in production the intent is written through `updateMeta`
-// under the metadata lock, which serialises the two read-modify-writes instead.
+// product change.
 function intentFixture(t, id, options, { intent, marker = '', die = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'antonina-intent-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const helper = join(root, 'record-intent.mjs');
   writeFileSync(helper, [
-    "import { readFileSync, writeFileSync } from 'node:fs';",
-    'const [path, intent, marker, die] = process.argv.slice(2);',
+    "import { writeFileSync } from 'node:fs';",
+    'const [storeUrl, agentId, intent, marker, die, stateHome, configHome] = process.argv.slice(2);',
+    'const { readMeta, updateMeta } = await import(storeUrl);',
+    'const options = { env: { XDG_STATE_HOME: stateHome, XDG_CONFIG_HOME: configHome } };',
     'const sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };',
+    // The same fake backend serves every `<opencode> ...` invocation the runner
+    // makes, so the helper's own arguments come first and the backend's follow.
+    // `session list` and `models` are metadata probes: the answer is "no
+    // session" and "model unknown", which the runner already reads off a zero
+    // exit with empty output. They used to fall through to the wait below and
+    // burn the whole probe timeout, once per invocation and per test, on a
+    // path that can never produce a record to write into.
+    'const backendArgv = process.argv.slice(9);',
+    'if (backendArgv[0] === "session" || backendArgv[0] === "models") process.exit(0);',
+    'if (backendArgv[0] !== "run") {',
+    '  process.stderr.write(`record-intent: unexpected backend invocation: ${backendArgv.join(" ")}\\n`);',
+    '  process.exit(4);',
+    '}',
     // `pid` is set only by `recordSpawned`, and only after it has taken the
-    // metadata lock, committed, and released it.
+    // metadata lock, committed, and released it. Polling `readMeta` rather than
+    // parsing the file keeps a torn read from looking like a missing record.
     'const deadline = Date.now() + 30000;',
     'let meta = null;',
     'while (Date.now() < deadline) {',
-    '  try { meta = JSON.parse(readFileSync(path, "utf8")); } catch { meta = null; }',
+    '  try { meta = readMeta(agentId, options); } catch { meta = null; }',
     '  if (meta !== null && meta.pid !== null && meta.pid !== undefined) break;',
     '  sleep(2);',
     '}',
@@ -334,14 +363,29 @@ function intentFixture(t, id, options, { intent, marker = '', die = false } = {}
     '  process.stderr.write("record-intent: recordSpawned never committed; refusing to race it\\n");',
     '  process.exit(3);',
     '}',
-    'meta.intent = intent;',
-    'meta.stop_reason = intent;',
-    'writeFileSync(path, JSON.stringify(meta));',
+    // The intent is written through the store\'s own updateMeta, so it takes the',
+    // metadata lock, lands via a temp file and an atomic rename, and cannot',
+    // interleave with the runner\'s read-modify-write or be read half-written.',
+    'await updateMeta(agentId, (current) => {',
+    '  if (current.pid === null || current.pid === undefined) process.exit(3);',
+    '  current.intent = intent;',
+    '  current.stop_reason = intent;',
+    '}, options);',
     'if (marker !== "") writeFileSync(marker, "");',
     'if (die === "1") process.kill(process.pid, "SIGKILL");',
     'else setInterval(() => {}, 1000);',
   ].join('\n'));
-  const argv = [helper, metaPath(id, options), intent, marker, die ? '1' : '0']
+  const storeUrl = new URL('../dist/packages/agent-runtime/src/store.js', import.meta.url).href;
+  const argv = [
+    helper,
+    storeUrl,
+    id,
+    intent,
+    marker,
+    die ? '1' : '0',
+    options.env.XDG_STATE_HOME,
+    options.env.XDG_CONFIG_HOME,
+  ]
     .map((value) => JSON.stringify(value))
     .join(' ');
   return `node ${argv}`;
@@ -350,8 +394,11 @@ function intentFixture(t, id, options, { intent, marker = '', die = false } = {}
 // A fake backend whose first act is to record an operator intent and then either
 // die on its own or wait to be signalled. `exec` keeps the recorded pid as the
 // process group leader, so the runner signals the very process the fixture is.
+// `"$@"` matters: the runner reaches this same binary for `session list` and
+// `models` as well as for the invocation itself, and the helper tells those
+// apart by the subcommand it is handed.
 function intentBackend(t, id, options, config) {
-  return fakeBackend(t, `#!/bin/sh\necho "starting"\nexec ${intentFixture(t, id, options, config)}\n`);
+  return fakeBackend(t, `#!/bin/sh\necho "starting"\nexec ${intentFixture(t, id, options, config)} "$@"\n`);
 }
 
 test('a. a queued steer is delivered on a full host rather than dropped', async (t) => {
@@ -642,7 +689,7 @@ test('e. a kill intent does not excuse a host kill that beat the control poll', 
   assert.equal(after.backend_error.automatic_retry_safe, false);
   assert.match(after.error, /SIGKILL \(signal 9\)/);
   assert.match(after.error, /OOM killer fired inside the agent lifetime/);
-});
+}, { timeout: INTENT_TEST_TIMEOUT_MS });
 
 test('e. a stop intent the runner itself signalled is still a clean stopped', async (t) => {
   if (!requireProc(t)) return;
@@ -672,4 +719,4 @@ test('e. a stop intent the runner itself signalled is still a clean stopped', as
   assert.equal(after.state, 'stopped');
   assert.equal(after.backend_error, null);
   assert.equal(after.error, null);
-});
+}, { timeout: INTENT_TEST_TIMEOUT_MS });

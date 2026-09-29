@@ -535,6 +535,109 @@ test('delete --force cancels an in-flight runner reservation and reports it', (t
   assert.throws(() => readFileSync(path, 'utf8'));
 });
 
+// The rung `reservationOwnerAlive` (the `kill(pid, 0)` liveness probe followed
+// by the start-ticks comparison in packages/agent-runtime/src/lifecycle.ts) is
+// NOT reachable from the delete path, and the case below is what proves it.
+//
+// `cmdDelete` evaluates:
+//   deriveState(observed) === 'running'
+//     || invocationAlive(observed)
+//     || activeRunnerFlag(observed) === true
+//     || reservationInFlight(observed)
+//     || pending !== null
+// and `||` short-circuits. `reservationInFlight` only consults the reservation
+// when `activeRunnerFlag` is exactly true (a false flag returns early, and a
+// malformed one fails closed), so `reservationOwnerAlive` is only ever entered
+// under an active_runner of true -- which is the THIRD disjunct, and therefore
+// already short-circuits before the fourth is ever evaluated. The delete path
+// can never reach the rung, for any meta shape.
+//
+// The rung is NOT dead code globally. It is dead only with respect to
+// `cmdDelete` (and, for the same reason, `stopLike` at agent.ts:720, which
+// puts the same `activeRunnerFlag` disjunct in front of `reservationInFlight`).
+// `reconcileDeadMeta` calls `reservationInFlight` with no such disjunct in
+// front of it, and reaches it from `list`, `status`, `log` and `wait` via
+// `reconcileAgent`. The rung is live and load-bearing on those paths, and
+// board 118's b7b152e is the coverage for it. Do not read the above as a
+// licence to remove `reservationOwnerAlive`.
+//
+// The observable consequence: with a persisted state that does not derive to
+// 'running' and an expired reservation owned by this (live) test process,
+// `delete` WITHOUT `--force` is refused -- contradicting board 118's comment
+// that such an agent is deletable. The refusal is earned by the active_runner
+// disjunct, not by the reservation check, which is why these two cases (whose
+// start ticks deliberately disagree) are indistinguishable.
+test('delete refuses a non-running agent whose expired reservation owner has mismatched start ticks', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', 'feed3', '--cwd', work], env).status, 0);
+  const path = metaPath(root, 'feed3');
+  const meta = JSON.parse(readFileSync(path, 'utf8'));
+  const realTicks = procStartTicks(process.pid);
+  assert.ok(realTicks !== null, 'this test process must expose real start ticks for the sibling case to mean anything');
+  Object.assign(meta, {
+    // 'stopped' is terminal, so deriveState() !== 'running' and the first
+    // disjunct is false.
+    state: 'stopped',
+    active_runner: true,
+    runner_pid: null,
+    runner_start_time: null,
+    pending_prompt: null,
+    runner_gen: 1,
+    started_at: 1,
+    runner_reservation: {
+      state: 'reserved',
+      gen: 1,
+      mode: 'new',
+      // A live pid, but with start ticks that are NOT this process's, so the
+      // identity check inside reservationOwnerAlive would fail if it were read.
+      owner_pid: process.pid,
+      owner_start_ticks: realTicks + 1,
+      // Far outside RUNNER_RESERVATION_GRACE_SECONDS, so the grace window
+      // cannot be what makes the reservation in flight either.
+      reserved_at: 1,
+    },
+  });
+  writeFileSync(path, JSON.stringify(meta));
+  const before = readFileSync(path, 'utf8');
+
+  const refused = run(['agent', 'delete', '--id', 'feed3'], env);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /use --force/);
+  // Whole-file compare, not field-by-field: the refusal is thrown before
+  // `updateMeta` runs, so a refused delete must not rewrite anything at all.
+  assert.equal(readFileSync(path, 'utf8'), before, 'a refused delete must leave the metadata byte-identical');
+
+  // Sibling negative case: same shape, but the live pid's start ticks DO match.
+  // Both are refused, and identically -- the delete path cannot tell them apart,
+  // which is exactly the short-circuit this pins.
+  assert.equal(run(['agent', 'new', '--id', 'feed4', '--cwd', work], env).status, 0);
+  const path4 = metaPath(root, 'feed4');
+  const meta4 = JSON.parse(readFileSync(path4, 'utf8'));
+  Object.assign(meta4, {
+    state: 'stopped',
+    active_runner: true,
+    runner_pid: null,
+    runner_start_time: null,
+    pending_prompt: null,
+    runner_gen: 1,
+    started_at: 1,
+    runner_reservation: {
+      state: 'reserved',
+      gen: 1,
+      mode: 'new',
+      owner_pid: process.pid,
+      owner_start_ticks: realTicks,
+      reserved_at: 1,
+    },
+  });
+  writeFileSync(path4, JSON.stringify(meta4));
+
+  const refused4 = run(['agent', 'delete', '--id', 'feed4'], env);
+  assert.equal(refused4.status, 1);
+  assert.match(refused4.stderr, /use --force/);
+  assert.equal(JSON.parse(readFileSync(path4, 'utf8')).runner_reservation.state, 'reserved');
+});
+
 // /proc entries for a freshly spawned process can lag, and a reaped process has
 // no entry at all: null means "gone", which is what these tests assert on.
 function procStartTicks(pid) {

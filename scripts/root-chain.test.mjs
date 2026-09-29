@@ -539,6 +539,45 @@ test('a failed prerequisite does not stop, skip, or excuse any chain step', () =
   );
 });
 
+test('no declared prerequisite still runs the whole chain, as its own group', () => {
+  // The mirror of the case above with `prereq === null`, and the only case that
+  // pins what runs when nothing is declared. `runWithPrerequisite` is the
+  // function that decides what executes, and the `prereq !== null` branch is
+  // where the chain call sits *outside*. Indent `root-chain-run.mjs:211` inward
+  // by one level and the chain stops running exactly in this case — the
+  // declaration is gone, the runner reports "all 0 steps ran and all passed",
+  // and `npm test` exits 0 having run no suite at all. That is board 123's
+  // defect, green instead of red, and the three cases that pass a prerequisite
+  // cannot see it because they never take this path.
+  //
+  // (The undeclared-prerequisite case at
+  // `the preflight notice is diagnostic and cannot stop or gate the chain` is a
+  // different assertion: it pins `formatPrereqNotice`'s *text* for a null
+  // prerequisite. It never calls `runWithPrerequisite`, so it cannot tell a
+  // chain that runs from a chain that does not. Both stay.)
+  const executed = [];
+  const groups = runWithPrerequisite(
+    null,
+    ['test:core', 'test:runtime', 'test:daemon', 'test:cli', 'test:web', 'test:workflow', 'test:build-identity'].map((name) => ({ name })),
+    { exec: (name) => { executed.push(name); return 0; }, log: () => {} },
+  );
+  assert.deepEqual(
+    executed,
+    ['test:core', 'test:runtime', 'test:daemon', 'test:cli', 'test:web', 'test:workflow', 'test:build-identity'],
+    'with no declared prerequisite the chain ran nothing — a `npm test` that runs no suite and exits 0',
+  );
+  assert.equal(groups.length, 1, 'with no declared prerequisite the chain is not reported as exactly one group');
+  assert.equal(groups[0].title, 'root chain steps');
+  assert.deepEqual(
+    groups[0].results.map((r) => [r.name, r.code]),
+    [
+      ['test:core', 0], ['test:runtime', 0], ['test:daemon', 0],
+      ['test:cli', 0], ['test:web', 0], ['test:workflow', 0], ['test:build-identity', 0],
+    ],
+    'with no declared prerequisite the chain steps are not reported with their own exit codes',
+  );
+});
+
 test('a passing prerequisite is reported as a prerequisite and still runs the whole chain', () => {
   // The other direction, so the previous case cannot be satisfied by simply
   // never reporting the prerequisite. The green case is the one that matters

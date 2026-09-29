@@ -150,9 +150,16 @@ test('the suite bound ends a wedged run non-zero, and reaps the process it ident
   // the control case below and not evidence about the bound.
   assert.equal(run.signal, null, `the wedged run was killed from outside: ${run.stderr}`);
   assert.equal(run.error, undefined, `the wedged run could not be started: ${String(run.error)}`);
+  // The literal, and not `BOUND_EXIT_CODE`. The whole point of the case is that
+  // a bounded-out run is red, and comparing the observed code against the
+  // module's own constant cannot fail for the one mutation that matters: set
+  // that constant to 0 and a wedged run exits 0 while this file still reports
+  // 3 pass / 0 fail, rc=0. So the expected code is written here, where the
+  // module under test cannot reach it, and the constant is pinned against the
+  // same literal -- if it moves, both of these assertions move red by name.
   assert.equal(
     run.status,
-    BOUND_EXIT_CODE,
+    1,
     `a bounded-out run must not exit 0; the run said:\n${run.stderr}`,
   );
   assert.match(run.stderr, /ANTONINA-TEST-BOUND: the suite-bound self-check is bounded out/);
@@ -201,6 +208,24 @@ test('the same wedged run, with the bound out of reach, is ended by nothing here
     convergesWithin(run.identity.pid, 0),
     false,
     'the control run left nothing running, so it is not the control this suite assumes',
+  );
+});
+
+test("the module's own bound exit code is the non-zero code, pinned here", () => {
+  // Its own test, and not a line inside the case above, so that it reports by
+  // name: the literal in that case fails first and would take this one with it,
+  // and a guarantee that is only ever checked as a side effect of another
+  // assertion is the kind that silently stops being checked.
+  //
+  // The module's own header says why this is a guarantee at all: "a code of 0
+  // would be a lie here, and a code of 0 is the only thing a caller could
+  // mistake for a pass." The file that enforces the comment did not enforce the
+  // code, so it is enforced here, against a literal the module cannot reach.
+  assert.equal(
+    BOUND_EXIT_CODE,
+    1,
+    'the module\'s own bound exit code is no longer the non-zero code this suite pins; '
+    + 'a wedged run that exits 0 is indistinguishable from a pass to any caller',
   );
 });
 

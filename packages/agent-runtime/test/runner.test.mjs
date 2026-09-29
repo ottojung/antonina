@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
-import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
+import { envHasAgentMarker, envHasInvocationMarker, procStartTicks, processIsZombie } from '../dist/packages/agent-runtime/src/process.js';
 import { runManagedRunner } from '../dist/packages/agent-runtime/src/runner.js';
 import { createAgentDirectory, metaPath, readMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
 import { boundMs, installSuiteBound, registerCleanup, registerReap } from './support/suite-bound.mjs';
@@ -182,31 +182,49 @@ function agent(t, options, overrides = {}) {
   // register it -- after the spawn is on the record -- is exactly the moment a
   // wedged test never reaches.
   //
-  // It identifies the invocation the way the product does: from the durable
-  // record the runner itself wrote, checking the pid's /proc start ticks
-  // against the ones recorded beside it, and signalling the recorded process
-  // group. A pid whose start ticks do not match is a recycled pid belonging to
-  // somebody else, so it is reported and left alone; nothing here is ever
-  // found by process name.
-  registerReap(`agent ${id} invocation`, () => {
-    const live = readMeta(id, options);
-    if (live === null) return 'no durable record, so no identity to signal';
-    const { pid, pgid, start_time: startTime } = live;
-    if (!Number.isSafeInteger(pid) || pid <= 0) return 'no recorded invocation pid, so nothing was left running by the runner';
-    if (procStartTicks(pid) !== startTime) {
-      return `pid ${pid} no longer has the recorded start ticks ${startTime}; not signalled`;
-    }
-    if (!Number.isSafeInteger(pgid) || pgid <= 0) {
-      return `pid ${pid} is the recorded invocation but no process group is recorded; not signalled`;
-    }
-    try {
-      process.kill(-pgid, 'SIGKILL');
-      return `SIGKILLed process group ${pgid} (pid ${pid}, start ticks ${startTime})`;
-    } catch (error) {
-      return `could not SIGKILL process group ${pgid}: ${error && error.code ? error.code : String(error)}`;
-    }
-  });
+  // The body is `reapInvocation`, named and top-level rather than inline, so the
+  // tests below can call the reaper this suite actually ships instead of a
+  // copy of it. A reaper that can only be observed in a wedge is a reaper with
+  // no coverage at all, and the start-ticks check in particular is the one line
+  // here that must never be deleted silently.
+  registerReap(`agent ${id} invocation`, () => reapInvocation(id, options));
   return id;
+}
+
+// The reaper the runner suite registers, and the one the tests below drive.
+// It identifies the invocation the way the product does: from the durable record
+// the runner itself wrote, requiring the pid's /proc start ticks to match the
+// ones recorded beside it AND the target's own environ to carry this agent's
+// and this invocation's markers, and only then signalling the recorded process
+// group. That is `process.ts:148-152`, in the same order, for the same reason:
+// a pid whose start ticks do not match is a recycled pid belonging to somebody
+// else, and a pid that is not carrying our markers is not our invocation at all,
+// so both are reported and left alone. Nothing here is ever found by process
+// name. The markers are defence in depth -- the record is only ever written by
+// the runner immediately after `spawn` -- but a reaper that is going to
+// SIGKILL a whole process group on the strength of a pid and a tick count
+// should be held to the same identity rule as the product, and a comment that
+// claims a check the code does not make is worse than no comment.
+function reapInvocation(id, options) {
+  const live = readMeta(id, options);
+  if (live === null) return 'no durable record, so no identity to signal';
+  const { pid, pgid, start_time: startTime, invocation_id: invocationId } = live;
+  if (!Number.isSafeInteger(pid) || pid <= 0) return 'no recorded invocation pid, so nothing was left running by the runner';
+  if (procStartTicks(pid) !== startTime) {
+    return `pid ${pid} no longer has the recorded start ticks ${startTime}; not signalled`;
+  }
+  if (!envHasAgentMarker(pid, id) || !envHasInvocationMarker(pid, invocationId)) {
+    return `pid ${pid} is the recorded pid but does not carry this invocation's environ markers; not signalled`;
+  }
+  if (!Number.isSafeInteger(pgid) || pgid <= 0) {
+    return `pid ${pid} is the recorded invocation but no process group is recorded; not signalled`;
+  }
+  try {
+    process.kill(-pgid, 'SIGKILL');
+    return `SIGKILLed process group ${pgid} (pid ${pid}, start ticks ${startTime})`;
+  } catch (error) {
+    return `could not SIGKILL process group ${pgid}: ${error && error.code ? error.code : String(error)}`;
+  }
 }
 
 // The four rejection cases share one assertion shape: a runner that does not own
@@ -861,4 +879,177 @@ test('e. a stop intent the runner itself signalled is still a clean stopped', { 
     'the fixture gave up waiting to be signalled, so the runner never sent this stop; '
     + 'the clean stopped record above is the fixture ending by itself, not the runner stopping it',
   );
+});
+
+// ---------------------------------------------------------------------------
+// The reaper this suite ships, exercised directly.
+//
+// `reapInvocation` above is the function the suite bound drains when this file
+// wedges. A green run never reaches the drain, so the cases below are the only
+// place it is observed at all: without them the reaper's identity rule -- the
+// /proc start-ticks check, which is this repository's hard rule that ownership
+// is never inferred from anything but recorded identity -- can be deleted from
+// the shipped code and the whole suite stays green, which is exactly what an
+// independent review demonstrated.
+//
+// The subject is the shipped function, not a copy of it. Each case puts a
+// durable record on disk naming a process this test really spawned, then calls
+// `reapInvocation(id, options)` -- the same call `registerReap` holds -- and
+// asserts both halves of the claim: what it reported, and what it did to the
+// process. The negative cases assert the process is still running, which is the
+// half that matters: a reaper that reports a decline and signals anyway is
+// worse than one that signals nothing.
+// ---------------------------------------------------------------------------
+
+// A live process in a process group of its own, so a group kill aimed at it
+// cannot reach this test file. `markers` puts this invocation's identity in the
+// child's environ, which is what the runner does for the backend it spawns and
+// what the reaper's marker check reads back out of /proc.
+function standInProcess(t, { markers = true, invocationId }) {
+  const child = spawn(
+    process.execPath,
+    ['-e', 'setInterval(() => {}, 1000)'],
+    {
+      detached: true,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        ...(markers
+          ? { ANTONINA_AGENT_ID: 'a11d', ANTONINA_INVOCATION_ID: invocationId }
+          : {}),
+      },
+    },
+  );
+  // Converge on every path, including the ones where the reaper declines: a
+  // coverage test for a reaper that leaks the process it is checking is the
+  // same defect in a different hat.
+  t.after(() => {
+    try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+  });
+  return child;
+}
+
+// `/proc` is read synchronously and immediately, but the child has to be there
+// to be read, so this waits for the stat line rather than assuming it.
+function startTicksOf(pid) {
+  const deadline = Date.now() + 5_000;
+  let ticks = null;
+  while (ticks === null && Date.now() < deadline) {
+    ticks = procStartTicks(pid);
+    if (ticks === null) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  }
+  return ticks;
+}
+
+const STAND_IN_INVOCATION = 'a'.repeat(32);
+
+// The record the reaper reads, built by writing a real meta the way the runner
+// does, so the reaper is driven through the same durable state and the same
+// validator rather than being handed an object.
+function recordStanding(t, options, overrides) {
+  return agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    pending_prompt: 'work',
+    ...overrides,
+  });
+}
+
+test('f. the shipped reaper leaves a pid whose start ticks are not the recorded ones', async (t) => {
+  if (!requireProc(t)) return;
+  const options = scratch(t, '/nonexistent/backend');
+  const child = standInProcess(t, { invocationId: STAND_IN_INVOCATION });
+  const ticks = startTicksOf(child.pid);
+  assert.ok(ticks !== null, 'no /proc start ticks for the stand-in process');
+  const id = recordStanding(t, options, {
+    pid: child.pid,
+    pgid: child.pid,
+    // A pid on the record whose start ticks are not the ones the runner recorded
+    // is a pid that has been recycled: the number now belongs to somebody else.
+    // The reaper must say so and must not signal it.
+    start_time: ticks + 1,
+    invocation_id: STAND_IN_INVOCATION,
+  });
+
+  const report = reapInvocation(id, options);
+
+  assert.match(
+    report,
+    new RegExp(`pid ${child.pid} no longer has the recorded start ticks ${ticks + 1}; not signalled`),
+    `the reaper did not report the start-ticks mismatch; it said: ${report}`,
+  );
+  assert.equal(
+    processIsZombie(child.pid),
+    false,
+    'the reaper signalled a pid whose start ticks were not the recorded ones',
+  );
+});
+
+test('f. the shipped reaper leaves a pid that does not carry this invocation\'s markers', async (t) => {
+  if (!requireProc(t)) return;
+  const options = scratch(t, '/nonexistent/backend');
+  const child = standInProcess(t, { markers: false, invocationId: STAND_IN_INVOCATION });
+  const ticks = startTicksOf(child.pid);
+  assert.ok(ticks !== null, 'no /proc start ticks for the stand-in process');
+  // Right pid, right start ticks, own process group -- and not our invocation.
+  // The product's own identity check (`process.ts:148-152`) declines this on
+  // the environ markers, so the reaper has to decline it too.
+  const id = recordStanding(t, options, {
+    pid: child.pid,
+    pgid: child.pid,
+    start_time: ticks,
+    invocation_id: STAND_IN_INVOCATION,
+  });
+
+  const report = reapInvocation(id, options);
+
+  assert.match(report, /does not carry this invocation's environ markers; not signalled/, `the reaper said: ${report}`);
+  assert.equal(
+    processIsZombie(child.pid),
+    false,
+    'the reaper signalled a pid that carries no marker of this invocation, on the strength of a pid and a tick count',
+  );
+});
+
+test('f. the shipped reaper does signal the invocation its record really names', async (t) => {
+  if (!requireProc(t)) return;
+  // The control, and it is what makes the two cases above mean anything: a
+  // reaper that declines everything is not a safe reaper, it is a reaper that
+  // leaks the process it exists to reap. Every field here is the truth about a
+  // process this test spawned, carrying this invocation's markers, in its own
+  // process group -- so the reaper must kill it, and must say that it did.
+  const options = scratch(t, '/nonexistent/backend');
+  const child = standInProcess(t, { invocationId: STAND_IN_INVOCATION });
+  const ticks = startTicksOf(child.pid);
+  assert.ok(ticks !== null, 'no /proc start ticks for the stand-in process');
+  const id = recordStanding(t, options, {
+    pid: child.pid,
+    pgid: child.pid,
+    start_time: ticks,
+    invocation_id: STAND_IN_INVOCATION,
+  });
+
+  const report = reapInvocation(id, options);
+
+  assert.match(
+    report,
+    new RegExp(`SIGKILLed process group ${child.pid} \\(pid ${child.pid}, start ticks ${ticks}\\)`),
+    `the reaper declined an invocation its record really names; it said: ${report}`,
+  );
+  // And the process is actually gone, so this is a reap and not a report.
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`pid ${child.pid} survived the reaper's SIGKILL`)), 10_000);
+    child.once('exit', () => { clearTimeout(timer); resolve(); });
+  });
+  assert.equal(processIsZombie(child.pid), true, `pid ${child.pid} is still running after the reaper reported reaping it`);
+});
+
+test('f. the shipped reaper declines a record with no invocation identity on it', (t) => {
+  if (!requireProc(t)) return;
+  const options = scratch(t, '/nonexistent/backend');
+  const id = recordStanding(t, options, {});
+
+  const report = reapInvocation(id, options);
+
+  assert.equal(report, 'no recorded invocation pid, so nothing was left running by the runner');
 });

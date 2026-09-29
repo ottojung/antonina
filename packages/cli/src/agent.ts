@@ -774,10 +774,20 @@ async function cmdDelete(args: string[], context: AgentCommandContext): Promise<
   } catch {
     throw new Error(`delete: agent ${agentId} has malformed pending prompt authority`);
   }
+  // No reservation disjunct here, and that is deliberate rather than an
+  // oversight: `reservationInFlight` can only return true when
+  // `activeRunnerFlag(meta)` is null or true. `null` is unreachable through
+  // `requireMeta`, because `readMeta` runs `validateAgentMetadata`, which
+  // rejects a missing or non-boolean `active_runner` outright; and `true` is
+  // exactly the preceding disjunct, so it short-circuits before this point.
+  // A reservation disjunct here could therefore only ever be evaluated, never
+  // satisfied. The reservation is still owned work -- `reconcileDeadMeta`
+  // (lifecycle.ts) and the `stopLike`, `prompt` and `clean` paths reach the
+  // rung and are guarded by their own tests. See
+  // packages/cli/test/delete-reservation-rung.test.mjs, which pins the absence.
   const ownsWork = deriveState(observed) === 'running'
     || invocationAlive(observed)
     || activeRunnerFlag(observed) === true
-    || reservationInFlight(observed)
     || pending !== null;
   if (ownsWork && !parsed.flags.has('--force')) {
     throw new Error(`delete: agent ${agentId} is running; use --force`);

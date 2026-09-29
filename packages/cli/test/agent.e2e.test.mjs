@@ -543,7 +543,7 @@ test('delete --force cancels an in-flight runner reservation and reports it', (t
 // by the start-ticks comparison in packages/agent-runtime/src/lifecycle.ts) is
 // NOT reachable from the delete path, and the case below is what proves it.
 //
-// `cmdDelete` evaluates:
+// `cmdDelete` USED to evaluate:
 //   deriveState(observed) === 'running'
 //     || invocationAlive(observed)
 //     || activeRunnerFlag(observed) === true
@@ -551,10 +551,17 @@ test('delete --force cancels an in-flight runner reservation and reports it', (t
 //     || pending !== null
 // and `||` short-circuits. `reservationInFlight` only consults the reservation
 // when `activeRunnerFlag` is exactly true (a false flag returns early, and a
-// malformed one fails closed), so `reservationOwnerAlive` is only ever entered
+// malformed one fails closed), so `reservationOwnerAlive` was only ever entered
 // under an active_runner of true -- which is the THIRD disjunct, and therefore
-// already short-circuits before the fourth is ever evaluated. The delete path
-// can never reach the rung, for any meta shape.
+// already short-circuited before the fourth was ever evaluated. The delete path
+// could never reach the rung, for any meta shape.
+//
+// That disjunct has since been DELETED as unreachable, and
+// packages/cli/test/delete-reservation-rung.test.mjs now pins both the absence
+// and the reasoning above. This file is left describing the original shape
+// because the case below is still meaningful: it pins the refusal that the
+// `activeRunnerFlag` disjunct earns on its own, which is exactly the behaviour
+// that made the dead disjunct look load-bearing.
 //
 // The rung is NOT dead code globally. It is dead only with respect to
 // `cmdDelete` (and, for the same reason, `stopLike` at agent.ts:720, which

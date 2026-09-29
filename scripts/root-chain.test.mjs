@@ -27,9 +27,9 @@
 // chain does not run.
 
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { dirname } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
@@ -43,7 +43,13 @@ import {
   resolveRootTestChain,
   rootChainSource,
 } from './root-chain.mjs';
-import { runChain } from './root-chain-run.mjs';
+import {
+  PREREQ_SCRIPT,
+  formatPrereqNotice,
+  inspectBuildState,
+  resolvePrerequisite,
+} from './root-chain-prereq.mjs';
+import { runChain, runWithPrerequisite, summarize } from './root-chain-run.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const chain = resolveRootTestChain(repoRoot);
@@ -415,5 +421,322 @@ test('the root chain steps this gate cannot resolve are the ones it says they ar
     steps,
     ['npm test --prefix web'],
     `the root chain has steps this gate cannot resolve, and they are not the expected one: ${JSON.stringify(chain.unresolved, null, 2)}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Board issue 124: the step the chain required and did not name.
+//
+// Everything above is boards 74 and 123. Those are about what the chain *runs*:
+// board 74's was a chain that ran browser suites it could not run, and board
+// 123's was a chain that did not report the suites it skipped. This section is
+// about a step that was never in the chain at all, so neither mechanism could
+// see it — a runner that faithfully executes and reports seven steps is still
+// seven red steps and no explanation when the eighth, unlisted one was skipped.
+//
+// The failure that had to become impossible, measured twice on fresh worktrees:
+//
+//   board 123's front — `npm test` exited 1, red at 5 of 7 steps, four
+//     `ERR_MODULE_NOT_FOUND` errors naming `packages/*/dist`, one vitest Startup
+//     Error, and nothing anywhere saying a prerequisite had been skipped;
+//   board 112's front — `npm run typecheck` exited 127 with
+//     `./web/node_modules/.bin/tsc: not found`, immediately below a
+//     `pretypecheck` step that had exited 0, because `pretypecheck` is plain node.
+//
+// A caller who skipped `typecheck` saw a green step, then a compiler error with
+// no cause, or four module-resolution errors naming build output. Both read as
+// code regressions and neither was one.
+//
+// The fix has two halves and, as with board 123, only one of them is the
+// mechanism. The declared prerequisite and the build-state inspection live in
+// `scripts/root-chain-prereq.mjs`; the runner runs them in
+// `scripts/root-chain-run.mjs`. Every case below is here because a mechanism
+// asserted only by a comment is not asserted at all.
+// ---------------------------------------------------------------------------
+
+test('the root npm test chain declares its prerequisite as data, not as a comment', () => {
+  // The defect was an *undeclared* prerequisite. Declaring it in a comment would
+  // leave the runner's behaviour unconnected to it: delete the comment, or
+  // change the script, and the chain goes back to requiring something nothing
+  // reads. So the declaration is a `package.json` key that a resolver reads,
+  // and this case pins that it resolves to a script that exists.
+  const prereq = resolvePrerequisite(repoRoot);
+  assert.ok(prereq !== null, `\`package.json\` declares no \`${PREREQ_SCRIPT}\`, so \`npm test\` has no declared prerequisite and the defect is back`);
+  assert.equal(
+    prereq.name,
+    'typecheck',
+    `\`${PREREQ_SCRIPT}\` names ${prereq.name}; the chain's declared prerequisite is \`typecheck\`, which is what emits \`packages/*/dist\` and the generated build-identity modules`,
+  );
+  assert.equal(prereq.command, pkgScripts().typecheck);
+});
+
+test('the declared prerequisite is not a chain step, and the chain is still exactly the seven suites', () => {
+  // The two contracts are kept apart deliberately. `chain:root-test` answers
+  // "which suites guard this repository" and `prereq:root-test` answers "what
+  // has to happen before the chain means anything". Folding the prerequisite
+  // into the chain would make the pinned list above mean "seven test suites
+  // plus a compile", and would make the prerequisite indistinguishable from a
+  // failing suite in the summary — which is the misattribution again, one level
+  // up.
+  const prereq = resolvePrerequisite(repoRoot);
+  assert.ok(prereq !== null, `no \`${PREREQ_SCRIPT}\` declared`);
+  const named = chain.steps.map((step) => step.name);
+  assert.ok(
+    !named.includes(prereq.name),
+    `\`${prereq.name}\` is a step of \`${CHAIN_SCRIPT}\` as well as the declared prerequisite, so it is reported as a suite and the two contracts can no longer be told apart`,
+  );
+  // Re-pin the list, so adding a prerequisite cannot quietly become adding a
+  // suite and no test in this file is the one that notices.
+  assert.deepEqual(
+    named,
+    ['test:core', 'test:runtime', 'test:daemon', 'test:cli', 'test:web', 'test:workflow', 'test:build-identity'],
+    'the root chain runs a different set or order of suites than the release line declares',
+  );
+});
+
+test('a failed prerequisite does not stop, skip, or excuse any chain step', () => {
+  // The load-bearing case, and the one a "fix" would most easily get wrong. The
+  // obvious way to declare a prerequisite is a `pretest` script, and it is
+  // exactly wrong: npm aborts before running `test` when `pretest` fails, so a
+  // type error would produce a run reporting *zero* of its seven steps. That is
+  // board 123's defect — suites that never ran, indistinguishable from suites
+  // that do not exist — reintroduced through the front door. So the runner runs
+  // the prerequisite, records it, and runs the chain regardless.
+  //
+  // Here the prerequisite fails at 127, the exit code board 112's front measured
+  // for `./web/node_modules/.bin/tsc: not found`, and all seven steps are still
+  // executed and still reported with their own exit codes.
+  const executed = [];
+  const groups = runWithPrerequisite(
+    { name: 'typecheck', command: 'tsc' },
+    ['test:core', 'test:runtime', 'test:daemon', 'test:cli', 'test:web', 'test:workflow', 'test:build-identity'].map((name) => ({ name })),
+    {
+      exec: (name) => { executed.push(name); return name === 'typecheck' ? 127 : 0; },
+      log: () => {},
+    },
+  );
+  assert.deepEqual(
+    executed,
+    ['typecheck', 'test:core', 'test:runtime', 'test:daemon', 'test:cli', 'test:web', 'test:workflow', 'test:build-identity'],
+    'a failed prerequisite changed what the chain ran — the exact defect of board 123, reintroduced as a prerequisite',
+  );
+  assert.deepEqual(
+    groups.map((group) => group.results.map((r) => [r.name, r.code])),
+    [
+      [['typecheck (declared prerequisite)', 127]],
+      [
+        ['test:core', 0], ['test:runtime', 0], ['test:daemon', 0],
+        ['test:cli', 0], ['test:web', 0], ['test:workflow', 0], ['test:build-identity', 0],
+      ],
+    ],
+    'the prerequisite and the chain are not reported as two separate groups of exit codes, so a failed prerequisite still reads as a failing suite',
+  );
+  // And the run is still red: a failed prerequisite must not be swallowed, or
+  // `npm test` would go green on a tree that was never built.
+  assert.ok(
+    groups.flatMap((g) => g.results).some((r) => r.code !== 0),
+    'a failed prerequisite did not make the run non-zero',
+  );
+});
+
+test('a passing prerequisite is reported as a prerequisite and still runs the whole chain', () => {
+  // The other direction, so the previous case cannot be satisfied by simply
+  // never reporting the prerequisite. The green case is the one that matters
+  // most in practice: it is what makes the four `ERR_MODULE_NOT_FOUND` errors
+  // unreachable through `npm test`, because the thing that produces
+  // `packages/*/dist` has already run by the time the suites do.
+  const executed = [];
+  const groups = runWithPrerequisite(
+    { name: 'typecheck', command: 'tsc' },
+    [{ name: 'test:core' }, { name: 'test:web' }],
+    { exec: (name) => { executed.push(name); return 0; }, log: () => {} },
+  );
+  assert.deepEqual(executed, ['typecheck', 'test:core', 'test:web']);
+  assert.equal(groups.length, 2, 'a passing prerequisite produced no separate group, so it is invisible in the summary');
+  assert.equal(groups[0].title, 'declared prerequisite (npm run typecheck)');
+  assert.equal(groups[0].results[0].name, 'typecheck (declared prerequisite)');
+});
+
+test('an unbuilt tree reports each missing condition separately, with its own remedy', () => {
+  // Three conditions, three remedies, and a fresh worktree has all three at
+  // once. Collapsing them into one "unbuilt" boolean is what would have left
+  // board 112's front with a run that still told them to run a typecheck that
+  // exits 127 — the misattribution, one level of indirection further away.
+  //
+  // The root is a throwaway directory, deliberately empty: this is the
+  // fresh-worktree case the issue documents, produced without touching the real
+  // tree or the real `web/node_modules`.
+  const bare = mkdtempSync(join(tmpdir(), 'antonina-124-bare-'));
+  try {
+    const state = inspectBuildState(bare);
+    assert.equal(state.ok, false, 'an empty tree was reported as ready to run the chain');
+    const byKind = Object.fromEntries(state.missing.map((c) => [c.kind, c]));
+    assert.deepEqual(
+      Object.keys(byKind).sort(),
+      ['build-output', 'generated-module', 'toolchain'],
+      `an unbuilt tree did not report all three missing conditions; got ${JSON.stringify(state.missing, null, 2)}`,
+    );
+    // The condition that actually bit board 112's front is named as its own
+    // thing, because no amount of typechecking can produce it.
+    assert.deepEqual(byKind.toolchain.entries, ['web/node_modules/.bin/tsc']);
+    assert.equal(byKind.toolchain.remedy, 'npm run bootstrap');
+    // A missing package `dist` and a missing generated module are different
+    // conditions and both are reported, with different remedies.
+    assert.ok(
+      byKind['build-output'].entries.includes('packages/core/dist'),
+      `the unbuilt tree did not name a missing package dist directory: ${JSON.stringify(byKind['build-output'], null, 2)}`,
+    );
+    assert.equal(byKind['build-output'].remedy, 'npm run typecheck');
+    assert.ok(
+      byKind['generated-module'].entries.includes('packages/cli/src/build-identity.generated.ts')
+      && byKind['generated-module'].entries.includes('web/build-identity.generated.ts'),
+      `the unbuilt tree did not name both generated build-identity modules: ${JSON.stringify(byKind['generated-module'], null, 2)}`,
+    );
+    assert.equal(byKind['generated-module'].remedy, 'npm run generate:build-identity');
+
+    // The notice has to say the thing that was true before the defect: that the
+    // step results below are not evidence of a code regression. A notice that
+    // only listed paths would still leave the reader to work that out.
+    const notice = formatPrereqNotice({ prereq: { name: 'typecheck' }, state });
+    for (const expected of [
+      'MISSING PREREQUISITE',
+      'npm run bootstrap',
+      'npm run typecheck',
+      'npm run generate:build-identity',
+      'NOT evidence of a code regression',
+      'will still run and report its own exit code',
+    ]) {
+      assert.ok(notice.includes(expected), `the preflight notice does not say \`${expected}\`:\n${notice}`);
+    }
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+  }
+});
+
+test('a tree that has been built reports no missing prerequisite', () => {
+  // The other direction, so the notice above cannot be satisfied by always
+  // printing a warning. This runs against a synthetic tree that contains
+  // exactly what the prerequisite is supposed to produce, which also pins what
+  // "built" means: the toolchain, both generated modules, and every package
+  // dist. A tree missing any one of them is not built, and the three are not
+  // interchangeable.
+  const built = mkdtempSync(join(tmpdir(), 'antonina-124-built-'));
+  const materialize = (root) => {
+    for (const entry of ['web/node_modules/.bin/tsc', 'packages/cli/src/build-identity.generated.ts', 'web/build-identity.generated.ts']) {
+      mkdirSync(dirname(join(root, entry)), { recursive: true });
+      writeFileSync(join(root, entry), '');
+    }
+    for (const dir of ['packages/core/dist', 'packages/agent-runtime/dist', 'packages/host-daemon/dist', 'packages/cli/dist']) {
+      mkdirSync(join(root, dir), { recursive: true });
+    }
+  };
+  try {
+    materialize(built);
+    const state = inspectBuildState(built);
+    assert.deepEqual(state.missing, [], `a fully built tree was still reported as missing prerequisites: ${JSON.stringify(state.missing, null, 2)}`);
+    assert.equal(formatPrereqNotice({ prereq: { name: 'typecheck' }, state }), null, 'a built tree still got a missing-prerequisite notice');
+
+    // One condition at a time, each on its own freshly built tree, so the check
+    // is not passing because the tree happened to be complete for a reason this
+    // case does not control, and so a missing condition is not masked by an
+    // earlier removal. Each of these is a real, distinct state a caller can be
+    // in, and each must be named as itself.
+    for (const [kind, entry] of [
+      ['toolchain', 'web/node_modules/.bin/tsc'],
+      ['generated-module', 'web/build-identity.generated.ts'],
+      ['build-output', 'packages/agent-runtime/dist'],
+    ]) {
+      const partial_root = mkdtempSync(join(tmpdir(), 'antonina-124-partial-'));
+      try {
+        materialize(partial_root);
+        rmSync(join(partial_root, entry), { recursive: true, force: true });
+        const partial = inspectBuildState(partial_root);
+        assert.deepEqual(
+          partial.missing.map((c) => c.kind),
+          [kind],
+          `removing only ${entry} from an otherwise built tree did not produce exactly the \`${kind}\` condition; got ${JSON.stringify(partial.missing, null, 2)}`,
+        );
+      } finally {
+        rmSync(partial_root, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    rmSync(built, { recursive: true, force: true });
+  }
+});
+
+test('the preflight notice is diagnostic and cannot stop or gate the chain', () => {
+  // A notice that altered the run would be a guard, and a guard that stopped the
+  // chain is board 123's defect. So the notice is a pure function of the tree's
+  // build state and the declared prerequisite: it takes no runner, returns no
+  // exit code, and `runWithPrerequisite` — the thing that decides what runs —
+  // does not consult it. Pinned here so a future "let's make it fatal" change
+  // is a visible diff against this line rather than a silent one.
+  const built = mkdtempSync(join(tmpdir(), 'antonina-124-pure-'));
+  try {
+    mkdirSync(join(built, 'packages'), { recursive: true });
+    const args = { prereq: { name: 'typecheck' }, state: inspectBuildState(built) };
+    assert.equal(formatPrereqNotice(args), formatPrereqNotice(args), 'the notice is not a pure function of its inputs');
+    assert.equal(typeof formatPrereqNotice(args), 'string');
+    // A tree with no declared prerequisite still gets an honest notice rather
+    // than a crash, because "nobody declared the prerequisite" is the defect
+    // being reported on, not an error to throw over.
+    const undeclared = formatPrereqNotice({ prereq: null, state: inspectBuildState(built) });
+    assert.ok(undeclared.startsWith('\nroot-chain-run: MISSING PREREQUISITE'), `the notice for an undeclared prerequisite is wrong:\n${undeclared}`);
+  } finally {
+    rmSync(built, { recursive: true, force: true });
+  }
+});
+
+test('a declared prerequisite naming a script that does not exist is an error, not a silent pass', () => {
+  // The failure mode a lenient resolver would allow: `prereq:root-test` names
+  // `typechek`, nothing defines it, the runner "runs" nothing, and the chain
+  // goes green having never built the tree. That is the defect with a
+  // declaration attached, which is worse than no declaration.
+  const bogus = mkdtempSync(join(tmpdir(), 'antonina-124-bogus-'));
+  try {
+    writeFileSync(
+      join(bogus, 'package.json'),
+      JSON.stringify({ name: 'x', private: true, scripts: { [PREREQ_SCRIPT]: 'typechek' } }),
+    );
+    assert.throws(
+      () => resolvePrerequisite(bogus),
+      /does not define/,
+      'a prerequisite naming a script that does not exist was accepted',
+    );
+  } finally {
+    rmSync(bogus, { recursive: true, force: true });
+  }
+});
+
+test('the rendered summary names the failed prerequisite as a prerequisite, not as a failing suite', () => {
+  // The summary is what a reader actually reads, so the grouping has to survive
+  // all the way into the rendered text. A failed `typecheck` sitting in the
+  // middle of the test results reads as a failing suite, which is the original
+  // defect wearing a summary. This asserts on the rendered string rather than on
+  // the runner's source, because source text would match a summary that is
+  // never reached.
+  const rendered = summarize(runWithPrerequisite(
+    { name: 'typecheck', command: 'tsc' },
+    [{ name: 'test:core' }, { name: 'test:web' }],
+    { exec: (name) => (name === 'typecheck' ? 127 : 0), log: () => {} },
+  ));
+  assert.ok(rendered.includes('declared prerequisite (npm run typecheck)'), `the summary does not label the prerequisite:\n${rendered}`);
+  assert.ok(rendered.includes('root chain steps:'), `the summary does not label the chain steps:\n${rendered}`);
+  assert.ok(rendered.includes('typecheck (declared prerequisite)  FAIL (127)'), `the failed prerequisite is not reported with its real exit code:\n${rendered}`);
+  // The sentence that stops a reader from calling this a code regression.
+  assert.ok(
+    rendered.includes('is the chain\'s declared prerequisite, not a test suite'),
+    `the summary does not tell the reader that the red step is a prerequisite:\n${rendered}`,
+  );
+  // And it still names the chain's own results, so nothing was hidden by the
+  // grouping.
+  assert.ok(rendered.includes('test:core') && rendered.includes('test:web'), `the summary dropped a chain step:\n${rendered}`);
+});
+
+test('`npm test` is still the chain runner, so the prerequisite is what actually runs', () => {
+  assert.ok(
+    pkgScripts().test === `node ${CHAIN_RUNNER}`,
+    '`npm test` is not the chain runner, so neither the chain nor its declared prerequisite would run',
   );
 });

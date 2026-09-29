@@ -19,6 +19,15 @@ const PROBE_SENTINEL = 'ANTONINA-RUNNER-FIXTURE-EXEC-OK';
 // which is the difference between a usable gate and an unusable one; it is
 // deliberately generous, because the bound is here to stop a deadlock and not
 // to ration a passing run.
+//
+// The bound has to be passed in the OPTIONS OBJECT, as the second argument:
+// `test(name, options, fn)`. Written as a trailing third argument it looks
+// equivalent and is not -- node reads the second argument as `options`, so a
+// trailing `{ timeout }` is silently discarded and the test runs unbounded. A
+// deliberate hang (the intent fixture never recording an intent, so the control
+// poll never signals) is the only way to see this, because a healthy run never
+// reaches the bound and so cannot distinguish a bound that fires from one that
+// was thrown away.
 const INTENT_TEST_TIMEOUT_MS = 120_000;
 
 // The runner spawns its backend detached and awaits it, so the fixture backend
@@ -639,7 +648,7 @@ test('e. a steer the runner itself signalled is still recorded as a clean stoppe
   assert.equal(after.error, null);
 });
 
-test('e. a kill intent does not excuse a host kill that beat the control poll', async (t) => {
+test('e. a kill intent does not excuse a host kill that beat the control poll', { timeout: INTENT_TEST_TIMEOUT_MS }, async (t) => {
   if (!requireProc(t)) return;
   // A persisted kill intent is not evidence that the operator's signal reached
   // the invocation. This invocation records the intent and then SIGKILLs itself
@@ -689,9 +698,9 @@ test('e. a kill intent does not excuse a host kill that beat the control poll', 
   assert.equal(after.backend_error.automatic_retry_safe, false);
   assert.match(after.error, /SIGKILL \(signal 9\)/);
   assert.match(after.error, /OOM killer fired inside the agent lifetime/);
-}, { timeout: INTENT_TEST_TIMEOUT_MS });
+});
 
-test('e. a stop intent the runner itself signalled is still a clean stopped', async (t) => {
+test('e. a stop intent the runner itself signalled is still a clean stopped', { timeout: INTENT_TEST_TIMEOUT_MS }, async (t) => {
   if (!requireProc(t)) return;
   // The complement of the case above, and the guard against over-correcting it.
   // The invocation is still alive when the control poll runs, so the poll really
@@ -719,4 +728,4 @@ test('e. a stop intent the runner itself signalled is still a clean stopped', as
   assert.equal(after.state, 'stopped');
   assert.equal(after.backend_error, null);
   assert.equal(after.error, null);
-}, { timeout: INTENT_TEST_TIMEOUT_MS });
+});

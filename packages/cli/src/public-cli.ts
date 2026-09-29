@@ -42,7 +42,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--confirm': 'Confirm the destructive operation.',
   '--credential': 'Print only the initialized credential.',
   '--cursor': 'Paging cursor.',
-  '--cwd': 'Working directory.',
+  '--cwd': 'Working directory the front runs in; declared, never inherited from the invoking shell.',
   '--days': 'Retention age in days.',
   '--description': 'Human-readable description.',
   '--detach': 'Return after starting background work.',
@@ -345,7 +345,7 @@ const AGENT_SPECS: readonly CommandSpec[] = [
   {
     path: ['run'],
     summary: 'Send work to a managed agent.',
-    values: ['--id', '--prompt'],
+    values: ['--id', '--prompt', '--cwd'],
     flags: ['--steer', '--detach', '--json'],
     required: ['--id', '--prompt'],
     normalize: (p) => [
@@ -354,6 +354,7 @@ const AGENT_SPECS: readonly CommandSpec[] = [
       p.values.get('--id')!,
       '--prompt',
       p.values.get('--prompt')!,
+      ...valueArgs(p, ['--cwd']),
       ...flagArgs(p, ['--steer', '--detach', '--json']),
     ],
   },

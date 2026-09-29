@@ -164,9 +164,11 @@ When Antonina's managed agent runtime is appropriate, use the CLI:
 antonina agent list
 antonina agent status --id ID
 antonina agent log --id ID
-antonina agent run --id ID --prompt '...' --detach
+antonina agent run --id ID --cwd /absolute/worktree --prompt '...' --detach
 antonina agent new --id ID --cwd /absolute/worktree
 ```
+
+Always declare `--cwd` on `run`. A front's working directory is the one declared there, never the directory the orchestrator happened to run the command from, and `agent status`/`agent list` report exactly that declared directory or an explicit `null`. A reported `cwd` is therefore the directory the front runs in, not an observation of where the front has since worked: to learn that, read `agent log`. An agent created without `--cwd` has no working directory and `run` refuses to launch it, so declare one at launch.
 
 Launch newly delegated work with `--detach`; do not keep the orchestrator attached to a subordinate agent while it works.
 

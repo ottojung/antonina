@@ -32,6 +32,7 @@ import {
   pendingPrompt,
   persistedControlField,
   persistedNativeSessionId,
+  requiredAgentCwd,
   runnerGeneration,
   runnerReservationMode,
   runnerReservationState,
@@ -297,7 +298,21 @@ async function runInvocation(
 ): Promise<boolean> {
   const meta = readMeta(agentId, options);
   if (meta === null) return false;
-  const command = buildAgentCommand(meta, prompt, isContinue, options.env);
+  let command: string[] | null;
+  try {
+    command = buildAgentCommand(meta, prompt, isContinue, options.env);
+  } catch (error) {
+    // A durable record the backend cannot be launched from -- an undeclared
+    // working directory, a malformed one -- is a failed invocation with a
+    // stated reason. Letting it escape would leave the runner holding a
+    // reservation it never discharges.
+    const reason = error instanceof Error ? error.message : String(error);
+    await updateMeta(agentId, (current) => {
+      finalizeTerminal(current, 'failed', Date.now() / 1000, null, null, reason);
+      setActiveRunner(current, false);
+    }, options);
+    return false;
+  }
   if (command === null) {
     await updateMeta(agentId, (current) => {
       finalizeTerminal(current, 'failed', Date.now() / 1000, null, null, 'cannot continue: underlying session not available');
@@ -325,7 +340,7 @@ async function runInvocation(
     let child: ChildProcess;
     try {
       child = spawn(command[0]!, command.slice(1), {
-        cwd: String(meta.cwd),
+        cwd: requiredAgentCwd(meta),
         env,
         detached: true,
         stdio: ['ignore', fd, fd],

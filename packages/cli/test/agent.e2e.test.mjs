@@ -151,6 +151,9 @@ case "$1" in
       echo "about to be killed"
       kill -KILL $$
     fi
+    # The directory the backend process was actually started in. Reported by
+    # the front itself, so a test can compare it with what status claims.
+    echo "FAKE_CWD:$(pwd)"
     echo "FAKE:$last"
     exit 0
     ;;
@@ -1478,5 +1481,133 @@ test('e. a signal-killed agent is reported as an external kill through status', 
   assert.equal(body.backend_error.signal_name, 'SIGKILL');
   assert.ok(['observed', 'unavailable'].includes(body.backend_error.oom_evidence));
   assertFixtureInvoked(handle, 'die-by-signal');
+});
+
+// ------------------------------------------------------------------ BOARD 122
+// The invariant, in one sentence: a front runs in the working directory an
+// operator declared for it, and every report of that directory -- the agent
+// record, `agent status`, `agent list` -- names the directory the front is
+// actually in; where no directory was ever declared the report is an explicit
+// "none", never some other directory's path.
+//
+// The regression this pins, measured on 2026-09-29: `agent new` without `--cwd`
+// silently recorded the invoking shell's directory, `agent run` had no way to
+// correct it, and status presented that inherited path as the front's location.
+// An orchestrator read it, concluded three healthy fronts were running in
+// worktrees they did not own, and stopped all three. See board issue 122 and
+// the incident record on board issue 98.
+test('a front runs in, and reports, the directory declared by --cwd on run', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  const declared = join(root, 'declared-worktree');
+  mkdirSync(declared);
+  // The record starts out naming one directory...
+  assert.equal(run(['agent', 'new', '--id', 'c0de', '--cwd', work], env).status, 0);
+  // ...and the launch declares a different one.
+  const launched = run(
+    ['agent', 'run', '--id', 'c0de', '--cwd', declared, '--detach', '--prompt', 'declared'],
+    env,
+  );
+  assert.equal(launched.status, 0, launched.stderr);
+  const done = await waitFor(
+    root,
+    'c0de',
+    (meta) => meta.state === 'succeeded' && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(done.state, 'succeeded');
+  assert.equal(done.prompt_count, 1, 'the prompt must really have been delivered');
+
+  // What the front says about itself, read from its own log. This is the
+  // assertion that would fail if status merely reported a plausible path.
+  const log = readFileSync(outputLogPath(root, 'c0de'), 'utf8');
+  assert.match(log, new RegExp(`FAKE_CWD:${declared}\\n`));
+  assert.doesNotMatch(log, new RegExp(`FAKE_CWD:${work}\\n`));
+
+  // And every report names the same directory the front named.
+  const status = run(['agent', 'status', '--id', 'c0de', '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(JSON.parse(status.stdout).cwd, declared);
+  const listed = run(['agent', 'list', '--json'], env);
+  assert.equal(listed.status, 0, listed.stderr);
+  const entry = JSON.parse(listed.stdout).agents.find((agent) => agent.id === 'c0de');
+  assert.equal(entry.cwd, declared);
+  // The backend was told the same directory, so the record and the invocation
+  // cannot disagree about where the front is.
+  assert.match(readFileSync(env.ANTONINA_TEST_CALLS, 'utf8'), new RegExp(`--dir ${declared} `));
+  assertFixtureInvoked(handle, 'declared');
+});
+
+// The other half of the same invariant: the user who has no trustworthy
+// directory to give must not acquire one by accident. Recording the invoking
+// shell's directory is what made the field wrong in the first place.
+test('an agent with no declared working directory is never launched, and says so', (t) => {
+  const { root, work, env } = fixture(t);
+  const created = run(['agent', 'new', '--id', 'd1e0'], env);
+  assert.equal(created.status, 0, created.stderr);
+
+  // No --cwd anywhere in this agent's life, so there is no such directory to
+  // report. Reporting the directory this test process happens to run in would be
+  // the defect this pins.
+  const status = run(['agent', 'status', '--id', 'd1e0', '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(JSON.parse(status.stdout).cwd, null);
+  const human = run(['agent', 'status', '--id', 'd1e0'], env);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /^cwd:\s+undeclared$/m);
+
+  const launched = run(['agent', 'run', '--id', 'd1e0', '--detach', '--prompt', 'must-not-run'], env);
+  assert.equal(launched.status, 1, `expected a refusal, got: ${launched.stdout}${launched.stderr}`);
+  assert.match(launched.stderr, /no declared working directory/);
+  const meta = JSON.parse(readFileSync(metaPath(root, 'd1e0'), 'utf8'));
+  assert.equal(meta.prompt_count, 0, 'a refused launch must not accept the prompt');
+  assert.equal(meta.pending_prompt, null);
+  assert.equal(meta.active_runner, false);
+  assert.equal(meta.runner_reservation, null);
+  // The directory the front would have been run in, had it been run at all.
+  assert.notEqual(meta.cwd, work);
+  assert.equal(meta.cwd, null);
+});
+
+// A declared working directory is a statement about a front that does not exist
+// yet. Rewriting it under a live invocation, an accepted prompt, or an unclaimed
+// runner reservation would make the record disagree with a front that already
+// exists, so it is refused instead -- and refused without writing anything.
+test('--cwd is refused while a front exists, and changes nothing', async (t) => {
+  const { root, work, env } = fixture(t);
+  const elsewhere = join(root, 'not-yours');
+  mkdirSync(elsewhere);
+  assert.equal(run(['agent', 'new', '--id', 'f0e5', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'f0e5', '--detach', '--prompt', 'slow'], env).status, 0);
+  const live = await waitFor(root, 'f0e5', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
+  t.after(() => {
+    try { process.kill(-live.pid, 'SIGKILL'); } catch {}
+    try { process.kill(live.pid, 'SIGKILL'); } catch {}
+  });
+  const before = readFileSync(metaPath(root, 'f0e5'), 'utf8');
+
+  const refused = run(
+    ['agent', 'run', '--id', 'f0e5', '--steer', '--cwd', elsewhere, '--detach', '--prompt', 'moved'],
+    env,
+  );
+  assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stderr, /--cwd/);
+  assert.equal(readFileSync(metaPath(root, 'f0e5'), 'utf8'), before, 'a refused --cwd must write nothing');
+
+  assert.equal(run(['agent', 'stop', '--id', 'f0e5'], env).status, 0);
+  await waitFor(root, 'f0e5', (meta) => meta.state === 'stopped');
+});
+
+// run --cwd is a real option, validated exactly as `new --cwd` is: a path that
+// is not an existing directory is refused before any state is written.
+test('run refuses a --cwd that is not an existing directory', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '9a17', '--cwd', work], env).status, 0);
+  const missing = join(root, 'no-such-worktree');
+  const before = readFileSync(metaPath(root, '9a17'), 'utf8');
+  const refused = run(['agent', 'run', '--id', '9a17', '--cwd', missing, '--detach', '--prompt', 'no'], env);
+  assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stderr, /working directory does not exist/);
+  assert.equal(readFileSync(metaPath(root, '9a17'), 'utf8'), before, 'a refused --cwd must write nothing');
 });
 

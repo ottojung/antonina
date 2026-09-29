@@ -188,7 +188,7 @@ function summary(meta: AgentMetadata): {
   last_activity_at: number;
   finished_at: number | null;
   prompts: number;
-  cwd: string;
+  cwd: string | null;
   title: string | null;
 } {
   return {
@@ -234,12 +234,28 @@ function matchesFilters(parsed: Parsed, state: string): boolean {
   return true;
 }
 
+/**
+ * A working directory an operator declared, resolved and checked to be an
+ * existing directory. Both `new` and `run` declare one, and both refuse a bad
+ * one before any state is written.
+ */
+function declaredCwd(raw: string, command: string): string {
+  const cwd = resolve(raw);
+  if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
+    throw new Error(`${command}: working directory does not exist: ${cwd}`);
+  }
+  return cwd;
+}
+
 async function cmdNew(args: string[], context: AgentCommandContext): Promise<number> {
   const parsed = parse(args, ['--json']);
   if (parsed.positionals.length !== 0) throw new UsageError('new: unexpected positional arguments');
   const agentId = requireAgentId(parsed.values.get('--id'), 'new');
-  const cwd = resolve(parsed.values.get('--cwd') ?? context.cwd);
-  if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error(`new: working directory does not exist: ${cwd}`);
+  // A front is not created in whatever directory happened to invoke this
+  // command. With no `--cwd` the agent records no working directory at all, and
+  // `run` then refuses to launch it until one is declared, rather than
+  // inheriting one and reporting it as the front's location.
+  const cwd = parsed.values.has('--cwd') ? declaredCwd(parsed.values.get('--cwd')!, 'new') : null;
   if (!createAgentDirectory(agentId, paths(context))) throw new Error(`new: agent ${agentId} already exists`);
   const meta = idleMeta(agentId, cwd, parsed.values.get('--title') ?? null);
   try {
@@ -251,7 +267,11 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
   if (parsed.flags.has('--json')) {
     context.io.stdout(stableJson({ id: agentId, state: 'idle', cwd, created_at: meta.created_at }));
   } else {
-    context.io.stdout(`Created agent with id ${agentId} (idle). Start work with \`antonina agent run --id ${agentId} --prompt 'task'\`.`);
+    context.io.stdout(
+      cwd === null
+        ? `Created agent with id ${agentId} (idle, no declared working directory). Declare one with \`antonina agent run --id ${agentId} --cwd /absolute/path --prompt 'task'\`.`
+        : `Created agent with id ${agentId} (idle). Start work with \`antonina agent run --id ${agentId} --prompt 'task'\`.`,
+    );
   }
   return EXIT_OK;
 }
@@ -284,7 +304,7 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
         entry.state,
         entry.summary.prompts,
         humanAge(entry.summary.created_at),
-        entry.summary.cwd,
+        entry.summary.cwd ?? 'undeclared',
         (entry.summary.title ?? '').replace(/\n/g, ' '),
       ].join('  '));
     }
@@ -369,7 +389,12 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
     context.io.stdout(`agent:      ${agentId}`);
     context.io.stdout(`state:      ${String(status.state)}`);
     context.io.stdout(`alive:      ${status.alive === true ? 'yes' : 'no'}`);
-    context.io.stdout(`cwd:        ${shown(status.cwd)}`);
+    // The declared working directory, which is the directory the front runs in.
+    // It is not a live observation of wherever the front has since wandered --
+    // nothing here can know that -- and it is not inherited from the shell that
+    // created the agent, so an undeclared agent says so rather than naming a
+    // directory nobody chose.
+    context.io.stdout(`cwd:        ${shown(status.cwd, 'undeclared')}`);
     context.io.stdout(`created:    ${shown(status.created_at)}`);
     context.io.stdout(`started:    ${shown(status.started_at)}`);
     context.io.stdout(`finished:   ${shown(status.finished_at)}`);
@@ -516,7 +541,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   // Durable execution configuration must be canonical before this prompt can
   // acquire runner or invocation authority.
   requiredPersistedAgentId(observed);
-  persistedAgentCwd(observed);
+  const recordedCwd = persistedAgentCwd(observed);
   persistedVariant(observed);
   persistedNativeSessionId(observed);
   if (
@@ -525,6 +550,29 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     && (invocationAlive(observed) || reservationInFlight(observed))
   ) {
     throw new Error(`agent ${agentId} is still running; use --steer to redirect it`);
+  }
+  // `--cwd` declares the directory this front runs in, and the record is
+  // corrected to it in the same durable write that accepts the prompt, so the
+  // two can never disagree. It is only ever a statement about a front that does
+  // not exist yet: under a live invocation, an accepted prompt, or an unclaimed
+  // runner reservation it would make the record name a directory the front that
+  // already exists is not in, so it is refused without writing anything.
+  const runCwd = parsed.values.has('--cwd') ? declaredCwd(parsed.values.get('--cwd')!, 'run') : null;
+  if (runCwd !== null) {
+    let acceptedPending: string | null;
+    try {
+      acceptedPending = pendingPrompt(observed);
+    } catch {
+      throw new Error(`run: agent ${agentId} has malformed pending prompt authority`);
+    }
+    if (invocationAlive(observed) || reservationInFlight(observed) || acceptedPending !== null) {
+      throw new Error(`run: agent ${agentId} already owns work; --cwd cannot be declared while a front exists`);
+    }
+  } else if (recordedCwd === null) {
+    // The operator has no directory to give. There is still no honest value to
+    // launch the backend with, and inheriting the invoking shell's directory is
+    // the defect this replaces, so the launch is refused and says why.
+    throw new Error(`run: agent ${agentId} has no declared working directory; pass --cwd /absolute/path`);
   }
   if (configuredModelAvailable(context.env) === false) {
     throw new Error('configured OpenCode model opencode/space-bunny-free is unavailable');
@@ -646,6 +694,11 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     }
     const generation = currentGeneration + 1;
     const now = Date.now() / 1000;
+    // The declared working directory is written here, on the one path that
+    // starts a fresh invocation for an agent that owns no work, and nowhere
+    // else: a transaction that ends in `busy` records nothing at all, so a
+    // rejected prompt cannot leave a cwd behind that no front ever ran in.
+    if (runCwd !== null) meta.cwd = runCwd;
     beginInvocation(meta, prompt, now, promptCount);
     meta.active_runner = true;
     meta.runner_gen = generation;

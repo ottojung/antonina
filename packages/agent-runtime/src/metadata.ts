@@ -389,11 +389,34 @@ export function persistedVariant(meta: AgentMetadata): string {
   return value;
 }
 
-export function persistedAgentCwd(meta: AgentMetadata): string {
+/**
+ * The working directory an operator declared for this front, or `null` when
+ * none was ever declared. `null` is a real, canonical state and not a
+ * malformed record: a front is not created in whatever directory happened to
+ * invoke the CLI, so an agent with no declared directory has no directory to
+ * report, and saying so is the only truthful answer. A non-null value is still
+ * held to the absolute-path rule, so a present-but-wrong one is rejected.
+ */
+export function persistedAgentCwd(meta: AgentMetadata): string | null {
+  if (!hasOwn(meta, 'cwd')) {
+    throw new MalformedAgentMetadataError('managed-agent cwd is missing');
+  }
   const value = meta.cwd;
+  if (value === null) return null;
   if (typeof value !== 'string' || value.length === 0 || !isAbsolute(value)) {
     throw new MalformedAgentMetadataError('managed-agent cwd is malformed');
   }
+  return value;
+}
+
+/**
+ * The same field for the paths that must launch a backend: a null cwd is not
+ * silently replaced by anything, it refuses the launch, because the backend is
+ * invoked with `--dir` and there is no honest value to give it.
+ */
+export function requiredAgentCwd(meta: AgentMetadata): string {
+  const value = persistedAgentCwd(meta);
+  if (value === null) throw new MalformedAgentMetadataError('managed-agent cwd is undeclared');
   return value;
 }
 
@@ -409,9 +432,9 @@ export function steerSequence(meta: AgentMetadata): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
-export function idleMeta(agentId: string, cwd: string, title: string | null, now = Date.now() / 1000): AgentMetadata {
+export function idleMeta(agentId: string, cwd: string | null, title: string | null, now = Date.now() / 1000): AgentMetadata {
   if (persistedAgentId(agentId) !== agentId) throw new MalformedAgentMetadataError('managed-agent id is malformed');
-  if (!isAbsolute(cwd)) throw new MalformedAgentMetadataError('managed-agent cwd is malformed');
+  if (cwd !== null && !isAbsolute(cwd)) throw new MalformedAgentMetadataError('managed-agent cwd is malformed');
   if (title !== null && typeof title !== 'string') throw new MalformedAgentMetadataError('managed-agent title is malformed');
   if (persistedTimestamp(now) === null) throw new MalformedAgentMetadataError('managed-agent creation time is malformed');
   const meta: AgentMetadata = {

@@ -35,14 +35,18 @@ jobs:
         # what the 0.1.1 rollout was: the page was served and the board was
         # not readable. Board issue 74. scripts/deploy-smoke.mjs drives headless
         # Chromium against the deployed URL and requires the application to
-        # start, the board to load *and verify* against the public trust anchor
-        # in ANTONINA_BOARD_TRUST_ANCHOR, the issue list to be populated and the
+        # start, and to load and verify it against the public trust anchor in
+        # ANTONINA_BOARD_TRUST_ANCHOR and read it with the board credential in
+        # ANTONINA_BOARD_CREDENTIAL; the issue list to be populated and the
         # feed to be populated, and it prints the application's own error text
         # when it is not.
         #
-        # Read-only by construction: the probe only navigates and reads. It
-        # stores a public trust anchor in a throwaway browser profile, submits no
-        # form, and never holds a board credential.
+        # Read-only against the board, by construction: the probe only navigates
+        # and reads, submits no form, and never writes to the board. It does hold
+        # two secrets — the public trust anchor and the board credential — but
+        # both go only into a throwaway browser profile that is deleted when the
+        # step ends, and neither is printed, sent to the board, or written to any
+        # Antonina state directory.
         #
         # ANTONINA_BOARD_TRUST_ANCHOR is the board's *public trust anchor*: the
         # single-line JSON `antonina board credential trust` prints, of exactly
@@ -69,12 +73,30 @@ jobs:
         # itself, not only that a step went red.
         env:
           ANTONINA_BOARD_TRUST_ANCHOR: ${{ secrets.ANTONINA_BOARD_TRUST_ANCHOR }}
+          ANTONINA_BOARD_CREDENTIAL: ${{ secrets.ANTONINA_BOARD_CREDENTIAL }}
         run: |
           set -euo pipefail
-          if [ -z "${ANTONINA_BOARD_TRUST_ANCHOR:-}" ]; then
-            echo "ERROR: ANTONINA_BOARD_TRUST_ANCHOR is not set. The smoke test cannot read and verify the board without it, and it refuses to pass a board it did not read." >&2
-            echo "Set the repository secret to the board's public trust anchor (antonina board credential trust)." >&2
-            printf '## Smoke test\n\n**SMOKE FAILED** — no trust anchor configured, so the board was never read.\n\n' >> "$GITHUB_STEP_SUMMARY"
+          # Two secrets, and both are required. The trust anchor is the board's
+          # public key and lets the application *verify* a board; the board
+          # credential is what grants the *read*. Since the application refuses
+          # every credential-less read, a probe holding only the anchor sits on
+          # the credential screen of a perfectly healthy deployment — which is a
+          # red about this step's own inputs, not about the build. Both are
+          # required here so that is said out loud, once, instead of as a
+          # confusing verdict about a healthy release.
+          #
+          # ANTONINA_BOARD_CREDENTIAL is the credential `antonina board
+          # credential` prints, as one line of JSON. It is a private key: it
+          # belongs in a repository secret, never in this file. The probe writes
+          # it only into a throwaway browser profile that is deleted when the
+          # step ends, and it never writes to the board.
+          if [ -z "${ANTONINA_BOARD_TRUST_ANCHOR:-}" ] || [ -z "${ANTONINA_BOARD_CREDENTIAL:-}" ]; then
+            echo "ERROR: both ANTONINA_BOARD_TRUST_ANCHOR and ANTONINA_BOARD_CREDENTIAL must be set." >&2
+            echo "The anchor is the public trust anchor (antonina board credential trust);" >&2
+            echo "the credential is the board credential (antonina board credential)." >&2
+            echo "The application refuses every read that has no credential, so the anchor alone" >&2
+            echo "cannot open the board and this step would fail on a perfectly healthy build." >&2
+            printf '## Smoke test\n\n**SMOKE FAILED** — board secrets not configured, so the board was never read.\n\n' >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           curl --fail --retry 5 --retry-delay 5 https://vau.place/_skrynia/health

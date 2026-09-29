@@ -245,6 +245,37 @@ test('a running record is never reconciled to failed while a live runner or an i
     state: 'reserved', gen: 1, mode: 'wat', reserved_at: 1, owner_pid: 99999999, owner_start_ticks: 1,
   };
   assert.equal(reservationInFlight(badMode, 80), true, 'a bad reservation mode is not proof the reservation is dead');
+
+  // 4. The final rung, `reservationOwnerAlive`, holds the reservation in flight on
+  //    its own merits once the grace window has expired. Every fixture above sits
+  //    inside that window or names a pid that does not exist, so the rung was only
+  //    ever reached returning false. This one is genuinely past the window and
+  //    names a real, live owner, with its REAL start ticks: `reservationOwnerAlive`
+  //    compares `procStartTicks(ownerPid)` to `owner_start_ticks`, so a placeholder
+  //    like 1 would fail the check and miss the rung this case exists to pin.
+  const owned = idleMeta(AGENT_ID, '/tmp', null, 1);
+  beginInvocation(owned, 'work', 10, 1);
+  owned.active_runner = true;
+  owned.runner_pid = null;
+  owned.runner_start_time = null;
+  owned.runner_reservation = {
+    state: 'reserved',
+    gen: 1,
+    mode: 'new',
+    // now - RUNNER_RESERVATION_GRACE_SECONDS - 1 == 74, i.e. deliberately outside
+    // the 5s grace window, so the only surviving term is the owner liveness check.
+    reserved_at: 74,
+    owner_pid: child.pid,
+    owner_start_ticks: startTicks,
+  };
+  assert.equal(
+    reservationInFlight(owned, 80),
+    true,
+    'a live reservation owner keeps an out-of-grace reservation in flight',
+  );
+  assert.equal(reconcileDeadMeta(owned, 80), false, 'a live reservation owner must veto the failed transition');
+  assert.equal(owned.state, 'running');
+  assert.equal(owned.finished_at, null);
 });
 
 // A different, equally well-formed agent id. Used to prove liveness is decided

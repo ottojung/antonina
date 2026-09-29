@@ -481,9 +481,17 @@ function intentFixture(t, id, options, { intent, marker = '', die = false } = {}
     //
     // It costs a healthy run nothing: the control poll runs 200ms after the
     // intent lands, so a green run is signalled long before this line.
+    //
+    // These three lines are written as outer template literals on purpose.
+    // Written as plain single-quoted strings they would leave
+    // `${FIXTURE_LIFETIME_MS}` in the generated source for the FIXTURE to
+    // interpolate, and the fixture has no such binding: the give-up would throw
+    // a ReferenceError and exit 1 without ever writing the file the test
+    // asserts on, which is the one failure mode this whole arrangement exists
+    // to prevent. The numbers are substituted here, where they are in scope.
     `sleep(${FIXTURE_LIFETIME_MS});`,
-    'process.stderr.write(`record-intent: still unsignalled after ${FIXTURE_LIFETIME_MS}ms; giving up so the run can fail rather than hang\\n`);',
-    'writeFileSync(gaveUp, `${FIXTURE_LIFETIME_MS}\\n`);',
+    `process.stderr.write("record-intent: still unsignalled after ${FIXTURE_LIFETIME_MS}ms; giving up so the run can fail rather than hang\\n");`,
+    `writeFileSync(gaveUp, "${FIXTURE_LIFETIME_MS}\\n");`,
     'process.exit(0);',
   ].join('\n'));
   const storeUrl = new URL('../dist/packages/agent-runtime/src/store.js', import.meta.url).href;

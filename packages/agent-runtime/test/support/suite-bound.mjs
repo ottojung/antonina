@@ -187,11 +187,18 @@ export function installSuiteBound({
     // a suite whose tests were all still passing at the moment it wedged would
     // report success on a run that never finished. The bound firing is itself
     // the failure.
+    //
+    // The cleaners are drained here too, at exit, rather than immediately
+    // below. A reap often does unwind the run, and a test that is resuming
+    // after one still has assertions to make against the state home it was
+    // given; deleting that state home out from under it would replace a real
+    // failure with a `TypeError` about a null record, which is a worse
+    // account of the same defect than the one already on stderr.
     process.on('exit', () => {
       process.exitCode = BOUND_EXIT_CODE;
+      for (const note of drain(cleaners)) write(`${BOUND_PREFIX}: cleaned ${note}`);
     });
     for (const note of drain(reapers)) write(`${BOUND_PREFIX}: reaped ${note}`);
-    for (const note of drain(cleaners)) write(`${BOUND_PREFIX}: cleaned ${note}`);
 
     setTimeout(() => {
       write(

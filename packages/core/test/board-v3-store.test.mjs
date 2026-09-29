@@ -79,6 +79,17 @@ function fakeSkrynia() {
         return jsonResponse({ ok: true }, 200);
       }
 
+      if (method === 'DELETE') {
+        if (current === undefined) return new Response(null, { status: 404 });
+        if (current.mode === 'immutable') return jsonResponse({ error: 'immutable' }, 403);
+        const headers = new Headers(init.headers);
+        if (headers.get('X-Skrynia-Capability') !== current.capability) {
+          return jsonResponse({ error: 'invalid capability' }, 403);
+        }
+        objects.delete(key);
+        return jsonResponse({ ok: true }, 200);
+      }
+
       return new Response(null, { status: 405 });
     },
   };
@@ -276,7 +287,12 @@ test('feed entries are materialized directly and read without history', async ()
   assert.ok(storedFeedEntry);
   assert.equal(Object.hasOwn(storedFeedEntry, 'author'), false);
   assert.equal(Object.hasOwn(storedFeedEntry, 'body'), false);
-  assert.equal(typeof storedFeedEntry.commentRef, 'string');
+  // A comment entry addresses its message by index, not by the ref of the
+  // comment page that held it when the entry was written. A page is rewritten
+  // by every later comment to that issue, so a ref recorded here would name an
+  // object the store is entitled to reclaim, and this entry can be in an
+  // already-sealed page that nothing will ever rewrite.
+  assert.equal(Object.hasOwn(storedFeedEntry, 'commentRef'), false);
   assert.equal(storedFeedEntry.commentIndex, 0);
 
   server.clearRequests();

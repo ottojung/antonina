@@ -25,6 +25,7 @@ import { type BoardFeedPage, type BoardFeedRequest } from './feed.js';
 import {
   ShardedBoardStore,
   ShardedBoardStoreError,
+  type BoardCompactionReport,
   type BoardOverview,
   type IssueListPage,
 } from './board-v3-store.js';
@@ -32,6 +33,8 @@ import {
 export const ANTONINA_NAMESPACE = 'antonina';
 export const SIGNED_BOARD_KEY = 'board-v2';
 export const DEFAULT_BOARD_BASE_URL = 'https://vau.place/_skrynia';
+
+export type { BoardCompactionReport, BoardSweepReport } from './board-v3-store.js';
 
 const DEFAULT_MAX_ATTEMPTS = 6;
 
@@ -418,6 +421,30 @@ export class SignedBoardStore {
     await this.ensureMaterialized(credential, previouslyAcceptedHead);
     try {
       return await this.sharded.getQueue(credential);
+    } catch (error) {
+      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
+      throw error;
+    }
+  }
+
+  /**
+   * Reports the store's storage shape and reclaims what this board's own
+   * retention chain says has aged out.
+   *
+   * This is the operator-facing half of the bounded-growth model, and it is
+   * destructive in the same way `collect delete` is: it deletes shard objects
+   * that no meta names any more. It is exposed here rather than folded into a
+   * mutation so that a front end can present it as a deliberate, confirmed
+   * action, and it never runs as a side effect of reading the board.
+   */
+  async compactionReport(
+    credentialValue: BoardCredential,
+    options: { confirm?: boolean } = {},
+  ): Promise<BoardCompactionReport> {
+    const credential = await verifyBoardCredential(credentialValue);
+    await this.ensureMaterialized(credential, null);
+    try {
+      return await this.sharded.compact(credential, options);
     } catch (error) {
       if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
       throw error;

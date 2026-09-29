@@ -8,6 +8,7 @@ import {
   DEFAULT_BOARD_BASE_URL,
   TargetSelectionError,
   type BoardAccessState,
+  type BoardCompactionReport,
   type BoardInitialization,
   type IssueListSummary,
 } from '../../core/src/api.js';
@@ -118,6 +119,7 @@ type CommandValue =
   | BoardTrustAnchor
   | CollectListEntry[]
   | CollectDeleteReportBase
+  | BoardCompactionReport
   | BoardFeedPage
   | number[]
   | null;
@@ -614,6 +616,22 @@ async function execute(
       }
       throw new AntoninaApiError('dispatch requires select or record');
     }
+    case 'compact': {
+      const confirmFlag = flag(parsed.args, '--confirm');
+      if (confirmFlag.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for compact');
+      // Destructive, and deliberately shaped like `collect delete`: the default
+      // run reports and touches nothing, and only `--confirm` deletes. Skrynia
+      // exposes no listing primitive to Antonina, so this can only reclaim what
+      // the board's own retention chain names -- superseded objects written
+      // before the reclaimable model was in force are invisible here and stay on
+      // the namespace until Skrynia collects them itself.
+      return {
+        mode: 'compaction',
+        value: await client.compactionReport({
+          confirm: confirmFlag.value,
+        }),
+      };
+    }
     case 'collect': {
       const [subcommand, ...args] = parsed.args;
       if (subcommand === 'list') {
@@ -909,6 +927,38 @@ function humanLines(result: CommandResult): string[] {
     return ['Resource added: ' + resource.host + ' ' + resource.path];
   }
   if (result.mode === 'resource-removed') return ['Resource dependency removed.'];
+
+  if (result.mode === 'compaction') {
+    const report = result.value as BoardCompactionReport;
+    const sweep = report.lastSweep;
+    const lines = [
+      `board ${report.boardId} revision ${report.revision}: ${report.reachableRefs} reachable shard objects`,
+      `retained generation(s) for in-flight readers: ${
+        report.retainedGenerationRevisions.length === 0
+          ? 'none'
+          : report.retainedGenerationRevisions.join(', ')
+      }`,
+      `reclaimable by Antonina now: ${report.reclaimableRefs}; reclaimed by this run: ${report.reclaimedRefs}`,
+      `last committed mutation reclaimed ${sweep.reclaimed} object(s), ${sweep.retained} undeletable${
+        sweep.at === null ? '' : ' at revision ' + sweep.revision
+      }${sweep.error === null ? '' : '; last sweep failed: ' + sweep.error}`,
+    ];
+    if (report.reclaimableRefs > 0 && report.reclaimedRefs === 0) {
+      lines.push('nothing was deleted; re-run with --confirm to reclaim');
+    }
+    if (report.retainedRefs > 0) {
+      // The honest limit of what a client can do here. Skrynia exposes no
+      // listing primitive to Antonina, so objects that predate the reclaimable
+      // model are not merely undeletable -- they are invisible, and this command
+      // cannot even count them.
+      lines.push(
+        `${report.retainedRefs} object(s) in the retention chain could not be deleted; `
+        + 'objects written under the pre-fix immutable model are outside this board\'s reach '
+        + 'and are removed only by Skrynia collecting the namespace itself',
+      );
+    }
+    return lines;
+  }
 
   if (result.mode === 'collect-list') {
     const entries = result.value as CollectListEntry[];

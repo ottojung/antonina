@@ -7,6 +7,7 @@ import {
   SIGNED_BOARD_KEY,
   SignedBoardStore,
   SignedBoardStoreError,
+  type BoardCompactionReport,
   type SignedBoardStoreOptions,
   type StoredSignedBoard,
 } from './board-store.js';
@@ -478,6 +479,23 @@ export class BoardApi {
     return page;
   }
 
+  /**
+   * Reports how the board's materialized storage is currently shaped, and with
+   * `confirm` reclaims the shard objects this board's retention chain says have
+   * aged out.
+   *
+   * It is on the API rather than only on the store because it is the operator
+   * surface for the bounded-growth model, and it must be reachable by both front
+   * ends. It deletes objects, so it is deliberately not reachable without an
+   * explicit confirmation from the caller.
+   */
+  async compactionReport(options: { confirm?: boolean } = {}): Promise<BoardCompactionReport> {
+    const credential = await this.fastReadCredential();
+    const report = await this.store.compactionReport(credential, options);
+    this.rememberedHead = null;
+    return { ...report, lastSweep: { ...report.lastSweep } };
+  }
+
   async getQueue(): Promise<number[]> {
     const credential = await this.fastReadCredential();
     const queue = await this.store.getQueue(credential, this.rememberedHead);
@@ -843,7 +861,12 @@ export {
   parseFeedCursor,
 } from './feed.js';
 export type { BoardFeedEntry, BoardFeedEntryKind, BoardFeedPage, BoardFeedRequest } from './feed.js';
-export type { BoardOverview, IssueListSummary } from './board-v3-store.js';
+export type {
+  BoardCompactionReport,
+  BoardOverview,
+  BoardSweepReport,
+  IssueListSummary,
+} from './board-v3-store.js';
 export {
   EXECUTION_TARGET_ACCESS_METHODS,
   EXECUTION_TARGET_BACKENDS,

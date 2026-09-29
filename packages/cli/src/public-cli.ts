@@ -289,6 +289,12 @@ const BOARD_SPECS: readonly CommandSpec[] = [
     ],
   }),
   withJson({
+    path: ['compact'],
+    summary: 'Report board shard storage; reclaim aged generations with --confirm (operator action).',
+    flags: ['--confirm'],
+    normalize: (p) => ['compact', ...flagArgs(p, ['--confirm']), ...jsonArg(p)],
+  }),
+  withJson({
     path: ['collect', 'list'],
     summary: 'List collectible resources on one host.',
     values: ['--host'],

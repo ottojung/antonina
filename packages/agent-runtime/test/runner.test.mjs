@@ -33,14 +33,14 @@ const PROBE_SENTINEL = 'ANTONINA-RUNNER-FIXTURE-EXEC-OK';
 // It is only half a bound. A per-test timeout bounds the test; it does not
 // bound this file, because a test that times out never runs its `t.after` hooks
 // and the `ChildProcess` handle of the detached backend stays ref'd, so the
-// file process never exits and `npm test` never returns. The three constants
+// file process never exits and `npm test` never returns. The four constants
 // below are the other halves, and they are in increasing order of bluntness:
 // the fixture's own lifetime (it never waits to be signalled forever), the
-// per-test timeout (a wedged test becomes a failed test), and the suite bound
-// (a wedged *file* reaps its invocation and exits non-zero). Every one of them
-// is a ceiling: the environment may shorten a bound, never lengthen it, so no
-// value of any of these variables can put a run back where it started. See
-// `support/suite-bound.mjs` for the process-level half.
+// per-test timeout (a wedged test becomes a failed test), and the two suite
+// bounds (a wedged *file* reaps its invocation and exits non-zero). Every one
+// of them is a ceiling: the environment may shorten a bound, never lengthen
+// it, so no value of any of these variables can put a run back where it
+// started. See `support/suite-bound.mjs` for the process-level half.
 const FIXTURE_LIFETIME_MS = boundMs('ANTONINA_TEST_FIXTURE_LIFETIME_MS', 60_000);
 const INTENT_TEST_TIMEOUT_MS = boundMs('ANTONINA_TEST_CASE_TIMEOUT_MS', 120_000);
 const SUITE_STALL_MS = boundMs('ANTONINA_TEST_SUITE_STALL_MS', 180_000);
@@ -410,7 +410,8 @@ function intentFixture(t, id, options, { intent, marker = '', die = false } = {}
   // fixture that gave up, which the durable record cannot. A runner that never
   // signals leaves an invocation that ends anyway, and the record of an
   // invocation that ended by itself with a `stop` intent on it reads exactly
-  // like the record of one the runner stopped. See `gaveUpPath` below.
+  // like the record of one the runner stopped. `intentBackend` hands the path
+  // back to the test that has to assert on it.
   const gaveUp = join(root, 'gave-up');
   const helper = join(root, 'record-intent.mjs');
   writeFileSync(helper, [

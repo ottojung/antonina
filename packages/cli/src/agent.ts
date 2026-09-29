@@ -28,6 +28,10 @@ import {
   waitForInvocationGone,
 } from '../../agent-runtime/src/lifecycle.js';
 import {
+  AgentForkSourceMissingError,
+  forkAgent,
+} from '../../agent-runtime/src/fork.js';
+import {
   formatBytes,
   readHostCapacity,
   type HostCapacity,
@@ -251,6 +255,9 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
   const parsed = parse(args, ['--json']);
   if (parsed.positionals.length !== 0) throw new UsageError('new: unexpected positional arguments');
   const agentId = requireAgentId(parsed.values.get('--id'), 'new');
+  if (parsed.values.has('--fork')) {
+    return await cmdFork(parsed.values.get('--fork')!, agentId, parsed, context);
+  }
   // A front is not created in whatever directory happened to invoke this
   // command. With no `--cwd` the agent records no working directory at all, and
   // `run` then refuses to launch it until one is declared, rather than
@@ -271,6 +278,62 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
       cwd === null
         ? `Created agent with id ${agentId} (idle, no declared working directory). Declare one with \`antonina agent run --id ${agentId} --cwd /absolute/path --prompt 'task'\`.`
         : `Created agent with id ${agentId} (idle). Start work with \`antonina agent run --id ${agentId} --prompt 'task'\`.`,
+    );
+  }
+  return EXIT_OK;
+}
+
+/**
+ * `agent new --id <NEW> --fork <OLD>`: a snapshot of an existing agent.
+ *
+ * The clone gets the source's persisted work identity -- declared cwd, title,
+ * variant, native session, prompt history and terminal outcome -- and its own
+ * id and its own record, with no process, runner, reservation, accepted prompt
+ * or queued steer inherited. It is a snapshot, not a link: nothing in the
+ * product reads the source in order to update the clone, or the clone in order
+ * to update the source, and the two never share a file.
+ *
+ * `--cwd` and `--title` are refused here rather than silently ignored. They
+ * describe a fresh front's own declaration, and letting them apply to a fork
+ * would leave an operator believing they had named the clone's directory when
+ * the record says the source's.
+ */
+async function cmdFork(
+  raw: string,
+  agentId: string,
+  parsed: Parsed,
+  context: AgentCommandContext,
+): Promise<number> {
+  const sourceId = normalizeAgentId(raw);
+  if (sourceId === null) throw new UsageError('new: --fork must be a base-16 managed-agent id');
+  if (sourceId === agentId) throw new UsageError('new: --fork source and --id must be different agents');
+  if (parsed.values.has('--cwd')) throw new UsageError('new: --cwd cannot be combined with --fork');
+  if (parsed.values.has('--title')) throw new UsageError('new: --title cannot be combined with --fork');
+  let meta: AgentMetadata;
+  try {
+    meta = forkAgent(sourceId, agentId, paths(context));
+  } catch (error) {
+    // A source that does not exist is a lookup failure, not a crash, and gets
+    // the same exit code every other unknown-id path in this file returns.
+    if (error instanceof AgentForkSourceMissingError) throw new NotFoundError(error.message);
+    throw error;
+  }
+  if (parsed.flags.has('--json')) {
+    context.io.stdout(stableJson({
+      id: agentId,
+      forked_from: sourceId,
+      state: persistedLifecycleState(meta),
+      cwd: persistedAgentCwd(meta),
+      title: meta.title as string | null,
+      native_session_id: persistedNativeSessionId(meta),
+      prompts: meta.prompt_count as number,
+      created_at: meta.created_at,
+    }));
+  } else {
+    const cwd = persistedAgentCwd(meta);
+    context.io.stdout(
+      `Forked agent ${sourceId} into ${agentId} (state ${String(persistedLifecycleState(meta))}, ${String(meta.prompt_count)} prompts, ${cwd === null ? 'no declared working directory' : cwd}). `
+      + `The two agents are independent: neither observes or changes the other. Start work with \`antonina agent run --id ${agentId} --prompt 'task'\`.`,
     );
   }
   return EXIT_OK;

@@ -43,6 +43,29 @@
 // chain: the gate cannot be trusted if the thing that can break the chain can
 // also stop the gate from running, and the tail running under this runner is
 // what guarantees the gate always gets its turn.
+//
+// ---------------------------------------------------------------------------
+// Board issue 124: the prerequisite the chain had, and did not name.
+//
+// Everything above is board 123. This runner could report every step perfectly
+// and still leave a caller staring at four `ERR_MODULE_NOT_FOUND` errors naming
+// `packages/*/dist`, because the step those suites actually needed was never in
+// the chain to be reported. See `scripts/root-chain-prereq.mjs` for the
+// measurements; the shape of the fix is here.
+//
+// The rule that governs this section, and the one that is easiest to break by
+// accident:
+//
+//   the prerequisite is run and reported, and it NEVER stops the chain.
+//
+// Not "unless it failed". Not "unless the tree is unbuilt". A `pretest` script
+// would be the obvious way to declare this and it is exactly wrong: npm aborts
+// before running `test` when `pretest` fails, so a compile error would produce
+// a run that reports *zero* of its seven steps. That is board 123's defect —
+// suites that never ran, indistinguishable from suites that do not exist —
+// reintroduced through the front door by a well-meant fix. So the prerequisite
+// gets its own section, its own exit code, and the chain runs regardless.
+// ---------------------------------------------------------------------------
 
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -50,6 +73,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { resolveRootTestChain, rootChainSource } from './root-chain.mjs';
+import { formatPrereqNotice, inspectBuildState, resolvePrerequisite } from './root-chain-prereq.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -90,15 +114,18 @@ function runStep(name) {
 export function runChain(steps, { exec = runStep, log = (line) => process.stdout.write(`${line}\n`) } = {}) {
   const results = [];
   for (const step of steps) {
-    log(`root-chain-run: running ${step.name}`);
+    // `label` is the display name; it differs from `name` only for the
+    // prerequisite, whose log line must not read as another test suite.
+    const label = step.label ?? step.name;
+    log(`root-chain-run: running ${label}`);
     const raw = exec(step.name);
     // A step that reports no numeric status — killed by a signal, or an `exec`
     // that does not answer — is a step that did not pass. Normalising here, in
     // the one place a result becomes a record, means no caller can accidentally
     // record an absent exit code and have the run read as green.
     const code = Number.isInteger(raw) ? raw : 1;
-    results.push({ name: step.name, code });
-    log(`root-chain-run: ${step.name} exited ${code}`);
+    results.push({ name: label, code });
+    log(`root-chain-run: ${label} exited ${code}`);
   }
   return results;
 }
@@ -107,26 +134,82 @@ export function runChain(steps, { exec = runStep, log = (line) => process.stdout
  * The human-facing summary. This is the part that makes a skip impossible to
  * miss: every step is listed with its own exit code, so an absent suite shows
  * up as a missing line rather than as nothing.
+ *
+ * Takes groups rather than one list, so the declared prerequisite is printed
+ * under its own heading as a prerequisite. Collapsing it into the step list
+ * would put a failed `typecheck` in the middle of the test results, where it
+ * reads as a failing suite — the same misattribution as the original defect,
+ * one level up.
+ *
+ * Exported so `scripts/root-chain.test.mjs` can read the rendered text, which is
+ * what a caller actually reads. Asserting on the runner's source instead would
+ * pass against a summary that is never reached.
  */
-function summarize(results) {
-  const width = results.reduce((max, r) => Math.max(max, r.name.length), 0);
+export function summarize(groups) {
+  const width = groups
+    .flatMap((group) => group.results)
+    .reduce((max, r) => Math.max(max, r.name.length), 0);
   const lines = ['', 'root-chain-run: summary of every step in the root `npm test` chain', ''];
-  for (const { name, code } of results) {
-    lines.push(`  ${name.padEnd(width)}  ${code === 0 ? 'pass (0)' : `FAIL (${code})`}`);
+  const failed = [];
+  for (const group of groups) {
+    if (group.results.length === 0) continue;
+    lines.push(`  ${group.title}:`);
+    for (const { name, code } of group.results) {
+      lines.push(`    ${name.padEnd(width)}  ${code === 0 ? 'pass (0)' : `FAIL (${code})`}`);
+      if (code !== 0) failed.push({ ...group, name, code });
+    }
+    lines.push('');
   }
-  const failed = results.filter((r) => r.code !== 0);
-  lines.push('');
   if (failed.length === 0) {
-    lines.push(`root-chain-run: all ${results.length} steps ran and all passed.`);
-  } else {
+    const steps = groups.flatMap((group) => group.results).length;
+    lines.push(`root-chain-run: all ${steps} steps ran and all passed.`);
+    return lines.join('\n');
+  }
+  lines.push(
+    `root-chain-run: ${failed.length} step(s) failed: ${failed.map((r) => `${r.name} (${r.code})`).join(', ')}.`,
+  );
+  lines.push(
+    'root-chain-run: every other step still ran; this chain reports all of its failures at once rather than stopping at the first.',
+  );
+  for (const group of failed) {
+    if (!group.blocks) continue;
     lines.push(
-      `root-chain-run: ${failed.length} of ${results.length} steps failed: ${failed.map((r) => `${r.name} (${r.code})`).join(', ')}.`,
-    );
-    lines.push(
-      'root-chain-run: every other step still ran; this chain reports all of its failures at once rather than stopping at the first.',
+      `root-chain-run: NOTE \`${group.name}\` is the chain's declared prerequisite, not a test suite. `
+      + 'Every step below it ran anyway and its own exit code is the only thing that says anything about the code under test.',
     );
   }
   return lines.join('\n');
+}
+
+/**
+ * Run the declared prerequisite and then the chain, as reporting groups.
+ *
+ * The single most important property of this function is that the chain runs
+ * unconditionally. It is here, as its own exported unit, rather than inlined in
+ * `main`, so `scripts/root-chain.test.mjs` can watch it happen: a mechanism
+ * whose central promise is "this cannot skip anything" should be the easiest
+ * thing in the file to test, not the hardest.
+ *
+ * @param {{ name: string, command: string } | null} prereq
+ * @param {Array<{ name: string }>} steps
+ * @returns {Array<{ title: string, results: Array<{ name: string, code: number }>, blocks: boolean }>}
+ */
+export function runWithPrerequisite(prereq, steps, options = {}) {
+  const groups = [];
+  if (prereq !== null) {
+    groups.push({
+      title: `declared prerequisite (npm run ${prereq.name})`,
+      results: runChain(
+        [{ name: prereq.name, label: `${prereq.name} (declared prerequisite)` }],
+        options,
+      ),
+      blocks: true,
+    });
+  }
+  // Unconditional, and deliberately not inside the `if` above. A prerequisite
+  // that fails does not skip, reorder, or excuse a step.
+  groups.push({ title: 'root chain steps', results: runChain(steps, options) });
+  return groups;
 }
 
 function main() {
@@ -147,10 +230,29 @@ function main() {
     return 1;
   }
 
-  const results = runChain(chain.steps);
-  process.stdout.write(`${summarize(results)}\n`);
-  // Strictly stricter than `&&`: any failure at all is a non-zero exit.
-  return results.some((r) => r.code !== 0) ? 1 : 0;
+  // The prerequisite is read from `package.json`, not from a comment, and it is
+  // run through the same `runChain` machinery as the chain so that it cannot
+  // acquire a second, laxer execution path.
+  //
+  // Deliberately not wrapped in a try/catch. A `prereq:root-test` naming a
+  // script that does not exist is a broken committed file, not a caller's
+  // sequencing mistake, and `scripts/root-chain.test.mjs` pins the correct
+  // configuration. Catching it here would mean choosing between a stack trace
+  // and a chain that runs on a declaration nobody could honour; the stack trace
+  // is the honest one.
+  const prereq = resolvePrerequisite(repoRoot, pkg);
+
+  // Diagnostics only. This writes text and changes nothing about what runs or
+  // what exit code comes out: a notice that altered the run would be a guard,
+  // and a guard that stopped the chain would be board 123's defect.
+  const notice = formatPrereqNotice({ prereq, state: inspectBuildState(repoRoot) });
+  if (notice !== null) process.stderr.write(`${notice}\n`);
+
+  const groups = runWithPrerequisite(prereq, chain.steps);
+  process.stdout.write(`${summarize(groups)}\n`);
+  // Strictly stricter than `&&`: any failure at all is a non-zero exit, and a
+  // failed prerequisite is a failure of the run even though it stopped no step.
+  return groups.flatMap((group) => group.results).some((r) => r.code !== 0) ? 1 : 0;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

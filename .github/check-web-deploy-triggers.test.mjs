@@ -6,6 +6,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
+import { rootChainSource } from '../scripts/root-chain.mjs';
+
 // This repository's own deploy trigger, checked by .github/check-web-deploy-triggers.mjs.
 //
 // The checker is the enforcement point for this issue: a `paths` entry that
@@ -202,13 +204,23 @@ test('a bundle import the checker cannot trace is reported next to the result', 
 test('the root npm test chain still runs the bare-checkout gate', () => {
   const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
 
+  // The chain text, read from the chain rather than from `scripts.test`. Board
+  // issue 123: `npm test` is now `scripts/root-chain-run.mjs`, which executes
+  // the chain held in `chain:root-test` and prints a per-step exit-code
+  // summary, so that a step failing can no longer stop the steps after it from
+  // running. This case must therefore ask the same question of the chain the
+  // runner runs — reading `scripts.test` and finding no `npm run` in it at all
+  // would be true of a correctly configured tree, and would quietly stop
+  // guarding anything the moment the runner was in place.
+  const chain = rootChainSource(pkg);
+
   // This file is the witness, so its own reachability is asserted too. If
   // `test:workflow` is ever dropped from the chain, the case below is
   // unreachable and the guard it provides silently evaporates — the same
   // failure shape as the one this case exists to catch.
   assert.ok(
-    pkg.scripts.test.includes('npm run test:workflow'),
-    `the root \`npm test\` chain does not run \`test:workflow\`, so this file never guards anything: ${pkg.scripts.test}`,
+    chain.includes('npm run test:workflow'),
+    `the root \`npm test\` chain does not run \`test:workflow\`, so this file never guards anything: ${chain}`,
   );
   // Which file `test:workflow` runs is not pinned as a string. It is
   // `node --test .github/*.test.mjs` — a glob — and asserting the literal
@@ -235,9 +247,9 @@ test('the root npm test chain still runs the bare-checkout gate', () => {
 
   // The gate's own step, in the chain.
   assert.ok(
-    pkg.scripts.test.includes('npm run test:build-identity'),
+    chain.includes('npm run test:build-identity'),
     `the root \`npm test\` chain does not run \`test:build-identity\`, so scripts/root-chain.test.mjs `
-      + `is never executed and \`npm test\` is green having stopped running it: ${pkg.scripts.test}`,
+      + `is never executed and \`npm test\` is green having stopped running it: ${chain}`,
   );
   assert.ok(
     pkg.scripts['test:build-identity'].includes('scripts/root-chain.test.mjs'),

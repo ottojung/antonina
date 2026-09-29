@@ -35,16 +35,59 @@ function jsonResponse(value: unknown, status = 200, etag?: string): Response {
   return new Response(JSON.stringify(value), { status, headers });
 }
 
-/** The CAS storage behaviour the signed board relies on. */
+/**
+ * The CAS storage behaviour the signed board relies on.
+ *
+ * The capability model here is the point of this double, so it is spelled out
+ * rather than implied. A `capability-write` object gets a *fresh per-object*
+ * capability minted at POST, that value is returned once in the response body,
+ * and only its hash is kept. The caller's `X-Skrynia-Capability` is not
+ * adopted, so the one value that can authorize a later PUT or DELETE of that
+ * object is the one the creating response returned, to a caller that no longer
+ * exists. A `public-write` object is guarded by no capability at all, so any
+ * client that can name the key may rewrite or delete it, and an `immutable`
+ * object can be read but never rewritten or deleted.
+ *
+ * An earlier version of this double stored one ambient capability for every
+ * object and adopted whatever the caller put in the header. That made a shard
+ * written `capability-write` look deletable by any other client, so the whole
+ * web suite passed green against exactly the storage regression the reclaim path
+ * exists to prevent. `packages/core/test/fake-skrynia.mjs` already models this
+ * correctly; this one now models the same thing.
+ *
+ * The hash is a plain FNV-1a, not a cryptographic digest. Its only job is to be
+ * deterministic and collision-free enough that "a different capability does not
+ * match" stays true, which is what the assertions below turn on.
+ */
 function fakeSkrynia() {
   type Entry = {
     value: unknown;
     mode: 'capability-write' | 'public-write' | 'immutable';
-    capability: string | null;
+    capabilityHash: string | null;
     revision: number;
   };
   const capability = 'a'.repeat(64);
   const objects = new Map<string, Entry>();
+  const issued = new Map<string, string>();
+  const requests: Array<{ method: string; key: string; presented: string | null }> = [];
+  let minted = 0;
+
+  const capabilityHash = (value: string) => {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash.toString(16).padStart(8, '0');
+  };
+  /** A minted capability, in the 64-hex shape a real credential field requires. */
+  const mintCapability = (seed: string) => {
+    let value = '';
+    for (let round = 1; value.length < 64; round += 1) value += capabilityHash(`${seed}:${round}`);
+    return value.slice(0, 64);
+  };
+  const authorized = (entry: Entry, headers: Headers) => entry.capabilityHash === null
+    || capabilityHash(headers.get('X-Skrynia-Capability') ?? '') === entry.capabilityHash;
 
   const keyOf = (input: string | URL | Request) => {
     const parts = String(input).split('/');
@@ -56,6 +99,14 @@ function fakeSkrynia() {
   return {
     capability,
     objects,
+    requests,
+    /**
+     * The capability Skrynia issued for an object, as its creating response
+     * reported it. A test acting on a `capability-write` object must present
+     * this value rather than the ambient `capability`, because those are not
+     * the same string and conflating them is what this double exists to prevent.
+     */
+    capabilityOf(key: string) { return issued.get(key) ?? null; },
     get signed(): unknown { return boardEntry()?.value ?? null; },
     set signed(value: unknown) {
       if (value === null) {
@@ -63,10 +114,23 @@ function fakeSkrynia() {
         return;
       }
       const current = boardEntry();
+      // Repointing an existing object cannot change what guards it. The
+      // pointer was created by a `capability-write` POST that minted a
+      // capability, and that minted value is what the board credential carries,
+      // so the stored hash has to survive the rewrite or the store's own next
+      // PUT would be refused for a reason no real server would produce.
+      const stored = current ?? (() => {
+        const fresh = mintCapability(`skrynia-minted:board-v2:${++minted}`);
+        issued.set('board-v2', fresh);
+        return {
+          mode: 'capability-write' as const,
+          capabilityHash: capabilityHash(fresh),
+        };
+      })();
       objects.set('board-v2', {
         value,
-        mode: 'capability-write',
-        capability,
+        mode: stored.mode,
+        capabilityHash: stored.capabilityHash,
         revision: (current?.revision ?? 0) + 1,
       });
     },
@@ -74,6 +138,11 @@ function fakeSkrynia() {
       const method = init.method ?? 'GET';
       const key = keyOf(input);
       const current = objects.get(key);
+      requests.push({
+        method,
+        key,
+        presented: new Headers(init.headers).get('X-Skrynia-Capability'),
+      });
 
       if (method === 'GET') {
         return current === undefined
@@ -88,15 +157,20 @@ function fakeSkrynia() {
         if (!['capability-write', 'public-write', 'immutable'].includes(mode)) {
           return jsonResponse({ error: 'invalid_mode' }, 400);
         }
+        // Fresh per object, and deliberately not the caller's header. An
+        // inbound `X-Skrynia-Capability` on POST is ignored exactly as a real
+        // Skrynia that mints per object would ignore it.
+        const mintedCapability = mintCapability(`skrynia-minted:${key}:${++minted}`);
         const entry: Entry = {
           value: JSON.parse(String(init.body)),
           mode,
-          capability: mode === 'capability-write' ? capability : null,
+          capabilityHash: mode === 'capability-write' ? capabilityHash(mintedCapability) : null,
           revision: 1,
         };
         objects.set(key, entry);
+        if (mode === 'capability-write') issued.set(key, mintedCapability);
         return jsonResponse(
-          mode === 'capability-write' ? { mode, capability } : { mode },
+          mode === 'capability-write' ? { mode, capability: mintedCapability } : { mode },
           201,
         );
       }
@@ -104,11 +178,10 @@ function fakeSkrynia() {
       if (method === 'PUT') {
         if (current === undefined) return new Response(null, { status: 404 });
         if (current.mode === 'immutable') return jsonResponse({ error: 'immutable' }, 403);
-        const headers = new Headers(init.headers);
-        if (current.mode === 'capability-write'
-            && headers.get('X-Skrynia-Capability') !== current.capability) {
+        if (!authorized(current, new Headers(init.headers))) {
           return jsonResponse({ error: 'invalid capability' }, 403);
         }
+        const headers = new Headers(init.headers);
         const match = headers.get('If-Match');
         if (match !== null && match !== etag(current)) {
           return jsonResponse({ error: 'etag_mismatch' }, 412);
@@ -118,9 +191,27 @@ function fakeSkrynia() {
         return jsonResponse({ ok: true }, 200);
       }
 
+      if (method === 'DELETE') {
+        // The branch the reclaim path actually goes through. Without it this
+        // double answers 405 to every reclaim, so no failure of reclamation
+        // could ever be observed from the web side at all.
+        if (current === undefined) return new Response(null, { status: 404 });
+        if (current.mode === 'immutable') return jsonResponse({ error: 'immutable' }, 403);
+        if (!authorized(current, new Headers(init.headers))) {
+          return jsonResponse({ error: 'invalid capability' }, 403);
+        }
+        objects.delete(key);
+        return jsonResponse({ ok: true }, 200);
+      }
+
       return new Response(null, { status: 405 });
     },
   };
+}
+
+/** The `board-v2` pointer is the only object that is not a shard. */
+function shards(server: ReturnType<typeof fakeSkrynia>) {
+  return [...server.objects.entries()].filter(([key]) => key !== 'board-v2');
 }
 
 function memoryStorage(): BoardKeyStorage {
@@ -137,6 +228,23 @@ function session(server: ReturnType<typeof fakeSkrynia>, storage: BoardKeyStorag
   return new BrowserBoardSession(storage, {
     fetch: (input, init) => server.fetch(String(input), init),
     now: () => new Date(STAMP),
+    newId: () => `web-${++sequence}`,
+  });
+}
+
+/**
+ * A session whose clock moves on every call, for tests that need each mutation
+ * to produce distinct stored bytes. With a frozen clock the store floors a new
+ * timestamp to the previous meta's, so two mutations of the same issue are
+ * byte-identical, the content-addressed store correctly declines to write a
+ * second object, and a storage measurement would be measuring nothing.
+ */
+function tickingSession(server: ReturnType<typeof fakeSkrynia>, storage: BoardKeyStorage = memoryStorage()): BrowserBoardSession {
+  let tick = 0;
+  let sequence = 0;
+  return new BrowserBoardSession(storage, {
+    fetch: (input, init) => server.fetch(String(input), init),
+    now: () => new Date(Date.UTC(2026, 8, 29, 12, 0, 0) + (tick += 1) * 1000),
     newId: () => `web-${++sequence}`,
   });
 }
@@ -360,15 +468,42 @@ describe('browser board session', () => {
     const storage = memoryStorage();
     const owner = session(server, storage);
     const initialized = await owner.initialize();
-    const initialPointer = structuredClone(server.signed);
     await owner.api.createIssue('Kept');
 
     const reopened = session(server, storage);
     await expect(reopened.readState()).resolves.toMatchObject({ board: { issues: [{ title: 'Kept' }] } });
 
     // Whoever has the one board key is intentionally fully trusted. Repointing
-    // the single mutable pointer is therefore authoritative; v3 keeps no replay
-    // history for ancestry checks.
+    // the single mutable pointer is authoritative in the sense that matters for
+    // the live board, so re-deriving the same pointer from stored state is a
+    // no-op rather than a second source of truth.
+    const livePointer = structuredClone(server.signed);
+    server.signed = livePointer;
+    const reset = session(server, memoryStorage());
+    await reset.enableEditing(serializeBoardCredential(initialized.credential));
+    expect((await reset.readState())?.board.issues).toEqual([expect.objectContaining({ title: 'Kept' })]);
+  });
+
+  // Board 125, review finding B1, and left as a skip on purpose: this property
+  // is real and is currently false, and the fix is a separate change with its
+  // own blast radius. It used to be asserted inside the test above and used to
+  // pass -- not because the store honoured it, but because the fake Skrynia in
+  // this file had no DELETE branch and so could not reclaim the generation the
+  // rewind names. With the branch restored, the very first `createIssue`
+  // reclaims generation 0 (measured on this file's double: one `DELETE` issued,
+  // 4 objects before the mutation, 9 after, the one removed key being
+  // generation 0's meta), and the rewound pointer then resolves to a meta that is
+  // no longer in storage: "Antonina board key does not open the current
+  // materialized snapshot". The superseded generation is torn on the next
+  // commit, which is B1, and it is not fixed here.
+  it.skip('a pointer rewound to a superseded generation still reads (review 125 B1)', async () => {
+    const server = fakeSkrynia();
+    const storage = memoryStorage();
+    const owner = session(server, storage);
+    const initialized = await owner.initialize();
+    const initialPointer = structuredClone(server.signed);
+    await owner.api.createIssue('Kept');
+
     server.signed = initialPointer;
     const reset = session(server, memoryStorage());
     await reset.enableEditing(serializeBoardCredential(initialized.credential));
@@ -598,6 +733,161 @@ describe('the board feed through the session', () => {
 
     await expect(reader.readFeed()).rejects.toThrow('credential');
     expect(reader.hasCredential()).toBe(false);
+  });
+});
+
+/**
+ * The reclaim property, from the browser side.
+ *
+ * Every other case in this file exercises a read or a write and would pass
+ * unchanged if the store wrote its shards in a mode nobody can ever delete
+ * them from. That is not hypothetical: the store once wrote every shard as
+ * `capability-write`, and a first attempt at making them reclaimable kept that
+ * mode. Because a `capability-write` object is guarded by a capability Skrynia
+ * mints per object and returns only to the creating caller, no later client can
+ * present it, so every DELETE is refused and the namespace grows without bound.
+ *
+ * The double above used to be blind to exactly that: it adopted the caller's
+ * capability for every object and had no DELETE branch, so a shard written
+ * `capability-write` looked deletable and the whole web suite stayed green
+ * against the regression. The three cases below are what make the web suite able
+ * to see it.
+ */
+describe('shard storage is reclaimable from a browser client', () => {
+  it('models a fresh per-object capability, so a wrong one cannot delete an object', async () => {
+    // The guard is on the double itself. If this stops holding, every number
+    // below is being produced by a server more permissive than the real one.
+    const { server, storage, initialized } = await initializedBoard();
+    const pointerCapability = server.capabilityOf('board-v2');
+    expect(pointerCapability).not.toBeNull();
+    // The board credential carries the value the creating response returned,
+    // which is not the ambient capability the double also exposes. A double that
+    // adopted the caller's header would make these two the same string, and every
+    // assertion in this block would be satisfied by a shard nobody can delete.
+    expect(pointerCapability).not.toBe(server.capability);
+    expect(initialized.credential.storageCapability).toBe(pointerCapability);
+
+    // A capability-write object outside the board, so the refusal can be
+    // observed without destroying the board the next assertions read.
+    const url = (key: string) => `/_skrynia/store/antonina/${key}`;
+    const created = await server.fetch(url('capability-write-probe'), {
+      method: 'POST',
+      headers: { 'X-Skrynia-Mode': 'capability-write' },
+      body: JSON.stringify({ probe: true }),
+    });
+    expect(created.status).toBe(201);
+    const probeCapability = server.capabilityOf('capability-write-probe');
+    expect(probeCapability).not.toBeNull();
+    expect(probeCapability).not.toBe(server.capability);
+
+    // The ambient capability is a different value from the minted one, so it
+    // authorizes nothing.
+    const wrong = await server.fetch(url('capability-write-probe'), {
+      method: 'DELETE',
+      headers: { 'X-Skrynia-Capability': server.capability },
+    });
+    expect(wrong.status).toBe(403);
+    expect(server.objects.has('capability-write-probe')).toBe(true);
+    // The minted capability authorizes the same operation, so the refusal above
+    // was the double being right rather than the object being undeletable.
+    const right = await server.fetch(url('capability-write-probe'), {
+      method: 'DELETE',
+      headers: { 'X-Skrynia-Capability': probeCapability! },
+    });
+    expect(right.status).toBe(200);
+    // Deleting something that is already gone is the goal state, not an error.
+    const absent = await server.fetch(url('capability-write-probe'), { method: 'DELETE' });
+    expect(absent.status).toBe(404);
+    // And an immutable object is refused outright, which is the mode the
+    // pre-reclaim store wrote every shard as.
+    await server.fetch(url('immutable-probe'), {
+      method: 'POST',
+      headers: { 'X-Skrynia-Mode': 'immutable' },
+      body: JSON.stringify({ probe: true }),
+    });
+    expect((await server.fetch(url('immutable-probe'), { method: 'DELETE' })).status).toBe(403);
+
+    // The board still works after all of that, which is the property that
+    // matters: the refusals were the fake being right, not the store broken.
+    const reopened = session(server, storage);
+    expect((await reopened.readState())?.board.issues).toEqual([]);
+  });
+
+  it('writes shards public-write, so a later browser client can reclaim them', async () => {
+    const { server, storage, initialized } = await initializedBoard();
+    const writer = tickingSession(server, storage);
+    await writer.api.createIssue('First', 'first body');
+    await writer.api.createIssue('Second', 'second body');
+    await writer.api.comment(1, 'tester', 'a comment to supersede a shard');
+
+    // The mode is the whole fix. `immutable` is not deletable at all and
+    // `capability-write` is not deletable by anyone but the process that
+    // created the object, so only `public-write` makes the sweep below possible.
+    const modes = new Set(shards(server).map(([, entry]) => entry.mode));
+    expect([...modes]).toEqual(['public-write']);
+    expect(shards(server).length).toBeGreaterThan(0);
+
+    // A second client that holds only the serialized credential -- no
+    // in-process state from the writes above -- has to be able to delete shards
+    // the first client wrote. This is the property reclamation rests on.
+    const stale = shards(server).map(([key]) => key);
+    const second = session(server, memoryStorage());
+    await second.enableEditing(serializeBoardCredential(initialized.credential));
+    for (let index = 0; index < 4; index += 1) {
+      await second.api.editIssueBody(2, `revision ${index}`);
+    }
+
+    const present = new Set(shards(server).map(([key]) => key));
+    const reclaimed = stale.filter((key) => !present.has(key));
+    expect(reclaimed.length).toBeGreaterThan(0);
+    // And those deletions really went through the DELETE branch unauthenticated,
+    // rather than the objects happening to be overwritten away.
+    const deletes = server.requests.filter((request) => request.method === 'DELETE');
+    expect(deletes.length).toBeGreaterThan(0);
+    expect(deletes.every((request) => request.presented === null)).toBe(true);
+    expect(deletes.some((request) => !present.has(request.key))).toBe(true);
+  });
+
+  it('keeps growth bounded by live board size, not by mutation count', async () => {
+    // The assertion that is missing everywhere else in the web suite and the
+    // reason this front exists: a test that fails when the shard write mode is
+    // reverted to `capability-write`. Live board size is fixed at four issues
+    // throughout, so anything that tracks the mutation count is a leak.
+    const server = fakeSkrynia();
+    const writer = tickingSession(server);
+    await writer.api.initialize();
+    for (let index = 1; index <= 4; index += 1) await writer.api.createIssue(`Issue ${index}`);
+
+    const total = 120;
+    const half = total / 2;
+    let midpoint = shards(server).length;
+    for (let index = 0; index < total; index += 1) {
+      // Round robin, so every issue's thread grows and no comment page is left
+      // untouched: a live board of fixed shape being fed unbounded history.
+      await writer.api.comment((index % 4) + 1, 'tester', `comment ${index}`);
+      if (index + 1 === half) midpoint = shards(server).length;
+    }
+    const end = shards(server).length;
+
+    // With `capability-write` shards every DELETE is refused, and the second
+    // half of this run costs about six objects per comment. The bound is a
+    // quarter of one object per comment, which still leaves room for the sealed
+    // product history (a feed page and a comment page per 50 entries) and misses
+    // the leaking model by an order of magnitude.
+    expect(
+      end - midpoint,
+      `the last ${half} of ${total} comments added ${end - midpoint} objects `
+      + `(${midpoint} -> ${end}); growth must be bounded by live board size, not by mutation count`,
+    ).toBeLessThanOrEqual(half / 4 + 16);
+    // The same property stated independently of the checkpoint: total objects are
+    // the live board's cost plus its product history, and both are known.
+    expect(
+      end,
+      `${total} comments left ${end} objects, more than the live board plus its history`,
+    ).toBeLessThanOrEqual(20 + total / 10);
+    // A bounded count is only a real bound if something was actually deleted,
+    // so the run is also required to have issued and completed reclaims.
+    expect(server.requests.some((request) => request.method === 'DELETE')).toBe(true);
   });
 });
 

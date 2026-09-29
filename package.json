@@ -14,6 +14,8 @@
     "test:cli": "node --test packages/cli/test/*.test.mjs",
     "test:daemon": "node --test packages/host-daemon/test/*.test.mjs",
     "test:web": "npm test --prefix web",
+    "//test:deploy-smoke": "Deliberately NOT in the root `npm test` chain, and asserted to be absent by scripts/deploy-smoke.test.mjs. It needs a built web bundle (`npm run build --prefix web`, which also needs `npm run typecheck` for packages/*/dist) and a Chrome or Chromium plus a matching chromedriver on PATH; the root gate must stay runnable on a bare checkout with neither. The suite asserts the bundle is there and says how to produce it; it never builds one itself. The CI job that provisions both and runs it is `smoke-probe` in .github/workflows/ci.yml, where a missing browser is a failure and never a skip.",
+    "test:deploy-smoke": "node --test scripts/deploy-smoke.test.mjs",
     "test": "npm run test:core && npm run test:runtime && npm run test:daemon && npm run test:cli && npm run test:web",
     "build:web": "npm run build --prefix web",
     "build": "npm run typecheck && npm run build:web",

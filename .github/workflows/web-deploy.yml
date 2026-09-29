@@ -29,6 +29,28 @@ jobs:
           subdir: .
           builder: ghcr.io/ottojung/skrynia-builder:1.0.0-122-g9829feb
           token: ${{ secrets.SKRYNIA_TOKEN }}
+      - name: Provision Chrome and ChromeDriver
+        # This is the same provisioning the `smoke-probe` job in ci.yml does,
+        # and it is here for the same reason: the probe drives a real browser,
+        # and the runner image is not a contract about a *matching*
+        # Chrome/chromedriver pair. ChromeDriver refuses to drive a browser of a
+        # different version, and that refusal is exit 2 — "the probe could not
+        # run" — not a broken board, so the summary below reports the two apart.
+        # Detecting the browser and exporting it also keeps a chromium-only
+        # image from falling through to chromedriver's Chrome-only search.
+        run: |
+          set -euo pipefail
+          for candidate in google-chrome chromium chromium-browser; do
+            if command -v "$candidate" >/dev/null 2>&1; then browser="$candidate"; break; fi
+          done
+          if [ -z "${browser:-}" ]; then
+            echo "::error::no Chrome or Chromium on PATH; the deploy smoke test cannot run here" >&2
+            exit 1
+          fi
+          command -v chromedriver
+          "$browser" --version
+          chromedriver --version
+          echo "ANTONINA_CHROMIUM_BINARY=$(command -v "$browser")" >> "$GITHUB_ENV"
       - name: Smoke test
         # A functional probe, not a status code. `curl --fail` on index.html
         # passes for a deployment whose board cannot be loaded at all, which is
@@ -100,15 +122,33 @@ jobs:
             exit 1
           fi
           curl --fail --retry 5 --retry-delay 5 https://vau.place/_skrynia/health
+          # The two thresholds are policy, not leftovers: 1/1 is deliberate
+          # because the criterion in board issue 74 is that the board *loads
+          # and renders* on a real deployment, and a production board is never
+          # legitimately empty. Raise them only if the board has a documented
+          # floor above which an empty board is correct.
           if output="$(node scripts/deploy-smoke.mjs --url https://vau.place/a/antonina/ --min-issues 1 --min-feed 1 2>&1)"; then
             printf '## Smoke test\n\n```\n%s\n```\n' "$output" >> "$GITHUB_STEP_SUMMARY"
             printf '%s\n' "$output"
           else
             status=$?
+            # The probe keeps its exit codes apart for exactly the reason this
+            # branch does: 1 means the deployment is broken, 2 means *this
+            # runner could not run the probe at all* — no chromedriver, or a
+            # Chrome/ChromeDriver version mismatch. Collapsing both into "the
+            # board could not be read" is the misdiagnosis the probe spends its
+            # own classification logic existing to prevent, reintroduced one
+            # layer up, and it would name a perfectly healthy board as broken.
+            if [ "$status" -eq 2 ]; then
+              printf '## Smoke test\n\n**PROBE COULD NOT RUN** (exit 2) — this build is live, but this runner could not run the smoke test, so the board was not read either way. Check the step log for a missing Chrome/chromedriver pair or a version mismatch.\n\n```\n%s\n```\n' "$output" >> "$GITHUB_STEP_SUMMARY"
+            else
+              printf '## Smoke test\n\n**SMOKE FAILED** (exit %s) — this build is live; the board could not be read.\n\n```\n%s\n```\n' "$status" "$output" >> "$GITHUB_STEP_SUMMARY"
+            fi
             # The probe's own words, verbatim, on the run page. A smoke test that
             # can silently degrade is the bug this step exists to fix, so its
-            # failure text is what the operator is shown.
-            printf '## Smoke test\n\n**SMOKE FAILED** (exit %s) — this build is live; the board could not be read.\n\n```\n%s\n```\n' "$status" "$output" >> "$GITHUB_STEP_SUMMARY"
+            # failure text is what the operator is shown. The exit status is
+            # propagated unchanged, so a step that could not run fails the job
+            # for the same reason a broken board does.
             printf '%s\n' "$output" >&2
             exit "$status"
           fi

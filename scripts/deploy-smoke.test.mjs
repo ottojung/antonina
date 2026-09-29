@@ -40,7 +40,7 @@
 
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { createReadStream, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { extname, dirname, join, normalize, resolve } from 'node:path';
@@ -51,6 +51,7 @@ import {
   runProbe, judgeBoard, judgeFeed, parseArgs, classifyObservation, overallBudgetMs,
   ProbeUsageError, ProbeTimeout, SmokeFailure, APP_STATE_TITLES, OBSERVE_BOARD,
   BOARD_CREDENTIAL_STORAGE_KEY, BOARD_TRUST_STORAGE_KEY,
+  BOARD_CREDENTIAL_KEYS, BOARD_TRUST_ANCHOR_KEYS,
 } from './deploy-smoke.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -442,6 +443,138 @@ test('the deploy smoke suite is gated by a CI job that provisions a browser', ()
   assert.doesNotMatch(ci, /deploy-smoke\.mjs[^\n]*\|\|\s*true/);
 });
 
+// The workflow that actually deploys, asserted as well as ci.yml. The previous
+// wiring case read only ci.yml, and the review's Error 1 landed in the deploy
+// workflow for exactly that reason: the job covered was the one that exercises
+// the probe's *suite*, while the job that runs the probe itself on a real
+// deployment was covered by nothing at all.
+test('the deploy workflow provisions a browser for the probe, the way ci.yml does', () => {
+  const deploy = readFileSync(join(repoRoot, '.github', 'workflows', 'web-deploy.yml'), 'utf8');
+  // A missing browser is a hard failure, never a skip, or a run reports "the
+  // probe was never exercised" as green.
+  assert.match(deploy, /command -v chromedriver/, 'the deploy job never checks for chromedriver');
+  assert.match(
+    deploy,
+    /if \[ -z "\$\{browser:-\}" \]; then[\s\S]*?exit 1/,
+    'the deploy job does not fail loudly when no browser is on PATH',
+  );
+  assert.match(
+    deploy,
+    /ANTONINA_CHROMIUM_BINARY=\$\(command -v "\$browser"\)/,
+    'the deploy job does not hand the probe the browser it provisioned',
+  );
+});
+
+test('the deploy step reports a probe that could not run differently from a board that could not be read', () => {
+  // Executed, not read. The whole point of the review's Error 1 is that the
+  // wrong wording is *invisible* in a reading of the workflow — it looks
+  // deliberate — and the only thing that catches it is running the step's own
+  // shell with a probe that exits 2 and reading the summary it wrote.
+  const summary = runDeploySmokeStep({ probeExit: 2 });
+  assert.equal(summary.status, 2, `expected the step to fail with the probe's status\n${summary.stdout}${summary.stderr}`);
+  assert.match(summary.step, /could not run/i, 'an exit 2 is not reported as a probe that could not run');
+  assert.doesNotMatch(
+    summary.step,
+    /the board could not be read/,
+    'an exit 2 is reported as an unreadable board, which is the misdiagnosis the probe exists to prevent',
+  );
+
+  const broken = runDeploySmokeStep({ probeExit: 1 });
+  assert.equal(broken.status, 1);
+  assert.match(broken.step, /the board could not be read/, 'an exit 1 is not reported as an unreadable board');
+  assert.doesNotMatch(
+    broken.step,
+    /could not run/i,
+    'an exit 1 is reported as a probe that could not run, so a real board failure would be blamed on the runner',
+  );
+
+  // And the pass path still says what the probe said, with no verdict invented.
+  const healthy = runDeploySmokeStep({ probeExit: 0 });
+  assert.equal(healthy.status, 0);
+  assert.doesNotMatch(healthy.step, /FAILED/);
+  assert.match(healthy.step, /probe: loaded/, 'the pass path drops the probe output it is given');
+});
+
+/**
+ * The `run:` body of the deploy workflow's Smoke test step, as shell source.
+ *
+ * Read out of the YAML rather than kept as a copy, so the test cannot pass
+ * against a step the workflow no longer has. The block scalar is located by its
+ * `- name: Smoke test` marker and its `run: |` header, and ends at the first
+ * line that is not indented further than the header — which is the next key of
+ * the same step or the next step.
+ */
+function deploySmokeStepScript() {
+  const yaml = readFileSync(join(repoRoot, '.github', 'workflows', 'web-deploy.yml'), 'utf8');
+  const name = yaml.search(/^ {6}- name: Smoke test$/m);
+  assert.notEqual(name, -1, '.github/workflows/web-deploy.yml has no "Smoke test" step');
+  const header = yaml.indexOf('run: |', name);
+  assert.notEqual(header, -1, 'the Smoke test step has no `run: |` body');
+  const rest = yaml.slice(header + 'run: |'.length).replace(/^\n/, '');
+  const lines = rest.split('\n');
+  const body = [];
+  for (const line of lines) {
+    if (line.trim() === '') { body.push(''); continue; }
+    if (!/^\s/.test(line)) break;
+    body.push(line);
+  }
+  while (body.length > 0 && body[body.length - 1] === '') body.pop();
+  const indent = Math.min(...body.filter((line) => line !== '').map((line) => line.length - line.trimStart().length));
+  assert.ok(Number.isFinite(indent) && indent > 0, 'could not determine the Smoke test step indentation');
+  return body.map((line) => (line === '' ? '' : line.slice(indent))).join('\n');
+}
+
+/**
+ * Runs the deploy step's own shell, with a fake `node` standing in for the
+ * probe and a fake `curl`, and returns its exit status, output and the
+ * `$GITHUB_STEP_SUMMARY` it wrote.
+ *
+ * This is what makes the deploy wiring observable. Reading the workflow tells
+ * you what it says; this tells you what an operator is shown, which is the
+ * thing the review's Error 1 was actually about.
+ */
+function runDeploySmokeStep({ probeExit }) {
+  const dir = mkdtempSync(join(tmpdir(), 'antonina-deploy-step-'));
+  try {
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    const summaryPath = join(dir, 'summary.md');
+    // The step calls `node scripts/deploy-smoke.mjs ...`; this is the only `node`
+    // it will find, so the step's own logic runs against a chosen status.
+    writeFileSync(join(bin, 'node'), `#!/bin/sh
+echo "probe: loaded ${probeExit === 0 ? 'https://vau.place/a/antonina/' : ''}"
+echo "probe: the application said something" >&2
+exit ${probeExit}
+`);
+    writeFileSync(join(bin, 'curl'), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(bin, 'node'), 0o755);
+    chmodSync(join(bin, 'curl'), 0o755);
+    const script = deploySmokeStepScript();
+    const scriptPath = join(dir, 'step.sh');
+    writeFileSync(scriptPath, script);
+    const run = spawnSync('bash', [scriptPath], {
+      encoding: 'utf8',
+      env: {
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: dir,
+        GITHUB_STEP_SUMMARY: summaryPath,
+        // The step's own guard, satisfied, so the run reaches the probe rather
+        // than failing on its inputs and proving nothing about the branching.
+        ANTONINA_BOARD_TRUST_ANCHOR: '{"boardId":"b","rootKeyId":"ed25519:' + 'A'.repeat(43) + '","rootPublicKey":"B"}',
+        ANTONINA_BOARD_CREDENTIAL: '{"boardId":"b","privateKey":"B"}',
+      },
+    });
+    return {
+      status: run.status,
+      stdout: run.stdout ?? '',
+      stderr: run.stderr ?? '',
+      step: existsSync(summaryPath) ? readFileSync(summaryPath, 'utf8') : '',
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // The three browser cases share one set of fixtures, and only they need them:
 // the timeout, spawn-failure and classification cases below run with no browser
 // and no built bundle at all, so `node --test --test-name-pattern` can reach them
@@ -625,6 +758,86 @@ test('the credential keys the probe checks are the credential parser\'s own keys
   }
   assert.equal(BOARD_CREDENTIAL_STORAGE_KEY, 'antonina:board-v2:credential');
   assert.equal(BOARD_TRUST_STORAGE_KEY, 'antonina:board-v2:trust');
+});
+
+test('the probe\'s duplicated key lists are the core parsers\' own key lists', async () => {
+  // The two Errors of review 74 were, in the end, about duplicated knowledge.
+  // The probe keeps `parseBoardCredential`'s and `parseBoardTrustAnchor`'s key
+  // lists as literals so it stays one file with no build step — the deploy job
+  // runs it on a checkout where nothing has been compiled, so importing
+  // `packages/core/dist` there would make the probe unrunnable in the only
+  // place it matters. That reason is real, but it only licenses the
+  // duplication if something holds the two lists together, and until now
+  // nothing did: two source comments claimed a test that did not exist.
+  //
+  // This is that test, and it asks core rather than a regex. It builds an
+  // object whose keys are exactly the probe's list, with a usable value for
+  // each, and requires core's *compiled* parser to accept it — and then requires
+  // core to reject the same object with any one key removed. Together those two
+  // directions pin the probe's list to core's:
+  //
+  //   - core gains a field  -> the probe's list no longer builds a credential
+  //     core accepts, so `parseBoardCredential` throws here;
+  //   - core drops a field  -> the probe's list builds an object core rejects,
+  //     because the key is one core does not want;
+  //   - the probe's list drifts either way -> same two failures.
+  //
+  // It is a behavioural comparison rather than a source-string one on purpose:
+  // a grep for `hasExactKeys(...)` would keep passing through a rename, a
+  // refactor into a named constant, or a second list in the same file.
+  const core = await import(join(repoRoot, 'packages', 'core', 'dist', 'credential.js'));
+
+  const anchorValue = {
+    boardId: 'board-smoke',
+    rootKeyId: `ed25519:${'A'.repeat(43)}`,
+    rootPublicKey: 'B'.repeat(43),
+  };
+  const credentialValue = {
+    ...anchorValue,
+    schemaVersion: core.BOARD_CREDENTIAL_SCHEMA_VERSION,
+    keyId: `ed25519:${'C'.repeat(43)}`,
+    publicKey: 'D'.repeat(43),
+    privateKey: 'E'.repeat(43),
+    storageCapability: 'f'.repeat(64),
+  };
+
+  // The probe's own lists, not hand-written ones: a test that spelled the keys
+  // out again would be a third copy to drift.
+  assert.deepEqual([...BOARD_TRUST_ANCHOR_KEYS].sort(), Object.keys(anchorValue).sort());
+  assert.deepEqual([...BOARD_CREDENTIAL_KEYS].sort(), Object.keys(credentialValue).sort());
+
+  // Direction one: exactly these keys is a valid credential and a valid anchor.
+  assert.deepEqual(core.parseBoardCredential({ ...credentialValue }), { ...credentialValue });
+  assert.deepEqual(core.parseBoardTrustAnchor({ ...anchorValue }), { ...anchorValue });
+
+  // Direction two: every one of the keys is load-bearing on core's side too, so
+  // the probe cannot be holding a key core has stopped requiring.
+  for (const key of BOARD_CREDENTIAL_KEYS) {
+    const without = { ...credentialValue };
+    delete without[key];
+    assert.throws(
+      () => core.parseBoardCredential(without),
+      new Error('Antonina board credential is malformed'),
+      `core accepts a board credential without '${key}', so the probe's key list names a key core does not require`,
+    );
+  }
+  for (const key of BOARD_TRUST_ANCHOR_KEYS) {
+    const without = { ...anchorValue };
+    delete without[key];
+    assert.throws(
+      () => core.parseBoardTrustAnchor(without),
+      new Error('Antonina board trust anchor is malformed'),
+      `core accepts a trust anchor without '${key}', so the probe's key list names a key core does not require`,
+    );
+  }
+
+  // And the shape check the probe actually runs accepts the same object, so the
+  // pinning is not only about a list the probe happens not to use.
+  assert.doesNotThrow(() => parseArgs([
+    '--url', 'http://127.0.0.1:1/',
+    '--trust-anchor', JSON.stringify(anchorValue),
+    '--board-credential', JSON.stringify(credentialValue),
+  ]));
 });
 
 // --- the verdicts themselves --------------------------------------------

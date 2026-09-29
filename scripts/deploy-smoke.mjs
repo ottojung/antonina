@@ -106,6 +106,33 @@ export const BOARD_TRUST_STORAGE_KEY = 'antonina:board-v2:trust';
  */
 export const BOARD_CREDENTIAL_STORAGE_KEY = 'antonina:board-v2:credential';
 
+/**
+ * The keys the probe's own shape check requires of a board credential.
+ *
+ * This duplicates `parseBoardCredential`'s list
+ * (packages/core/src/credential.ts) rather than importing it, and it is
+ * deliberately not derived from core: the deploy job runs this script on a
+ * checkout where nothing has been compiled, so `packages/core/dist` does not
+ * exist and importing it would make the probe unrunnable in the one place it
+ * matters. The duplication is safe only because
+ * `scripts/deploy-smoke.test.mjs` hands these two lists to core's own compiled
+ * parsers and asserts that they accept exactly these keys and reject them if
+ * one is removed, so a new field on `BoardCredential` turns the suite red
+ * rather than turning a healthy release into a false alarm at deploy time.
+ */
+export const BOARD_CREDENTIAL_KEYS = [
+  'boardId', 'keyId', 'privateKey', 'publicKey',
+  'rootKeyId', 'rootPublicKey', 'schemaVersion', 'storageCapability',
+];
+
+/**
+ * The keys the probe's own shape check requires of a public trust anchor.
+ *
+ * Duplicates `parseBoardTrustAnchor`'s list, and is pinned to it by the same
+ * test as {@link BOARD_CREDENTIAL_KEYS}, for the same single-file reason.
+ */
+export const BOARD_TRUST_ANCHOR_KEYS = ['boardId', 'rootKeyId', 'rootPublicKey'];
+
 export class ProbeUsageError extends Error {}
 
 export function parseArgs(argv) {
@@ -179,7 +206,8 @@ export function parseArgs(argv) {
  * offered. The keys checked here are the ones
  * `parseBoardTrustAnchor` (packages/core/src/credential.ts) requires, kept
  * literal rather than imported so this script stays a single file with no build
- * step; `scripts/deploy-smoke.test.mjs` asserts the two agree.
+ * step; `scripts/deploy-smoke.test.mjs` hands the list to core's own compiled
+ * parser and asserts the two agree.
  */
 function checkTrustAnchorShape(text, source) {
   let value;
@@ -193,7 +221,7 @@ function checkTrustAnchorShape(text, source) {
     throw new ProbeUsageError(`the trust anchor from ${source} is not a JSON object`);
   }
   const keys = Object.keys(value).sort();
-  const wanted = ['boardId', 'rootKeyId', 'rootPublicKey'];
+  const wanted = BOARD_TRUST_ANCHOR_KEYS;
   if (keys.length !== wanted.length || keys.some((key, index) => key !== wanted[index])) {
     throw new ProbeUsageError(`the trust anchor from ${source} has keys [${keys.join(', ')}] `
       + `but must have exactly [${wanted.join(', ')}]; it is the public anchor, not the board credential and not the contents of trust.json`);
@@ -215,7 +243,8 @@ function checkTrustAnchorShape(text, source) {
  * then silently refuses — which reads as a broken deployment rather than as a
  * mistyped flag. The keys are `parseBoardCredential`'s
  * (packages/core/src/credential.ts:76-95), kept literal for the same
- * single-file reason; the test file asserts the two lists agree.
+ * single-file reason; `scripts/deploy-smoke.test.mjs` asserts the two lists
+ * agree by running core's own compiled parser over them.
  *
  * Reject-only, like every other check here: it can turn a pass into a red and
  * never the reverse. It never logs or echoes the secret, which is why it does
@@ -232,10 +261,7 @@ function checkBoardCredentialShape(text, source) {
     throw new ProbeUsageError(`the board credential from ${source} is not a JSON object`);
   }
   const keys = Object.keys(value).sort();
-  const wanted = [
-    'boardId', 'keyId', 'privateKey', 'publicKey',
-    'rootKeyId', 'rootPublicKey', 'schemaVersion', 'storageCapability',
-  ];
+  const wanted = BOARD_CREDENTIAL_KEYS;
   if (keys.length !== wanted.length || keys.some((key, index) => key !== wanted[index])) {
     throw new ProbeUsageError(`the board credential from ${source} has keys [${keys.join(', ')}] `
       + `but must have exactly [${wanted.join(', ')}]; it is the board credential, not the trust anchor `

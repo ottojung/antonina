@@ -79,7 +79,126 @@ jobs:
           subdir: .
           builder: ghcr.io/ottojung/skrynia-builder:1.0.0-122-g9829feb
           token: ${{ secrets.SKRYNIA_TOKEN }}
-      - name: Smoke test
+      - name: Provision Chrome and ChromeDriver
+        # This is the same provisioning the `smoke-probe` job in ci.yml does,
+        # and it is here for the same reason: the probe drives a real browser,
+        # and the runner image is not a contract about a *matching*
+        # Chrome/chromedriver pair. ChromeDriver refuses to drive a browser of a
+        # different version, and that refusal is exit 2 — "the probe could not
+        # run" — not a broken board, so the summary below reports the two apart.
+        # Detecting the browser and exporting it also keeps a chromium-only
+        # image from falling through to chromedriver's Chrome-only search.
         run: |
-          curl --fail --retry 5 --retry-delay 5 https://vau.place/a/antonina/
+          set -euo pipefail
+          for candidate in google-chrome chromium chromium-browser; do
+            if command -v "$candidate" >/dev/null 2>&1; then browser="$candidate"; break; fi
+          done
+          if [ -z "${browser:-}" ]; then
+            echo "::error::no Chrome or Chromium on PATH; the deploy smoke test cannot run here" >&2
+            exit 1
+          fi
+          command -v chromedriver
+          "$browser" --version
+          chromedriver --version
+          echo "ANTONINA_CHROMIUM_BINARY=$(command -v "$browser")" >> "$GITHUB_ENV"
+      - name: Smoke test
+        # A functional probe, not a status code. `curl --fail` on index.html
+        # passes for a deployment whose board cannot be loaded at all, which is
+        # what the 0.1.1 rollout was: the page was served and the board was
+        # not readable. Board issue 74. scripts/deploy-smoke.mjs drives headless
+        # Chromium against the deployed URL and requires the application to
+        # start, and to load and verify it against the public trust anchor in
+        # ANTONINA_BOARD_TRUST_ANCHOR and read it with the board credential in
+        # ANTONINA_BOARD_CREDENTIAL; the issue list to be populated and the
+        # feed to be populated, and it prints the application's own error text
+        # when it is not.
+        #
+        # Read-only against the board, by construction: the probe only navigates
+        # and reads, submits no form, and never writes to the board. It does hold
+        # two secrets — the public trust anchor and the board credential — but
+        # both go only into a throwaway browser profile that is deleted when the
+        # step ends, and neither is printed, sent to the board, or written to any
+        # Antonina state directory.
+        #
+        # ANTONINA_BOARD_TRUST_ANCHOR is the board's *public trust anchor*: the
+        # single-line JSON `antonina board credential trust` prints, of exactly
+        # the shape {boardId, rootKeyId, rootPublicKey}.
+        #
+        # It is NOT the contents of $XDG_CONFIG_HOME/antonina/trust.json, which
+        # is the whole local credential store rather than one anchor, and it is
+        # not the board credential itself. This used to say otherwise and the
+        # probe's own shape check (checkTrustAnchorShape) would have rejected
+        # trust.json — so the two disagreed, and a secret set that way would have
+        # failed the deploy with a message about the required key set rather than
+        # about what to paste. The check is reject-only and runs before the
+        # browser starts, so a wrong secret fails loudly and immediately.
+        #
+        # Without an anchor the probe cannot ask the app to verify anything, so
+        # the guard below fails the deploy rather than passing a board nobody
+        # read. That is deliberate: a smoke test that silently degrades to a
+        # status check is the bug this step exists to fix.
+        #
+        # This step runs *after* Deploy, so a red probe marks the run but does
+        # not stop the bundle that was just published. The verdict is therefore
+        # written to the run page as well as to the log: an operator opening a
+        # failed run learns what was published and what the board said about
+        # itself, not only that a step went red.
+        env:
+          ANTONINA_BOARD_TRUST_ANCHOR: ${{ secrets.ANTONINA_BOARD_TRUST_ANCHOR }}
+          ANTONINA_BOARD_CREDENTIAL: ${{ secrets.ANTONINA_BOARD_CREDENTIAL }}
+        run: |
+          set -euo pipefail
+          # Two secrets, and both are required. The trust anchor is the board's
+          # public key and lets the application *verify* a board; the board
+          # credential is what grants the *read*. Since the application refuses
+          # every credential-less read, a probe holding only the anchor sits on
+          # the credential screen of a perfectly healthy deployment — which is a
+          # red about this step's own inputs, not about the build. Both are
+          # required here so that is said out loud, once, instead of as a
+          # confusing verdict about a healthy release.
+          #
+          # ANTONINA_BOARD_CREDENTIAL is the credential `antonina board
+          # credential` prints, as one line of JSON. It is a private key: it
+          # belongs in a repository secret, never in this file. The probe writes
+          # it only into a throwaway browser profile that is deleted when the
+          # step ends, and it never writes to the board.
+          if [ -z "${ANTONINA_BOARD_TRUST_ANCHOR:-}" ] || [ -z "${ANTONINA_BOARD_CREDENTIAL:-}" ]; then
+            echo "ERROR: both ANTONINA_BOARD_TRUST_ANCHOR and ANTONINA_BOARD_CREDENTIAL must be set." >&2
+            echo "The anchor is the public trust anchor (antonina board credential trust);" >&2
+            echo "the credential is the board credential (antonina board credential)." >&2
+            echo "The application refuses every read that has no credential, so the anchor alone" >&2
+            echo "cannot open the board and this step would fail on a perfectly healthy build." >&2
+            printf '## Smoke test\n\n**SMOKE FAILED** — board secrets not configured, so the board was never read.\n\n' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           curl --fail --retry 5 --retry-delay 5 https://vau.place/_skrynia/health
+          # The two thresholds are policy, not leftovers: 1/1 is deliberate
+          # because the criterion in board issue 74 is that the board *loads
+          # and renders* on a real deployment, and a production board is never
+          # legitimately empty. Raise them only if the board has a documented
+          # floor above which an empty board is correct.
+          if output="$(node scripts/deploy-smoke.mjs --url https://vau.place/a/antonina/ --min-issues 1 --min-feed 1 2>&1)"; then
+            printf '## Smoke test\n\n```\n%s\n```\n' "$output" >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "$output"
+          else
+            status=$?
+            # The probe keeps its exit codes apart for exactly the reason this
+            # branch does: 1 means the deployment is broken, 2 means *this
+            # runner could not run the probe at all* — no chromedriver, or a
+            # Chrome/ChromeDriver version mismatch. Collapsing both into "the
+            # board could not be read" is the misdiagnosis the probe spends its
+            # own classification logic existing to prevent, reintroduced one
+            # layer up, and it would name a perfectly healthy board as broken.
+            if [ "$status" -eq 2 ]; then
+              printf '## Smoke test\n\n**PROBE COULD NOT RUN** (exit 2) — this build is live, but this runner could not run the smoke test, so the board was not read either way. Check the step log for a missing Chrome/chromedriver pair or a version mismatch.\n\n```\n%s\n```\n' "$output" >> "$GITHUB_STEP_SUMMARY"
+            else
+              printf '## Smoke test\n\n**SMOKE FAILED** (exit %s) — this build is live; the board could not be read.\n\n```\n%s\n```\n' "$status" "$output" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            # The probe's own words, verbatim, on the run page. A smoke test that
+            # can silently degrade is the bug this step exists to fix, so its
+            # failure text is what the operator is shown. The exit status is
+            # propagated unchanged, so a step that could not run fails the job
+            # for the same reason a broken board does.
+            printf '%s\n' "$output" >&2
+            exit "$status"
+          fi

@@ -81,3 +81,58 @@ jobs:
         run: npm test --prefix web
       - name: Web build
         run: npm run build --prefix web
+
+  smoke-probe:
+    # The post-deploy probe's own suite (scripts/deploy-smoke.test.mjs). It is
+    # deliberately NOT in the root `npm test` chain: it needs a built web bundle
+    # and a real headless browser, neither of which any other suite needs, and
+    # the root chain must stay runnable on a bare checkout. The suite asserts
+    # both halves of that contract. It runs here, in a job that provisions the
+    # browser, so it is exercised by CI rather than by nobody.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web toolchain
+        run: npm ci --prefix web
+      - name: Typecheck
+        # The probe suite drives the real board app against the real core, so it
+        # imports packages/*/dist exactly as the other suites do; and tsc emits
+        # that dist, which is why this step precedes the smoke probe.
+        run: npm run typecheck
+      - name: Web build
+        # The build is a documented precondition of the suite, produced here in
+        # the step, never from inside a test hook: a test that builds the
+        # artifact it is supposed to be checking makes the check unrepeatable.
+        run: npm run build --prefix web
+      - name: Provision Chrome and ChromeDriver
+        run: |
+          set -euo pipefail
+          # A missing browser is a hard failure here, never a skip: this job
+          # exists to run the probe suite, and a skip would turn "the probe was
+          # never exercised" into a green run. GitHub's ubuntu image ships
+          # google-chrome; other images ship chromium. Which one it is does not
+          # matter, so both are accepted, but the *versions* do — ChromeDriver
+          # refuses to drive a browser it is not the matching version of, and
+          # that refusal would otherwise look like the probe failing.
+          for candidate in google-chrome chromium chromium-browser; do
+            if command -v "$candidate" >/dev/null 2>&1; then browser="$candidate"; break; fi
+          done
+          if [ -z "${browser:-}" ]; then
+            echo "::error::no Chrome or Chromium on PATH; the smoke probe suite cannot run here" >&2
+            exit 1
+          fi
+          command -v chromedriver
+          "$browser" --version
+          chromedriver --version
+          # Hand the probe the browser it was given, so a chromium-only image
+          # does not fall through to chromedriver's own (Chrome-only) search.
+          echo "ANTONINA_CHROMIUM_BINARY=$(command -v "$browser")" >> "$GITHUB_ENV"
+      - name: Smoke probe
+        # The suite fails if the bundle is missing rather than building it; this
+        # is the step that makes the precondition true.
+        run: npm run test:deploy-smoke

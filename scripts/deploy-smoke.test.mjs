@@ -94,9 +94,20 @@ function requireWebBuild() {
  * `boardMode` is what the deployment can do to the store underneath a perfectly
  * good page, and it is the only thing the broken cases change:
  *   'ok'          - the signed board is served as committed
- *   'tampered'    - the log is served with one operation's payload altered, so
+ *   'tampered'    - a committed operation's payload is rewritten in transit, so
  *                   signature verification must refuse it
  *   'server-error'- the store answers 500 with a body that is not a board
+ *
+ * The store itself is `packages/core/test/fake-skrynia.mjs` — the repository's
+ * own Skrynia fake, the one `packages/core` is tested against — served over
+ * real HTTP. It is deliberately not reimplemented here. An earlier revision of
+ * this fixture hand-rolled a v2-only `board-v2` endpoint; when the store moved
+ * to a sharded v3 layout that fixture answered 404 to every immutable object,
+ * so `store.initialize()` died before a browser was ever started and all four
+ * browser cases were red for a reason in the fixture rather than in the probe.
+ * Reusing the one definition of Skrynia's semantics is what keeps this honest
+ * as the store changes; the only thing added on top is how a *broken
+ * deployment* answers.
  */
 /** Every local instance, so a fixture that fails halfway is still torn down. */
 const openInstances = [];
@@ -105,19 +116,20 @@ async function startLocalAntonina(boardMode) {
   const { BoardApi } = await import(join(repoRoot, 'packages', 'core', 'dist', 'api.js'));
   const { SignedBoardStore } = await import(join(repoRoot, 'packages', 'core', 'dist', 'board-store.js'));
   const { credentialTrustAnchor, serializeBoardTrustAnchor } = await import(join(repoRoot, 'packages', 'core', 'dist', 'credential.js'));
+  const { fakeSkrynia } = await import(join(repoRoot, 'packages', 'core', 'test', 'fake-skrynia.mjs'));
 
-  let signed = null;
-  let revision = 0;
   // The failure mode is switched on only after the fixture board is committed,
   // so a broken deployment is a board that was fine and then stopped working,
   // not a board this fixture never managed to create.
   let broken = false;
-  const capability = 'a'.repeat(64);
-  const etag = () => `"v${revision}"`;
+  const skrynia = fakeSkrynia();
 
   const server = createServer((request, response) => {
     void handle(request, response).catch((error) => {
-      response.writeHead(500, { 'Content-Type': 'application/json' });
+      // A fixture that fails mid-request must say so in the response the caller
+      // can read, not by throwing out of a stream callback where nothing sees it.
+      process.stderr.write(`smoke fixture ${request.method} ${request.url} failed: ${error?.stack ?? error}\n`);
+      if (!response.headersSent) response.writeHead(500, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify({ error: String(error && error.message) }));
     });
   });
@@ -133,6 +145,11 @@ async function startLocalAntonina(boardMode) {
     });
   }
 
+  /** The last path segment: the Skrynia object key, still percent-encoded. */
+  function keyOf(pathname) {
+    return decodeURIComponent(pathname.split('/').at(-1));
+  }
+
   async function handle(request, response) {
     const url = new URL(request.url, 'http://127.0.0.1');
     const send = (status, body, headers = {}) => {
@@ -140,46 +157,60 @@ async function startLocalAntonina(boardMode) {
       response.end(body === undefined ? '' : JSON.stringify(body));
     };
     if (url.pathname === '/_skrynia/health') return send(200, { ok: true });
-    if (url.pathname === '/_skrynia/store/antonina/board-v2') {
-      if (request.method === 'GET') {
-        if (broken && boardMode === 'server-error') return send(500, { error: 'skrynia storage backend unavailable' });
-        if (signed === null) return send(404, { error: 'not found' });
-        if (broken && boardMode === 'tampered') {
-          // The 0.1.1 shape: the app is served fine, the board under it cannot
-          // be verified. One committed operation's title is rewritten in
-          // transit, so the signature no longer covers the payload.
-          const tamperedLog = structuredClone(signed);
-          const create = tamperedLog.operations.find((operation) => operation.kind === 'issue.create');
-          assert.ok(create, 'the fixture board has no created issue to tamper with');
-          create.payload.title = 'tampered in transit';
-          return send(200, tamperedLog, { ETag: etag() });
-        }
-        return send(200, signed, { ETag: etag() });
+    if (url.pathname.startsWith('/_skrynia/store/antonina/')) {
+      const isRead = request.method === 'GET';
+      if (broken && isRead && boardMode === 'server-error') {
+        return send(500, { error: 'skrynia storage backend unavailable' });
       }
       const body = await readBody(request);
-      if (request.method === 'POST') {
-        if (signed !== null) return send(409, { error: 'exists' });
-        signed = JSON.parse(body === '' ? 'null' : body);
-        revision += 1;
-        return send(201, { mode: 'capability-write', capability });
+      const answer = await skrynia.fetch(request.url, {
+        method: request.method,
+        headers: new Headers(request.headers),
+        body: body === '' ? undefined : body,
+      });
+      // `Response.body` is a stream; what this server has to write is the text.
+      const text = await answer.text();
+      // The 0.1.1 shape: the app is served fine, the board under it cannot be
+      // verified. One committed operation's title is rewritten on the way out,
+      // so the signature no longer covers the payload. It is rewritten in
+      // transit rather than in the store, so what is stored stays valid and the
+      // only thing that is broken is the deployment serving it.
+      if (broken && isRead && boardMode === 'tampered' && keyOf(url.pathname).startsWith('board-v3-')) {
+        const altered = withTamperedIssue(text);
+        if (altered !== null) {
+          const etag = answer.headers.get('ETag');
+          return send(200, altered, etag === null ? {} : { ETag: etag });
+        }
       }
-      if (request.method === 'PUT') {
-        if (request.headers['x-skrynia-capability'] !== capability) return send(403, { error: 'invalid capability' });
-        if (request.headers['if-match'] !== etag()) return send(412, { error: 'stale' });
-        signed = JSON.parse(body === '' ? 'null' : body);
-        revision += 1;
-        return send(200, signed, { ETag: etag() });
-      }
-      return send(405, { error: 'method not allowed' });
+      const etag = answer.headers.get('ETag');
+      response.writeHead(answer.status, {
+        'Content-Type': answer.headers.get('Content-Type') ?? 'application/json',
+        ...(etag === null ? {} : { ETag: etag }),
+      });
+      return response.end(text);
     }
     if (url.pathname.startsWith(APP_PATH)) return serveStatic(url.pathname, response);
     return send(404, { error: 'not found' });
   }
 
+  /** A served object with one `issue.create` payload altered, or null if it is not a log. */
+  function withTamperedIssue(body) {
+    let value;
+    try { value = JSON.parse(body); } catch { return null; }
+    const operations = Array.isArray(value) ? value : value?.operations;
+    if (!Array.isArray(operations)) return null;
+    if (!operations.some((operation) => operation?.kind === 'issue.create')) return null;
+    const altered = structuredClone(value);
+    for (const operation of (Array.isArray(value) ? altered : altered.operations)) {
+      if (operation?.kind === 'issue.create') { operation.payload.title = 'tampered in transit'; break; }
+    }
+    return altered;
+  }
+
   function serveStatic(pathname, response) {
     const requested = normalize(pathname.slice(APP_PATH.length)).replace(/^(\.\.(\/|\\|$))+/, '');
     const isDirectoryRequest = requested === '' || requested === '.' || requested.endsWith('/');
-    const relative = isDirectoryRequest ? (requested === '.' ? '' : requested) + 'index.html' : requested;
+    const relative = (isDirectoryRequest ? (requested === '.' ? '' : requested) + 'index.html' : requested);
     const file = join(webDist, relative);
     if (!file.startsWith(webDist) || !existsSync(file) || !statSync(file).isFile()) {
       response.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -196,8 +227,8 @@ async function startLocalAntonina(boardMode) {
 
   // Real board, real signing, real verification: this fixture uses the same core
   // code the browser bundle uses, over the same HTTP shape.
-  const store = new SignedBoardStore({ baseUrl: `${origin}/_skrynia` });
-  const initialized = await store.initialize();
+  const board = new SignedBoardStore({ baseUrl: `${origin}/_skrynia` });
+  const initialized = await board.initialize();
   const trustAnchor = credentialTrustAnchor(initialized.credential);
   const client = new BoardApi({ baseUrl: `${origin}/_skrynia`, credential: initialized.credential, trustAnchor });
   const first = await client.createIssue('Smoke: the board must load', 'The probe reads this board and nothing else.');
@@ -281,6 +312,63 @@ function withinDeadline(thunk, ms, message) {
 
 const BUDGET_DID_NOT_FIRE = 'the overall budget did not end the run';
 
+test('a page-side wait that runs out is reported as the wait that ran out', { timeout: 60_000 }, async () => {
+  // The residual the re-review recorded but did not close: both page-side
+  // `waitFor` calls used to catch their own timeout and carry on to observe the
+  // page anyway. That was fail-closed — an unsettled page classifies as a
+  // failure — but it reported the *wrong* failure, telling an operator the board
+  // could not be loaded when the truth was that the application never finished
+  // starting. Here the driver answers every call and the application stays on
+  // its loading screen forever, so only the wait's own deadline can end the run.
+  const dir = mkdtempSync(join(tmpdir(), 'antonina-probe-fixture-'));
+  const fake = join(dir, 'chromedriver');
+  writeFileSync(fake, `#!/usr/bin/env node
+const { createServer } = require('node:http');
+const port = Number((process.argv.find((a) => a.startsWith('--port=')) ?? '--port=0').slice('--port='.length));
+process.stderr.write('fake chromedriver answering every call\\n');
+const send = (response, value) => { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ value })); };
+let chunks = '';
+createServer((request, response) => {
+  if (request.method === 'POST' && request.url === '/session') return send(response, { sessionId: 'sess-1' });
+  request.on('data', (chunk) => { chunks += chunk; });
+  request.on('end', () => {
+    const body = chunks;
+    chunks = '';
+    // Storing the anchor works; every executed script returns false, so the
+    // application is never observed to have finished starting.
+    if (body.includes('localStorage.setItem')) return send(response, true);
+    send(response, false);
+  });
+}).listen(port, '127.0.0.1');
+`, { mode: 0o755 });
+
+  try {
+    await assert.rejects(
+      () => withinDeadline(() => runProbe({
+        url: 'http://127.0.0.1:1/',
+        trustAnchor: '{"boardId":"b","rootKeyId":"ed25519:' + 'A'.repeat(43) + '","rootPublicKey":"B"}',
+        chromedriver: fake,
+        timeout: 2_000,
+        overallTimeout: 600_000,
+        minIssues: 1,
+        minFeed: 1,
+      }), 30_000, 'the page-side wait did not end the run'),
+      (error) => {
+        assert.ok(error instanceof ProbeTimeout, `expected a ProbeTimeout, got ${error}`);
+        // The page-side wording, not the per-call or the budget one.
+        assert.match(error.message, /timed out waiting for the application to finish starting/);
+        assert.doesNotMatch(error.message, /the probe to finish within/);
+        return true;
+      },
+    );
+  } finally {
+    // In a `finally`, not after the assertion: a *failing* run must not leave
+    // its fake driver behind, and that is exactly the run that fails. Fourteen
+    // of these directories were found in tmpdir() for this reason before the
+    // suite had ever been green.
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 // --- what the root gate is and is not required to have ---------------------
 // Error 4 of the review was that appending this suite to the root `npm test`
 // chain gave the root gate a browser, a chromedriver and a built-bundle
@@ -804,34 +892,40 @@ createServer((request, response) => {
 `, { mode: 0o755 });
 
   const profilesBefore = readdirSync(tmpdir()).filter((name) => name.startsWith('antonina-smoke-'));
-  await assert.rejects(
-    // 20s is well past the 1500ms the call is allowed, and far short of the
-    // 600000ms overall budget, so this races the *signal*, never the budget.
-    () => withinDeadline(() => runProbe({
-      url: 'http://127.0.0.1:1/',
-      trustAnchor: null,
-      chromedriver: fake,
-      timeout: 1_500,
-      overallTimeout: 600_000,
-      minIssues: 1,
-      minFeed: 1,
-    }), 20_000, 'the per-call WebDriver bound did not end the wedged call'),
-    (error) => {
-      assert.ok(error instanceof ProbeTimeout, `expected a ProbeTimeout, got ${error}`);
-      // The per-call message, not "the probe to finish within 600000ms": this is
-      // the assertion that distinguishes the two bounds.
-      assert.match(error.message, /chromedriver to answer POST \/session within 1500ms/);
-      assert.match(error.message, /HELLA busy/);
-      assert.doesNotMatch(error.message, /the probe to finish within/);
-      return true;
-    },
-  );
-  assert.deepEqual(
-    readdirSync(tmpdir()).filter((name) => name.startsWith('antonina-smoke-')),
-    profilesBefore,
-    'a per-call timeout leaked its browser profile',
-  );
-  rmSync(dir, { recursive: true, force: true });
+  try {
+    await assert.rejects(
+      // 20s is well past the 1500ms the call is allowed, and far short of the
+      // 600000ms overall budget, so this races the *signal*, never the budget.
+      // It is also what keeps the mutation honest: with the per-call signal
+      // deleted this is a bounded red assertion, not a wedged job.
+      () => withinDeadline(() => runProbe({
+        url: 'http://127.0.0.1:1/',
+        trustAnchor: null,
+        chromedriver: fake,
+        timeout: 1_500,
+        overallTimeout: 600_000,
+        minIssues: 1,
+        minFeed: 1,
+      }), 20_000, 'the per-call WebDriver bound did not end the wedged call'),
+      (error) => {
+        assert.ok(error instanceof ProbeTimeout, `expected a ProbeTimeout, got ${error}`);
+        // The per-call message, not "the probe to finish within 600000ms": this is
+        // the assertion that distinguishes the two bounds.
+        assert.match(error.message, /chromedriver to answer POST \/session within 1500ms/);
+        assert.match(error.message, /HELLA busy/);
+        assert.doesNotMatch(error.message, /the probe to finish within/);
+        return true;
+      },
+    );
+    assert.deepEqual(
+      readdirSync(tmpdir()).filter((name) => name.startsWith('antonina-smoke-')),
+      profilesBefore,
+      'a per-call timeout leaked its browser profile',
+    );
+  } finally {
+    // A failing run must clean up its fake driver too; see the sibling test.
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('the overall budget is a multiple of the per-call timeout, so a run cannot add up without bound', () => {

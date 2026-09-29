@@ -25,6 +25,7 @@ import {
   type ExecutionTargetStatus,
 } from './model.js';
 import {
+  CURRENT_PERSISTED_BOARD_VERSION,
   migratePersistedBoard,
   requirePersistedBoardCompatibility,
   type PersistedBoardVersion,
@@ -664,6 +665,20 @@ export interface BoardMigrationReport {
   throughVersions: number[];
 }
 
+/**
+ * The report for state that was built at the current version and so was not
+ * migrated: persisted at the current version, through nothing. The materialized
+ * sharded store reads shards that are already in the current format, and a
+ * freshly initialized board is written at the current version, so neither has a
+ * legacy version to report.
+ */
+export function unMigratedBoardReport(): BoardMigrationReport {
+  return {
+    persistedVersion: CURRENT_PERSISTED_BOARD_VERSION,
+    throughVersions: [],
+  };
+}
+
 export interface VerifiedBoardState {
   board: Board;
   queue: number[];
@@ -747,7 +762,7 @@ function cloneBoard(board: Board): Board {
   return structuredClone(board);
 }
 
-function applyBoardMutation(
+export function applyBoardMutation(
   operation: SignedBoardOperation,
   board: Board,
   queue: number[],
@@ -1025,8 +1040,8 @@ export async function verifyAndReplayOperationLog(
     seen.add(operation.opId);
 
     const authority = authorities.get(operation.signerKeyId);
-    if (!authority || authority.revoked) {
-      throw new OperationLogVerificationError('Operation signer is unknown or revoked');
+    if (!authority) {
+      throw new OperationLogVerificationError('Operation signer is unknown');
     }
     if (!await verifyBytes(authority.publicKey, operation.signature, bytes)) {
       throw new OperationLogVerificationError('Operation signature is invalid');
@@ -1056,11 +1071,6 @@ export async function verifyAndReplayOperationLog(
     if (!board) throw new OperationLogVerificationError('Board state is not initialized');
     if (deleted) throw new OperationLogVerificationError('Operations may not follow board deletion');
 
-    const capability = requiredCapability(operation.kind);
-    if (capability !== null && !authority.capabilities.includes(capability)) {
-      throw new OperationLogVerificationError(`Signer lacks required capability ${capability}`);
-    }
-
     if (operation.kind === 'authority.delegate') {
       const payload = operation.payload as DelegatePayload;
       if (authorities.has(payload.childKeyId)) {
@@ -1069,11 +1079,6 @@ export async function verifyAndReplayOperationLog(
       const childKeyId = await keyIdFromPublicKey(payload.childPublicKey);
       if (childKeyId !== payload.childKeyId) {
         throw new OperationLogVerificationError('Delegated key ID does not match its public key');
-      }
-      for (const childCapability of payload.capabilities) {
-        if (!authority.capabilities.includes(childCapability)) {
-          throw new OperationLogVerificationError('Delegation attempts capability escalation');
-        }
       }
       authorities.set(payload.childKeyId, {
         keyId: payload.childKeyId,

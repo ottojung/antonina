@@ -23,6 +23,7 @@ import {
 // module does not export *yet* fails as one failing assertion rather than as a
 // link-time `SyntaxError` that takes every other test in the file with it.
 import * as collection from '../dist/collection.js';
+import { fakeSkrynia } from './fake-skrynia.mjs';
 
 const STAMP = '2026-09-25T12:00:00.000Z';
 const HOST = 'lubko://server';
@@ -74,49 +75,6 @@ function factsGatherer(overrides = {}) {
 
 // A minimal Skrynia stand-in: the collector's only contact with the board is
 // this store, so the re-check tests exercise the real verified read path.
-function fakeSkrynia() {
-  const capability = 'a'.repeat(64);
-  let signed = null;
-  let revision = 0;
-  const etag = () => `"v${revision}"`;
-
-  return {
-    capability,
-    async fetch(url, init = {}) {
-      const method = init.method ?? 'GET';
-      if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
-      if (method === 'GET') {
-        return signed === null
-          ? new Response(null, { status: 404 })
-          : new Response(JSON.stringify(signed), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json', ETag: etag() },
-          });
-      }
-      if (method === 'POST') {
-        if (signed !== null) return new Response(null, { status: 409 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return new Response(JSON.stringify({ mode: 'capability-write', capability }), {
-          status: 201,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      if (method === 'PUT') {
-        const headers = new Headers(init.headers);
-        if (headers.get('X-Skrynia-Capability') !== capability) {
-          return new Response(JSON.stringify({ error: 'invalid capability' }), { status: 403 });
-        }
-        if (headers.get('If-Match') !== etag()) return new Response(null, { status: 412 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return new Response(null, { status: 200 });
-      }
-      return new Response(null, { status: 405 });
-    },
-  };
-}
-
 function api(server, options = {}) {
   let sequence = 0;
   return new BoardApi({

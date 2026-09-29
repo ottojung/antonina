@@ -4,6 +4,7 @@ import {
   type BoardAccessState,
   type BoardApiOptions,
   type BoardInitialization,
+  type BoardOverview,
 } from '../../packages/core/src/api';
 import {
   BOARD_CREDENTIAL_STORAGE_KEY,
@@ -103,10 +104,9 @@ export function browserStorage(): BoardKeyStorage {
 }
 
 /**
- * A browser's signed board session. It holds the one public trust anchor that
- * makes the board readable and, once a credential has been pasted or
- * initialized, the secret credential that makes it editable. A page load only
- * ever reads; nothing here creates the board.
+ * A browser board session. The public trust anchor identifies the board, while
+ * the one shared board credential is required for all live board access. A
+ * page load only reads; nothing here creates the board.
  */
 export class BrowserBoardSession {
   readonly api: BoardApi;
@@ -127,9 +127,9 @@ export class BrowserBoardSession {
   }
 
   /**
-   * One read of the whole verified board state, so a refresh learns the shared
-   * priority order in the same pass that learns the issues. Every render reads
-   * this one snapshot; nothing here re-reads or caches a queue of its own.
+   * Reads the current materialized board snapshot. The core store follows the
+   * pointer to issue, queue and catalog snapshots; no operation history is
+   * reconstructed.
    */
   async readState(): Promise<VerifiedBoardState | null> {
     try {
@@ -143,15 +143,26 @@ export class BrowserBoardSession {
   }
 
   /**
-   * One page of the unified board activity stream, newest first.
+   * Lightweight board overview for the main UI. This reads only list pages,
+   * queue and catalog; issue bodies and comments stay unloaded.
+   */
+  async readOverview(): Promise<BoardOverview | null> {
+    try {
+      const overview = await this.api.loadOverview();
+      this.rememberHead();
+      return overview;
+    } catch (error) {
+      if (error instanceof BoardMissingError) return null;
+      throw error;
+    }
+  }
+
+  /**
+   * One page of the materialized board activity stream, newest first.
    *
-   * This is the same projection `antonina board feed` reads: it hands the
-   * request straight to the core `BoardApi.readFeed`, which derives the page
-   * from the verified operation log and returns the backend's own continuation
-   * token. Nothing here derives, orders, re-limits or re-tokenizes anything —
-   * a second implementation of the feed in the browser is exactly the failure
-   * mode this app avoids, so the cursor in `page.nextCursor` is the one the next
-   * call must be given back unchanged.
+   * The request goes directly to `BoardApi.readFeed`, which reads persisted
+   * feed pages and returns their continuation token. The browser does not
+   * derive or reconstruct activity history.
    *
    * It is an arrow-function property and not a `readonly` method on purpose.
    * The feed tab takes this as a bare function prop and calls it on its own, so
@@ -163,10 +174,8 @@ export class BrowserBoardSession {
   readonly readFeed: FeedRead = async (request = {}) => this.api.readFeed(request);
 
   /**
-   * Adopts a board trust anchor so this browser can read it, and returns the
-   * whole state that call verified — the same shape `readState` hands back,
-   * queue beside board. Trusting reads and verifies the log once, so the
-   * session is ready to render and no second read is needed.
+   * Adopts the public identity anchor for a board. It does not grant access:
+   * reading the materialized board still requires the shared board credential.
    */
   async trust(anchorText: string): Promise<VerifiedBoardState> {
     const anchor = await parseBoardTrustAnchorText(anchorText);
@@ -177,8 +186,8 @@ export class BrowserBoardSession {
   }
 
   /**
-   * Creates the board, keeps its root credential in this browser, and returns
-   * the state the create verified, so the first load needs no second read.
+   * Creates the board, materializes its initial snapshot, and keeps the shared
+   * board credential in this browser.
    */
   async initialize(): Promise<BoardInitialization> {
     const initialized = await this.api.initialize();

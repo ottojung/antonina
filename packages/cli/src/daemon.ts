@@ -137,7 +137,7 @@ function statusView(context: DaemonCommandContext, config: DaemonConfig): Status
 
 /**
  * Host telemetry is not a board record, so this output is plain JSON rather
- * than the canonical form the signed board log uses: a load average of 0.1 is a
+ * than the canonical form board persistence uses: a load average of 0.1 is a
  * real reading, and rounding it to make a number canonical would be a lie about
  * the host.
  */

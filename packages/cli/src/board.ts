@@ -9,6 +9,7 @@ import {
   TargetSelectionError,
   type BoardAccessState,
   type BoardInitialization,
+  type IssueListSummary,
 } from '../../core/src/api.js';
 import {
   serializeBoardCredential,
@@ -57,10 +58,7 @@ import {
 import { daemonPaths } from '../../host-daemon/src/identity.js';
 import { readHostReport } from '../../host-daemon/src/state.js';
 import {
-  parseBoardCapability,
-  type BoardCapability,
   type BoardTrustAnchor,
-  type VerifiedAuthority,
 } from '../../core/src/operations.js';
 import {
   CollectBoardError,
@@ -106,6 +104,7 @@ export interface BoardCommandContext {
 type CommandValue =
   | BoardIssue
   | BoardIssue[]
+  | IssueListSummary[]
   | BoardResource
   | BoardResource[]
   | BoardDispatch
@@ -117,7 +116,6 @@ type CommandValue =
   | BoardCredential
   | BoardAccessState
   | BoardTrustAnchor
-  | VerifiedAuthority[]
   | CollectListEntry[]
   | CollectDeleteReportBase
   | BoardFeedPage
@@ -254,11 +252,6 @@ function defaultClient(context: BoardCommandContext): BoardApi {
   });
 }
 
-function parseCapabilities(args: string[]): BoardCapability[] {
-  if (args.length === 0) throw new AntoninaApiError('credential delegate requires at least one capability');
-  return args.map(parseBoardCapability);
-}
-
 /**
  * The normal place to put a value, and the one place it comes from.
  *
@@ -268,9 +261,7 @@ function parseCapabilities(args: string[]): BoardCapability[] {
  * them. Naming a single file rather than also naming an environment variable is
  * deliberate: the CLI reads the file, so the file is the advice.
  */
-const TRUST_ADVICE = 'save the board trust anchor as $XDG_CONFIG_HOME/antonina/trust.json to read it';
-
-const CREDENTIAL_ADVICE = 'save a credential copied after the storage capability was issued as'
+const CREDENTIAL_ADVICE = 'save the shared board credential as'
   + ' $XDG_CONFIG_HOME/antonina/credential.json';
 
 /**
@@ -282,7 +273,7 @@ const CREDENTIAL_ADVICE = 'save a credential copied after the storage capability
 function collectionAdvice(kind: string): string | null {
   if (kind === 'board-missing') return 'run: antonina board initialize to create it';
   if (kind === 'board-unverifiable' || kind === 'board-state-rejected') {
-    return TRUST_ADVICE;
+    return CREDENTIAL_ADVICE;
   }
   // A transport failure is the one kind with no established advice, so it is
   // named as itself rather than flattened into another kind's advice.
@@ -300,7 +291,7 @@ function collectionAdvice(kind: string): string | null {
  */
 function boardStateAdvice(error: unknown): string | null {
   if (error instanceof BoardMissingError) return 'run: antonina board initialize to create it';
-  if (error instanceof BoardTrustRequiredError) return TRUST_ADVICE;
+  if (error instanceof BoardTrustRequiredError) return CREDENTIAL_ADVICE;
   if (error instanceof BoardDeletedError) return 'start a new board instead; this key is permanently occupied';
   if (error instanceof BoardStorageRejectedError) return CREDENTIAL_ADVICE;
   // A collection snapshot classifies its own failures rather than throwing the
@@ -345,29 +336,11 @@ async function execute(
         if (credential === null) throw new AntoninaApiError('Antonina board credential is not configured');
         return { mode: 'credential', value: credential };
       }
-      if (subcommand === 'trust') {
-        if (args.length !== 0) throw new AntoninaApiError('credential trust takes no arguments');
-        const trust = client.getTrustAnchor();
-        if (trust === null) throw new AntoninaApiError('Antonina board trust anchor is not configured');
-        return { mode: 'trust', value: trust };
-      }
       if (subcommand === 'verify') {
         if (args.length !== 0) throw new AntoninaApiError('credential verify takes no arguments');
         return { mode: 'access', value: await client.verifyCredential() };
       }
-      if (subcommand === 'delegate') {
-        return { mode: 'credential', value: await client.delegateCredential(parseCapabilities(args)) };
-      }
-      if (subcommand === 'revoke') {
-        if (args.length !== 1) throw new AntoninaApiError('credential revoke requires KEY_ID');
-        return { mode: 'authorities', value: await client.revokeCredential(requireArg(args[0], 'KEY_ID')) };
-      }
-      throw new AntoninaApiError('credential requires show, trust, verify, delegate, or revoke');
-    }
-    case 'authority': {
-      const [subcommand, ...args] = parsed.args;
-      if (subcommand !== 'list' || args.length !== 0) throw new AntoninaApiError('authority requires list');
-      return { mode: 'authorities', value: await client.listAuthorities() };
+      throw new AntoninaApiError('credential requires show or verify');
     }
     case 'queue': {
       const [subcommand, ...args] = parsed.args;
@@ -402,7 +375,7 @@ async function execute(
       }
       return {
         mode: 'issues',
-        value: await client.listIssues(state === 'all' ? undefined : state as IssueState),
+        value: await client.listIssueSummaries(state === 'all' ? undefined : state as IssueState),
       };
     }
     case 'show':
@@ -902,10 +875,10 @@ function humanLines(result: CommandResult): string[] {
   if (result.mode === 'initialize') {
     const initialized = result.value as BoardInitialization;
     return [
-      'Antonina signed board initialized.',
-      'Trust anchor (public):',
+      'Antonina board initialized.',
+      'Integrity anchor (public; does not grant board access):',
       serializeBoardTrustAnchor(initialized.trustAnchor),
-      'Root credential (secret; store securely):',
+      'Board credential (secret; grants full access):',
       serializeBoardCredential(initialized.credential),
     ];
   }
@@ -923,14 +896,6 @@ function humanLines(result: CommandResult): string[] {
       'edit: ' + (access.canEdit ? 'yes' : 'no'),
       'capabilities: ' + access.capabilities.join(', '),
     ];
-  }
-  if (result.mode === 'authorities') {
-    return (result.value as VerifiedAuthority[]).map((authority) =>
-      authority.keyId
-      + ' parent=' + (authority.parentKeyId ?? '-')
-      + ' ' + (authority.revoked ? 'revoked' : 'active')
-      + ' [' + authority.capabilities.join(', ') + ']'
-    );
   }
   if (result.mode === 'queue') {
     return [(result.value as number[]).map((number) => '#' + number).join(' ')];

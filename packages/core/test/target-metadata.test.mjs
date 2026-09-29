@@ -65,37 +65,64 @@ function boardWith(targets) {
  * carrying a target is what these tests read back rather than a hand-built
  * state object.
  */
+// A board storage service for one test. It is a generic keyed store rather than
+// a single `board-v2` slot: initializing a board writes the sharded v3
+// snapshots, so a fake that only answers for one key 404s the first shard write.
 function fakeSkrynia() {
   const capability = 'a'.repeat(64);
-  let signed = null;
-  let revision = 0;
-  const etag = () => '"v' + revision + '"';
+  const objects = new Map();
+  const keyOf = (url) => decodeURIComponent(String(url).split('/').at(-1));
+  const etagOf = (entry) => `"v${entry.revision}"`;
   return {
     async fetch(url, init = {}) {
       const method = init.method ?? 'GET';
-      if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
+      const key = keyOf(url);
+      const current = objects.get(key);
       if (method === 'GET') {
-        if (signed === null) return new Response(null, { status: 404 });
-        return new Response(signed, { status: 200, headers: { 'Content-Type': 'application/json', ETag: etag() } });
-      }
-      if (method === 'POST') {
-        if (signed !== null) return new Response(null, { status: 409 });
-        signed = String(init.body);
-        revision += 1;
-        return new Response(JSON.stringify({ mode: 'capability-write', capability }), {
-          status: 201,
-          headers: { 'Content-Type': 'application/json' },
+        if (current === undefined) return new Response(null, { status: 404 });
+        return new Response(JSON.stringify(current.value), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ETag: etagOf(current) },
         });
       }
+      if (method === 'POST') {
+        if (current !== undefined) return new Response(null, { status: 409 });
+        const mode = new Headers(init.headers).get('X-Skrynia-Mode') ?? 'capability-write';
+        if (!['capability-write', 'public-write', 'immutable'].includes(mode)) {
+          return new Response(JSON.stringify({ error: 'invalid_mode' }), { status: 400 });
+        }
+        objects.set(key, {
+          value: JSON.parse(String(init.body)),
+          mode,
+          capability: mode === 'capability-write' ? capability : null,
+          revision: 1,
+        });
+        return new Response(
+          JSON.stringify(mode === 'capability-write' ? { mode, capability } : { mode }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
       if (method === 'PUT') {
+        if (current === undefined) return new Response(null, { status: 404 });
+        if (current.mode === 'immutable') {
+          return new Response(JSON.stringify({ error: 'immutable' }), { status: 403 });
+        }
         const headers = new Headers(init.headers);
-        if (headers.get('X-Skrynia-Capability') !== capability) {
+        if (current.mode === 'capability-write' && headers.get('X-Skrynia-Capability') !== capability) {
           return new Response(JSON.stringify({ error: 'invalid capability' }), { status: 403 });
         }
-        if (headers.get('If-Match') !== etag()) return new Response(null, { status: 412 });
-        signed = String(init.body);
-        revision += 1;
+        const match = headers.get('If-Match');
+        if (match !== null && match !== etagOf(current)) {
+          return new Response(JSON.stringify({ error: 'etag_mismatch' }), { status: 412 });
+        }
+        current.value = JSON.parse(String(init.body));
+        current.revision += 1;
         return new Response(null, { status: 200 });
+      }
+      if (method === 'DELETE') {
+        if (current === undefined) return new Response(null, { status: 404 });
+        objects.delete(key);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
       }
       return new Response(null, { status: 405 });
     },

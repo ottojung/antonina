@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { fakeSkrynia } from '../../core/test/fake-skrynia.mjs';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -49,40 +50,6 @@ function jsonResponse(value, status = 200, etag) {
   return new Response(JSON.stringify(value), { status, headers });
 }
 
-function fakeSkrynia() {
-  const capability = 'a'.repeat(64);
-  let signed = null;
-  let revision = 0;
-  const etag = () => `"v${revision}"`;
-
-  return {
-    capability,
-    get signed() { return signed; },
-    async fetch(url, init = {}) {
-      const method = init.method ?? 'GET';
-      if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
-      if (method === 'GET') {
-        return signed === null ? new Response(null, { status: 404 }) : jsonResponse(signed, 200, etag());
-      }
-      if (method === 'POST') {
-        if (signed !== null) return new Response(null, { status: 409 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return jsonResponse({ mode: 'capability-write', capability }, 201);
-      }
-      if (method === 'PUT') {
-        const headers = new Headers(init.headers);
-        if (headers.get('X-Skrynia-Capability') !== capability) return jsonResponse({ error: 'invalid capability' }, 403);
-        if (headers.get('If-Match') !== etag()) return new Response(null, { status: 412 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return new Response(null, { status: 200 });
-      }
-      return new Response(null, { status: 405 });
-    },
-  };
-}
-
 function client(server, options = {}) {
   let sequence = 0;
   return new BoardApi({
@@ -107,13 +74,13 @@ function run(argv, context) {
   return runBoardCommand(argv, { env: {}, home: TEST_HOME, io: capture.io, ...context }).then((code) => ({ code, ...capture }));
 }
 
-test('board CLI emits deterministic JSON list output for a read-only client', async () => {
+test('board CLI emits deterministic JSON list output for a board-key holder', async () => {
   const server = fakeSkrynia();
   const owner = client(server);
   const initialized = await owner.initialize();
   await owner.createIssue('First', 'signed board');
 
-  const reader = client(server, { trustAnchor: initialized.trustAnchor });
+  const reader = client(server, { credential: initialized.credential });
   const capture = memoryIo();
   const code = await runBoardCommand(['list', '--json'], { env: {}, home: TEST_HOME, io: capture.io, createClient: () => reader });
 
@@ -151,7 +118,7 @@ test('no board CLI command creates a missing board', async () => {
 
 test('every read command names initialization while the board is missing', async () => {
   const server = fakeSkrynia();
-  const missing = 'antonina board: Antonina signed board does not exist; run: antonina board initialize to create it';
+  const missing = 'antonina board: Antonina board does not exist; run: antonina board initialize to create it';
 
   for (const command of [
     ['list'],
@@ -171,7 +138,7 @@ test('every read command names initialization while the board is missing', async
 
 test('mutating commands name initialization before they demand a credential', async () => {
   const server = fakeSkrynia();
-  const missing = 'antonina board: Antonina signed board does not exist; run: antonina board initialize to create it';
+  const missing = 'antonina board: Antonina board does not exist; run: antonina board initialize to create it';
   const methods = [];
   const reader = client(server, { fetch: async (url, init = {}) => { methods.push(init.method); return server.fetch(url, init); } });
 
@@ -180,7 +147,6 @@ test('mutating commands name initialization before they demand a credential', as
     ['create', 'Mine'],
     ['close', '1'],
     ['resource', 'add', '1', 'lubko://host', '/workspace'],
-    ['credential', 'delegate', 'issue.create'],
   ]) {
     const { code, err } = await run(command, { createClient: () => reader });
     assert.equal(code, 1, command.join(' '));
@@ -200,17 +166,17 @@ test('a client on an existing board with no credential is told exactly that', as
   for (const command of [['access'], ['create', 'Mine']]) {
     const { code, err } = await run(command, { createClient: () => reader });
     assert.equal(code, 1, command.join(' '));
-    assert.equal(err[0], 'antonina board: Antonina board credential is required', command.join(' '));
+    assert.equal(err[0], 'antonina board: Antonina board exists; this client has no board credential; save the shared board credential as $XDG_CONFIG_HOME/antonina/credential.json', command.join(' '));
   }
 
-  assert.equal(server.signed.operations.length, 1);
+  assert.equal(server.signed.revision, 1);
 });
 
-test('every read command names the trust anchor when it cannot verify the board', async () => {
+test('every read command names the board credential when access is not configured', async () => {
   const server = fakeSkrynia();
   await client(server).initialize();
-  const untrusted = 'antonina board: Antonina signed board exists; this client has no trust anchor for it; '
-    + 'save the board trust anchor as $XDG_CONFIG_HOME/antonina/trust.json to read it';
+  const untrusted = 'antonina board: Antonina board exists; this client has no board credential; '
+    + 'save the shared board credential as $XDG_CONFIG_HOME/antonina/credential.json';
 
   for (const command of [
     ['list'],
@@ -234,7 +200,7 @@ test('a missing board fails closed for a client that holds a valid credential', 
   const { code, err } = await run(['create', 'Mine'], { createClient: () => writer });
 
   assert.equal(code, 1);
-  assert.equal(err[0], 'antonina board: Antonina signed board does not exist; run: antonina board initialize to create it');
+  assert.equal(err[0], 'antonina board: Antonina board does not exist; run: antonina board initialize to create it');
   assert.equal(server.signed, null);
 });
 
@@ -248,7 +214,7 @@ test('board CLI reports an existing board instead of taking the trust root again
   assert.match(err[0], /already exists/);
 });
 
-test('board CLI reports the trust anchor and root credential after initialization', async () => {
+test('board CLI reports the integrity anchor and board credential after initialization', async () => {
   const server = fakeSkrynia();
   const { code, out } = await run(['initialize', '--json'], { createClient: () => client(server) });
 
@@ -256,17 +222,19 @@ test('board CLI reports the trust anchor and root credential after initializatio
   const printed = JSON.parse(out[0]);
   assert.equal(printed.credential.keyId, printed.trustAnchor.rootKeyId);
   assert.equal(printed.state.board.nextIssueNumber, 1);
-  assert.equal(server.signed.operations[0].kind, 'board.initialize');
+  assert.equal(server.signed.format, 'materialized-snapshots');
+  assert.equal(server.signed.revision, 1);
 });
 
-test('board CLI hands the initializer the copyable trust anchor and credential', async () => {
+test('board CLI hands the initializer the integrity anchor and board credential', async () => {
   const server = fakeSkrynia();
   const { out } = await run(['initialize'], { createClient: () => client(server) });
   const anchor = JSON.parse(out[2]);
   const credential = JSON.parse(out[4]);
 
-  assert.equal(out[1], 'Trust anchor (public):');
+  assert.equal(out[1], 'Integrity anchor (public; does not grant board access):');
   assert.equal(serializeBoardTrustAnchor(anchor), out[2]);
+  assert.equal(out[3], 'Board credential (secret; grants full access):');
   assert.equal(serializeBoardCredential(credential), out[4]);
   assert.equal(credential.storageCapability, server.capability);
   assert.equal(credential.rootKeyId, anchor.rootKeyId);
@@ -284,7 +252,7 @@ test('board CLI prints only the credential for a pipe-friendly initialization', 
   assert.equal(credential.storageCapability, server.capability);
 });
 
-test('board CLI prints only the trust anchor for a pipe-friendly initialization', async () => {
+test('board CLI prints only the public integrity anchor for a pipe-friendly initialization', async () => {
   const server = fakeSkrynia();
   const { code, out, err } = await run(['initialize', '--trust-anchor'], { createClient: () => client(server) });
 
@@ -355,7 +323,7 @@ test('a pipe-friendly initialization leaves stdout empty when the board already 
   }
 });
 
-test('a board command takes its trust anchor and credential from the config files', async () => {
+test('a board command takes its board credential and optional integrity anchor from config files', async () => {
   const initialized = await client(fakeSkrynia()).initialize();
   const config = configDirectory({
     'trust.json': serializeBoardTrustAnchor(initialized.trustAnchor),
@@ -435,7 +403,7 @@ test('the injected home resolves the config directory when XDG_CONFIG_HOME is un
   assert.equal(identity.credential, null);
 });
 
-test('a trust anchor and credential from different boards are still refused', async () => {
+test('a mismatched integrity anchor and board credential are still refused', async () => {
   const first = await client(fakeSkrynia()).initialize();
   const second = await client(fakeSkrynia()).initialize();
   const mismatched = configDirectory({
@@ -468,12 +436,14 @@ async function queuedBoard() {
 
 test('board CLI queue reorder prints the committed order on one line', async () => {
   const board = await queuedBoard();
+  const before = board.server.signed.revision;
   const { code, out, err } = await run(['queue', 'reorder', '3', '1', '2'], { createClient: () => board.client });
 
   assert.equal(code, 0);
   assert.deepEqual(err, []);
   assert.deepEqual(out, ['#3 #1 #2']);
-  assert.equal(board.server.signed.operations.at(-1).kind, 'queue.reorder');
+  assert.equal(board.server.signed.revision, before + 1);
+  assert.deepEqual(await board.client.getQueue(), [3, 1, 2]);
 });
 
 test('board CLI queue list prints the reordered order in human and JSON form', async () => {
@@ -539,7 +509,7 @@ test('board CLI rejects a queue reorder argument that is not a positive integer 
   }
 
   assert.deepEqual(methods, [], 'a malformed argument never reaches the store');
-  assert.equal(board.server.signed.operations.length, 4);
+  assert.equal(board.server.signed.revision, 4);
 });
 
 test('board CLI refuses a duplicated queue reorder without writing it', async () => {
@@ -583,6 +553,6 @@ test('board CLI queue reorder requires a credential and leaves the board alone',
   const { code, err } = await run(['queue', 'reorder', '3', '2', '1'], { createClient: () => reader });
 
   assert.equal(code, 1);
-  assert.equal(err[0], 'antonina board: Antonina board credential is required');
+  assert.equal(err[0], 'antonina board: Antonina board exists; this client has no board credential; save the shared board credential as $XDG_CONFIG_HOME/antonina/credential.json');
   assert.equal(board.server.signed, stored);
 });

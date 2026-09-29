@@ -1,6 +1,14 @@
 import { BoardDeletedError, BoardTrustRequiredError, DEFAULT_FEED_LIMIT } from './api';
-import type { BoardFeedEntry, BoardFeedEntryKind, BoardFeedPage, BoardFeedRequest, FeedRead } from './api';
-import type { Board, BoardIssue, BoardResource, VerifiedBoardState } from './model';
+import type {
+  BoardFeedEntry,
+  BoardFeedEntryKind,
+  BoardFeedPage,
+  BoardFeedRequest,
+  BoardOverview,
+  FeedRead,
+  IssueListSummary,
+} from './api';
+import type { BoardIssue, BoardResource, VerifiedBoardState } from './model';
 
 export type IssueFilter = 'open' | 'closed' | 'all';
 
@@ -9,29 +17,31 @@ export type IssueFilter = 'open' | 'closed' | 'all';
  * status here without a queue: a board whose order has not been read is a
  * `failed` load, never a list quietly sorted some other way.
  */
+export type BoardSummary = Pick<BoardOverview, 'issues' | 'resources' | 'targets' | 'dispatches'>;
+
 export type BoardLoad =
   | { status: 'loading' }
   | { status: 'uninitialized' }
   | { status: 'untrusted' }
   | { status: 'deleted' }
-  | { status: 'ready'; board: Board; queue: number[] }
+  | { status: 'ready'; board: BoardSummary; queue: number[]; head: string }
   | { status: 'failed'; message: string };
 
 export const FIRST_RUN_COPY = {
   title: 'No Antonina board yet',
-  body: 'Initializing the board makes this browser its first editor and stores the board’s root signing credential in this browser. Copy that credential and the board’s public trust anchor from Settings and share them with the other browsers and agents that need to read or edit the board.',
+  body: 'Initializing the board creates its shared board credential and stores it in this browser. Copy that credential from Settings and share it only with browsers and agents that should have full board access.',
   action: 'Initialize board',
   recheck: 'Check again',
-  raced: 'Another browser initialized the board first; this browser is read-only.',
-  initialized: 'Board initialized; this browser holds the root signing credential',
+  raced: 'Another browser initialized the board first; enter its board credential to continue.',
+  initialized: 'Board initialized; this browser holds the board credential',
   readFailed: 'The board was created but could not be read back',
 } as const;
 
-export const TRUST_COPY = {
-  title: 'This board needs its trust anchor',
-  body: 'The signed board already exists, and this browser cannot verify its history without the board’s public trust anchor. Paste the anchor to read the board read-only; editing still needs a credential.',
-  action: 'Trust this board',
-  hint: 'The trust anchor is public and comes from the browser or agent that initialized the board.',
+export const BOARD_KEY_COPY = {
+  title: 'Enter the board credential',
+  body: 'This Antonina board is private to people who have its shared credential. The credential grants full read and write access.',
+  action: 'Open board',
+  hint: 'Paste the full Antonina board credential JSON shared by another browser or agent.',
 } as const;
 
 export const DELETED_COPY = {
@@ -46,21 +56,21 @@ export type ReadOnlyAccess = 'read-only' | 'rejected';
 export type BoardAccess = 'editable' | ReadOnlyAccess;
 
 export const READ_ONLY_CALLOUT = {
-  title: 'Read-only board',
-  body: 'You can read every issue and resource. Enable editing in this browser to make changes.',
-  action: 'Enable editing',
+  title: 'Board credential required',
+  body: 'Enter the board credential to access this board.',
+  action: 'Enter credential',
 } as const;
 
 export const COMPOSER_READ_ONLY_CALLOUT = {
-  title: 'Want to join the conversation?',
-  body: 'Enable editing in this browser to make changes.',
-  action: 'Enable editing',
+  title: 'Board credential required',
+  body: 'Enter the board credential to access this board.',
+  action: 'Enter credential',
 } as const;
 
 export const REJECTED_CREDENTIAL_COPY = {
   title: 'This board rejected the credential in this browser',
-  body: 'The board credential stored in this browser was rejected, so the board is read-only. Paste a fresh credential that this board still accepts.',
-  action: 'Paste a fresh credential',
+  body: 'The board credential stored in this browser was rejected. Paste a valid credential to access the board.',
+  action: 'Paste a valid credential',
 } as const;
 
 export const ISSUE_FORM_HINT = 'The description holds the task context; the conversation holds updates and questions.';
@@ -73,7 +83,7 @@ export const ISSUE_FORM_SUBMIT_HINT = 'Ctrl+Enter or Cmd+Enter creates the issue
  */
 export const COMPOSER_SUBMIT_HINT = 'Ctrl+Enter or Cmd+Enter posts this message.';
 
-export const WRITE_ACCESS_SUMMARY = 'Write access allows issue, description, dependency, status, and priority order changes.';
+export const WRITE_ACCESS_SUMMARY = 'The board credential grants full read and write access to Antonina.';
 
 export const QUEUE_HINT = 'Issues are listed in the board’s shared priority order. Select an issue to place it at any position in one commit.';
 
@@ -120,12 +130,51 @@ export function emptyIssueList(filter: IssueFilter, hasWriteAccess: boolean): { 
   };
 }
 
-export function loadedBoard(load: BoardLoad): Board | undefined {
+export function loadedBoard(load: BoardLoad): BoardSummary | undefined {
   return load.status === 'ready' ? load.board : undefined;
 }
 
+function summarizeIssue(issue: BoardIssue): IssueListSummary {
+  return {
+    number: issue.number,
+    title: issue.title,
+    state: issue.state,
+    createdAt: issue.createdAt,
+    updatedAt: issue.updatedAt,
+    closedAt: issue.state === 'closed' ? issue.updatedAt : null,
+    messageCount: issue.messages.length,
+    hasBody: issue.body.length > 0,
+  };
+}
+
 export function boardLoaded(state: VerifiedBoardState | null): BoardLoad {
-  return state ? { status: 'ready', board: state.board, queue: state.queue } : { status: 'uninitialized' };
+  if (state === null) return { status: 'uninitialized' };
+  return {
+    status: 'ready',
+    board: {
+      issues: state.board.issues.map(summarizeIssue),
+      resources: state.board.resources,
+      targets: state.board.targets,
+      dispatches: state.board.dispatches,
+    },
+    queue: state.queue,
+    head: state.head,
+  };
+}
+
+export function overviewLoaded(overview: BoardOverview | null): BoardLoad {
+  if (overview === null) return { status: 'uninitialized' };
+  return {
+    status: 'ready',
+    board: {
+      issues: overview.issues,
+      resources: overview.resources,
+      targets: overview.targets,
+      dispatches: overview.dispatches,
+    },
+    queue: overview.queue,
+    head: overview.head,
+  };
 }
 
 /**
@@ -210,7 +259,7 @@ export function firstRunOutcome(created: BoardRead, afterRefusal?: BoardRead): F
  * result is the board's order, never one the browser invented. There is no
  * other order to fall back to, so nothing is sorted or appended here.
  */
-export function openQueueOrder(issues: BoardIssue[], queue: number[]): number[] {
+export function openQueueOrder<T extends Pick<BoardIssue, 'number' | 'state'>>(issues: readonly T[], queue: readonly number[]): number[] {
   const open = new Set(issues.filter((issue) => issue.state === 'open').map((issue) => issue.number));
   return queue.filter((number) => open.has(number));
 }
@@ -221,7 +270,7 @@ export function openQueueOrder(issues: BoardIssue[], queue: number[]): number[] 
  * number: oldest closed work first, a stable order that does not shuffle as
  * timestamps move.
  */
-export function closedIssueOrder(issues: BoardIssue[]): number[] {
+export function closedIssueOrder<T extends Pick<BoardIssue, 'number' | 'state'>>(issues: readonly T[]): number[] {
   return issues.filter((issue) => issue.state === 'closed').map((issue) => issue.number).sort((left, right) => left - right);
 }
 
@@ -230,7 +279,7 @@ export function closedIssueOrder(issues: BoardIssue[]): number[] {
  * unqueued tail, and `all` is the queue first with the closed tail after it, so
  * the open work a reader came for is always at the top in priority order.
  */
-export function visibleIssues(issues: BoardIssue[], queue: number[], filter: IssueFilter): BoardIssue[] {
+export function visibleIssues<T extends Pick<BoardIssue, 'number' | 'state'>>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
   const byNumber = new Map(issues.map((issue) => [issue.number, issue]));
   const open = openQueueOrder(issues, queue).map((number) => byNumber.get(number)!);
   if (filter === 'open') return open;
@@ -307,7 +356,7 @@ export function priorityLabel(position: number): string {
   return position > 0 ? `Priority ${position}` : 'Not in the queue';
 }
 
-export function issueCounts(issues: BoardIssue[]): Record<IssueFilter, number> {
+export function issueCounts<T extends Pick<BoardIssue, 'state'>>(issues: readonly T[]): Record<IssueFilter, number> {
   const open = issues.filter((issue) => issue.state === 'open').length;
   const closed = issues.length - open;
   return { open, closed, all: issues.length };
@@ -321,7 +370,7 @@ export function groupResources(resources: BoardResource[]): Array<[string, Board
     .map(([host, entries]) => [host, entries.sort((left, right) => left.path.localeCompare(right.path))]);
 }
 
-export const FEED_HINT = 'Everything the signed board recorded, newest first: creations, edits, comments, closures and reopenings, each at the moment it was committed.';
+export const FEED_HINT = 'Materialized board activity, newest first: creations, edits, comments, closures and reopenings, each at the moment it was committed.';
 
 /**
  * How each feed entry kind reads on one line. A mapping over the whole
@@ -359,8 +408,8 @@ export const FEED_KIND_LABEL: { readonly [K in BoardFeedEntryKind]: string } = {
  * event the board never committed.
  */
 export function feedEntrySummary(entry: BoardFeedEntry): string {
-  if (entry.kind === 'comment-added' && entry.author !== null) {
-    return `${FEED_VERB['comment-added']} by ${entry.author}: ${entry.body ?? ''}`;
+  if (entry.kind === 'comment-added' && typeof entry.author === 'string') {
+    return `${FEED_VERB['comment-added']} by ${entry.author}: ${typeof entry.body === 'string' ? entry.body : ''}`;
   }
   return `${FEED_VERB[entry.kind]} — ${entry.title}`;
 }
@@ -404,9 +453,9 @@ export async function readFeedFirstPage(readFeed: FeedRead): Promise<BoardFeedPa
  * One page back, using the token the previous page returned.
  *
  * The cursor is handed to the projection exactly as it arrived. It is a position
- * in the append-only log, not an offset, so the page this returns is the set of
- * operations committed before that position — a walk that neither skips nor
- * repeats an entry, and that still works for a position whose entry the board no
+ * in the materialized feed, not an offset, so the page this returns is the set
+ * of entries committed before that position — a walk that neither skips nor
+ * repeats an entry, and that still works for a position whose issue the board no
  * longer holds. The merged page keeps the token for its own next call, so a
  * reader can keep walking until the projection returns `null` and the feed is
  * exhausted.
@@ -435,20 +484,19 @@ export const FEED_UNTRACKED_COPY =
  * for. This is the set difference and nothing else: a pure function of what it
  * is given, with no opinion about whether the claim built on it is yet true.
  *
- * The feed is a projection over the operation log, and an issue that was already
- * in the `board.initialize` snapshot predates that log: no operation ever named
- * its creation, so the projection cannot place it and does not. The CLI cannot
- * tell that apart from an empty board and prints an empty feed, but a browser
- * can, because it holds both the board view and the feed. No entry is invented
- * for such an issue, and it is not ordered or timestamped here, because the
- * board recorded no such facts.
+ * An issue already present when the materialized feed begins has no creation
+ * entry: no feed event ever named its creation, so the feed cannot place it and
+ * does not. The CLI cannot tell that apart from an empty board and prints an
+ * empty feed, but a browser can, because it holds both the board view and the
+ * feed. No entry is invented for such an issue, and it is not ordered or
+ * timestamped here, because the board recorded no such feed event.
  *
  * What this cannot say on its own is that the issue predates the log. It can
  * only say the entries it was handed do not mention it, and on a paged feed
  * that is exactly as true of an issue created ten operations ago and left off
  * the first page. `unplacedIssueNumbers` is the gated form.
  */
-export function untrackedIssueNumbers(issues: BoardIssue[], entries: BoardFeedEntry[]): number[] {
+export function untrackedIssueNumbers<T extends Pick<BoardIssue, 'number'>>(issues: readonly T[], entries: BoardFeedEntry[]): number[] {
   const tracked = new Set(entries.map((entry) => entry.issueNumber));
   return issues.filter((issue) => !tracked.has(issue.number)).map((issue) => issue.number).sort((left, right) => left - right);
 }
@@ -474,7 +522,7 @@ export function untrackedIssueNumbers(issues: BoardIssue[], entries: BoardFeedEn
  * untracked is still reported, as soon as the reader has walked the feed to its
  * end and can honestly be told the log holds nothing for those issues.
  */
-export function unplacedIssueNumbers(issues: BoardIssue[], entries: BoardFeedEntry[], nextCursor: string | null, total: number): number[] {
+export function unplacedIssueNumbers<T extends Pick<BoardIssue, 'number'>>(issues: readonly T[], entries: BoardFeedEntry[], nextCursor: string | null, total: number): number[] {
   if (nextCursor !== null || entries.length < total) return [];
   return untrackedIssueNumbers(issues, entries);
 }
@@ -485,7 +533,7 @@ export function unplacedIssueNumbers(issues: BoardIssue[], entries: BoardFeedEnt
  * a partial walk.
  */
 export const FEED_TRUNCATED_COPY = (numbers: number[]) =>
-  `You have read the whole feed, and the log records no operation for these issues. They were already on the board when the signed log began, so the feed cannot show when they were created or changed: ${numbers.map((number) => `#${number}`).join(', ')}.`;
+  `You have read the whole feed, and it records no activity for these issues. They were already on the board when the materialized feed began, so the feed cannot show when they were created or changed: ${numbers.map((number) => `#${number}`).join(', ')}.`;
 
 export function formatUpdatedAt(timestamp: string, now = new Date()): string {
   const date = new Date(timestamp);

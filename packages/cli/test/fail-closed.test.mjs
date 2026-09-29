@@ -77,6 +77,26 @@ function seed(id, work, state) {
   writeMeta(id, idleMeta(id, work, null, 1), state);
 }
 
+test('list does not lock or rewrite metadata for non-running agents', async (t) => {
+  const { work, state } = fixture(t);
+  seed('d00d', work, state);
+  const output = capture();
+  const readOnlyFs = storeFs({
+    openSync(path, flags, mode) {
+      if (String(path).endsWith('.lock')) throw ioError('EACCES', 'list attempted to lock metadata');
+      return nodeFs.openSync(path, flags, mode);
+    },
+  });
+
+  const code = await runAgentCommand(
+    ['list', '--json'],
+    context(work, state, output.io, readOnlyFs),
+  );
+
+  assert.equal(code, 0, output.err.join('\n'));
+  assert.deepEqual(JSON.parse(output.out.join('\n')).agents.map((agent) => agent.id), ['d00d']);
+});
+
 test('run does not accept work when the metadata lock cannot be acquired', async (t) => {
   const { work, state } = fixture(t);
   seed('a11d', work, state);

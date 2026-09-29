@@ -118,30 +118,61 @@ const ROOT_KEY = {
   privateKey: 'MC4CAQAwBQYDK2VwBCIEIIcl33zeE-gtzBcuqxw02dHc9_rFTAYDBcimwJdRD_zZ',
 };
 
+// A board storage service for one test. It is a generic keyed store rather than
+// a single `board-v2` slot: initializing a board writes the sharded v3
+// snapshots, so a fake that only answers for one key 404s the first shard write.
 function fakeSkrynia(seed) {
   const capability = 'c'.repeat(64);
-  let signed = seed === undefined ? null : structuredClone(seed);
-  let revision = 0;
-  const etag = () => `"v${revision}"`;
-  const json = (value, status) => new Response(JSON.stringify(value), {
+  const objects = new Map();
+  if (seed !== undefined) {
+    objects.set('board-v2', { value: structuredClone(seed), mode: 'capability-write', capability, revision: 1 });
+  }
+  const keyOf = (url) => decodeURIComponent(String(url).split('/').at(-1));
+  const etagOf = (entry) => `"v${entry.revision}"`;
+  const json = (value, status, etag) => new Response(JSON.stringify(value), {
     status,
-    headers: { 'Content-Type': 'application/json', ETag: etag() },
+    headers: { 'Content-Type': 'application/json', ...(etag === undefined ? {} : { ETag: etag }) },
   });
 
   return {
     capability,
-    get signed() { return signed; },
+    get signed() { return objects.get('board-v2')?.value ?? null; },
     async fetch(url, init = {}) {
       const method = init.method ?? 'GET';
-      if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
+      const key = keyOf(url);
+      const current = objects.get(key);
       if (method === 'GET') {
-        return signed === null ? new Response(null, { status: 404 }) : json(signed, 200);
+        return current === undefined
+          ? new Response(null, { status: 404 })
+          : json(current.value, 200, etagOf(current));
+      }
+      if (method === 'POST') {
+        if (current !== undefined) return new Response(null, { status: 409 });
+        const mode = new Headers(init.headers).get('X-Skrynia-Mode') ?? 'capability-write';
+        if (!['capability-write', 'public-write', 'immutable'].includes(mode)) {
+          return json({ error: 'invalid_mode' }, 400);
+        }
+        objects.set(key, {
+          value: JSON.parse(String(init.body)),
+          mode,
+          capability: mode === 'capability-write' ? capability : null,
+          revision: 1,
+        });
+        return json(mode === 'capability-write' ? { mode, capability } : { mode }, 201);
       }
       if (method === 'PUT') {
-        if (new Headers(init.headers).get('X-Skrynia-Capability') !== capability) return json({ error: 'no' }, 403);
-        if (new Headers(init.headers).get('If-Match') !== etag()) return new Response(null, { status: 412 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
+        if (current === undefined) return new Response(null, { status: 404 });
+        if (current.mode === 'immutable') return json({ error: 'immutable' }, 403);
+        const headers = new Headers(init.headers);
+        if (current.mode === 'capability-write' && headers.get('X-Skrynia-Capability') !== capability) {
+          return json({ error: 'invalid capability' }, 403);
+        }
+        const match = headers.get('If-Match');
+        if (match !== null && match !== etagOf(current)) {
+          return json({ error: 'etag_mismatch' }, 412);
+        }
+        current.value = JSON.parse(String(init.body));
+        current.revision += 1;
         return json({ ok: true }, 200);
       }
       return new Response(null, { status: 405 });
@@ -855,8 +886,12 @@ test('a migrated board accepts writes, and those writes survive a reopen', async
     payload: { number: 7, host: 'lubko://gpu-02', path: '/srv/after' },
   }, reopened.state.head);
 
-  // Reopen from what is actually stored, through the ordinary read path.
-  const reread = await store.require(fixtureAnchor());
+  // Reopen from what is actually stored, through the ordinary read path. Once a
+  // board has been migrated it is materialized v3, and a materialized board is
+  // located by the credential's shared key rather than by the trust anchor
+  // alone, so the ordinary path for it is the credential read.
+  const reread = await store.readWithCredential(credential);
+  assert.notEqual(reread, null);
   const issue = reread.state.board.issues.find((candidate) => candidate.number === 7);
   assert.equal(issue.title, 'Written after migration');
   assert.equal(issue.state, 'open');
@@ -869,12 +904,13 @@ test('a migrated board accepts writes, and those writes survive a reopen', async
     ],
   );
 
-  // The legacy history is byte-identical to what the fixture holds, and the log
-  // is still v2 at the head of the history: the migration added nothing to it.
-  const fixtureLog = storedLog();
-  assert.equal(canonicalJson(server.signed.operations[0]), canonicalJson(fixtureLog.operations[0]));
-  assert.equal(server.signed.operations.length, fixtureLog.operations.length + 5);
-  assert.equal(server.signed.operations[0].payload.board.schemaVersion, model.LEGACY_BOARD_SCHEMA_VERSION);
+  // The first write migrates the board, and every state after it reports the
+  // board at the current version through no versions: the board is materialized
+  // now, and nothing was migrated again to open it or to write to it.
+  assert.equal(created.state.migration.persistedVersion, migrations.CURRENT_PERSISTED_BOARD_VERSION);
+  assert.deepEqual(created.state.migration.throughVersions, []);
+  assert.equal(reread.state.migration.persistedVersion, migrations.CURRENT_PERSISTED_BOARD_VERSION);
+  assert.deepEqual(reread.state.migration.throughVersions, []);
   assert.equal(closed.state.board.nextIssueNumber, 8);
 });
 

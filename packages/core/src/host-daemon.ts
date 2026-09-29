@@ -19,8 +19,8 @@ import {
  * Two boundaries are load-bearing here and are not negotiable by a caller:
  *
  *  - A daemon report is host-local observation. It is not a board mutation, it
- *    is never appended to the signed board log, and reading it requires no board
- *    credential. The catalog of execution targets stays a registration; the
+ *    is never stored in the materialized board snapshots, and reading it
+ *    requires no board credential. The catalog of execution targets stays a registration; the
  *    report is the freshness of one host behind that registration.
  *  - A report describes capacity. It carries no command-execution surface, so a
  *    daemon can never become a second transport to a host. Lubko remains the

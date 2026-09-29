@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { fakeSkrynia } from '../../core/test/fake-skrynia.mjs';
 
 import { BoardApi } from '../dist/packages/core/src/api.js';
 import { runBoardCommand } from '../dist/packages/cli/src/board.js';
@@ -14,40 +15,6 @@ function jsonResponse(value, status = 200, etag) {
   const headers = { 'Content-Type': 'application/json' };
   if (etag !== undefined) headers.ETag = etag;
   return new Response(JSON.stringify(value), { status, headers });
-}
-
-function fakeSkrynia() {
-  const capability = 'a'.repeat(64);
-  let signed = null;
-  let revision = 0;
-  const etag = () => `"v${revision}"`;
-
-  return {
-    capability,
-    get signed() { return signed; },
-    async fetch(url, init = {}) {
-      const method = init.method ?? 'GET';
-      if (!String(url).endsWith('/store/antonina/board-v2')) return new Response(null, { status: 404 });
-      if (method === 'GET') {
-        return signed === null ? new Response(null, { status: 404 }) : jsonResponse(signed, 200, etag());
-      }
-      if (method === 'POST') {
-        if (signed !== null) return new Response(null, { status: 409 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return jsonResponse({ mode: 'capability-write', capability }, 201);
-      }
-      if (method === 'PUT') {
-        const headers = new Headers(init.headers);
-        if (headers.get('X-Skrynia-Capability') !== capability) return jsonResponse({ error: 'invalid capability' }, 403);
-        if (headers.get('If-Match') !== etag()) return new Response(null, { status: 412 });
-        signed = JSON.parse(String(init.body));
-        revision += 1;
-        return new Response(null, { status: 200 });
-      }
-      return new Response(null, { status: 405 });
-    },
-  };
 }
 
 function client(server, options = {}) {
@@ -240,7 +207,7 @@ test('the target commands parse only the typed vocabulary', async () => {
 
 test('the new read commands name initialization while the board is missing', async () => {
   const server = fakeSkrynia();
-  const missing = 'antonina board: Antonina signed board does not exist; run: antonina board initialize to create it';
+  const missing = 'antonina board: Antonina board does not exist; run: antonina board initialize to create it';
   for (const command of [['target', 'list'], ['target', 'show', 'phoebe-dev'], ['dispatch', 'select'], ['dispatch', 'record', '1']]) {
     const { code, err } = await run(command, client(server));
     assert.equal(code, 1, command.join(' '));

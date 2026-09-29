@@ -10,9 +10,8 @@ process.env.XDG_CONFIG_HOME = '/nonexistent-antonina-web-app-mount-config';
 
 import App from './App';
 import { DEFAULT_FEED_LIMIT, type BoardFeedEntry, type BoardFeedEntryKind, type BoardFeedPage, type BoardFeedRequest } from './api';
-import type { Board, BoardIssue } from './model';
-import { BOARD_SCHEMA_VERSION } from '../../packages/core/src/model';
-import type { VerifiedBoardState } from '../../packages/core/src/operations';
+import type { BoardIssue } from './model';
+import type { BoardOverview } from '../../packages/core/src/api';
 import type { BoardAccessState } from '../../packages/core/src/api';
 import type { BrowserBoardSession } from './api';
 
@@ -35,9 +34,21 @@ const STAMP = '2026-09-27T12:00:00.000Z';
  * the error and first-run paths, the feed tab — is the production component
  * tree, mounted.
  */
+const allIssues = new Map<number, BoardIssue>();
+
 const session = {
-  api: { accessState: (): BoardAccessState => ({ boardId: 'board-1', keyId: null, rootKeyId: 'root-1', capabilities: [], credentialRejection: null, storageRejected: false, canEdit: false }) },
-  readState: vi.fn<() => Promise<VerifiedBoardState | null>>(),
+  api: {
+    accessState: (): BoardAccessState => ({ boardId: 'board-1', keyId: null, rootKeyId: 'root-1', capabilities: [], credentialRejection: null, storageRejected: false, canEdit: false }),
+    // The list is rendered from the overview's issue summaries, so a thread is
+    // hydrated on open rather than carried in the list read. The stub answers
+    // from the same issue bodies the fixtures are built from.
+    getIssue: async (number: number): Promise<BoardIssue> => {
+      const found = allIssues.get(number);
+      if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
+      return found;
+    },
+  },
+  readOverview: vi.fn<() => Promise<BoardOverview | null>>(),
   hasCredential: vi.fn(() => false),
   readFeed: vi.fn<(request?: BoardFeedRequest) => Promise<BoardFeedPage>>(),
   trust: vi.fn(),
@@ -63,16 +74,33 @@ function issue(number: number, overrides: Partial<BoardIssue> = {}): BoardIssue 
   return { number, title: `Issue ${number}`, body: `Body of issue ${number}`, state: 'open', createdAt: STAMP, updatedAt: STAMP, messages: [], ...overrides };
 }
 
-function board(issues: BoardIssue[]): Board {
-  return { schemaVersion: BOARD_SCHEMA_VERSION, nextIssueNumber: issues.length + 1, issues, resources: [], targets: [], dispatches: [] };
-}
-
-function state(issues: BoardIssue[]): VerifiedBoardState {
-  // `migration` is required on VerifiedBoardState since board issue 73 made the
-  // migration gate mandatory, so a fixture that omits it no longer type-checks.
-  // A current-format board persists at the current version and steps through
-  // nothing, which is what the real gate reports for it.
-  return { board: board(issues), queue: issues.filter((each) => each.state === 'open').map((each) => each.number), authorities: [], deleted: false, head: 'op-1', migration: { persistedVersion: BOARD_SCHEMA_VERSION, throughVersions: [] } };
+// The UI reads the materialized overview rather than a whole verified state:
+// list pages, the queue and the catalog, with issue bodies left unloaded. So a
+// fixture is an overview, and it carries no migration report, because opening
+// an overview reads materialized snapshots and reconstructs no history.
+function overview(issues: BoardIssue[]): BoardOverview {
+  allIssues.clear();
+  for (const each of issues) allIssues.set(each.number, each);
+  return {
+    boardId: 'board-1',
+    head: 'op-1',
+    revision: 1,
+    deleted: false,
+    queue: issues.filter((each) => each.state === 'open').map((each) => each.number),
+    issues: issues.map((each) => ({
+      number: each.number,
+      title: each.title,
+      state: each.state,
+      createdAt: each.createdAt,
+      updatedAt: each.updatedAt,
+      closedAt: each.state === 'closed' ? each.updatedAt : null,
+      messageCount: each.messages.length,
+      hasBody: each.body.length > 0,
+    })),
+    resources: [],
+    targets: [],
+    dispatches: [],
+  };
 }
 
 let sequence = 0;
@@ -88,16 +116,17 @@ function feedPage(entries: BoardFeedEntry[], nextCursor: string | null = null): 
 async function mountApp(): Promise<HTMLElement> {
   const { container } = render(<App />);
   expect(container.isConnected).toBe(true);
-  await waitFor(() => expect(session.readState).toHaveBeenCalled());
+  await waitFor(() => expect(session.readOverview).toHaveBeenCalled());
   return container;
 }
 
 beforeEach(() => {
   window.localStorage.clear();
-  session.readState.mockReset();
+  allIssues.clear();
+  session.readOverview.mockReset();
   session.readFeed.mockReset();
   session.readFeed.mockResolvedValue(feedPage([]));
-  session.readState.mockResolvedValue(state([issue(1), issue(2, { state: 'closed' })]));
+  session.readOverview.mockResolvedValue(overview([issue(1), issue(2, { state: 'closed' })]));
 });
 
 afterEach(cleanup);
@@ -145,7 +174,7 @@ describe('the board app, mounted', () => {
     // A realistic failure: the browser cannot read the board at all. The shell
     // must say so in its own words, with the backend's reason attached, and must
     // not present an empty board that looks like a board with nothing on it.
-    session.readState.mockRejectedValue(new Error('the board log is not readable from this browser'));
+    session.readOverview.mockRejectedValue(new Error('the board log is not readable from this browser'));
 
     await mountApp();
 
@@ -159,7 +188,7 @@ describe('the board app, mounted', () => {
   it('offers first run, not an error, when there is no board yet', async () => {
     // The other realistic failure, and the one a broken import or a bad prop
     // would most plausibly turn into a crash or a blank page.
-    session.readState.mockResolvedValue(null);
+    session.readOverview.mockResolvedValue(null);
 
     await mountApp();
 

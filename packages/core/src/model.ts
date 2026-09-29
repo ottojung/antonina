@@ -1395,7 +1395,10 @@ export function parseCanonicalBoard(value: unknown): Board {
 
 export const parseBoard = parseCanonicalBoard;
 
-export function resourceState(resource: BoardResource, issues: BoardIssue[]): ResourceState {
+export function resourceState(
+  resource: BoardResource,
+  issues: readonly Pick<BoardIssue, 'number' | 'state'>[],
+): ResourceState {
   return resource.issueNumbers.some((number) => issues.find((issue) => issue.number === number)?.state === 'open')
     ? 'protected'
     : 'collectible';
@@ -1434,7 +1437,19 @@ export function targetIdForHost(board: Board, host: string): string | null {
   return board.targets.find((target) => target.address === host)?.id ?? null;
 }
 
-export function targetViews(board: Board): TargetView[] {
+/**
+ * The catalogued targets joined with the resources and dispatches that name
+ * them.
+ *
+ * The parameter is the narrow projection of a board this actually needs — the
+ * target catalog, the resource registry, and the dispatch list — rather than a
+ * whole `Board`, because the reading web client holds is a materialized
+ * summary carrying exactly those three, and a whole-board read to render the
+ * target tab would contradict "a client reads only the objects it needs".
+ */
+export function targetViews(
+  board: Pick<Board, 'resources' | 'targets' | 'dispatches'>,
+): TargetView[] {
   return board.targets.map((target) => ({
     ...target,
     capabilities: [...target.capabilities],

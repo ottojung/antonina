@@ -206,7 +206,7 @@ describe('the feed tab', () => {
       // tell, because it holds both halves.
       const markup = renderToStaticMarkup(<FeedThread {...props({ entries: [entry('comment-added', 2)], total: 1, issues: [issue(1), issue(2)] })} />);
 
-      expect(markup).toContain('already on the board when the signed log began');
+      expect(markup).toContain('already on the board when the materialized feed began');
       expect(markup).toContain('#1');
       expect(markup).not.toContain('#2,');
     });
@@ -215,7 +215,7 @@ describe('the feed tab', () => {
       const markup = renderToStaticMarkup(<FeedThread {...props({ entries: [], total: 0, issues: [issue(1), issue(2)] })} />);
 
       expect(markup).toContain('No activity recorded yet');
-      expect(markup).toContain('already on the board when the signed log began');
+      expect(markup).toContain('already on the board when the materialized feed began');
       expect(markup).toContain('#1, #2');
     });
 

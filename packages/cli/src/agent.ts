@@ -152,9 +152,12 @@ function requireMeta(agentId: string, context: AgentCommandContext): AgentMetada
   return meta;
 }
 
-async function reconcileAgent(agentId: string, context: AgentCommandContext): Promise<void> {
-  if (readMeta(agentId, paths(context)) === null) return;
-  await updateMeta(agentId, (meta) => { reconcileDeadMeta(meta); }, paths(context));
+async function reconcileAgent(agentId: string, context: AgentCommandContext): Promise<AgentMetadata | null> {
+  const observed = readMeta(agentId, paths(context));
+  if (observed === null) return null;
+  if (persistedLifecycleState(observed) !== 'running') return observed;
+  if (!reconcileDeadMeta(observed)) return observed;
+  return updateMeta(agentId, (meta) => { reconcileDeadMeta(meta); }, paths(context));
 }
 
 function agentIds(context: AgentCommandContext): string[] {
@@ -259,8 +262,7 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
   const limit = parsed.values.has('--limit') ? positiveInteger(parsed.values.get('--limit'), '--limit') : null;
   const entries: Array<{ agentId: string; meta: AgentMetadata; state: string; summary: ReturnType<typeof summary> }> = [];
   for (const agentId of agentIds(context)) {
-    await reconcileAgent(agentId, context);
-    const meta = readMeta(agentId, paths(context));
+    const meta = await reconcileAgent(agentId, context);
     if (meta === null) continue;
     const state = deriveState(meta);
     if (!matchesFilters(parsed, state)) continue;

@@ -76,8 +76,9 @@ function ageAndArmOwnership(t, id) {
       // rung is in fact unreachable from this guard — `reservationInFlight`
       // returns false outright when `active_runner` is false, so the only
       // fixtures that get past the earlier term are exactly the ones where the
-      // reservation term is already false. See `lifecycle.test.mjs:194` for the
-      // case that does pin the rung's true branch.
+      // reservation term is already false. See the `owned` fixture in the
+      // "GAP-RT-2" test in `lifecycle.test.mjs` for the case that does pin the
+      // rung's true branch.
       owner_pid: process.pid,
       owner_start_ticks: procStartTicks(process.pid),
       reserved_at: 1,

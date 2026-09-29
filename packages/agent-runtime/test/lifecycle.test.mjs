@@ -250,9 +250,10 @@ test('a running record is never reconciled to failed while a live runner or an i
   //    its own merits once the grace window has expired. Every fixture above sits
   //    inside that window or names a pid that does not exist, so the rung was only
   //    ever reached returning false. This one is genuinely past the window and
-  //    names a real, live owner, with its REAL start ticks: `reservationOwnerAlive`
-  //    compares `procStartTicks(ownerPid)` to `owner_start_ticks`, so a placeholder
-  //    like 1 would fail the check and miss the rung this case exists to pin.
+  //    names a real, live owner, with its REAL start ticks. The sibling case in
+  //    step 4b below is what holds the codebase to the rest of the rung's
+  //    contract: that the identity comparison, not mere pid liveness, is what
+  //    decides ownership.
   const owned = idleMeta(AGENT_ID, '/tmp', null, 1);
   beginInvocation(owned, 'work', 10, 1);
   owned.active_runner = true;
@@ -276,6 +277,33 @@ test('a running record is never reconciled to failed while a live runner or an i
   assert.equal(reconcileDeadMeta(owned, 80), false, 'a live reservation owner must veto the failed transition');
   assert.equal(owned.state, 'running');
   assert.equal(owned.finished_at, null);
+
+  // 4b. The negative half of the same rung, and the only case that pins it: the
+  //     owner pid is genuinely live and the reservation is exactly as far out of
+  //     grace as the fixture above, but `owner_start_ticks` is a placeholder that
+  //     does not match this process's real start ticks. A live pid whose start
+  //     ticks disagree is a recycled pid, not the owner that reserved the work,
+  //     so the reservation is not in flight. Deleting the start-ticks comparison
+  //     from `reservationOwnerAlive` (leaving only the `kill(pid, 0)` liveness
+  //     probe) makes this assertion fail.
+  const recycled = idleMeta(AGENT_ID, '/tmp', null, 1);
+  beginInvocation(recycled, 'work', 10, 1);
+  recycled.active_runner = true;
+  recycled.runner_pid = null;
+  recycled.runner_start_time = null;
+  recycled.runner_reservation = {
+    state: 'reserved',
+    gen: 1,
+    mode: 'new',
+    reserved_at: 74,
+    owner_pid: child.pid,
+    owner_start_ticks: 1,
+  };
+  assert.equal(
+    reservationInFlight(recycled, 80),
+    false,
+    'a live pid whose start ticks do not match the reservation is a recycled pid, not the owner',
+  );
 });
 
 // A different, equally well-formed agent id. Used to prove liveness is decided

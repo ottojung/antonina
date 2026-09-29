@@ -510,8 +510,12 @@ test('delete --force cancels an in-flight runner reservation and reports it', (t
       state: 'reserved',
       gen: 1,
       mode: 'new',
-      // This test process is alive and these are its real identity facts, so
-      // the reservation owner check holds without relying on the grace window.
+      // This test process is alive and these are its real identity facts, so the
+      // reservation is well-formed and held by a live owner. This fixture does
+      // NOT exercise `reservationOwnerAlive`: `cmdDelete`'s `ownsWork` tests
+      // `deriveState(observed) === 'running'` first, and this fixture sets
+      // `state: 'running'`, so the reservation rung is never reached. The
+      // reservation facts here are shape, not coverage.
       owner_pid: process.pid,
       owner_start_ticks: procStartTicks(process.pid),
       reserved_at: 1,

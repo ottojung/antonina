@@ -15,16 +15,24 @@
 //      evaluates, and the app mounts past its loading state;
 //   2. the board is loaded *and verified*: the app reaches its board shell, not
 //      the trust prompt and not an error page. Verification is the app's own —
-//      this probe hands it a public trust anchor and the core parser does the
+//      the probe hands it a public trust anchor and the core parser does the
 //      signature and log replay, exactly as it does in a browser;
 //   3. the issue list is populated;
 //   4. the feed is populated;
 //   5. a failure prints the *application's own* error text, not just a status.
 //
-// Read-only, by construction: the only interaction is navigation and reading.
-// No form is ever submitted, no button that writes is ever clicked, and no
-// credential is used — the trust anchor is a public key and the probe never
-// stores one. A deployment that fails this probe leaves production untouched.
+// Read-only against the board, by construction: the only interaction with it is
+// navigation and reading. No form is ever submitted, no button that writes is
+// ever clicked, and nothing is ever written to a board.
+//
+// Two secrets go into the throwaway browser profile and nowhere else: the public
+// trust anchor, and the board credential. Both are needed, and neither is
+// optional in practice. `BoardApi.readStored` refuses every read that has no
+// credential, so the anchor alone gets the browser to the credential screen of a
+// perfectly healthy board — a false red about a healthy deployment. Neither
+// secret is printed, sent to the board, or written to any Antonina state
+// directory, and both die with the profile. A deployment that fails this probe
+// leaves production untouched.
 //
 // The verdicts are `judgeBoard`, `judgeFeed`, and the browser console check at
 // the end of the session, which reads the one W3C log type that exists (`browser`)
@@ -35,13 +43,15 @@
 //
 // Usage:
 //   node scripts/deploy-smoke.mjs --url https://host/a/antonina/ \
-//     [--trust-anchor TEXT | --trust-anchor-file PATH] \
+//     --trust-anchor TEXT --board-credential TEXT \
 //     [--chromedriver PATH] [--timeout MS] [--min-issues N] [--min-feed N]
 //
 // The trust anchor may also come from ANTONINA_BOARD_TRUST_ANCHOR or
-// ANTONINA_BOARD_TRUST_ANCHOR_FILE. Without an anchor the probe cannot ask the
-// app to verify anything, so it reports the trust screen as a failure rather
-// than passing a board it never read.
+// ANTONINA_BOARD_TRUST_ANCHOR_FILE, and the board credential from
+// ANTONINA_BOARD_CREDENTIAL or ANTONINA_BOARD_CREDENTIAL_FILE. Without the
+// credential the application refuses every read, so the probe cannot see a board
+// even when the deployment is serving one perfectly; it reports that as the
+// probe's own missing input rather than as a broken deployment.
 //
 // Exit codes:
 //   0  the board loaded, was verified, and rendered issues and feed entries
@@ -67,6 +77,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 export const PROBE_USAGE = [
   'Usage: node scripts/deploy-smoke.mjs --url URL [--trust-anchor TEXT|--trust-anchor-file PATH]',
+  '                             [--board-credential TEXT|--board-credential-file PATH]',
   '                             [--chromedriver PATH] [--timeout MS] [--min-issues N] [--min-feed N]',
 ].join('\n');
 
@@ -80,10 +91,25 @@ const DEFAULTS = {
 /** Storage key the app itself reads the trust anchor from (core credential.ts). */
 export const BOARD_TRUST_STORAGE_KEY = 'antonina:board-v2:trust';
 
+/**
+ * Storage key the app itself reads the board *credential* from.
+ *
+ * This is the other half of the browser's board access, and the probe needs it:
+ * `BoardApi.readStored` (packages/core/src/api.ts) refuses every read that has
+ * no credential, reporting `BoardTrustRequiredError` when a board exists and
+ * `BoardMissingError` when it does not. A public trust anchor lets the app
+ * *verify* a board; it grants no read access. Since "Make every existing board
+ * key full-access" (ebe8c17) moved that check from "has an anchor" to "has a
+ * credential", a probe that stores only an anchor lands on the credential
+ * screen on a perfectly healthy deployment, and the positive half of issue 74
+ * is unreachable: there is no input that makes it pass.
+ */
+export const BOARD_CREDENTIAL_STORAGE_KEY = 'antonina:board-v2:credential';
+
 export class ProbeUsageError extends Error {}
 
 export function parseArgs(argv) {
-  const options = { ...DEFAULTS, url: null, trustAnchor: null, chromedriver: 'chromedriver' };
+  const options = { ...DEFAULTS, url: null, trustAnchor: null, boardCredential: null, chromedriver: 'chromedriver' };
   const value = (flag, index) => {
     const next = argv[index + 1];
     if (next === undefined || next.startsWith('--')) throw new ProbeUsageError(`${flag} requires a value`);
@@ -94,6 +120,8 @@ export function parseArgs(argv) {
     if (arg === '--url') { options.url = value(arg, i); i += 1; }
     else if (arg === '--trust-anchor') { options.trustAnchor = value(arg, i); options.trustAnchorSource = arg; i += 1; }
     else if (arg === '--trust-anchor-file') { options.trustAnchor = readFileSync(value(arg, i), 'utf8'); options.trustAnchorSource = arg; i += 1; }
+    else if (arg === '--board-credential') { options.boardCredential = value(arg, i); options.boardCredentialSource = arg; i += 1; }
+    else if (arg === '--board-credential-file') { options.boardCredential = readFileSync(value(arg, i), 'utf8'); options.boardCredentialSource = arg; i += 1; }
     else if (arg === '--chromedriver') { options.chromedriver = value(arg, i); i += 1; }
     else if (arg === '--timeout') { options.timeout = Number(value(arg, i)); i += 1; }
     else if (arg === '--min-issues') { options.minIssues = Number(value(arg, i)); i += 1; }
@@ -120,6 +148,16 @@ export function parseArgs(argv) {
     }
   }
   if (options.trustAnchor !== null) options.trustAnchor = options.trustAnchor.trim();
+  if (options.boardCredential === null) {
+    if (process.env.ANTONINA_BOARD_CREDENTIAL) {
+      options.boardCredential = process.env.ANTONINA_BOARD_CREDENTIAL;
+      options.boardCredentialSource = 'ANTONINA_BOARD_CREDENTIAL';
+    } else if (process.env.ANTONINA_BOARD_CREDENTIAL_FILE) {
+      options.boardCredential = readFileSync(process.env.ANTONINA_BOARD_CREDENTIAL_FILE, 'utf8');
+      options.boardCredentialSource = `ANTONINA_BOARD_CREDENTIAL_FILE (${process.env.ANTONINA_BOARD_CREDENTIAL_FILE})`;
+    }
+  }
+  if (options.boardCredential !== null) options.boardCredential = options.boardCredential.trim();
   // Checked here as well as in runProbe, so the command line rejects a bad
   // secret at parse time and never reaches the browser; runProbe repeats it
   // because it is the public entry and cannot assume it came through here.
@@ -164,6 +202,44 @@ function checkTrustAnchorShape(text, source) {
     if (typeof value[key] !== 'string' || value[key] === '') {
       throw new ProbeUsageError(`the trust anchor from ${source} has no usable ${key}`);
     }
+  }
+}
+
+/**
+ * The shape a board credential has to have, checked before it reaches the browser.
+ *
+ * The same reasoning as `checkTrustAnchorShape`, and it exists because the two
+ * secrets are confusable at the command line: a trust anchor and a board
+ * credential are both JSON, both are "the board secret", and passing one where
+ * the other belongs produces a browser that stores something the application
+ * then silently refuses — which reads as a broken deployment rather than as a
+ * mistyped flag. The keys are `parseBoardCredential`'s
+ * (packages/core/src/credential.ts:76-95), kept literal for the same
+ * single-file reason; the test file asserts the two lists agree.
+ *
+ * Reject-only, like every other check here: it can turn a pass into a red and
+ * never the reverse. It never logs or echoes the secret, which is why it does
+ * not report which *value* was wrong, only which key was missing.
+ */
+function checkBoardCredentialShape(text, source) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    throw new ProbeUsageError(`the board credential from ${source} is not valid JSON (${error.message})`);
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ProbeUsageError(`the board credential from ${source} is not a JSON object`);
+  }
+  const keys = Object.keys(value).sort();
+  const wanted = [
+    'boardId', 'keyId', 'privateKey', 'publicKey',
+    'rootKeyId', 'rootPublicKey', 'schemaVersion', 'storageCapability',
+  ];
+  if (keys.length !== wanted.length || keys.some((key, index) => key !== wanted[index])) {
+    throw new ProbeUsageError(`the board credential from ${source} has keys [${keys.join(', ')}] `
+      + `but must have exactly [${wanted.join(', ')}]; it is the board credential, not the trust anchor `
+      + 'and not the contents of credential.json');
   }
 }
 
@@ -418,14 +494,23 @@ export function judgeBoard(observation, options) {
   }
   if (observation.state === 'untrusted') {
     // This is the `untrusted` load status, which the application reaches when it
-    // cannot read the board without a board *credential* — a public trust
-    // anchor only lets it verify; it does not grant read access. So this screen
-    // means the probe could not read the board, and it must say which of the two
-    // causes it was: the probe was handed nothing, or the deployment is serving
-    // a board this browser cannot open.
-    if (options.trustAnchor === null) {
-      return 'the board is present but this browser cannot verify it, and no trust anchor was supplied, so the board was never read. '
-        + 'Pass --trust-anchor (or ANTONINA_BOARD_TRUST_ANCHOR) to make the probe read and verify the deployed board.';
+    // cannot read the board without a board *credential* — a public trust anchor
+    // only lets it verify; it does not grant read access. So this screen means
+    // the probe could not read the board, and the two causes have to be told
+    // apart, because they are not the same operator action.
+    if (options.trustAnchor === null && (options.boardCredential ?? null) === null) {
+      return 'the board is present but this browser cannot open it, and the probe was given no board secret at all, so the board was never read. '
+        + 'Pass --trust-anchor (or ANTONINA_BOARD_TRUST_ANCHOR) together with --board-credential '
+        + '(or ANTONINA_BOARD_CREDENTIAL) to make the probe read and verify the deployed board. '
+        + 'A trust anchor alone is not enough: the application refuses every read that has no board credential.';
+    }
+    if ((options.boardCredential ?? null) === null) {
+      // The precise shape of this false red, and the one an operator would
+      // otherwise report as a broken deployment. Say it as the cause, not as a
+      // symptom to investigate.
+      return 'the probe stored a trust anchor but no board credential, and the application refused the read: '
+        + 'a trust anchor is a public key that only permits verification, and the deployed board is unreadable without its credential. '
+        + 'This is the probe\'s input, not the deployment. Pass --board-credential to make the probe able to read the board.';
     }
     return `the application asked for a board credential instead of showing the board, so the deployed board was never read: ${observation.firstRunBody || observation.firstRunTitle || '(no reason printed)'}`;
   }
@@ -570,11 +655,19 @@ export function overallBudgetMs(options) {
  */
 export async function runProbe(options, { report = () => {} } = {}) {
   const started = Date.now();
+  // runProbe is the public entry and callers construct the options object
+  // themselves, so "not supplied" arrives as either `null` or a missing key.
+  // Normalising here means every check below is one comparison, and an omitted
+  // secret is absent rather than an `undefined` that reads as a malformed one.
+  options = { ...options, trustAnchor: options.trustAnchor ?? null, boardCredential: options.boardCredential ?? null };
   // Before anything is created or launched, so a bad secret costs no browser
   // and no profile: runProbe is the public entry and the check cannot live only
   // in parseArgs, which a caller may not have gone through.
   if (options.trustAnchor !== null) {
     checkTrustAnchorShape(options.trustAnchor, options.trustAnchorSource ?? 'the trust anchor');
+  }
+  if (options.boardCredential !== null) {
+    checkBoardCredentialShape(options.boardCredential, options.boardCredentialSource ?? 'the board credential');
   }
   const driverProcess = await startDriver(options);
   try {
@@ -635,12 +728,25 @@ async function probeSession(options, driverProcess, report) {
     // SEVERE, so that is the level that is kept — matching on the *level*
     // rather than on a bracketed tag in the message, which Chrome log entries
     // do not carry and which made this filter discard everything.
+    //
+    // And then the `source`, which is the part that had to be measured. Every
+    // SEVERE entry is not an application fault: a failed subresource fetch is
+    // reported at SEVERE with `source: 'network'`, and a page that never
+    // requests a favicon.ico therefore produces one on every single run. This
+    // check fired on the very first healthy board the suite ever loaded, on
+    // `favicon.ico` 404, with the issue list and the feed both populated. A
+    // check that is red on a healthy deployment every time is a check operators
+    // learn to ignore, so it keeps what it is actually for — a *script* fault
+    // (`source: 'javascript'`, an uncaught exception, and `'console-api'`, an
+    // explicit `console.error`). A board that fails to load is not lost by
+    // ignoring network entries: it renders its own error text, and `judgeBoard`
+    // reports that text, which is a far better diagnosis than a 404 line.
     const collectLogs = async () => {
       try {
         for (const entry of await driver.logs('browser')) {
-          if (entry.level === 'SEVERE' || entry.level === 'ERROR') {
-            consoleErrors.push(`${entry.level}: ${entry.message}`);
-          }
+          if (entry.level !== 'SEVERE' && entry.level !== 'ERROR') continue;
+          if (entry.source === 'network') continue;
+          consoleErrors.push(`${entry.level} [${entry.source ?? 'unknown'}]: ${entry.message}`);
         }
       } catch (error) {
         // A driver that cannot serve logs must not decide the verdict, but it
@@ -651,13 +757,29 @@ async function probeSession(options, driverProcess, report) {
     };
 
     // Load the origin once so the app's own origin is established, then set the
-    // trust anchor and reload. The anchor is a public key: this is the whole of
-    // what the probe writes, it goes to the browser profile and never to the
-    // board, and no credential is involved at any point.
+    // board secrets and reload.
+    //
+    // Two secrets, and they are not interchangeable on current main. The trust
+    // anchor is a public key: it lets the application verify the board's
+    // signatures. The board *credential* is what grants the read — `readStored`
+    // refuses every credential-less read. Storing only the anchor produces a
+    // browser on the credential screen of a perfectly healthy board, which is a
+    // false red about the deployment, so the credential is stored too whenever
+    // the caller supplied one.
+    //
+    // Both go to the throwaway browser profile and nowhere else. Neither is
+    // sent to the board, printed, or written to any Antonina state directory,
+    // and both die with the profile.
     await driver.navigate(options.url);
-    if (options.trustAnchor !== null) {
-      const stored = await driver.script(STORE_TRUST, [BOARD_TRUST_STORAGE_KEY, options.trustAnchor]);
-      if (!stored) throw new SmokeFailure('the trust anchor could not be stored in the browser; the probe cannot verify the board');
+    if (options.trustAnchor !== null || options.boardCredential !== null) {
+      if (options.trustAnchor !== null) {
+        const stored = await driver.script(STORE_TRUST, [BOARD_TRUST_STORAGE_KEY, options.trustAnchor]);
+        if (!stored) throw new SmokeFailure('the trust anchor could not be stored in the browser; the probe cannot verify the board');
+      }
+      if (options.boardCredential !== null) {
+        const stored = await driver.script(STORE_TRUST, [BOARD_CREDENTIAL_STORAGE_KEY, options.boardCredential]);
+        if (!stored) throw new SmokeFailure('the board credential could not be stored in the browser; the probe cannot read the board');
+      }
       await driver.navigate(options.url);
     }
     report(`probe: loaded ${options.url}`);

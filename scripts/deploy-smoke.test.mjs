@@ -50,6 +50,7 @@ import { after, test } from 'node:test';
 import {
   runProbe, judgeBoard, judgeFeed, parseArgs, classifyObservation, overallBudgetMs,
   ProbeUsageError, ProbeTimeout, SmokeFailure, APP_STATE_TITLES, OBSERVE_BOARD,
+  BOARD_CREDENTIAL_STORAGE_KEY, BOARD_TRUST_STORAGE_KEY,
 } from './deploy-smoke.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -94,7 +95,7 @@ function requireWebBuild() {
  * `boardMode` is what the deployment can do to the store underneath a perfectly
  * good page, and it is the only thing the broken cases change:
  *   'ok'          - the signed board is served as committed
- *   'tampered'    - a committed operation's payload is rewritten in transit, so
+ *   'tampered'    - the board pointer's signed head is rewritten in transit, so
  *                   signature verification must refuse it
  *   'server-error'- the store answers 500 with a body that is not a board
  *
@@ -115,7 +116,7 @@ const openInstances = [];
 async function startLocalAntonina(boardMode) {
   const { BoardApi } = await import(join(repoRoot, 'packages', 'core', 'dist', 'api.js'));
   const { SignedBoardStore } = await import(join(repoRoot, 'packages', 'core', 'dist', 'board-store.js'));
-  const { credentialTrustAnchor, serializeBoardTrustAnchor } = await import(join(repoRoot, 'packages', 'core', 'dist', 'credential.js'));
+  const { credentialTrustAnchor, serializeBoardTrustAnchor, serializeBoardCredential } = await import(join(repoRoot, 'packages', 'core', 'dist', 'credential.js'));
   const { fakeSkrynia } = await import(join(repoRoot, 'packages', 'core', 'test', 'fake-skrynia.mjs'));
 
   // The failure mode is switched on only after the fixture board is committed,
@@ -123,6 +124,10 @@ async function startLocalAntonina(boardMode) {
   // not a board this fixture never managed to create.
   let broken = false;
   const skrynia = fakeSkrynia();
+  // What the store actually served, and what the tamper hook actually altered, so
+  // a test can assert the hook matched rather than assume it did.
+  const served = new Set();
+  const tampered = new Set();
 
   const server = createServer((request, response) => {
     void handle(request, response).catch((error) => {
@@ -171,13 +176,15 @@ async function startLocalAntonina(boardMode) {
       // `Response.body` is a stream; what this server has to write is the text.
       const text = await answer.text();
       // The 0.1.1 shape: the app is served fine, the board under it cannot be
-      // verified. One committed operation's title is rewritten on the way out,
-      // so the signature no longer covers the payload. It is rewritten in
-      // transit rather than in the store, so what is stored stays valid and the
-      // only thing that is broken is the deployment serving it.
-      if (broken && isRead && boardMode === 'tampered' && keyOf(url.pathname).startsWith('board-v3-')) {
-        const altered = withTamperedIssue(text);
+      // verified. The signed head is rewritten on the way out, so the signature
+      // no longer covers what is being served. It is rewritten in transit rather
+      // than in the store, so what is stored stays valid and the only thing that
+      // is broken is the deployment serving it.
+      if (broken && isRead && boardMode === 'tampered' && keyOf(url.pathname) === 'board-v2') {
+        served.add(keyOf(url.pathname));
+        const altered = withTamperedHead(text);
         if (altered !== null) {
+          tampered.add(keyOf(url.pathname));
           const etag = answer.headers.get('ETag');
           return send(200, altered, etag === null ? {} : { ETag: etag });
         }
@@ -193,17 +200,35 @@ async function startLocalAntonina(boardMode) {
     return send(404, { error: 'not found' });
   }
 
-  /** A served object with one `issue.create` payload altered, or null if it is not a log. */
-  function withTamperedIssue(body) {
+  /**
+   * A served object with a signed field altered, or null if it is not one.
+   *
+   * This has to name the object that is actually signed, and it used not to. An
+   * earlier revision rewrote an `issue.create` payload in the v2 signed log;
+   * the store has since moved to materialized v3 snapshots, where the log is
+   * gone and an issue lives at `issue` inside an immutable `board-v3-*` object.
+   *
+   * The v3 revision first rewrote the *snapshot*, and that was wrong in a way
+   * that mattered: `ShardedBoardStore.getJson` verifies neither a content hash
+   * against the key nor a signature over the body, so a rewritten snapshot is
+   * accepted silently and the app renders the attacker's title. The probe
+   * passed against a deployment that was serving a board nobody signed. That is
+   * a fail-open in the worst direction and no reading of the probe finds it.
+   *
+   * What the v3 layout does sign is the `board-v2` *pointer*, through its
+   * `head`: that is the signed log head the whole snapshot set hangs off. So
+   * this alters `head` on the pointer, leaving the snapshots perfectly valid
+   * and reachable — the failure is then exactly "the signature does not cover
+   * what is being served", which is what the case is named for.
+   */
+  function withTamperedHead(body) {
     let value;
     try { value = JSON.parse(body); } catch { return null; }
-    const operations = Array.isArray(value) ? value : value?.operations;
-    if (!Array.isArray(operations)) return null;
-    if (!operations.some((operation) => operation?.kind === 'issue.create')) return null;
+    if (value === null || typeof value !== 'object' || typeof value.head !== 'string') return null;
     const altered = structuredClone(value);
-    for (const operation of (Array.isArray(value) ? altered : altered.operations)) {
-      if (operation?.kind === 'issue.create') { operation.payload.title = 'tampered in transit'; break; }
-    }
+    // One character changed, so this is still a well-formed digest reference
+    // and the failure cannot be mistaken for a malformed store.
+    altered.head = `sha256:${altered.head.slice('sha256:'.length, -1)}${altered.head.endsWith('A') ? 'B' : 'A'}`;
     return altered;
   }
 
@@ -238,8 +263,15 @@ async function startLocalAntonina(boardMode) {
 
   return {
     origin,
+    // The live sets, not copies of them: the reads that carry these objects are
+    // the application's, and they happen after this function has returned.
+    served,
+    tampered,
     url: `${origin}${APP_PATH}`,
     trustAnchor: serializeBoardTrustAnchor(trustAnchor),
+    // Both secrets, because the deployed probe needs both: an anchor permits
+    // verification only, and readStored refuses a read with no credential.
+    boardCredential: serializeBoardCredential(initialized.credential),
     close,
   };
 }
@@ -248,6 +280,7 @@ function probeOptions(local, extra = {}) {
   return {
     url: local.url,
     trustAnchor: local.trustAnchor,
+    boardCredential: local.boardCredential,
     chromedriver: process.env.CHROMEDRIVER ?? 'chromedriver',
     timeout: 40_000,
     minIssues: 1,
@@ -270,6 +303,7 @@ function runProbeProcess(local, extraArgs = []) {
       probeScript,
       '--url', local.url,
       '--trust-anchor', local.trustAnchor,
+      '--board-credential', local.boardCredential,
       '--timeout', '40000',
       ...extraArgs,
     ], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
@@ -459,13 +493,50 @@ test('a deployment that serves HTML but cannot verify the board fails, exit 1', 
   assert.match(run.stderr, /The board could not be loaded/);
 });
 
+test('the tampering fixture actually tampers with something the store served', { timeout: 180_000 }, async () => {
+  // The fail-open this guards against is specific and it already happened once:
+  // the tamper hook was written for the v2 signed log, the store had moved to
+  // v3 materialized snapshots, the hook matched nothing, and the "broken
+  // deployment" served a valid board — so the case above was green for a
+  // reason that had nothing to do with the probe.
+  //
+  // Asserting the fixture is *effective* separately from asserting the probe
+  // *rejects* it means the two cannot be confused again. A hook that stops
+  // matching is a loud red here, naming the shapes the store actually served.
+  const local = await startLocalAntonina('tampered');
+  try {
+    // Driven through a real browser, because the reads that carry the snapshots
+    // are the application's, not the fixture's.
+    await assert.rejects(() => runProbe(probeOptions(local)));
+    assert.ok(
+      local.served.size > 0,
+      'the fixture served no object to tamper with, so the broken case was a no-op',
+    );
+    assert.ok(
+      local.tampered.has('board-v2'),
+      `the tamper hook altered none of the ${local.served.size} objects the store served `
+      + '(served: ' + [...local.served].join(', ') + '); the broken case would be a no-op and the probe '
+      + 'would be right to pass',
+    );
+    assert.ok(
+      ![...local.tampered].some((key) => key.startsWith('board-v3-')),
+      'an immutable snapshot was altered; only the signed pointer is rewritten, so that the '
+      + 'snapshots stay reachable and the failure is the signature and nothing else',
+    );
+  } finally {
+    await local.close();
+  }
+});
+
 test('a deployment whose board store errors fails with the application error, exit 1', { timeout: 180_000 }, async () => {
   await browserFixtures();
   await assert.rejects(
     () => runProbe(probeOptions(brokenStore)),
     (error) => {
       assert.ok(error instanceof SmokeFailure);
-      assert.match(error.message, /Skrynia GET antonina\/board-v2 failed \(500\)/);
+      // The wording is the real store's, not the hand-rolled fixture's: the pointer
+      // key is still board-v2, and ShardedBoardStore is what phrases the failure.
+      assert.match(error.message, /Skrynia GET Antonina board-v2 failed \(500\)/);
       return true;
     },
   );
@@ -476,19 +547,84 @@ test('a deployment whose board store errors fails with the application error, ex
   assert.match(run.stderr, /board-v2 failed \(500\)/);
 });
 
-test('a board that cannot be read is never reported as a pass, with or without an anchor', { timeout: 180_000 }, async () => {
-  // The trust screen is what a browser with no anchor sees on a board that is
-  // perfectly healthy. Treating it as a pass is precisely the hole this probe
-  // closes, so it is a failure in both directions.
+test('a board that cannot be read is never reported as a pass, with or without a credential', { timeout: 180_000 }, async () => {
+  // The credential screen is what a browser with no credential sees on a board
+  // that is perfectly healthy. Treating it as a pass is precisely the hole this
+  // probe closes, so it is a failure in every direction — and the two ways of
+  // getting there have to name their own cause, because they have different
+  // operator actions and one of them is the probe's own fault, not the
+  // deployment's.
   await browserFixtures();
+
+  // Nothing at all: the probe was handed no secret.
   await assert.rejects(
-    () => runProbe(probeOptions(healthy, { trustAnchor: null })),
+    () => runProbe(probeOptions(healthy, { trustAnchor: null, boardCredential: null })),
     (error) => {
       assert.ok(error instanceof SmokeFailure);
-      assert.match(error.message, /this browser cannot verify it/);
+      assert.match(error.message, /no board secret at all/);
       return true;
     },
   );
+
+  // The anchor alone. This is the false red that made the positive half of
+  // issue 74 unreachable: the board is healthy, the anchor is valid, and the
+  // application still refuses the read because an anchor permits verification
+  // and not access. The verdict has to say that, not "the deployment is broken".
+  await assert.rejects(
+    () => runProbe(probeOptions(healthy, { boardCredential: null })),
+    (error) => {
+      assert.ok(error instanceof SmokeFailure);
+      assert.match(error.message, /stored a trust anchor but no board credential/);
+      assert.match(error.message, /the probe's input, not the deployment/);
+      assert.doesNotMatch(error.message, /the application asked for a board credential/);
+      return true;
+    },
+  );
+
+  // The credential alone, with no anchor. This passes, and it is the case that
+  // has to be pinned rather than assumed: the credential carries the board's
+  // own public key, so the application can both read *and* verify without a
+  // separate anchor. An earlier revision of this test asserted the opposite —
+  // that dropping the anchor alone strands the browser — and was wrong, which
+  // would have made the probe look broken on a configuration that works.
+  const credentialOnly = await runProbe(probeOptions(healthy, { trustAnchor: null }));
+  assert.equal(credentialOnly.observation.state, 'ready');
+  assert.ok(credentialOnly.observation.issueRows >= 1, 'the credential alone could not read the board');
+});
+
+test('a board credential that is really a trust anchor is refused before the browser starts', async () => {
+  // The two secrets are both "the board secret" and both are JSON, so passing
+  // one where the other belongs is easy, and the application's reader would
+  // silently return null for it — making a mistyped flag look like a broken
+  // deployment. Reject-only, and before any browser exists.
+  await assert.rejects(
+    () => runProbe({
+      url: 'http://127.0.0.1:1/',
+      trustAnchor: '{"boardId":"b","rootKeyId":"ed25519:' + 'A'.repeat(43) + '","rootPublicKey":"B"}',
+      boardCredential: '{"boardId":"b","rootKeyId":"ed25519:' + 'A'.repeat(43) + '","rootPublicKey":"B"}',
+      chromedriver: 'chromedriver',
+      timeout: 1_000, minIssues: 1, minFeed: 1,
+    }),
+    (error) => {
+      assert.ok(error instanceof ProbeUsageError, `expected a ProbeUsageError, got ${error}`);
+      assert.match(error.message, /board credential has keys \[boardId, rootKeyId, rootPublicKey\]/);
+      return true;
+    },
+  );
+});
+
+test('the credential keys the probe checks are the credential parser\'s own keys', async () => {
+  // The probe keeps both key lists literal so it stays one file with no build
+  // step, which is only safe if something compares them to the parser they are
+  // standing in for. Read from the compiled source, which is what the probe
+  // would be handed.
+  const source = readFileSync(join(repoRoot, 'packages', 'core', 'dist', 'credential.js'), 'utf8');
+  const exported = ['BOARD_CREDENTIAL_STORAGE_KEY', 'BOARD_TRUST_STORAGE_KEY'];
+  for (const name of exported) {
+    assert.match(source, new RegExp(`${name} = '([^']+)'`));
+  }
+  assert.equal(BOARD_CREDENTIAL_STORAGE_KEY, 'antonina:board-v2:credential');
+  assert.equal(BOARD_TRUST_STORAGE_KEY, 'antonina:board-v2:trust');
 });
 
 // --- the verdicts themselves --------------------------------------------
@@ -505,8 +641,12 @@ test('judgeBoard names the application state and never invents one', () => {
     judgeBoard({ ...base, state: 'failed', heading: 'The board could not be loaded', detail: 'signature mismatch' }, options),
     /The board could not be loaded — signature mismatch/,
   );
-  assert.match(judgeBoard({ ...base, state: 'untrusted' }, { trustAnchor: null }), /no trust anchor was supplied/);
-  assert.match(judgeBoard({ ...base, state: 'untrusted' }, options), /asked for a board credential/);
+  assert.match(judgeBoard({ ...base, state: 'untrusted' }, { trustAnchor: null, boardCredential: null }), /no board secret at all/);
+  assert.match(
+    judgeBoard({ ...base, state: 'untrusted' }, { trustAnchor: 'anchor', boardCredential: null }),
+    /stored a trust anchor but no board credential/,
+  );
+  assert.match(judgeBoard({ ...base, state: 'untrusted' }, { trustAnchor: 'anchor', boardCredential: 'cred' }), /asked for a board credential/);
   assert.match(judgeBoard({ ...base, state: 'deleted' }, options), /deleted/);
   assert.match(judgeBoard({ ...base, state: 'uninitialized' }, options), /first-run screen/);
   assert.match(judgeBoard({ ...base, state: 'ready', tabs: ['Issues'] }, options), /missing its navigation/);

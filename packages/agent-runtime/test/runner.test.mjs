@@ -9,6 +9,7 @@ import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
 import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import { runManagedRunner } from '../dist/packages/agent-runtime/src/runner.js';
 import { createAgentDirectory, metaPath, readMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
+import { boundMs, installSuiteBound, registerCleanup, registerReap } from './support/suite-bound.mjs';
 
 const REPO_FIXTURE_PARENT = resolve('.antonina-test-tmp');
 const PROBE_SENTINEL = 'ANTONINA-RUNNER-FIXTURE-EXEC-OK';
@@ -19,7 +20,42 @@ const PROBE_SENTINEL = 'ANTONINA-RUNNER-FIXTURE-EXEC-OK';
 // which is the difference between a usable gate and an unusable one; it is
 // deliberately generous, because the bound is here to stop a deadlock and not
 // to ration a passing run.
-const INTENT_TEST_TIMEOUT_MS = 120_000;
+//
+// The bound has to be passed in the OPTIONS OBJECT, as the second argument:
+// `test(name, options, fn)`. Written as a trailing third argument it looks
+// equivalent and is not -- node reads the second argument as `options`, so a
+// trailing `{ timeout }` is silently discarded and the test runs unbounded. A
+// deliberate hang (the intent fixture never recording an intent, so the control
+// poll never signals) is the only way to see this, because a healthy run never
+// reaches the bound and so cannot distinguish a bound that fires from one that
+// was thrown away.
+//
+// It is only half a bound. A per-test timeout bounds the test; it does not
+// bound this file, because a test that times out never runs its `t.after` hooks
+// and the `ChildProcess` handle of the detached backend stays ref'd, so the
+// file process never exits and `npm test` never returns. The four constants
+// below are the other halves, and they are in increasing order of bluntness:
+// the fixture's own lifetime (it never waits to be signalled forever), the
+// per-test timeout (a wedged test becomes a failed test), and the two suite
+// bounds (a wedged *file* reaps its invocation and exits non-zero). Every one
+// of them is a ceiling: the environment may shorten a bound, never lengthen
+// it, so no value of any of these variables can put a run back where it
+// started. See `support/suite-bound.mjs` for the process-level half.
+const FIXTURE_LIFETIME_MS = boundMs('ANTONINA_TEST_FIXTURE_LIFETIME_MS', 60_000);
+const INTENT_TEST_TIMEOUT_MS = boundMs('ANTONINA_TEST_CASE_TIMEOUT_MS', 120_000);
+const SUITE_STALL_MS = boundMs('ANTONINA_TEST_SUITE_STALL_MS', 180_000);
+const SUITE_WALL_MS = boundMs('ANTONINA_TEST_SUITE_BOUND_MS', 300_000);
+
+// The bound is installed before the first test is declared, so it is armed for
+// the whole file including the module-level work. `stallMs` is the condition
+// that does the work on a loaded host: this file takes about 12s green, so
+// three minutes without a single test completing is not a slow host, it is a
+// wedge.
+installSuiteBound({
+  description: 'packages/agent-runtime/test/runner.test.mjs',
+  suiteMs: SUITE_WALL_MS,
+  stallMs: SUITE_STALL_MS,
+});
 
 // The runner spawns its backend detached and awaits it, so the fixture backend
 // has to be a real executable. On a host whose tmpdir() is mounted noexec a
@@ -107,6 +143,13 @@ function scratch(t, backend) {
     Object.assign(process.env, saved);
     rmSync(root, { recursive: true, force: true });
   });
+  // The scratch home is removed by the hook above on every path that reaches
+  // it. A test that wedges never reaches it, so the suite bound is also given
+  // the path, to keep a bounded-out run from leaving a state home behind.
+  registerCleanup(`scratch home ${root}`, () => {
+    rmSync(root, { recursive: true, force: true });
+    return 'removed';
+  });
   return { env };
 }
 
@@ -126,10 +169,43 @@ function agent(t, options, overrides = {}) {
   const id = 'a11d';
   const cwd = mkdtempSync(join(tmpdir(), 'antonina-runner-cwd-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  registerCleanup(`agent cwd ${cwd}`, () => {
+    rmSync(cwd, { recursive: true, force: true });
+    return 'removed';
+  });
   assert.equal(createAgentDirectory(id, options), true);
   const meta = idleMeta(id, cwd, null, 1);
   for (const [key, value] of Object.entries(overrides)) meta[key] = value;
   writeMeta(id, meta, options);
+  // The suite bound's reaper for this agent. It is registered here, before the
+  // runner has spawned anything, because the moment it would be useful to
+  // register it -- after the spawn is on the record -- is exactly the moment a
+  // wedged test never reaches.
+  //
+  // It identifies the invocation the way the product does: from the durable
+  // record the runner itself wrote, checking the pid's /proc start ticks
+  // against the ones recorded beside it, and signalling the recorded process
+  // group. A pid whose start ticks do not match is a recycled pid belonging to
+  // somebody else, so it is reported and left alone; nothing here is ever
+  // found by process name.
+  registerReap(`agent ${id} invocation`, () => {
+    const live = readMeta(id, options);
+    if (live === null) return 'no durable record, so no identity to signal';
+    const { pid, pgid, start_time: startTime } = live;
+    if (!Number.isSafeInteger(pid) || pid <= 0) return 'no recorded invocation pid, so nothing was left running by the runner';
+    if (procStartTicks(pid) !== startTime) {
+      return `pid ${pid} no longer has the recorded start ticks ${startTime}; not signalled`;
+    }
+    if (!Number.isSafeInteger(pgid) || pgid <= 0) {
+      return `pid ${pid} is the recorded invocation but no process group is recorded; not signalled`;
+    }
+    try {
+      process.kill(-pgid, 'SIGKILL');
+      return `SIGKILLed process group ${pgid} (pid ${pid}, start ticks ${startTime})`;
+    } catch (error) {
+      return `could not SIGKILL process group ${pgid}: ${error && error.code ? error.code : String(error)}`;
+    }
+  });
   return id;
 }
 
@@ -325,10 +401,22 @@ test('a. a completely full host still launches, because launch is not host-capac
 function intentFixture(t, id, options, { intent, marker = '', die = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'antonina-intent-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  registerCleanup(`intent fixture ${root}`, () => {
+    rmSync(root, { recursive: true, force: true });
+    return 'removed';
+  });
+  // The file the fixture writes if it gives up waiting to be signalled. It is
+  // not a diagnostic: it is how the tests below tell a real signal from a
+  // fixture that gave up, which the durable record cannot. A runner that never
+  // signals leaves an invocation that ends anyway, and the record of an
+  // invocation that ended by itself with a `stop` intent on it reads exactly
+  // like the record of one the runner stopped. `intentBackend` hands the path
+  // back to the test that has to assert on it.
+  const gaveUp = join(root, 'gave-up');
   const helper = join(root, 'record-intent.mjs');
   writeFileSync(helper, [
     "import { writeFileSync } from 'node:fs';",
-    'const [storeUrl, agentId, intent, marker, die, stateHome, configHome] = process.argv.slice(2);',
+    'const [storeUrl, agentId, intent, marker, gaveUp, die, stateHome, configHome] = process.argv.slice(2);',
     'const { readMeta, updateMeta } = await import(storeUrl);',
     'const options = { env: { XDG_STATE_HOME: stateHome, XDG_CONFIG_HOME: configHome } };',
     'const sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };',
@@ -339,7 +427,7 @@ function intentFixture(t, id, options, { intent, marker = '', die = false } = {}
     // exit with empty output. They used to fall through to the wait below and
     // burn the whole probe timeout, once per invocation and per test, on a
     // path that can never produce a record to write into.
-    'const backendArgv = process.argv.slice(9);',
+    'const backendArgv = process.argv.slice(10);',
     'if (backendArgv[0] === "session" || backendArgv[0] === "models") process.exit(0);',
     'if (backendArgv[0] !== "run") {',
     '  process.stderr.write(`record-intent: unexpected backend invocation: ${backendArgv.join(" ")}\\n`);',
@@ -373,7 +461,39 @@ function intentFixture(t, id, options, { intent, marker = '', die = false } = {}
     '}, options);',
     'if (marker !== "") writeFileSync(marker, "");',
     'if (die === "1") process.kill(process.pid, "SIGKILL");',
-    'else setInterval(() => {}, 1000);',
+    // Otherwise: wait to be signalled, but not forever. This used to be
+    // `setInterval(() => {}, 1000)`, which is "wait for a signal a broken
+    // runtime may never send, indefinitely". A fixture that waits forever
+    // decides the outcome of the whole run: the runner awaits this child, so
+    // nothing converges, the file's `t.after` hooks never run, the child stays
+    // alive, and the suite hangs rather than failing. Nothing about that hang
+    // is evidence about the runtime.
+    //
+    // Giving up is not the same as passing, and the difference has to be
+    // legible from outside this process, because the durable record cannot
+    // express it: an invocation that ends by itself with a `stop` intent
+    // already on it records `state: stopped`, `stop_reason: stop`, a null
+    // `backend_error` and a null `error` -- byte for byte the record of an
+    // invocation the runner signalled. So the give-up is announced on the file
+    // the tests pass in, and asserted absent. The exit code is left alone: a
+    // non-zero one would be classified as a backend failure, which is a
+    // different claim, and would make the record say something untrue about why
+    // this invocation ended.
+    //
+    // It costs a healthy run nothing: the control poll runs 200ms after the
+    // intent lands, so a green run is signalled long before this line.
+    //
+    // These three lines are written as outer template literals on purpose.
+    // Written as plain single-quoted strings they would leave
+    // `${FIXTURE_LIFETIME_MS}` in the generated source for the FIXTURE to
+    // interpolate, and the fixture has no such binding: the give-up would throw
+    // a ReferenceError and exit 1 without ever writing the file the test
+    // asserts on, which is the one failure mode this whole arrangement exists
+    // to prevent. The numbers are substituted here, where they are in scope.
+    `sleep(${FIXTURE_LIFETIME_MS});`,
+    `process.stderr.write("record-intent: still unsignalled after ${FIXTURE_LIFETIME_MS}ms; giving up so the run can fail rather than hang\\n");`,
+    `writeFileSync(gaveUp, "${FIXTURE_LIFETIME_MS}\\n");`,
+    'process.exit(0);',
   ].join('\n'));
   const storeUrl = new URL('../dist/packages/agent-runtime/src/store.js', import.meta.url).href;
   const argv = [
@@ -382,13 +502,14 @@ function intentFixture(t, id, options, { intent, marker = '', die = false } = {}
     id,
     intent,
     marker,
+    gaveUp,
     die ? '1' : '0',
     options.env.XDG_STATE_HOME,
     options.env.XDG_CONFIG_HOME,
   ]
     .map((value) => JSON.stringify(value))
     .join(' ');
-  return `node ${argv}`;
+  return { command: `node ${argv}`, gaveUpPath: gaveUp };
 }
 
 // A fake backend whose first act is to record an operator intent and then either
@@ -397,8 +518,15 @@ function intentFixture(t, id, options, { intent, marker = '', die = false } = {}
 // `"$@"` matters: the runner reaches this same binary for `session list` and
 // `models` as well as for the invocation itself, and the helper tells those
 // apart by the subcommand it is handed.
+//
+// `gaveUpPath` is the file the fixture writes if it stops waiting without ever
+// being signalled. A test that is about a signal the runner sent has to assert
+// that the file is absent, because the durable record cannot tell a signalled
+// invocation from one that gave up waiting: see `intentFixture`.
 function intentBackend(t, id, options, config) {
-  return fakeBackend(t, `#!/bin/sh\necho "starting"\nexec ${intentFixture(t, id, options, config)} "$@"\n`);
+  const fixture = intentFixture(t, id, options, config);
+  const backend = fakeBackend(t, `#!/bin/sh\necho "starting"\nexec ${fixture.command} "$@"\n`);
+  return { backend, gaveUpPath: fixture.gaveUpPath };
 }
 
 test('a. a queued steer is delivered on a full host rather than dropped', async (t) => {
@@ -639,7 +767,7 @@ test('e. a steer the runner itself signalled is still recorded as a clean stoppe
   assert.equal(after.error, null);
 });
 
-test('e. a kill intent does not excuse a host kill that beat the control poll', async (t) => {
+test('e. a kill intent does not excuse a host kill that beat the control poll', { timeout: INTENT_TEST_TIMEOUT_MS }, async (t) => {
   if (!requireProc(t)) return;
   // A persisted kill intent is not evidence that the operator's signal reached
   // the invocation. This invocation records the intent and then SIGKILLs itself
@@ -659,7 +787,7 @@ test('e. a kill intent does not excuse a host kill that beat the control poll', 
   });
   const marker = join(mkdtempSync(join(tmpdir(), 'antonina-oom-')), 'died');
   t.after(() => rmSync(join(marker, '..'), { recursive: true, force: true }));
-  const backend = intentBackend(t, id, options, { intent: 'kill', marker, die: true });
+  const { backend, gaveUpPath } = intentBackend(t, id, options, { intent: 'kill', marker, die: true });
   if (backend === null) return;
   const run = { ...options, env: { ...options.env, ANTONINA_OPENCODE_BIN: backend } };
 
@@ -689,9 +817,9 @@ test('e. a kill intent does not excuse a host kill that beat the control poll', 
   assert.equal(after.backend_error.automatic_retry_safe, false);
   assert.match(after.error, /SIGKILL \(signal 9\)/);
   assert.match(after.error, /OOM killer fired inside the agent lifetime/);
-}, { timeout: INTENT_TEST_TIMEOUT_MS });
+});
 
-test('e. a stop intent the runner itself signalled is still a clean stopped', async (t) => {
+test('e. a stop intent the runner itself signalled is still a clean stopped', { timeout: INTENT_TEST_TIMEOUT_MS }, async (t) => {
   if (!requireProc(t)) return;
   // The complement of the case above, and the guard against over-correcting it.
   // The invocation is still alive when the control poll runs, so the poll really
@@ -705,7 +833,7 @@ test('e. a stop intent the runner itself signalled is still a clean stopped', as
     runner_reservation: reservation({ gen: 7 }),
     pending_prompt: 'work',
   });
-  const backend = intentBackend(t, id, options, { intent: 'stop' });
+  const { backend, gaveUpPath } = intentBackend(t, id, options, { intent: 'stop' });
   if (backend === null) return;
   const run = { ...options, env: { ...options.env, ANTONINA_OPENCODE_BIN: backend } };
 
@@ -719,4 +847,18 @@ test('e. a stop intent the runner itself signalled is still a clean stopped', as
   assert.equal(after.state, 'stopped');
   assert.equal(after.backend_error, null);
   assert.equal(after.error, null);
-}, { timeout: INTENT_TEST_TIMEOUT_MS });
+  // The four assertions above are about the record, and the record cannot tell
+  // this test's subject from its opposite: an invocation that ends by itself
+  // with a `stop` intent already on it records exactly the same four values. So
+  // the thing this test is named for -- that the RUNNER sent the signal -- is
+  // asserted here, on the one witness that can witness it. The fixture writes
+  // this file only when it stops waiting without having been signalled, so its
+  // absence is the claim, and without it this case would pass on a runtime
+  // that never signals anything.
+  assert.equal(
+    existsSync(gaveUpPath),
+    false,
+    'the fixture gave up waiting to be signalled, so the runner never sent this stop; '
+    + 'the clean stopped record above is the fixture ending by itself, not the runner stopping it',
+  );
+});

@@ -740,13 +740,33 @@ export class ShardedBoardStore {
   /**
    * Publishes one shard under the ref its own content names.
    *
-   * The mode is `capability-write`, not `immutable`, and that is the whole fix.
-   * Nothing is overwritten either way -- a POST against an occupied ref is a 409
-   * and is confirmed below, not forced -- so no reader can observe a shard
-   * change under it, and a crash before the pointer CAS still leaves objects no
-   * reader can reach. What changes is that a superseded shard is now *deletable*
-   * once the pointer has moved past it, which is what lets the object count
-   * track the live board instead of the mutation count.
+   * The mode is `public-write`, and that is a deliberate consequence of how
+   * Skrynia issues capabilities rather than a preference. A `capability-write`
+   * object gets a *fresh per-object* capability minted at POST and only its hash
+   * is retained; the caller's `X-Skrynia-Capability` is not adopted. So the only
+   * value that authorizes a later PUT or DELETE of that object is the one the
+   * creating response returned, and the hash cannot be inverted back to it.
+   *
+   * That is fine for `board-v2`, which is created once and thereafter guarded by
+   * exactly that value -- `initialize` reads it out of the POST response and it
+   * becomes the board credential. It does not work for a shard. A mutation
+   * reclaims shards an *earlier* mutation wrote, possibly by a different client
+   * in a different process, so the capability that would authorize the delete is
+   * gone unless every shard's capability is persisted as new secret material
+   * inside the board. Deriving the ability to delete from the one board key
+   * instead is what keeps the current access assumption intact: possession of the
+   * board credential is what grants access, because shard locators are derived
+   * from it and are unguessable without it.
+   *
+   * `public-write` is reclaimable -- Skrynia accepts DELETE for it -- and it is
+   * the mode the pre-immutable sharded model used for exactly these shards.
+   *
+   * What the immutable model bought is untouched: nothing is ever overwritten.
+   * A POST against an occupied ref is a 409 and is confirmed below, not forced,
+   * so no reader can observe a shard change under it, a crash before the pointer
+   * CAS still leaves objects no reader can reach, and two concurrent writers
+   * still produce disjoint object sets with one winner at the CAS. What changes
+   * is only that a superseded shard can now be deleted.
    *
    * The 409 confirmation re-derives the stored object's ref from its content
    * rather than comparing the response to what was sent. A content-addressed ref
@@ -763,8 +783,7 @@ export class ShardedBoardStore {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Skrynia-Mode': 'capability-write',
-        'X-Skrynia-Capability': storageCapability,
+        'X-Skrynia-Mode': 'public-write',
       },
       body: JSON.stringify(value),
     });
@@ -778,14 +797,14 @@ export class ShardedBoardStore {
   }
 
   /**
-   * Removes one superseded shard. Best-effort by design: this runs after the
-   * pointer has already committed, so a failure here is a leak, never a lost
-   * write, and it is counted and reported rather than thrown.
+   * Removes one superseded shard, under the same `public-write` authority that
+   * wrote it. Best-effort by design: this runs after the pointer has already
+   * committed, so a failure here is a leak, never a lost write, and it is
+   * counted and reported rather than thrown.
    */
   private async deleteShard(storageCapability: string, ref: string): Promise<boolean> {
     const response = await this.fetcher(await this.url(storageCapability, ref), {
       method: 'DELETE',
-      headers: { 'X-Skrynia-Capability': storageCapability },
     });
     if (response.status === 200) return true;
     // 404 is already the goal state, and 403 is a shard written under the

@@ -162,7 +162,7 @@ test('repeated edits of one issue do not grow the store', async () => {
   );
 });
 
-test('every shard the store writes is reclaimable', async () => {
+test('every shard is reclaimable by any client holding only the board key', async () => {
   const server = fakeSkrynia();
   const { board, credential } = await seed(server, 2);
 
@@ -171,11 +171,74 @@ test('every shard the store writes is reclaimable', async () => {
     payload: { number: 1, author: 'tester', body: 'reclaimable' },
   });
 
-  // The whole fix in one assertion: the pre-fix model wrote every shard as
-  // `immutable`, and Skrynia refuses to delete an immutable object at all, so
-  // nothing that model ever wrote could be reclaimed by anyone.
-  const immutable = shards(server).filter(([, entry]) => entry.mode === 'immutable');
-  assert.deepEqual(immutable.map(([key]) => key), []);
+  // The whole fix in one assertion, and the specific thing that went wrong
+  // before: the pre-fix model wrote every shard as `immutable`, which Skrynia
+  // will not delete at all, and a first attempt at the fix wrote them as
+  // `capability-write`, whose per-object capability no later client can present.
+  const modes = new Set(shards(server).map(([, entry]) => entry.mode));
+  assert.deepEqual([...modes], ['public-write']);
+
+  // A `capability-write` shard would be un-deletable in practice: Skrynia mints
+  // a fresh capability for that object and keeps only its hash, so the only
+  // value that authorizes the DELETE is the one the creating response returned,
+  // to a process that no longer exists. This asserts the property reclamation
+  // actually depends on -- a second store instance, holding nothing but the
+  // board credential, can delete a shard written by the first.
+  const stale = shards(server).map(([key]) => key);
+  assert.ok(stale.length > 0);
+  const second = makeStore(server);
+  const report = await second.compactionReport(credential);
+  assert.equal(report.retainedRefs, 0);
+  for (let index = 0; index < 4; index += 1) {
+    await second.appendFast(credential, {
+      kind: 'issue.edit',
+      payload: { number: 2, title: 'Issue 2', body: `revision ${index}` },
+    });
+  }
+  const after = new Set(shards(server).map(([key]) => key));
+  const reclaimed = stale.filter((key) => !after.has(key));
+  assert.ok(reclaimed.length > 0, 'a later client must be able to reclaim earlier shards');
+});
+
+test('the fake models Skrynia minting a fresh capability per capability-write object', async () => {
+  const server = fakeSkrynia();
+  const { board, credential } = await seed(server, 1);
+
+  // Guard on the double itself. If this ever stops holding, the growth numbers
+  // above are being produced by a server more permissive than the real one and
+  // the suite would be green for the wrong reason -- which is exactly the defect
+  // the real per-object capability semantics exposed.
+  const pointerCapability = server.capabilityOf('board-v2');
+  assert.ok(pointerCapability);
+  assert.notEqual(pointerCapability, server.capability);
+
+  const url = (key) => `${'https://example.invalid/_skrynia'}/store/antonina/${key}`;
+  // The minted capability authorizes its own object...
+  const ok = await server.fetch(url('board-v2'), {
+    method: 'PUT',
+    headers: { 'X-Skrynia-Capability': pointerCapability, 'If-Match': `"v${server.revision}"` },
+    body: JSON.stringify(server.signed),
+  });
+  assert.equal(ok.status, 200);
+  // ...and the board credential, which is that same value, is a different thing
+  // from the ambient capability the double also exposes.
+  const wrong = await server.fetch(url('board-v2'), {
+    method: 'DELETE',
+    headers: { 'X-Skrynia-Capability': server.capability },
+  });
+  assert.equal(wrong.status, 403);
+  // A capability-write object a client cannot name a capability for is left
+  // alone, so a wrong capability is a refusal and never a silent no-op.
+  assert.equal(server.objects.has('board-v2'), true);
+
+  // The board still works afterwards, which is the property that matters: the
+  // refusal above was the fake being right, not the store being broken.
+  await board.appendFast(credential, {
+    kind: 'issue.comment',
+    payload: { number: 1, author: 'tester', body: 'after the refusal' },
+  });
+  const overview = await board.readOverview(credential);
+  assert.equal(overview.issues[0].messageCount, 1);
 });
 
 test('comments on a deleted issue stay readable in the feed', async () => {

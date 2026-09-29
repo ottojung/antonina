@@ -236,7 +236,9 @@ test('board CLI hands the initializer the integrity anchor and board credential'
   assert.equal(serializeBoardTrustAnchor(anchor), out[2]);
   assert.equal(out[3], 'Board credential (secret; grants full access):');
   assert.equal(serializeBoardCredential(credential), out[4]);
-  assert.equal(credential.storageCapability, server.capability);
+  // The credential carries the capability Skrynia minted for the pointer object
+  // itself, which is what authorizes every later CAS of that object.
+  assert.equal(credential.storageCapability, server.capabilityOf('board-v2'));
   assert.equal(credential.rootKeyId, anchor.rootKeyId);
 });
 
@@ -249,7 +251,9 @@ test('board CLI prints only the credential for a pipe-friendly initialization', 
   assert.equal(out.length, 1);
   const credential = JSON.parse(out[0]);
   assert.equal(out[0], serializeBoardCredential(credential));
-  assert.equal(credential.storageCapability, server.capability);
+  // The credential carries the capability Skrynia minted for the pointer object
+  // itself, which is what authorizes every later CAS of that object.
+  assert.equal(credential.storageCapability, server.capabilityOf('board-v2'));
 });
 
 test('board CLI prints only the public integrity anchor for a pipe-friendly initialization', async () => {

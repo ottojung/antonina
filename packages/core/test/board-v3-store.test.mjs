@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import { SignedBoardStore } from '../dist/board-store.js';
@@ -9,10 +10,21 @@ function jsonResponse(value, status, etag) {
   return new Response(JSON.stringify(value), { status, headers });
 }
 
+/**
+ * `capability-write` mints a fresh per-object capability at POST, returns it
+ * once, and keeps only its hash; it does not adopt the caller's header. A PUT or
+ * DELETE of that object must present the minted value.
+ */
+function capabilityHash(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
 function fakeSkrynia() {
   const objects = new Map();
   const requests = [];
+  const issued = new Map();
   const capability = 'a'.repeat(64);
+  let mintCount = 0;
 
   function keyOf(url) {
     const parts = String(url).split('/');
@@ -28,6 +40,7 @@ function fakeSkrynia() {
     requests,
     objects,
     clearRequests() { requests.length = 0; },
+    capabilityOf(key) { return issued.get(key) ?? null; },
     async fetch(url, init = {}) {
       const method = init.method ?? 'GET';
       const key = keyOf(url);
@@ -45,19 +58,21 @@ function fakeSkrynia() {
         if (current !== undefined) return new Response(null, { status: 409 });
         const headers = new Headers(init.headers);
         const mode = headers.get('X-Skrynia-Mode');
-        if (!['capability-write', 'immutable'].includes(mode)) {
+        if (!['capability-write', 'public-write', 'immutable'].includes(mode)) {
           return jsonResponse({ error: 'mode required' }, 400);
         }
+        const minted = capabilityHash(`skrynia-minted:${key}:${++mintCount}`);
         const entry = {
           value: body,
           mode,
-          capability: mode === 'capability-write' ? capability : null,
+          capabilityHash: mode === 'capability-write' ? capabilityHash(minted) : null,
           revision: 1,
         };
         objects.set(key, entry);
+        if (mode === 'capability-write') issued.set(key, minted);
         return jsonResponse(
           mode === 'capability-write'
-            ? { mode, capability }
+            ? { mode, capability: minted }
             : { mode },
           201,
         );
@@ -67,7 +82,8 @@ function fakeSkrynia() {
         if (current === undefined) return new Response(null, { status: 404 });
         if (current.mode === 'immutable') return jsonResponse({ error: 'immutable' }, 403);
         const headers = new Headers(init.headers);
-        if (headers.get('X-Skrynia-Capability') !== current.capability) {
+        if (current.capabilityHash !== null
+            && capabilityHash(headers.get('X-Skrynia-Capability') ?? '') !== current.capabilityHash) {
           return jsonResponse({ error: 'invalid capability' }, 403);
         }
         const match = headers.get('If-Match');
@@ -82,8 +98,8 @@ function fakeSkrynia() {
       if (method === 'DELETE') {
         if (current === undefined) return new Response(null, { status: 404 });
         if (current.mode === 'immutable') return jsonResponse({ error: 'immutable' }, 403);
-        const headers = new Headers(init.headers);
-        if (headers.get('X-Skrynia-Capability') !== current.capability) {
+        if (current.capabilityHash !== null
+            && capabilityHash(new Headers(init.headers).get('X-Skrynia-Capability') ?? '') !== current.capabilityHash) {
           return jsonResponse({ error: 'invalid capability' }, 403);
         }
         objects.delete(key);

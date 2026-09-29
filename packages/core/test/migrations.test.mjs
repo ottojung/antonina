@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -6,6 +7,16 @@ import test from 'node:test';
 
 import { SignedBoardStore } from '../dist/board-store.js';
 import { canonicalJson } from '../dist/canonical.js';
+
+/**
+ * `capability-write` mints a fresh per-object capability at POST, returns it
+ * once, and keeps only its hash; it never adopts the caller's header. A PUT or
+ * DELETE of that object must present the minted value, which is why the double
+ * compares hashes rather than a value it also handed out elsewhere.
+ */
+function capabilityHash(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
 import { createBoardCredential } from '../dist/credential.js';
 import * as migrations from '../dist/migrations.js';
 import * as model from '../dist/model.js';
@@ -124,8 +135,18 @@ const ROOT_KEY = {
 function fakeSkrynia(seed) {
   const capability = 'c'.repeat(64);
   const objects = new Map();
+  const issued = new Map();
+  let minted = 0;
+  // `capability-write` mints a fresh per-object capability at POST, returns it
+  // once and keeps only its hash. The seeded board is one whose capability the
+  // caller already holds, which is exactly the `board-v2` case.
   if (seed !== undefined) {
-    objects.set('board-v2', { value: structuredClone(seed), mode: 'capability-write', capability, revision: 1 });
+    objects.set('board-v2', {
+      value: structuredClone(seed),
+      mode: 'capability-write',
+      capabilityHash: capabilityHash(capability),
+      revision: 1,
+    });
   }
   const keyOf = (url) => decodeURIComponent(String(url).split('/').at(-1));
   const etagOf = (entry) => `"v${entry.revision}"`;
@@ -136,6 +157,7 @@ function fakeSkrynia(seed) {
 
   return {
     capability,
+    capabilityOf: (key) => issued.get(key) ?? null,
     get signed() { return objects.get('board-v2')?.value ?? null; },
     async fetch(url, init = {}) {
       const method = init.method ?? 'GET';
@@ -152,19 +174,25 @@ function fakeSkrynia(seed) {
         if (!['capability-write', 'public-write', 'immutable'].includes(mode)) {
           return json({ error: 'invalid_mode' }, 400);
         }
+        const mintedCapability = capabilityHash(`skrynia-minted:${key}:${++minted}`);
         objects.set(key, {
           value: JSON.parse(String(init.body)),
           mode,
-          capability: mode === 'capability-write' ? capability : null,
+          capabilityHash: mode === 'capability-write' ? capabilityHash(mintedCapability) : null,
           revision: 1,
         });
-        return json(mode === 'capability-write' ? { mode, capability } : { mode }, 201);
+        if (mode === 'capability-write') issued.set(key, mintedCapability);
+        return json(
+          mode === 'capability-write' ? { mode, capability: mintedCapability } : { mode },
+          201,
+        );
       }
       if (method === 'PUT') {
         if (current === undefined) return new Response(null, { status: 404 });
         if (current.mode === 'immutable') return json({ error: 'immutable' }, 403);
         const headers = new Headers(init.headers);
-        if (current.mode === 'capability-write' && headers.get('X-Skrynia-Capability') !== capability) {
+        if (current.capabilityHash !== null
+            && capabilityHash(headers.get('X-Skrynia-Capability') ?? '') !== current.capabilityHash) {
           return json({ error: 'invalid capability' }, 403);
         }
         const match = headers.get('If-Match');
@@ -173,6 +201,16 @@ function fakeSkrynia(seed) {
         }
         current.value = JSON.parse(String(init.body));
         current.revision += 1;
+        return json({ ok: true }, 200);
+      }
+      if (method === 'DELETE') {
+        if (current === undefined) return new Response(null, { status: 404 });
+        if (current.mode === 'immutable') return json({ error: 'immutable' }, 403);
+        if (current.capabilityHash !== null
+            && capabilityHash(new Headers(init.headers).get('X-Skrynia-Capability') ?? '') !== current.capabilityHash) {
+          return json({ error: 'invalid capability' }, 403);
+        }
+        objects.delete(key);
         return json({ ok: true }, 200);
       }
       return new Response(null, { status: 405 });

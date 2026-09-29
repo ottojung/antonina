@@ -19,7 +19,14 @@ test('initialization immediately commits a materialized board pointer and return
   const initialized = await store.initialize();
   assert.equal(initialized.state.board.nextIssueNumber, 1);
   assert.equal(initialized.log, null);
-  assert.equal(initialized.credential.storageCapability, server.capability);
+  // The board credential carries the capability Skrynia minted for the pointer
+  // object itself, not an ambient namespace capability: `capability-write`
+  // mints per object and keeps only a hash, so the value the creating response
+  // returned is the only thing that authorizes a later PUT of that object. This
+  // is the whole reason pointer CAS works, and asserting the wrong identity here
+  // is what let a shard-side capability mismatch reach production.
+  assert.equal(initialized.credential.storageCapability, server.capabilityOf('board-v2'));
+  assert.notEqual(initialized.credential.storageCapability, server.capability);
   assert.equal(initialized.credential.keyId, initialized.credential.rootKeyId);
   assert.equal(server.signed.schemaVersion, 3);
   assert.equal(server.signed.format, 'materialized-snapshots');

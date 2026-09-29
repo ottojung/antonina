@@ -50,6 +50,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--failed': 'Show failed agents only.',
   '--finished': 'Show terminal agents only.',
   '--follow': 'Follow output until the agent stops.',
+  '--follow-timeout': 'Attached-follow budget in seconds; 0 waits without a deadline (default 3600).',
   '--force': 'Force the requested operation.',
   '--guidance': 'Repository-relative guidance document path; may be repeated.',
   '--host': 'Host identifier/address.',
@@ -370,7 +371,7 @@ const AGENT_SPECS: readonly CommandSpec[] = [
   {
     path: ['run'],
     summary: 'Send work to a managed agent.',
-    values: ['--id', '--prompt'],
+    values: ['--id', '--prompt', '--follow-timeout'],
     flags: ['--steer', '--detach', '--json'],
     required: ['--id', '--prompt'],
     normalize: (p) => [
@@ -379,6 +380,7 @@ const AGENT_SPECS: readonly CommandSpec[] = [
       p.values.get('--id')!,
       '--prompt',
       p.values.get('--prompt')!,
+      ...valueArgs(p, ['--follow-timeout']),
       ...flagArgs(p, ['--steer', '--detach', '--json']),
     ],
   },
@@ -521,7 +523,9 @@ function commandHelp(namespace: PublicNamespace, spec: CommandSpec): string {
     const takesValue = (spec.values ?? []).includes(name) || (spec.repeated ?? []).includes(name);
     const required = (spec.required ?? []).includes(name) || (spec.requireRepeated ?? []).includes(name);
     const shown = name + (takesValue ? ' <value>' : '');
-    return '  ' + shown.padEnd(24) + (OPTION_HELP[name] ?? '') + (required ? ' (required)' : '');
+    // 26 keeps every option name separated from its description: the longest
+    // declared name plus its `<value>` placeholder must not fill the column.
+    return '  ' + shown.padEnd(26) + (OPTION_HELP[name] ?? '') + (required ? ' (required)' : '');
   });
   return [
     'Usage: antonina ' + namespace + ' ' + spec.path.join(' ') + (optionNames.length === 0 ? '' : ' [options]'),

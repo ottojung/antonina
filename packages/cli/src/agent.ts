@@ -477,8 +477,21 @@ function spawnRunner(
   child.unref();
 }
 
-async function followAttached(agentId: string, context: AgentCommandContext): Promise<number> {
+// The default attached-follow budget. An attached `agent run` is a foreground
+// command, so a default with no deadline is the defect this bounds. The
+// default is deliberately generous: it must exceed a legitimate long agent run,
+// while still guaranteeing the foreground command terminates. `--follow-timeout 0`
+// restores the explicitly unbounded wait for operators who have an out-of-band
+// reason to want it.
+const DEFAULT_FOLLOW_TIMEOUT_SECONDS = 3600;
+
+async function followAttached(
+  agentId: string,
+  context: AgentCommandContext,
+  timeoutSeconds: number,
+): Promise<number> {
   const path = logPath(agentId, paths(context));
+  const deadline = timeoutSeconds === 0 ? null : Date.now() + timeoutSeconds * 1000;
   let offset = 0;
   let terminalSince: number | null = null;
   while (true) {
@@ -498,10 +511,38 @@ async function followAttached(agentId: string, context: AgentCommandContext): Pr
       if (terminalSince === null) terminalSince = Date.now();
       if (Date.now() - terminalSince >= 500) return exitCodeFor(meta);
     } else {
+      // A terminal hold in progress is never cut short by the deadline: the
+      // 500ms settle window is part of the observer's contract, and cutting it
+      // would report a timeout for an agent that has already finished.
+      if (deadline !== null && Date.now() >= deadline) {
+        return followDeadlineExceeded(agentId, timeoutSeconds, meta, state, context);
+      }
       terminalSince = null;
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
+}
+
+// The follow path is a read-only observer. On expiry it reports what it last
+// saw and returns EXIT_TIMEOUT: it never writes metadata, never clears
+// `active_runner`, and never signals the runner. A foreground operator can
+// re-attach with `antonina agent log --id <id> --follow`, and the runner keeps
+// its ownership of the agent exactly as it had.
+function followDeadlineExceeded(
+  agentId: string,
+  timeoutSeconds: number,
+  meta: AgentMetadata,
+  state: string,
+  context: AgentCommandContext,
+): number {
+  const runner = activeRunnerFlag(meta) ? 'runner active' : 'no active runner';
+  context.io.stderr(
+    `antonina: run: agent ${agentId} did not finish within ${timeoutSeconds}s `
+    + `(state ${state}, ${runner}, prompts ${String(meta.prompt_count)}); `
+    + `the agent was left untouched and is still running. `
+    + `Re-attach with \`antonina agent log --id ${agentId} --follow\`.`,
+  );
+  return EXIT_TIMEOUT;
 }
 
 async function cmdRun(args: string[], context: AgentCommandContext): Promise<number> {
@@ -681,7 +722,10 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     }
     return EXIT_OK;
   }
-  return followAttached(agentId, context);
+  const followTimeoutSeconds = parsed.values.has('--follow-timeout')
+    ? nonnegativeInteger(parsed.values.get('--follow-timeout'), '--follow-timeout')
+    : DEFAULT_FOLLOW_TIMEOUT_SECONDS;
+  return followAttached(agentId, context, followTimeoutSeconds);
 }
 
 async function waitForRunnerGone(

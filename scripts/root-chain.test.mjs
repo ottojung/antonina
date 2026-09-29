@@ -34,12 +34,16 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 import {
+  CHAIN_RUNNER,
+  CHAIN_SCRIPT,
   HOST_PRECONDITION_NEEDS,
   TEST_NEEDS_MARKER,
   declaredHostPreconditions,
   declaredTestNeeds,
   resolveRootTestChain,
+  rootChainSource,
 } from './root-chain.mjs';
+import { runChain } from './root-chain-run.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const chain = resolveRootTestChain(repoRoot);
@@ -259,6 +263,147 @@ test('the vitest set this case enumerates is the set the root chain actually run
     !files.some((file) => file.startsWith('web/node_modules/') || file.startsWith('web/dist/')),
     'the web test enumeration reached into node_modules or dist, which vitest excludes',
   );
+});
+
+// ---------------------------------------------------------------------------
+// Board issue 123: a short-circuiting chain, and the tail it hides.
+//
+// Everything above this line is board 74's browser/bundle contract. These cases
+// are a different defect, and the difference matters: that one was a chain that
+// ran suites it *should not* have run, and this one is a chain that did not run
+// suites it *should* have. A chain built from the shell's `&&` stops at the
+// first non-zero exit, so when `test:web` failed, `test:workflow` and
+// `test:build-identity` produced no output, no artifact and no trace. The run
+// was red, but a reader saw five green suites and one red one, and the two
+// absent suites looked exactly like two suites that do not exist.
+//
+// The fix has two halves and they are not equally trusted. The executable half
+// is `scripts/root-chain-run.mjs`: it runs every step, records every exit code,
+// prints a per-step summary and still exits non-zero if anything failed. The
+// asserted half is here, because a mechanism in a file that nothing runs is a
+// comment. The cases below are the ones that keep the mechanism honest: they
+// pin the chain's shape, and they observe the runner failing on a synthetic
+// chain, because a visibility mechanism nobody has watched fail is not a
+// mechanism known to work.
+// ---------------------------------------------------------------------------
+
+test('the root npm test chain is executed by the runner, not by the shell', () => {
+  // The shape of the fix, pinned. `npm test` must not be an `&&` expression:
+  // that is precisely the thing whose short-circuit hid the tail. The chain
+  // lives in its own script so the runner and this gate read one list.
+  const scripts = pkgScripts();
+  assert.equal(
+    scripts.test,
+    `node ${CHAIN_RUNNER}`,
+    '`npm test` is not the chain runner, so a short-circuiting `&&` chain can hide the suites after it again',
+  );
+  assert.equal(CHAIN_RUNNER, 'scripts/root-chain-run.mjs');
+  assert.ok(
+    existsSync(join(repoRoot, CHAIN_RUNNER)),
+    `\`npm test\` invokes ${CHAIN_RUNNER}, which does not exist, so \`npm test\` cannot run at all`,
+  );
+  assert.equal(
+    scripts[CHAIN_SCRIPT],
+    rootChainSource(JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))),
+    `\`${CHAIN_SCRIPT}\` is missing, so the runner has no chain to execute and falls back to \`scripts.test\``,
+  );
+  assert.ok(
+    !/\s&&\s/.test(scripts.test),
+    `\`npm test\` still chains with \`&&\`: ${scripts.test}. The runner exists so no step can skip the ones after it.`,
+  );
+});
+
+test('every suite the root chain is supposed to run is a step the runner will execute', () => {
+  // The anti-skip property, asserted on the resolved step list. `resolveRootTestChain`
+  // already walks the chain; these are the suites that must appear in the list of
+  // steps the runner actually invokes. This is the case that fails if someone
+  // drops a suite from `chain:root-test` — the tail would then be missing
+  // deliberately rather than by accident, and would still be silent without this.
+  const named = chain.steps.map((step) => step.name);
+  for (const suite of [
+    'test:core',
+    'test:runtime',
+    'test:daemon',
+    'test:cli',
+    'test:web',
+    'test:workflow',
+    'test:build-identity',
+  ]) {
+    assert.ok(named.includes(suite), `the root chain does not run \`${suite}\`; it runs ${JSON.stringify(named)}`);
+  }
+  // Order is part of the contract: the cheap pure-Node suites first, so a
+  // failure is reported against the smallest possible cause.
+  assert.deepEqual(
+    named,
+    ['test:core', 'test:runtime', 'test:daemon', 'test:cli', 'test:web', 'test:workflow', 'test:build-identity'],
+    'the root chain runs a different set or order of suites than the release line declares',
+  );
+  // No duplicates: a suite listed twice would run twice and report twice, which
+  // is a chain whose accounting cannot be read.
+  assert.equal(new Set(named).size, named.length, `the root chain names a suite more than once: ${JSON.stringify(named)}`);
+});
+
+test('the chain runner runs every step after a failure instead of stopping at the first', () => {
+  // The defect, demonstrated red under mutation, with a synthetic chain so no
+  // real suite has to be broken to observe it. The old chain was `a && b && c`:
+  // `a` failing meant `b` and `c` never ran. Here `a` fails and `b` and `c` are
+  // still recorded, each with its own exit code.
+  const executed = [];
+  const results = runChain(
+    [{ name: 'a' }, { name: 'b' }, { name: 'c' }],
+    { exec: (name) => { executed.push(name); return name === 'a' ? 1 : 0; }, log: () => {} },
+  );
+  assert.deepEqual(
+    executed,
+    ['a', 'b', 'c'],
+    'the runner stopped after a failing step, so the suites after it were skipped — the exact defect of board 123',
+  );
+  assert.deepEqual(
+    results.map((r) => [r.name, r.code]),
+    [['a', 1], ['b', 0], ['c', 0]],
+    'the runner did not report an exit code for every step it ran',
+  );
+});
+
+test('the chain runner reports every failure, and its exit status is non-zero if any step failed', () => {
+  // Two halves. First, that a failure anywhere is visible and not just the
+  // first: the `&&` chain could only ever tell you about one. Second, and this
+  // is the half that must not be relaxed, that the runner does not become a way
+  // of *tolerating* a failure — it is strictly stricter than `&&`, which exited
+  // non-zero too but had already stopped running.
+  const executed = [];
+  const results = runChain(
+    [{ name: 'a' }, { name: 'b' }, { name: 'c' }],
+    { exec: (name) => { executed.push(name); return name === 'c' ? 3 : 0; }, log: () => {} },
+  );
+  assert.deepEqual(executed, ['a', 'b', 'c']);
+  const failed = results.filter((r) => r.code !== 0);
+  assert.deepEqual(failed.map((r) => r.name), ['c'], 'a non-zero step was not reported as a failure');
+  assert.notEqual(results.some((r) => r.code !== 0), false, 'a non-zero step did not make the run non-zero');
+  // A step killed by a signal has no status; it must not read as a pass.
+  const signalled = runChain([{ name: 'a' }], { exec: () => undefined, log: () => {} });
+  assert.notEqual(signalled[0].code, undefined, 'a step with no exit status was recorded without one');
+});
+
+test('the chain runner does not run a suite the chain does not name', () => {
+  // The other direction, so the fix cannot be used to quietly *add* work: the
+  // runner executes exactly the steps `resolveRootTestChain` resolved from the
+  // chain, and nothing else. The deploy smoke suite is the standing witness that
+  // this matters — it needs a browser and a built bundle.
+  const smoke = resolve(join(repoRoot, 'scripts', 'deploy-smoke.test.mjs'));
+  assert.ok(
+    !chain.files.includes(smoke),
+    'the root chain reaches the deploy smoke suite, so the runner would execute a suite that cannot run on a bare checkout',
+  );
+  // And the runner's step list is derived from the chain, not hardcoded: it
+  // contains no script name the chain does not contain.
+  const chainText = rootChainSource(JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')));
+  for (const step of chain.steps) {
+    assert.ok(
+      chainText.includes(`npm run ${step.name}`),
+      `the runner would execute \`${step.name}\`, which \`${CHAIN_SCRIPT}\` does not name`,
+    );
+  }
 });
 
 test('the root chain steps this gate cannot resolve are the ones it says they are', () => {

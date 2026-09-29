@@ -47,6 +47,35 @@ export const TEST_NEEDS_MARKER = 'antonina-test-needs';
 export const HOST_PRECONDITION_NEEDS = ['browser', 'chromedriver', 'built-web-bundle'];
 
 /**
+ * The npm script that holds the root chain, as a list of steps. It is a
+ * separate script from `test` so that `scripts/root-chain-run.mjs` and
+ * `resolveRootTestChain` read the *same* list: the runner executes it and the
+ * gate asserts properties of it, so a second copy of the chain cannot drift
+ * from the first and quietly become the one that runs.
+ */
+export const CHAIN_SCRIPT = 'chain:root-test';
+
+/**
+ * The `npm test` entry point. The chain is executed by a runner that reports
+ * every step, not by the shell's `&&`. See `scripts/root-chain-run.mjs`.
+ */
+export const CHAIN_RUNNER = 'scripts/root-chain-run.mjs';
+
+/**
+ * The root chain, as a string of `&&`-joined steps.
+ *
+ * Falls back to `scripts.test` for a tree that has not adopted the runner yet,
+ * so the gate can still resolve a chain rather than crashing on a missing
+ * script. `scripts/root-chain.test.mjs` asserts that the fallback is not what
+ * a checked-in tree actually uses.
+ */
+export function rootChainSource(pkg) {
+  const chain = pkg.scripts?.[CHAIN_SCRIPT];
+  if (typeof chain === 'string' && chain.trim() !== '') return chain;
+  return pkg.scripts.test;
+}
+
+/**
  * A `npm run <name>` step of a chain command.
  */
 const NPM_RUN = /^npm\s+run\s+([A-Za-z0-9:_-]+)\s*$/;
@@ -92,6 +121,7 @@ export function resolveRootTestChain(repoRoot) {
   const files = new Set();
   const unresolved = [];
   const seenScripts = new Set();
+  const steps = [];
 
   const walk = (command, via) => {
     for (const rawStep of command.split('&&')) {
@@ -111,6 +141,10 @@ export function resolveRootTestChain(repoRoot) {
           continue;
         }
         seenScripts.add(name);
+        // Recorded as a top-level step of the chain even though it is walked
+        // into, so the runner and this gate agree on which `npm run` invocations
+        // the chain performs, in order, without either re-parsing the text.
+        steps.push({ name, command: target });
         walk(target, name);
         continue;
       }
@@ -137,11 +171,12 @@ export function resolveRootTestChain(repoRoot) {
     }
   };
 
-  walk(pkg.scripts.test, 'test');
+  walk(rootChainSource(pkg), 'test');
   return {
     files: [...files].sort(),
     relative: [...files].map((file) => file.slice(repoRoot.length + 1).split(sep).join('/')).sort(),
     unresolved,
+    steps,
   };
 }
 

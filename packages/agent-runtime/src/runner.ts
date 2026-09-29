@@ -217,6 +217,42 @@ async function recordSpawned(
   return accepted;
 }
 
+// A rejected spawn falls into two classes that must not be confused.
+//
+// If recordSpawned returned false, a control path committed between the
+// runner's read of the record and its write of it and that path already owns
+// the durable record, so the runner writes nothing. This helper is not for that
+// case and must never be called for it.
+//
+// If recordSpawned threw, no control path committed anything: the write failed,
+// so the spawn was never published, and the runner is left holding a claim
+// (active_runner true, runner_reservation claimed), a consumed prompt, a
+// `running` state and no pid. The child has just been killed. Nothing owns a
+// terminal record, and that is the leak this releases.
+//
+// The guard is the class A invariant expressed as a condition rather than as a
+// separate code path: a stop-like record, a terminal state, or a published
+// spawn identity all mean some other actor already decided how this invocation
+// ends, and this write must not overrule it.
+async function releaseUnrecordedSpawn(agentId: string, options: RunnerOptions): Promise<void> {
+  await updateMeta(agentId, (meta) => {
+    if (stopLikeOrMalformed(meta)) {
+      setActiveRunner(meta, false);
+      return;
+    }
+    if (meta.state !== 'running' || meta.pid !== null) return;
+    finalizeTerminal(
+      meta,
+      'failed',
+      Date.now() / 1000,
+      null,
+      null,
+      'could not persist the spawned OpenCode process identity; the process was killed and never recorded',
+    );
+    setActiveRunner(meta, false);
+  }, options);
+}
+
 async function finalizeInvocation(
   agentId: string,
   result: ChildResult,
@@ -403,6 +439,15 @@ async function runInvocation(
       } catch (error) {
         try { process.kill(-pid, 'SIGKILL'); } catch {}
         await resultPromise.catch(() => undefined);
+        // The store failure still reaches the caller: a spawn that could not be
+        // recorded is not a clean return. But the record must not be left
+        // claiming a running invocation whose process no longer exists, so make
+        // the release attempt first. It is best effort by construction, because
+        // the same failing write may still be failing, and a release write that
+        // throws must not replace the real diagnosis with the release's.
+        try {
+          await releaseUnrecordedSpawn(agentId, options);
+        } catch {}
         throw error;
       }
       if (!accepted) {

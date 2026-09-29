@@ -222,7 +222,7 @@ test('board CLI reports the integrity anchor and board credential after initiali
   const printed = JSON.parse(out[0]);
   assert.equal(printed.credential.keyId, printed.trustAnchor.rootKeyId);
   assert.equal(printed.state.board.nextIssueNumber, 1);
-  assert.equal(server.signed.format, 'materialized-snapshots');
+  assert.equal(server.signed.format, 'compact-materialized-snapshots');
   assert.equal(server.signed.revision, 1);
 });
 

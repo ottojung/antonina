@@ -29,7 +29,7 @@ test('initialization immediately commits a materialized board pointer and return
   assert.notEqual(initialized.credential.storageCapability, server.capability);
   assert.equal(initialized.credential.keyId, initialized.credential.rootKeyId);
   assert.equal(server.signed.schemaVersion, 3);
-  assert.equal(server.signed.format, 'materialized-snapshots');
+  assert.equal(server.signed.format, 'compact-materialized-snapshots');
   assert.equal(server.signed.rootKeyId, initialized.credential.rootKeyId);
 });
 

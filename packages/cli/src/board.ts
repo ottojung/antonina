@@ -8,7 +8,7 @@ import {
   DEFAULT_BOARD_BASE_URL,
   TargetSelectionError,
   type BoardAccessState,
-  type BoardCompactionReport,
+  type BoardImportReport,
   type BoardInitialization,
   type IssueListSummary,
 } from '../../core/src/api.js';
@@ -119,7 +119,7 @@ type CommandValue =
   | BoardTrustAnchor
   | CollectListEntry[]
   | CollectDeleteReportBase
-  | BoardCompactionReport
+  | BoardImportReport
   | BoardFeedPage
   | number[]
   | null;
@@ -616,20 +616,21 @@ async function execute(
       }
       throw new AntoninaApiError('dispatch requires select or record');
     }
-    case 'compact': {
+    case 'import': {
       const confirmFlag = flag(parsed.args, '--confirm');
-      if (confirmFlag.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for compact');
-      // Destructive, and deliberately shaped like `collect delete`: the default
-      // run reports and touches nothing, and only `--confirm` deletes. Skrynia
-      // exposes no listing primitive to Antonina, so this can only reclaim what
-      // the board's own retention chain names -- superseded objects written
-      // before the reclaimable model was in force are invisible here and stay on
-      // the namespace until Skrynia collects them itself.
+      if (confirmFlag.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for import');
+      // The format cutover. The default run is a plan: it reads the pre-cutover
+      // store, rebuilds the board, verifies the two are semantically identical,
+      // and reports -- writing nothing and publishing nothing. Only --confirm
+      // replaces the pointer, which is the one step that changes what any client
+      // will read.
+      //
+      // It is an operator action by design, like collect delete. Nothing in the
+      // runtime reads the pre-cutover store, so an agent cannot stumble into
+      // half of it, and a scheduled run without the flag gets a report.
       return {
-        mode: 'compaction',
-        value: await client.compactionReport({
-          confirm: confirmFlag.value,
-        }),
+        mode: 'import',
+        value: await client.importBoard({ confirm: confirmFlag.value }),
       };
     }
     case 'collect': {
@@ -928,35 +929,45 @@ function humanLines(result: CommandResult): string[] {
   }
   if (result.mode === 'resource-removed') return ['Resource dependency removed.'];
 
-  if (result.mode === 'compaction') {
-    const report = result.value as BoardCompactionReport;
-    const sweep = report.lastSweep;
+  if (result.mode === 'import') {
+    const report = result.value as BoardImportReport;
+    const failed = report.checks.filter((check) => !check.equal);
     const lines = [
-      `board ${report.boardId} revision ${report.revision}: ${report.reachableRefs} reachable shard objects`,
-      `retained generation(s) for in-flight readers: ${
-        report.retainedGenerationRevisions.length === 0
-          ? 'none'
-          : report.retainedGenerationRevisions.join(', ')
-      }`,
-      `reclaimable by Antonina now: ${report.reclaimableRefs}; reclaimed by this run: ${report.reclaimedRefs}`,
-      `last committed mutation reclaimed ${sweep.reclaimed} object(s), ${sweep.retained} undeletable${
-        sweep.at === null ? '' : ' at revision ' + sweep.revision
-      }${sweep.error === null ? '' : '; last sweep failed: ' + sweep.error}`,
+      `board ${report.boardId}: ${report.state}`,
+      `carrying across ${report.issues} issue(s), ${report.comments} comment(s), `
+        + `${report.feedEntries} feed entr${report.feedEntries === 1 ? 'y' : 'ies'}, `
+        + `queue ${report.queueLength}, ${report.resources} resource(s), `
+        + `${report.targets} target(s), ${report.dispatches} dispatch(es)`,
     ];
-    if (report.reclaimableRefs > 0 && report.reclaimedRefs === 0) {
-      lines.push('nothing was deleted; re-run with --confirm to reclaim');
-    }
-    if (report.retainedRefs > 0) {
-      // The honest limit of what a client can do here. Skrynia exposes no
-      // listing primitive to Antonina, so objects that predate the reclaimable
-      // model are not merely undeletable -- they are invisible, and this command
-      // cannot even count them.
+    if (report.cutover) {
       lines.push(
-        `${report.retainedRefs} object(s) in the retention chain could not be deleted; `
-        + 'objects written under the pre-fix immutable model are outside this board\'s reach '
-        + 'and are removed only by Skrynia collecting the namespace itself',
+        `imported into ${report.importedRefs} shard object(s) and published at revision `
+        + `${report.toRevision}; the board is now served from the new store`,
       );
+    } else if (report.state === 'cutover-complete') {
+      lines.push(`already cut over; the board holds ${report.importedRefs} shard object(s)`);
+    } else {
+      lines.push(
+        `the rebuilt board would hold ${report.importedRefs} shard object(s); `
+        + 'nothing was written and the board was not switched over',
+      );
+      lines.push('re-run with --confirm to import and cut over');
     }
+    if (failed.length > 0) {
+      // A failed check is the reason a cutover is refused, so it is reported by
+      // name rather than summarised.
+      lines.push('VERIFICATION FAILED:');
+      for (const check of failed) lines.push(`  ${check.name}: ${check.difference ?? 'differs'}`);
+    } else if (report.checks.length > 0) {
+      lines.push(`verified equivalent on ${report.checks.length} propert`
+        + `${report.checks.length === 1 ? 'y' : 'ies'}`);
+    }
+    lines.push(
+      report.legacyStore.shardObjects === 0
+        ? report.legacyStore.note
+        : `the pre-cutover store holds at least ${report.legacyStore.shardObjects} object(s) and is `
+          + 'left whole and unreachable; ' + report.legacyStore.note.split('; ')[1],
+    );
     return lines;
   }
 

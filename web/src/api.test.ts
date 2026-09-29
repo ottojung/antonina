@@ -162,7 +162,7 @@ describe('browser board session', () => {
     expect(initialized.state.queue).toEqual([]);
     expect(server.signed).toMatchObject({
       schemaVersion: 3,
-      format: 'materialized-snapshots',
+      format: 'compact-materialized-snapshots',
       revision: 1,
     });
     for (const entry of server.objects.values()) {

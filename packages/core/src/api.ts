@@ -7,7 +7,8 @@ import {
   SIGNED_BOARD_KEY,
   SignedBoardStore,
   SignedBoardStoreError,
-  type BoardCompactionReport,
+  type BoardCutoverState,
+  type BoardImportReport,
   type SignedBoardStoreOptions,
   type StoredSignedBoard,
 } from './board-store.js';
@@ -480,21 +481,33 @@ export class BoardApi {
   }
 
   /**
-   * Reports how the board's materialized storage is currently shaped, and with
-   * `confirm` reclaims the shard objects this board's retention chain says have
-   * aged out.
+   * Which side of the format cutover the board is on.
    *
-   * It is on the API rather than only on the store because it is the operator
-   * surface for the bounded-growth model, and it must be reachable by both front
-   * ends. It deletes objects, so it is deliberately not reachable without an
-   * explicit confirmation from the caller.
+   * `needs-import` is the state a user has to be told about: the board is stored
+   * in the pre-cutover format, this build will not serve it, and an import is the
+   * only way forward. Reading the board in that state fails by name rather than
+   * silently returning stale or partial data.
    */
-  async compactionReport(options: { confirm?: boolean } = {}): Promise<BoardCompactionReport> {
+  async cutoverState(): Promise<BoardCutoverState> {
     const credential = await this.fastReadCredential();
-    const report = await this.store.compactionReport(credential, options);
-    this.rememberedHead = null;
-    return { ...report, lastSweep: { ...report.lastSweep } };
+    return this.store.cutoverState(credential);
   }
+
+  /**
+   * Imports a pre-cutover board into the current format and switches over to it.
+   *
+   * Destructive in the sense that `collect delete` is, and gated the same way:
+   * without `confirm` it is a plan that writes nothing.
+   */
+  async importBoard(options: { confirm?: boolean } = {}): Promise<BoardImportReport> {
+    const credential = await this.fastReadCredential();
+    const report = await this.store.importBoard(credential, options);
+    // A cutover replaces the board, so anything the caller remembered about its
+    // head is no longer a thing this client has seen.
+    this.rememberedHead = null;
+    return report;
+  }
+
 
   async getQueue(): Promise<number[]> {
     const credential = await this.fastReadCredential();
@@ -862,7 +875,8 @@ export {
 } from './feed.js';
 export type { BoardFeedEntry, BoardFeedEntryKind, BoardFeedPage, BoardFeedRequest } from './feed.js';
 export type {
-  BoardCompactionReport,
+  BoardCutoverState,
+  BoardImportReport,
   BoardOverview,
   BoardSweepReport,
   IssueListSummary,

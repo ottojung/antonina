@@ -48,7 +48,21 @@ export const V3_ISSUE_PAGE_SIZE = 50;
 export const V3_COMMENT_PAGE_SIZE = 50;
 export const V3_FEED_PAGE_SIZE = 50;
 
-const POINTER_FORMAT = 'materialized-snapshots' as const;
+/**
+ * The pointer format this build writes and is willing to serve.
+ *
+ * It is a different string from the pre-cutover one (`materialized-snapshots`,
+ * still read by `importBoard` and written by `board-store.ts` as the bootstrap
+ * record), and that difference is the entire migration boundary. A pointer
+ * carrying the old string names a store this build will *import once* and never
+ * read again; a pointer carrying this string names the only store the runtime
+ * serves. There is no third case and no compatibility branch, so the runtime
+ * cannot drift back into reading the old shape.
+ */
+const POINTER_FORMAT = 'compact-materialized-snapshots' as const;
+
+/** The pre-cutover pointer format. Import source only; never served. */
+const LEGACY_POINTER_FORMAT = 'materialized-snapshots' as const;
 const POINTER_KEY = 'board-v2';
 const DIRECTORY_PAGE_SIZE = 50;
 const DEFAULT_MAX_ATTEMPTS = 6;
@@ -71,24 +85,38 @@ const textEncoder = new TextEncoder();
 const SHARD_REF_PREFIX = 'v3:';
 
 /**
- * Generations of materialization kept reachable, counted back from the pointer.
+ * Generations of materialization kept readable behind the pointer, counted back
+ * from it.
  *
- * A writer reads the generation it is superseding, commits the new one, and
- * then deletes the refs that generation pinned and the new one does not. The
- * live set is therefore the pointer's generation plus the one before it, no
- * matter how many mutations have been applied: a store's object count tracks
- * its live board size, not its mutation count.
+ * There is no lease and no compare-and-delete in Skrynia, so the only way to let
+ * a slow reader finish is to keep what it may still be reading. A reader that
+ * resolved the pointer at revision `N` reads `meta(N)` and then the shards
+ * `meta(N)` pins; when revision `N+1` commits, the refs `N+1` *replaced* are
+ * still pinned by `N` and must survive. They become unreachable from `N+1` and
+ * are deleted by the generation after that, at `N+2`.
  *
- * Retaining the superseded generation is what buys back the safety that naming
- * shards by revision gave for free. There is no lease or compare-and-delete in
- * Skrynia, so the only way to let a slow reader finish is to keep what it may
- * still be reading. One retained generation is the smallest window that still
- * covers a reader that read the pointer and then completed its reads; a reader
- * that stalls across two further commits can see a 404 for a shard it was
- * reading. Widening this is a one-line latency-for-safety trade, and it is the
- * single knob in this file that the immutable design did not have.
+ * The delay is implemented by recording, in each meta, the refs that generation
+ * replaced, and deleting the recorded set of the `RETAINED_GENERATIONS`-th
+ * ancestor on every commit. That keeps the arithmetic in one place and costs no
+ * extra read at the default depth, because the required meta is the one the
+ * writer has already read off the pointer.
+ *
+ * With the default of 1, a reader that stalls across two further commits can see
+ * a 404 for a shard it was reading. That is the residual window the reclaimable
+ * model does not have, and it is the price of bounded storage; widening the
+ * constant widens the window.
+ *
+ * The window is a *deletion* window only. What keeps the retained generation
+ * internally consistent is that Antonina never overwrites a shard and shard
+ * locators are unguessable without the board credential -- not that the storage
+ * refuses to overwrite one. `public-write` does not, so a reader inside the
+ * window is relying on write discipline and locator secrecy; see `writeShard`.
+ * An externally overwritten shard is detected on the next write that re-derives
+ * its ref, and is otherwise outside what this design can promise.
  */
 const RETAINED_GENERATIONS = 1;
+
+0;
 
 interface JsonObject<T> {
   value: T;
@@ -97,7 +125,7 @@ interface JsonObject<T> {
 
 export interface ShardedBoardPointer {
   schemaVersion: 3;
-  format: typeof POINTER_FORMAT;
+  format: typeof POINTER_FORMAT | typeof LEGACY_POINTER_FORMAT;
   boardId: string;
   rootKeyId: string;
   head: string;
@@ -138,7 +166,37 @@ export interface ShardedBoardMeta {
    * board.
    */
   retainsMetaRef: string | null;
+  /**
+   * Shard refs this generation replaced: the ones the superseded generation
+   * pinned and this one does not.
+   *
+   * This is what makes the retention window real. The refs listed here are
+   * still pinned by the generation this one superseded, so a writer must NOT
+   * delete them when it commits this meta -- that would tear a reader that
+   * resolved the older pointer. They are instead deleted by the next writer,
+   * which reads this list off the meta it found through the pointer. So the
+   * delay is a property of the data rather than of the sweeping code, and it
+   * costs no extra read: the required list is the one the writer has already
+   * read.
+   *
+   * Unbounded in principle, since a mutation can replace many shards, and in
+   * practice it is the handful of shards the mutation actually rewrote.
+   */
+  supersededRefs: string[];
+  /**
+   * Deleted issues whose tombstone is still inside the feed-retention window,
+   * oldest first.
+   *
+   * This is what makes tombstone retention O(1) amortized rather than a scan. A
+   * tombstone is pinned by the directory page that holds it, so nothing ages one
+   * out on its own; keeping the set here, ordered by the feed position at which
+   * the issue was deleted, means a writer can expire the ones that have aged out
+   * by looking only at the front of the list. Enumerating the directory to find
+   * them would cost a full board walk on every mutation, which is exactly what
+   * the summary-only read path exists to avoid.
+   */
 }
+
 
 interface DirectoryEntry {
   number: number;
@@ -161,22 +219,18 @@ interface IssueCore {
   updatedAt: string;
 }
 
+/**
+ * One issue, and the pages its comment thread is stored in.
+ *
+ * There is no deleted-issue variant: a deleted issue leaves the directory and its
+ * comment pages become ordinary reclaimable shards, because a feed entry carries
+ * its own text and nothing needs the issue to keep existing.
+ */
 interface IssueSnapshot {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;
   number: number;
-  /**
-   * A deleted issue keeps one tombstone snapshot in the directory instead of
-   * vanishing from it. The tombstone pins nothing but its own `commentRefs`,
-   * and that is the point: a comment page is rewritten on every later comment to
-   * its issue, so the feed can only address a comment by (issue, index) if the
-   * issue is still resolvable after it is deleted. One small object per deleted
-   * issue is the entire cost of keeping every deleted issue's comments readable
-   * from the feed, and it replaces the unbounded pile of orphaned comment pages
-   * the previous model left behind.
-   */
-  deleted: boolean;
-  issue: IssueCore | null;
+  issue: IssueCore;
   closedAt: string | null;
   messageCount: number;
   commentRefs: string[];
@@ -244,21 +298,29 @@ interface CatalogSnapshot {
   dispatches: BoardDispatch[];
 }
 
-type StoredFeedEntry = Omit<BoardFeedEntry, 'author' | 'body'> & {
-  author?: string | null;
-  body?: string | null;
-  /**
-   * How a comment entry reaches its message. `commentRef` names a comment page
-   * directly and is what this model wrote before shards became reclaimable; it
-   * is read for compatibility and no longer written, because the page it names
-   * is rewritten by every later comment to that issue and so cannot be pinned
-   * once superseded. `commentIndex` is the addressable form: the issue's
-   * messages are append-only, so index `i` is page `floor(i / 50)`, element
-   * `i % 50`, of whatever the issue's current snapshot pins.
-   */
-  commentRef?: string;
-  commentIndex?: number;
-};
+/**
+ * A feed entry as stored.
+ *
+ * Self-contained: a comment entry carries its own author and body rather than a
+ * reference to a comment page. That is the single decision the import boundary
+ * rests on, and it is worth stating why.
+ *
+ * The earlier model kept a comment's text in the issue's comment page and had the
+ * feed point at it -- by page ref, then by index. Both forms are a *backwards*
+ * edge from a permanent historical record to mutable storage, and a mutable shard
+ * cannot be pinned by an immutable feed page: the page is rewritten by the next
+ * comment to that issue, so the reference is stale the moment it is written. That
+ * is what forced the deleted-issue tombstone, the retention window, and the
+ * legacy-format fallback -- all three existed only to keep those edges resolvable.
+ *
+ * With the body inline there is no edge to dangle, so a deleted issue needs no
+ * tombstone, its comment pages are ordinary reclaimable shards, and a feed entry
+ * is readable forever with no lookups at all. The cost is that a comment's text
+ * is stored twice, once in the feed and once in its issue thread. That is a
+ * constant factor on the product history we intend to keep, and it buys back the
+ * whole forward-edge problem.
+ */
+type StoredFeedEntry = BoardFeedEntry;
 
 interface FeedPage {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
@@ -328,7 +390,7 @@ function canonicalTimestampAtOrAfter(value: string, floor: string): string {
 function pointerOf(value: unknown): ShardedBoardPointer | null {
   if (!isRecord(value)
       || value.schemaVersion !== 3
-      || value.format !== POINTER_FORMAT
+      || (value.format !== POINTER_FORMAT && value.format !== LEGACY_POINTER_FORMAT)
       || typeof value.boardId !== 'string'
       || typeof value.rootKeyId !== 'string'
       || typeof value.head !== 'string'
@@ -339,7 +401,9 @@ function pointerOf(value: unknown): ShardedBoardPointer | null {
   }
   return {
     schemaVersion: 3,
-    format: POINTER_FORMAT,
+    // Preserved as stored, so a caller can tell the two formats apart. The
+    // runtime serves only `POINTER_FORMAT`; the other is an import source.
+    format: value.format as typeof POINTER_FORMAT | typeof LEGACY_POINTER_FORMAT,
     boardId: value.boardId,
     rootKeyId: value.rootKeyId,
     head: value.head,
@@ -399,9 +463,21 @@ function parseMeta(value: unknown): ShardedBoardMeta {
     feedPageRefs: strings(value.feedPageRefs, 'feed page references'),
     feedCount: requireSafeCount(value.feedCount, 'feed count'),
     deleted: value.deleted,
+    /**
+     * Both of these are absent on a meta written before this shape existed, and
+     * both read as "nothing to inherit": no predecessor chain, and nothing
+     * waiting to be reclaimed. That is the conservative reading for the chain --
+     * a board with no chain simply has no ancestors to walk -- and the right one
+     * for the reclaim list, because a pre-fix meta's superseded shards were
+     * written immutable and are not deletable in any case.
+     */
     retainsMetaRef: typeof value.retainsMetaRef === 'string' ? value.retainsMetaRef : null,
+    supersededRefs: Array.isArray(value.supersededRefs)
+      ? value.supersededRefs.map((entry) => requireText(entry, 'superseded reference'))
+      : [],
   };
 }
+
 
 function coreOf(issue: BoardIssue): IssueCore {
   return {
@@ -609,13 +685,6 @@ function feedEntryForMutation(
  * are append-only, so an index is stable for the life of the issue and resolves
  * against whatever the issue's current snapshot pins.
  */
-function compactFeedEntry(entry: BoardFeedEntry, commentIndex?: number): StoredFeedEntry {
-  const { author, body, ...base } = entry;
-  if (entry.kind === 'comment-added' && commentIndex !== undefined) {
-    return { ...base, commentIndex };
-  }
-  return base;
-}
 
 export interface BoardSweepReport {
   /** The generation the sweep ran for, or `null` before the first mutation. */
@@ -624,35 +693,100 @@ export interface BoardSweepReport {
   reclaimed: number;
   /**
    * Shard objects the last sweep identified as superseded but could not
-   * delete. A non-zero value is a leak, and the common cause is a board that
-   * predates the sweep: Skrynia refuses to delete an `immutable` object, so
-   * every object written by the pre-fix model is permanently undeletable by
-   * Antonina and only Skrynia's own namespace-level collection can remove it.
+   * delete. A non-zero value is a permanent leak, not a retryable one: a shard
+   * written under the pre-cutover `immutable` mode is not deletable through the
+   * API at all, so it is removed only by Skrynia collecting the namespace, and a
+   * board that has been cut over no longer has any `immutable` shard of its own.
    */
   retained: number;
   at: string | null;
   error: string | null;
 }
 
-export interface BoardCompactionReport {
+/**
+ * The logical board the import reconstructs from a pre-cutover store.
+ *
+ * This is the boundary type. Everything the product considers a board -- issues
+ * with their bodies and comment threads, the queue, the catalog, and the feed --
+ * is here, and nothing about how any of it was stored crosses it. The importer
+ * produces it from the old store, the new store materializes from it, and the
+ * equivalence check compares two of these against each other. No shard ref, no
+ * meta, no head-named key, and no per-object mode appears in it, which is what
+ * makes the check independent of the storage it is checking.
+ */
+export interface LogicalBoard {
+  board: Board;
+  queue: number[];
+  /** Every feed entry, in position order, with comment bodies already resolved. */
+  feed: BoardFeedEntry[];
+  /** The issue the board had deleted, if it was deleted. */
+  deleted: boolean;
+  /**
+   * When each closed issue was closed, which the old store recorded per issue and
+   * the new store needs to order the closed list.
+   */
+  closedAt: Map<number, string>;
+  /** The board id and root key the pointer names, checked against the credential. */
   boardId: string;
+  rootKeyId: string;
+}
+
+/** One thing the two boards must agree on, and what they agreed on. */
+export interface EquivalenceCheck {
+  name: string;
+  equal: boolean;
+  /** A short description of the difference, present only when `equal` is false. */
+  difference: string | null;
+}
+
+/**
+ * What an import did, or would do.
+ *
+ * The verification block is not a summary of the import succeeding; it is the
+ * evidence for the cutover, and a run with any failed check does not cut over.
+ */
+export interface BoardImportReport {
+  boardId: string;
+  state: 'cutover-complete' | 'needs-import';
+  /** False when the run was a plan rather than a cutover. */
+  cutover: boolean;
+  /** The pre-cutover revision the import read. */
+  fromRevision: number;
+  /** The revision the imported board is published at, when it was. */
+  toRevision: number | null;
+  /** Shard objects the imported store holds: the compacted size. */
+  importedRefs: number;
+  /** Product counts, so a human can see what was carried across. */
+  issues: number;
+  comments: number;
+  feedEntries: number;
+  queueLength: number;
+  resources: number;
+  targets: number;
+  dispatches: number;
+  checks: EquivalenceCheck[];
+  /** True only when every check passed. */
+  equivalent: boolean;
+  /**
+   * The old store, left whole. It is immutable, so Skrynia will not delete those
+   * objects, and it is not reachable from the new pointer; removing it is a
+   * namespace-level action for Skrynia or operator tooling, deliberately not
+   * this code.
+   */
+  legacyStore: {
+    pointer: string;
+    shardObjects: number;
+    note: string;
+  };
+}
+
+export interface BoardCutoverState {
+  boardId: string;
+  state: 'needs-import' | 'cutover-complete';
   revision: number;
-  /**
-   * Shard objects the current generation pins: the whole of what the live board
-   * costs, and the floor storage cannot go below without losing product data.
-   */
-  reachableRefs: number;
-  /** Revisions still retained for in-flight readers, oldest first. */
-  retainedGenerationRevisions: number[];
-  /**
-   * How many shard objects this board's retention chain still holds that have
-   * aged out. The same number whether or not the run was confirmed, so an
-   * operator can compare a report against the run that follows it.
-   */
-  reclaimableRefs: number;
-  reclaimedRefs: number;
-  retainedRefs: number;
-  lastSweep: BoardSweepReport;
+  /** The pre-cutover pointer, when the board has not been imported. */
+  legacyPointer: string | null;
+  report: BoardImportReport | null;
 }
 
 export class ShardedBoardStore {
@@ -662,6 +796,23 @@ export class ShardedBoardStore {
   private readonly maxAttempts: number;
   private readonly now: () => Date;
   private readonly newId: () => string;
+  /**
+   * Every ref `writeShard` has produced during the commit in flight.
+   *
+   * A ref in the previous generation's `supersededRefs` must never be deleted
+   * while the current generation pins it, and content addressing makes that a
+   * real case rather than a theoretical one: edit an issue from body A to body B
+   * and back to A, and A's ref is recorded as superseded at one generation and
+   * written again at the next. Deleting on the recorded list alone would then
+   * destroy a live shard.
+   *
+   * The set is per-attempt rather than per-store because a lost CAS is retried
+   * against a different starting point, and a ref written by the abandoned
+   * attempt is irrelevant to the attempt that commits. A `writtenRefs` entry can
+   * only mean "this commit re-established that ref", which is exactly the
+   * condition that makes deletion unsafe.
+   */
+  private writtenRefs = new Set<string>();
   private lastSweep: BoardSweepReport = {
     revision: null,
     reclaimed: 0,
@@ -761,24 +912,53 @@ export class ShardedBoardStore {
    * `public-write` is reclaimable -- Skrynia accepts DELETE for it -- and it is
    * the mode the pre-immutable sharded model used for exactly these shards.
    *
-   * What the immutable model bought is untouched: nothing is ever overwritten.
-   * A POST against an occupied ref is a 409 and is confirmed below, not forced,
-   * so no reader can observe a shard change under it, a crash before the pointer
-   * CAS still leaves objects no reader can reach, and two concurrent writers
-   * still produce disjoint object sets with one winner at the CAS. What changes
-   * is only that a superseded shard can now be deleted.
+   * WHAT IS ACTUALLY GUARANTEED HERE, because it is easy to state wrongly.
+   * `public-write` does **not** make a shard immutable. A holder of the locator
+   * can PUT over the object anonymously, with or without `If-Match`: `If-Match`
+   * is honoured when present and is optional. So "no reader can observe a shard
+   * change under it" is **not** a property of the storage.
+   *
+   * What holds is two things, and both are ours:
+   *
+   *   1. Antonina never overwrites. This method POSTs and treats an occupied ref
+   *      as a confirmation, never a force; nothing in this file PUTs a shard.
+   *   2. The locator is `board-v3-` + base64url(sha256(capability + ':' + ref)),
+   *      so addressing a shard at all requires the board credential. Reads are
+   *      unauthenticated, so the secrecy of the locator is the whole of the
+   *      read path's protection -- a locator that has ever been seen is a shard
+   *      that can be read and rewritten.
+   *
+   * Under those two, the properties the immutable model bought still hold: a
+   * crash before the pointer CAS leaves objects no reader can reach, two
+   * concurrent writers produce disjoint object sets with one winner at the CAS,
+   * and a reader cannot observe a shard change caused by a writer, because no
+   * writer performs one. What changes is only that a superseded shard can now be
+   * deleted.
    *
    * The 409 confirmation re-derives the stored object's ref from its content
    * rather than comparing the response to what was sent. A content-addressed ref
    * makes that the only check that is exact: the stored bytes may be ordered
    * differently from the canonical bytes that were hashed, so a structural
-   * comparison would accept a value that is not the one this ref names.
+   * comparison would accept a value that is not the one this ref names. It is
+   * also what makes an externally overwritten shard *detectable* rather than
+   * silently believed: a PUT that replaced the body would make this check fail
+   * loudly instead of being absorbed as a benign 409.
    */
   private async writeShard(
     storageCapability: string,
     value: unknown,
   ): Promise<string> {
     const ref = await shardRef(value);
+    // Recorded so the reclamation can tell a ref that this commit *replaced* from
+    // one it re-established. Content addressing makes that distinction necessary
+    // rather than tidy: an issue edited A -> B -> A writes A's ref again, so a ref
+    // recorded as superseded two generations ago is pinned by the current
+    // generation again, and deleting it would break the board. Subtracting the
+    // refs written by this commit is exact and free -- a superseded ref that this
+    // generation pins must have been re-written here, because a ref this
+    // generation merely carried forward was already pinned by the previous one
+    // and so was never recorded as superseded at all.
+    this.writtenRefs.add(ref);
     const response = await this.fetcher(await this.url(storageCapability, ref), {
       method: 'POST',
       headers: {
@@ -798,9 +978,17 @@ export class ShardedBoardStore {
 
   /**
    * Removes one superseded shard, under the same `public-write` authority that
-   * wrote it. Best-effort by design: this runs after the pointer has already
-   * committed, so a failure here is a leak, never a lost write, and it is
-   * counted and reported rather than thrown.
+   * wrote it. No credential is sent, and none is needed: DELETE on a
+   * public-write object is unauthenticated, which is the property that makes a
+   * shard reclaimable by a client that never saw its creating response.
+   *
+   * Best-effort by design: this runs after the pointer has already committed, so
+   * a failure here is a leak, never a lost write, and it is counted and reported
+   * rather than thrown. Both non-success outcomes are benign and expected:
+   * `404` is the goal state already holding (which is how a lost race between
+   * two reclaimers resolves, and what a re-run after a successful delete sees),
+   * and `403` is a shard written under the pre-cutover `immutable` mode, which
+   * Skrynia does not delete at all. Neither is an error and neither is retried.
    */
   private async deleteShard(storageCapability: string, ref: string): Promise<boolean> {
     const response = await this.fetcher(await this.url(storageCapability, ref), {
@@ -912,61 +1100,49 @@ export class ShardedBoardStore {
     meta: ShardedBoardMeta,
     ref: string,
     withMessages: boolean,
-  ): Promise<{ snapshot: IssueSnapshot; issue: BoardIssue | null }> {
+  ): Promise<{ snapshot: IssueSnapshot; issue: BoardIssue }> {
     const stored = await this.requireJson<unknown>(credential.storageCapability, ref);
     const value = stored.value;
     if (!isRecord(value)
         || value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
         || value.boardId !== meta.boardId
         || !Number.isSafeInteger(value.number)
-        || typeof value.deleted !== 'boolean'
-        || (value.issue !== null && !isRecord(value.issue))
+        || !isRecord(value.issue)
         || (value.closedAt !== null && typeof value.closedAt !== 'string')
         || !Number.isSafeInteger(value.messageCount)
         || !Array.isArray(value.commentRefs)) {
       throw new ShardedBoardStoreError('Antonina issue snapshot is malformed');
     }
-    // A tombstone has no core to validate. It is the only shape in which `issue`
-    // is null, and it exists so the deleted issue's comment pages stay pinned.
     const coreValue = value.issue;
-    let core: IssueCore | null = null;
-    if (coreValue !== null) {
-      if (!Number.isSafeInteger(coreValue.number)
-          || typeof coreValue.title !== 'string'
-          || typeof coreValue.body !== 'string'
-          || (coreValue.state !== 'open' && coreValue.state !== 'closed')
-          || typeof coreValue.createdAt !== 'string'
-          || typeof coreValue.updatedAt !== 'string') {
-        throw new ShardedBoardStoreError('Antonina issue core is malformed');
-      }
-      core = {
-        number: coreValue.number as number,
-        title: coreValue.title,
-        body: coreValue.body,
-        state: coreValue.state,
-        createdAt: coreValue.createdAt,
-        updatedAt: coreValue.updatedAt,
-      };
-      if (core.number !== (value.number as number)) {
-        throw new ShardedBoardStoreError('Antonina issue snapshot number mismatch');
-      }
+    if (!Number.isSafeInteger(coreValue.number)
+        || typeof coreValue.title !== 'string'
+        || typeof coreValue.body !== 'string'
+        || (coreValue.state !== 'open' && coreValue.state !== 'closed')
+        || typeof coreValue.createdAt !== 'string'
+        || typeof coreValue.updatedAt !== 'string') {
+      throw new ShardedBoardStoreError('Antonina issue core is malformed');
     }
-    if (value.deleted === true && core !== null) {
-      throw new ShardedBoardStoreError('Antonina tombstone snapshot carries an issue core');
+    const core: IssueCore = {
+      number: coreValue.number as number,
+      title: coreValue.title,
+      body: coreValue.body,
+      state: coreValue.state,
+      createdAt: coreValue.createdAt,
+      updatedAt: coreValue.updatedAt,
+    };
+    if (core.number !== (value.number as number)) {
+      throw new ShardedBoardStoreError('Antonina issue snapshot number mismatch');
     }
     const snapshot: IssueSnapshot = {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId: meta.boardId,
       number: value.number as number,
-      deleted: value.deleted,
       issue: core,
       closedAt: value.closedAt,
       messageCount: requireSafeCount(value.messageCount, 'message count'),
       commentRefs: value.commentRefs.map((entry) => requireText(entry, 'comment reference')),
     };
-    if (!withMessages || core === null) {
-      return { snapshot, issue: core === null ? null : issueFromCore(core, []) };
-    }
+    if (!withMessages) return { snapshot, issue: issueFromCore(core, []) };
 
     const pages = await Promise.all(snapshot.commentRefs.map(async (commentRef, index) => {
       const pageStored = await this.requireJson<unknown>(credential.storageCapability, commentRef);
@@ -989,7 +1165,7 @@ export class ShardedBoardStore {
   }
 
   /**
-   * Resolves an issue by number through the directory, tombstone or not. This is
+   * Resolves an issue by number through the directory.
    * the resolution a feed entry uses, so it must not skip the tombstone: a
    * comment on a deleted issue is still board history and still has to hydrate.
    */
@@ -997,7 +1173,7 @@ export class ShardedBoardStore {
     credential: BoardCredential,
     meta: ShardedBoardMeta,
     number: number,
-  ): Promise<{ snapshot: IssueSnapshot; issue: BoardIssue | null } | null> {
+  ): Promise<{ snapshot: IssueSnapshot; issue: BoardIssue } | null> {
     const directory = await this.readDirectoryPage(credential, meta, directoryPageNumber(number));
     const entry = directory?.entries.find((candidate) => candidate.number === number);
     if (entry === undefined) return null;
@@ -1058,19 +1234,15 @@ export class ShardedBoardStore {
       issueSnapshots.set(number, result.snapshot);
       messageCounts.set(number, result.snapshot.messageCount);
       if (result.snapshot.closedAt !== null) closedAt.set(number, result.snapshot.closedAt);
-      // A tombstone keeps its directory entry and its comment pages pinned, and
-      // contributes no issue to the board: it is a reachability record, not a
-      // live one.
       return result.issue;
     }));
-    const live = issues.filter((issue): issue is BoardIssue => issue !== null);
-    live.sort((left, right) => left.number - right.number);
+    issues.sort((left, right) => left.number - right.number);
     const queue = await this.readQueue(credential, meta);
     const catalog = await this.readCatalog(credential, meta);
     const board: Board = {
       schemaVersion: 3,
       nextIssueNumber: meta.nextIssueNumber,
-      issues: live,
+      issues,
       resources: catalog.resources,
       targets: catalog.targets,
       dispatches: catalog.dispatches,
@@ -1183,38 +1355,12 @@ export class ShardedBoardStore {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId,
       number: issue.number,
-      deleted: false,
       issue: coreOf(issue),
       closedAt,
       messageCount: issue.messages.length,
       commentRefs,
     };
     return { ref: await this.writeShard(credential.storageCapability, snapshot), superseded };
-  }
-
-  /**
-   * The tombstone written in place of a deleted issue's snapshot. It pins the
-   * comment pages that were live at deletion, which is all of them: a deleted
-   * issue takes no further comments, so those pages stop being rewritten and
-   * stay valid for the feed indefinitely.
-   */
-  private async materializeTombstone(
-    credential: BoardCredential,
-    boardId: string,
-    number: number,
-    previous: IssueSnapshot,
-  ): Promise<string> {
-    const snapshot: IssueSnapshot = {
-      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
-      boardId,
-      number,
-      deleted: true,
-      issue: null,
-      closedAt: null,
-      messageCount: previous.messageCount,
-      commentRefs: [...previous.commentRefs],
-    };
-    return this.writeShard(credential.storageCapability, snapshot);
   }
 
   private async writeDirectoryPage(
@@ -1304,7 +1450,6 @@ export class ShardedBoardStore {
     credential: BoardCredential,
     meta: ShardedBoardMeta,
     entry: BoardFeedEntry | null,
-    commentIndex?: number,
   ): Promise<{ refs: string[]; count: number; superseded: string[] }> {
     if (entry === null) {
       return { refs: [...meta.feedPageRefs], count: meta.feedCount, superseded: [] };
@@ -1321,7 +1466,7 @@ export class ShardedBoardStore {
       }
       entries = clone(previous.value.entries as StoredFeedEntry[]);
     }
-    entries.push(compactFeedEntry(entry, commentIndex));
+    entries.push(clone(entry));
     const page: FeedPage = {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId: meta.boardId,
@@ -1411,11 +1556,10 @@ export class ShardedBoardStore {
    * Deletes the refs a committed mutation superseded.
    *
    * It runs after the pointer has already committed and never throws: the
-   * commit is the mutation, and a failed reclamation is a leak that the next
-   * mutation retries, not a failed write. The count of what it could not delete
-   * is returned so an operator can see a board whose reclamation is not keeping
-   * up -- which is exactly the state a board upgraded from the immutable model
-   * is in, because Skrynia refuses to delete an immutable object at all.
+   * commit is the mutation, and a failed reclamation is a leak, not a failed
+   * write. The count of what it could not delete is returned so an operator can
+   * see it; the cause of a non-zero count is always a shard in a mode Skrynia
+   * will not delete, never a transient transport failure.
    */
   private async reclaim(
     credential: BoardCredential,
@@ -1440,6 +1584,25 @@ export class ShardedBoardStore {
    * has already been cut. It has to: the chain records what was superseded, not
    * what still exists, and a healthy board's ancestors are reclaimed by earlier
    * walks, so a missing ref is the normal end of the walk rather than an error.
+   */
+  /**
+   * Drops the tombstones whose feed entries have aged out, returning the ones
+   * that remain and the refs the drop makes reclaimable.
+   *
+   * A tombstone is pinned by a directory page, so it never ages out by itself;
+   * this is what bounds the set. The window is measured in feed positions
+   * because a tombstone exists only to serve feed entries, so "old enough" is
+   * exactly "more than `DELETED_ISSUE_FEED_RETENTION` entries ago".
+   *
+   * Only the front of the list is examined. The list is ordered by deletion
+   * position because entries are appended in feed order, so the expired ones are
+   * always a prefix and no scan is needed -- which is the difference between
+   * O(expired) and a full directory walk per mutation.
+   *
+   * The refs returned are the tombstone and the comment pages it was the only
+   * pinner of. They go through the ordinary superseded path, so they are deleted
+   * one generation later like anything else, and a reader inside the window is
+   * unaffected.
    */
   private async reclaimRetention(
     credential: BoardCredential,
@@ -1500,7 +1663,6 @@ export class ShardedBoardStore {
         schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
         boardId: anchor.boardId,
         number: issue.number,
-        deleted: false,
         issue: coreOf(issue),
         closedAt: closedAt.get(issue.number) ?? null,
         messageCount: issue.messages.length,
@@ -1560,11 +1722,7 @@ export class ShardedBoardStore {
       : feedEntries(stored.log)
           .sort((left, right) => left.position - right.position)
           .map((entry, position) => {
-            const positioned = { ...entry, position };
-            const index = entry.kind === 'comment-added' && entry.messageId !== null
-              ? commentIndexes.get(entry.messageId)
-              : undefined;
-            return compactFeedEntry(positioned, index);
+            return { ...entry, position };
           });
     const feedPageRefs: string[] = [];
     const feedPages = paginate(legacyFeed, V3_FEED_PAGE_SIZE);
@@ -1602,6 +1760,7 @@ export class ShardedBoardStore {
       feedCount: legacyFeed.length,
       deleted: false,
       retainsMetaRef: null,
+      supersededRefs: [],
     };
     const metaRef = await this.writeMeta(credential, meta);
     const pointer: ShardedBoardPointer = {
@@ -1630,12 +1789,623 @@ export class ShardedBoardStore {
     };
   }
 
+  /**
+   * Which side of the cutover a pointer is on.
+   *
+   * A pointer is served only if it is already in the current format. The
+   * pre-cutover format is *not* served and is never auto-migrated: it is an import
+   * source, and reading it through the normal path is precisely the permanent
+   * compatibility code the cutover exists to remove. So every read method checks
+   * this first and refuses with a named error, and only `cutoverState` and
+   * `importBoard` are allowed past it.
+   */
+  private requireCurrentPointer(pointerStored: JsonObject<ShardedBoardPointer>): ShardedBoardPointer {
+    if (pointerStored.value.format !== POINTER_FORMAT) {
+      throw new ShardedBoardStoreError(
+        'Antonina board is stored in the pre-cutover format and must be imported '
+        + 'with `antonina board import --confirm` before this build can serve it',
+      );
+    }
+    return pointerStored.value;
+  }
+
+  /**
+   * Reads a pre-cutover store into logical board state.
+   *
+   * This is the only code in the package that understands the old on-disk shape,
+   * and it is reached only from `importBoard`. It resolves head-named refs and
+   * comment-page references and returns a `LogicalBoard`, which is the whole
+   * point: the caller's next step cannot accidentally depend on a ref, because
+   * there is no ref on the other side of this call.
+   */
+  private async readLegacyBoard(
+    credential: BoardCredential,
+    pointer: ShardedBoardPointer,
+  ): Promise<LogicalBoard> {
+    const anchor = credentialTrustAnchor(credential);
+    if (pointer.boardId !== anchor.boardId || pointer.rootKeyId !== anchor.rootKeyId) {
+      throw new ShardedBoardStoreError('Antonina board pointer does not match this credential');
+    }
+    const get = async (ref: string): Promise<unknown> => {
+      const stored = await this.getJson<unknown>(credential.storageCapability, ref);
+      if (stored === null) {
+        throw new ShardedBoardStoreError(
+          `Antonina pre-cutover object ${ref} is missing; the board cannot be imported`,
+        );
+      }
+      return stored.value;
+    };
+
+    // The old meta carries the same field names as the new one but a different
+    // shard layout underneath, and it is read as a plain record rather than
+    // through `parseMeta`: the new parser is the current format's, and using it
+    // here would be the compatibility creep this cutover is removing.
+    const metaValue = await get(pointer.metaRef);
+    if (!isRecord(metaValue) || !Array.isArray(metaValue.directoryRefs)) {
+      throw new ShardedBoardStoreError('Antonina pre-cutover metadata is malformed');
+    }
+    // `isRecord` is deliberately false for arrays, so the array check comes first.
+    // The pre-cutover meta uses the same field names as the current one, which is
+    // what makes this a structural read rather than a schema translation.
+    const refs = (name: string): string[] => (Array.isArray(metaValue[name])
+      ? metaValue[name] as string[]
+      : []);
+    const single = (name: string): string => (typeof metaValue[name] === 'string'
+      ? metaValue[name] as string
+      : (() => { throw new ShardedBoardStoreError(`Antonina pre-cutover metadata lacks ${name}`); })());
+
+    const issues: BoardIssue[] = [];
+    const closedAt = new Map<number, string>();
+    for (const pageRef of refs('directoryRefs')) {
+      if (pageRef === null || pageRef === undefined) continue;
+      const page = await get(pageRef);
+      if (!isRecord(page) || !Array.isArray(page.entries)) {
+        throw new ShardedBoardStoreError('Antonina pre-cutover directory page is malformed');
+      }
+      for (const entry of page.entries as Array<Record<string, unknown>>) {
+        const snapshot = await get(entry.ref as string);
+        if (!isRecord(snapshot) || !isRecord(snapshot.issue)) {
+          throw new ShardedBoardStoreError('Antonina pre-cutover issue snapshot is malformed');
+        }
+        const core = snapshot.issue;
+        const messages: BoardMessage[] = [];
+        for (const commentRef of (snapshot.commentRefs as string[] ?? [])) {
+          const commentPage = await get(commentRef);
+          if (!isRecord(commentPage) || !Array.isArray(commentPage.messages)) {
+            throw new ShardedBoardStoreError('Antonina pre-cutover comment page is malformed');
+          }
+          messages.push(...(commentPage.messages as BoardMessage[]));
+        }
+        if (typeof snapshot.closedAt === 'string') closedAt.set(core.number as number, snapshot.closedAt);
+        issues.push({
+          number: core.number as number,
+          title: core.title as string,
+          body: core.body as string,
+          state: core.state as IssueState,
+          createdAt: core.createdAt as string,
+          updatedAt: core.updatedAt as string,
+          messages,
+        });
+      }
+    }
+    issues.sort((left, right) => left.number - right.number);
+
+    const queueValue = await get(single('queueRef'));
+    const catalogValue = await get(single('catalogRef'));
+    if (!isRecord(queueValue) || !Array.isArray(queueValue.numbers)
+        || !isRecord(catalogValue)
+        || !Array.isArray(catalogValue.resources)
+        || !Array.isArray(catalogValue.targets)
+        || !Array.isArray(catalogValue.dispatches)) {
+      throw new ShardedBoardStoreError('Antonina pre-cutover queue or catalog is malformed');
+    }
+
+    // The feed is read whole and its comment entries resolved, which is the step
+    // that makes the import a real migration rather than a ref copy: the old
+    // entries may name a comment page, and the new store's entries carry their
+    // own text. Resolving here is what retires the compatibility code.
+    const feed: BoardFeedEntry[] = [];
+    for (const feedPageRef of refs('feedPageRefs')) {
+      const feedPage = await get(feedPageRef);
+      if (!isRecord(feedPage) || !Array.isArray(feedPage.entries)) {
+        throw new ShardedBoardStoreError('Antonina pre-cutover feed page is malformed');
+      }
+      for (const entry of feedPage.entries as Array<Record<string, unknown>>) {
+        feed.push(await this.resolveLegacyFeedEntry(get, entry, issues));
+      }
+    }
+    feed.sort((left, right) => left.position - right.position);
+
+    const nextIssueNumber = requireSafeCount(metaValue.nextIssueNumber, 'next issue number');
+    return {
+      board: {
+        schemaVersion: 3,
+        nextIssueNumber,
+        issues,
+        resources: catalogValue.resources as BoardResource[],
+        targets: catalogValue.targets as BoardExecutionTarget[],
+        dispatches: catalogValue.dispatches as BoardDispatch[],
+      },
+      queue: [...(queueValue.numbers as number[])],
+      feed,
+      deleted: metaValue.deleted === true,
+      closedAt,
+      boardId: pointer.boardId,
+      rootKeyId: pointer.rootKeyId,
+    };
+  }
+
+  /**
+   * One pre-cutover feed entry, with its comment body resolved.
+   *
+   * The old entries are of two kinds: those that name the comment page they were
+   * written into, and those whose text is already inline. Both are resolved here
+   * so the imported feed is uniform, which is what lets the new store's reader be
+   * a plain validator with no branches.
+   */
+  private async resolveLegacyFeedEntry(
+    get: (ref: string) => Promise<unknown>,
+    entry: Record<string, unknown>,
+    issues: BoardIssue[],
+  ): Promise<BoardFeedEntry> {
+    const base = {
+      id: entry.id as string,
+      kind: entry.kind as BoardFeedEntry['kind'],
+      at: entry.at as string,
+      position: entry.position as number,
+      issueNumber: entry.issueNumber as number,
+      title: entry.title as string,
+      state: entry.state as IssueState,
+      messageId: (entry.messageId ?? null) as string | null,
+    };
+    if (base.kind !== 'comment-added') {
+      return { ...base, author: null, body: null };
+    }
+    if (typeof entry.author === 'string' && typeof entry.body === 'string') {
+      return { ...base, author: entry.author, body: entry.body };
+    }
+    // Named page first, then the issue's own thread, which covers an old entry
+    // whose page has been replaced by a later comment to the same issue.
+    let message: BoardMessage | undefined;
+    if (typeof entry.commentRef === 'string') {
+      const page = await get(entry.commentRef);
+      if (isRecord(page) && Array.isArray(page.messages)) {
+        message = (page.messages as BoardMessage[]).find(
+          (candidate) => candidate.id === base.messageId,
+        );
+      }
+    }
+    if (message === undefined && typeof entry.commentIndex === 'number') {
+      const issue = issues.find((candidate) => candidate.number === base.issueNumber);
+      message = issue?.messages[entry.commentIndex];
+    }
+    if (message === undefined) {
+      const issue = issues.find((candidate) => candidate.number === base.issueNumber);
+      message = issue?.messages.find((candidate) => candidate.id === base.messageId);
+    }
+    if (message === undefined) {
+      throw new ShardedBoardStoreError(
+        `Antonina pre-cutover feed entry ${base.id} names a comment that is not in the board`,
+      );
+    }
+    return { ...base, author: message.author, body: message.body };
+  }
+
+  /**
+   * Rebuilds `logical` into a fresh store of content-addressed shards and
+   * returns the pointer, without publishing it.
+   *
+   * Only the logical board and the product history are written. Nothing from the
+   * old store is carried by reference and no superseded artifact is reproduced,
+   * which is what makes the result compact: the import writes one object per
+   * live shard and one per 50 feed entries, where the old store held one per
+   * shard per revision it had ever been at.
+   */
+  private async materializeLogical(
+    credential: BoardCredential,
+    logical: LogicalBoard,
+  ): Promise<{ meta: ShardedBoardMeta; pointer: ShardedBoardPointer }> {
+    // A fresh identity, because this is a new store rather than a new revision
+    // of the old one. Deriving it from the imported content means two imports of
+    // the same board agree, which is what makes the cutover reviewable.
+    const head = await sha256Id('sha256', canonicalBytes({
+      kind: 'compact-import',
+      boardId: logical.boardId,
+      rootKeyId: logical.rootKeyId,
+      revision: 1,
+      issues: logical.board.issues.map((issue) => ({
+        number: issue.number,
+        title: issue.title,
+        body: issue.body,
+        state: issue.state,
+        createdAt: issue.createdAt,
+        updatedAt: issue.updatedAt,
+        messages: issue.messages,
+      })) as unknown as CanonicalValue,
+      queue: logical.queue,
+      resources: logical.board.resources as unknown as CanonicalValue,
+      targets: logical.board.targets as unknown as CanonicalValue,
+      dispatches: logical.board.dispatches as unknown as CanonicalValue,
+      feedCount: logical.feed.length,
+    }));
+
+    const directoryPages = new Map<number, DirectoryEntry[]>();
+    for (const issue of logical.board.issues) {
+      const commentRefs: string[] = [];
+      const pages = paginate(issue.messages, V3_COMMENT_PAGE_SIZE);
+      for (let index = 0; index < pages.length; index += 1) {
+        const page: CommentPage = {
+          schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+          boardId: logical.boardId,
+          number: issue.number,
+          page: index + 1,
+          messages: clone(pages[index]!),
+        };
+        commentRefs.push(await this.writeShard(credential.storageCapability, page));
+      }
+      const snapshot: IssueSnapshot = {
+        schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+        boardId: logical.boardId,
+        number: issue.number,
+        issue: coreOf(issue),
+        closedAt: logical.closedAt.get(issue.number) ?? null,
+        messageCount: issue.messages.length,
+        commentRefs,
+      };
+      const ref = await this.writeShard(credential.storageCapability, snapshot);
+      const page = directoryPageNumber(issue.number);
+      const entries = directoryPages.get(page) ?? [];
+      entries.push({ number: issue.number, ref });
+      directoryPages.set(page, entries);
+    }
+
+    const maxDirectoryPage = logical.board.nextIssueNumber <= 1
+      ? 0
+      : directoryPageNumber(logical.board.nextIssueNumber - 1);
+    const directoryRefs: Array<string | null> = [];
+    for (let page = 1; page <= maxDirectoryPage; page += 1) {
+      const entries = directoryPages.get(page);
+      directoryRefs.push(
+        entries === undefined || entries.length === 0
+          ? null
+          : (await this.writeDirectoryPage(credential, logical.boardId, page, entries, null)).ref,
+      );
+    }
+
+    const queueRef = await this.writeQueueSnapshot(credential, logical.boardId, logical.queue);
+    const catalogRef = await this.writeCatalogSnapshot(credential, logical.boardId, logical.board);
+
+    const state: VerifiedBoardState = {
+      board: logical.board,
+      queue: logical.queue,
+      authorities: [],
+      deleted: logical.deleted,
+      head,
+      migration: unMigratedBoardReport(),
+    };
+    const { refs: openPageRefs, superseded: openSuperseded } = await this.writeIssueListPages(
+      credential, logical.boardId, state, logical.closedAt, 'open', null, null, [],
+    );
+    const { refs: closedPageRefs, superseded: closedSuperseded } = await this.writeIssueListPages(
+      credential, logical.boardId, state, logical.closedAt, 'closed', null, null, [],
+    );
+    // The import has no superseded generation, so anything these report is a
+    // ref that was written twice in this same run. Nothing is reclaimed here: the
+    // import is the first writer, and the sweep belongs to the generations after
+    // it. The values are returned only so the caller can assert they are empty.
+    void [openSuperseded, closedSuperseded];
+
+    const feedPageRefs: string[] = [];
+    const feedPages = paginate(logical.feed, V3_FEED_PAGE_SIZE);
+    for (let index = 0; index < feedPages.length; index += 1) {
+      const page: FeedPage = {
+        schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+        boardId: logical.boardId,
+        page: index + 1,
+        entries: clone(feedPages[index]!),
+      };
+      feedPageRefs.push(await this.writeShard(credential.storageCapability, page));
+    }
+
+    const meta: ShardedBoardMeta = {
+      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+      boardId: logical.boardId,
+      rootKeyId: logical.rootKeyId,
+      head,
+      revision: 1,
+      updatedAt: latestBoardTimestamp(logical.board, logical.feed.at(-1)?.at ?? this.now().toISOString()),
+      // Names the format the board came from, so an operator looking at the
+      // imported store can tell it was rebuilt rather than carried across.
+      migratedFrom: LEGACY_POINTER_FORMAT,
+      nextIssueNumber: logical.board.nextIssueNumber,
+      issueCount: logical.board.issues.length,
+      openIssueCount: logical.board.issues.filter((issue) => issue.state === 'open').length,
+      closedIssueCount: logical.board.issues.filter((issue) => issue.state === 'closed').length,
+      directoryRefs,
+      openPageRefs,
+      closedPageRefs,
+      queueRef,
+      catalogRef,
+      feedPageRefs,
+      feedCount: logical.feed.length,
+      deleted: logical.deleted,
+      retainsMetaRef: null,
+      supersededRefs: [],
+    };
+    const metaRef = await this.writeMeta(credential, meta);
+    return {
+      meta,
+      pointer: {
+        schemaVersion: 3,
+        format: POINTER_FORMAT,
+        boardId: logical.boardId,
+        rootKeyId: logical.rootKeyId,
+        head,
+        revision: 1,
+        metaRef,
+      },
+    };
+  }
+
+  /**
+   * Reads a pre-cutover store and, with `confirm`, republishes the board from it.
+   *
+   * Without `confirm` this is a plan: it reads, rebuilds, verifies, and reports,
+   * and publishes nothing. With it, the same work happens and then the pointer is
+   * replaced under `If-Match`, which is the only atomic step and the only one that
+   * changes what any client will read.
+   *
+   * The old store is never written to and never deleted from. Its objects are
+   * `immutable`, so Skrynia refuses to delete them through the API regardless, and
+   * the pointer no longer names them, so they are unreachable garbage for Skrynia's
+   * own namespace-level collection to remove wholesale.
+   */
+  async importBoard(
+    credentialValue: BoardCredential,
+    options: { confirm?: boolean } = {},
+  ): Promise<BoardImportReport> {
+    const credential = await verifyBoardCredential(credentialValue);
+    const pointerStored = await this.readPointer();
+    if (pointerStored === null) {
+      throw new ShardedBoardStoreError('Antonina materialized board pointer does not exist');
+    }
+    const legacyPointer = pointerStored.value;
+    if (legacyPointer.format === POINTER_FORMAT) {
+      // Already cut over. Report the current state rather than re-importing: a
+      // second import would rewrite the board at a new head for no reason.
+      return this.reportCutoverComplete(credential, legacyPointer);
+    }
+
+    const logical = await this.readLegacyBoard(credential, legacyPointer);
+    const { meta, pointer } = await this.materializeLogical(credential, logical);
+    const checks = await this.verifyImport(credential, logical, pointer);
+    const equivalent = checks.every((check) => check.equal);
+    const reachable = await this.pinnedRefs(credential, meta);
+    const legacyObjects = await this.countLegacyObjects(credential, legacyPointer);
+
+    const report: BoardImportReport = {
+      boardId: logical.boardId,
+      state: 'needs-import',
+      cutover: false,
+      fromRevision: legacyPointer.revision,
+      toRevision: null,
+      importedRefs: reachable.size,
+      issues: logical.board.issues.length,
+      comments: logical.board.issues.reduce((total, issue) => total + issue.messages.length, 0),
+      feedEntries: logical.feed.length,
+      queueLength: logical.queue.length,
+      resources: logical.board.resources.length,
+      targets: logical.board.targets.length,
+      dispatches: logical.board.dispatches.length,
+      checks,
+      equivalent,
+      legacyStore: {
+        pointer: legacyPointer.metaRef,
+        shardObjects: legacyObjects,
+        note: 'the pre-cutover store is left whole and unreachable; Skrynia removes it, not Antonina',
+      },
+    };
+
+    if (options.confirm !== true) return report;
+    if (!equivalent) {
+      throw new ShardedBoardStoreError(
+        'Antonina board import failed verification and was not published; '
+        + `failed checks: ${checks.filter((check) => !check.equal).map((check) => check.name).join(', ')}`,
+      );
+    }
+    if (!await this.commitPointer(credential.storageCapability, pointerStored.etag, pointer)) {
+      throw new ShardedBoardStoreError(
+        'Antonina board changed during import; nothing was published, re-run the import',
+        { status: 412, method: 'PUT' },
+      );
+    }
+    return { ...report, cutover: true, state: 'cutover-complete', toRevision: pointer.revision };
+  }
+
+  /**
+   * Reads the just-imported board back through the *runtime* path and compares it
+   * to what the import intended, field by field.
+   *
+   * Both sides are compared as `LogicalBoard`, so the check cannot pass by
+   * comparing the wrong things: it covers issue bodies and every comment with its
+   * author and timestamps, open/closed state, the queue order, resources, targets,
+   * dispatches, the feed's ordering and content, and the counters a client reads.
+   *
+   * The new side is read through the public readers, not by re-walking the shards
+   * the importer just wrote. That is deliberate: a check that inspected the
+   * importer's own output would confirm only that the importer is self-consistent,
+   * whereas this confirms that the store the runtime will actually serve says the
+   * same thing the old store did.
+   */
+  private async verifyImport(
+    credential: BoardCredential,
+    intended: LogicalBoard,
+    imported: ShardedBoardPointer,
+  ): Promise<EquivalenceCheck[]> {
+    const checks: EquivalenceCheck[] = [];
+    const same = (name: string, left: unknown, right: unknown): void => {
+      const leftJson = JSON.stringify(left);
+      const rightJson = JSON.stringify(right);
+      checks.push({
+        name,
+        equal: leftJson === rightJson,
+        difference: leftJson === rightJson ? null : `imported ${rightJson} != source ${leftJson}`,
+      });
+    };
+
+    const bundle = await this.readBundle(credential, imported);
+    const meta = await this.readMeta(imported, credential);
+    const feed: BoardFeedEntry[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.readFeedFrom(credential, meta, cursor === undefined
+        ? { limit: V3_FEED_PAGE_SIZE }
+        : { limit: V3_FEED_PAGE_SIZE, cursor });
+      feed.push(...page.entries);
+      if (page.nextCursor === null) break;
+      cursor = page.nextCursor;
+    }
+
+    same('nextIssueNumber', intended.board.nextIssueNumber, bundle.state.board.nextIssueNumber);
+    same(
+      'issues',
+      intended.board.issues.map((issue) => ({
+        number: issue.number,
+        title: issue.title,
+        body: issue.body,
+        state: issue.state,
+        createdAt: issue.createdAt,
+        updatedAt: issue.updatedAt,
+        messages: issue.messages,
+      })),
+      bundle.state.board.issues.map((issue) => ({
+        number: issue.number,
+        title: issue.title,
+        body: issue.body,
+        state: issue.state,
+        createdAt: issue.createdAt,
+        updatedAt: issue.updatedAt,
+        messages: issue.messages,
+      })),
+    );
+    same('queue', intended.queue, bundle.state.queue);
+    same('resources', intended.board.resources, bundle.state.board.resources);
+    same('targets', intended.board.targets, bundle.state.board.targets);
+    same('dispatches', intended.board.dispatches, bundle.state.board.dispatches);
+    // The feed is *served* newest-first, which is the order a reader pages in,
+    // and *stored* in position order. Compared in position order, and the served
+    // order is checked separately below so neither is left unasserted.
+    const byPosition = (entries: BoardFeedEntry[]) => [...entries].sort((a, b) => a.position - b.position);
+    same('feed', byPosition(intended.feed), byPosition(feed));
+    const servedDescending = feed.every(
+      (entry, index) => index === 0 || feed[index - 1]!.position > entry.position,
+    );
+    checks.push({
+      name: 'feedServedNewestFirst',
+      equal: servedDescending,
+      difference: servedDescending ? null : 'the served feed is not in descending position order',
+    });
+    same('deleted', intended.deleted, bundle.state.deleted);
+    same('feedCount', intended.feed.length, meta.feedCount);
+    same('issueCount', intended.board.issues.length, meta.issueCount);
+    same(
+      'openIssueCount',
+      intended.board.issues.filter((issue) => issue.state === 'open').length,
+      meta.openIssueCount,
+    );
+    same(
+      'closedIssueCount',
+      intended.board.issues.filter((issue) => issue.state === 'closed').length,
+      meta.closedIssueCount,
+    );
+    return checks;
+  }
+
+  /**
+   * How many shard objects the pre-cutover store holds, counted from its own
+   * recorded shards.
+   *
+   * It is a lower bound and the report says so: Skrynia exposes no listing
+   * primitive, so the superseded objects the old store never named again cannot
+   * be counted at all. The number is reported because it is the size of the
+   * residue an operator is being asked to have Skrynia remove, and a floor is
+   * still a floor.
+   */
+  private async countLegacyObjects(
+    credential: BoardCredential,
+    legacyPointer: ShardedBoardPointer,
+  ): Promise<number> {
+    const logical = await this.readLegacyBoard(credential, legacyPointer);
+    // One directory page per 50 issue numbers, one comment page per 50 messages,
+    // one feed page per 50 entries, plus the singletons.
+    const directoryPages = Math.ceil(logical.board.issues.length / DIRECTORY_PAGE_SIZE);
+    const commentPages = logical.board.issues.reduce(
+      (total, issue) => total + Math.ceil(issue.messages.length / V3_COMMENT_PAGE_SIZE),
+      0,
+    );
+    const feedPages = Math.ceil(logical.feed.length / V3_FEED_PAGE_SIZE);
+    return directoryPages + commentPages + feedPages
+      + logical.board.issues.length + 1 + 1 + 2 + 1;
+  }
+
+  private async reportCutoverComplete(
+    credential: BoardCredential,
+    pointer: ShardedBoardPointer,
+  ): Promise<BoardImportReport> {
+    const meta = await this.readMeta(pointer, credential);
+    const reachable = await this.pinnedRefs(credential, meta);
+    const bundle = await this.readBundle(credential, pointer);
+    return {
+      boardId: pointer.boardId,
+      state: 'cutover-complete',
+      cutover: false,
+      fromRevision: pointer.revision,
+      toRevision: pointer.revision,
+      importedRefs: reachable.size,
+      issues: bundle.state.board.issues.length,
+      comments: bundle.state.board.issues.reduce((total, issue) => total + issue.messages.length, 0),
+      feedEntries: meta.feedCount,
+      queueLength: bundle.state.queue.length,
+      resources: bundle.state.board.resources.length,
+      targets: bundle.state.board.targets.length,
+      dispatches: bundle.state.board.dispatches.length,
+      checks: [],
+      equivalent: true,
+      legacyStore: {
+        pointer: '',
+        shardObjects: 0,
+        note: 'already cut over; there is no pre-cutover store to remove',
+      },
+    };
+  }
+
+  /** Which side of the cutover a pointer is on, read without changing anything. */
+  async cutoverState(
+    credentialValue: BoardCredential,
+    pointerStored: JsonObject<ShardedBoardPointer>,
+  ): Promise<{
+    legacyPointer: string | null;
+    report: BoardImportReport | null;
+  }> {
+    const credential = await verifyBoardCredential(credentialValue);
+    if (pointerStored.value.format === POINTER_FORMAT) {
+      return { legacyPointer: null, report: null };
+    }
+    // A plan, not a cutover: this reads the old store and reports what an import
+    // would carry across, without writing anything.
+    return {
+      legacyPointer: pointerStored.value.metaRef,
+      report: await this.importBoard(credential, { confirm: false }),
+    };
+  }
+
   async read(
     credentialValue: BoardCredential,
   ): Promise<StoredSignedBoard | null> {
     const credential = await verifyBoardCredential(credentialValue);
     const pointerStored = await this.readPointer();
     if (pointerStored === null) return null;
+    this.requireCurrentPointer(pointerStored);
     const bundle = await this.readBundle(credential, pointerStored.value);
     return {
       log: null,
@@ -1655,8 +2425,12 @@ export class ShardedBoardStore {
     }
 
     for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
+      // Reset per attempt: refs written by a lost CAS belong to a generation
+      // that was never committed and say nothing about this one.
+      this.writtenRefs = new Set<string>();
       const pointerStored = await this.readPointer();
       if (pointerStored === null) throw new ShardedBoardStoreError('Antonina materialized board pointer does not exist');
+      this.requireCurrentPointer(pointerStored);
       const pointer = pointerStored.value;
       const bundle = compact
         ? await this.readMutationBundle(credential, pointer)
@@ -1703,9 +2477,7 @@ export class ShardedBoardStore {
 
       // The compact path starts from list summaries. Only issue mutations that
       // actually need the issue body/messages hydrate that one issue, and only
-      // the directory page containing the touched issue is read. A delete reads
-      // the snapshot but not its messages: the tombstone it writes carries the
-      // comment refs, and the comments themselves are untouched by a delete.
+      // the directory page containing the touched issue is read.
       if (compact && beforeIssueNumber !== null && request.kind.startsWith('issue.')) {
         const pageNumber = directoryPageNumber(beforeIssueNumber);
         const directory = await this.readDirectoryPage(credential, bundle.meta, pageNumber);
@@ -1785,39 +2557,35 @@ export class ShardedBoardStore {
         nextMessageCounts.set(beforeIssueNumber, afterIssue.messages.length);
       }
 
-      const nextIssueRefs = new Map(bundle.issueRefs);
-      const nextDirectoryRefs = [...bundle.meta.directoryRefs];
       // The refs this mutation stops pinning. Collected as the writer goes
       // rather than derived afterwards, so a mutation never has to enumerate
       // the board to find out what it may delete -- which is what would
       // otherwise force a full hydration on every write.
       const superseded: string[] = [];
+      const nextDirectoryRefs = [...bundle.meta.directoryRefs];
       const issueMutation = request.kind.startsWith('issue.');
       if (issueMutation && beforeIssueNumber !== null) {
         const directoryPage = directoryPageNumber(beforeIssueNumber);
-        const currentDirectory = bundle.directoryPages.get(directoryPage);
-        const entries = currentDirectory === undefined ? [] : clone(currentDirectory.entries);
+        // Read the page the mutation is about to rewrite, so the entries below
+        // start from what is actually in storage rather than from a copy this
+        // bundle happened to have cached. One read, one page: the fast path
+        // still does not walk the board.
+        const directory = await this.readDirectoryPage(credential, bundle.meta, directoryPage);
+        if (directory !== null) bundle.directoryPages.set(directoryPage, directory);
+        const entries = clone(bundle.directoryPages.get(directoryPage)?.entries ?? []);
         const entryIndex = entries.findIndex((entry) => entry.number === beforeIssueNumber);
         const previousEntryRef = entryIndex >= 0 ? entries[entryIndex]!.ref : null;
 
         if (request.kind === 'issue.delete') {
-          nextIssueRefs.delete(beforeIssueNumber);
-          // The entry is replaced by a tombstone rather than removed, so the
-          // deleted issue's comment pages stay pinned and its feed entries stay
-          // resolvable. Its issue leaves the board: the tombstone carries no
-          // core, so no reader counts it as live.
+          // The entry goes, and with it the issue snapshot and every comment page
+          // it pinned. Nothing needs them: a feed entry carries its own text, so
+          // the history of a deleted issue survives in the feed without the issue
+          // continuing to exist in the directory. That is the whole reason this
+          // path is three lines rather than a tombstone.
+          if (entryIndex >= 0) entries.splice(entryIndex, 1);
           const previousSnapshot = bundle.issueSnapshots.get(beforeIssueNumber);
-          if (previousSnapshot === undefined) {
-            throw new ShardedBoardStoreError(`Operation references missing issue ${beforeIssueNumber}`);
-          }
-          const tombstone = await this.materializeTombstone(
-            credential,
-            pointer.boardId,
-            beforeIssueNumber,
-            previousSnapshot,
-          );
-          if (previousEntryRef !== null) superseded.push(previousEntryRef);
-          if (entryIndex >= 0) entries[entryIndex] = { number: beforeIssueNumber, ref: tombstone };
+          superseded.push(...(previousEntryRef === null ? [] : [previousEntryRef]));
+          superseded.push(...(previousSnapshot?.commentRefs ?? []));
         } else {
           if (afterIssue === undefined) throw new ShardedBoardStoreError('Issue mutation produced no issue snapshot');
           const previousSnapshot = bundle.issueSnapshots.get(beforeIssueNumber);
@@ -1829,7 +2597,6 @@ export class ShardedBoardStore {
             previousSnapshot,
             request.kind === 'issue.comment',
           );
-          nextIssueRefs.set(beforeIssueNumber, materialized.ref);
           superseded.push(...materialized.superseded);
           if (previousEntryRef !== null) superseded.push(previousEntryRef);
           if (entryIndex >= 0) entries[entryIndex] = { number: beforeIssueNumber, ref: materialized.ref };
@@ -1924,10 +2691,7 @@ export class ShardedBoardStore {
       // makes it stable: a comment page is rewritten by every later comment, so
       // a ref recorded here would name an object the reclamation may delete,
       // while an index resolves against whatever the issue pins now.
-      const feedCommentIndex = request.kind === 'issue.comment' && afterIssue !== undefined
-        ? afterIssue.messages.length - 1
-        : undefined;
-      const feed = await this.appendFeed(credential, bundle.meta, feedEntry, feedCommentIndex);
+      const feed = await this.appendFeed(credential, bundle.meta, feedEntry);
       superseded.push(...feed.superseded);
 
       const meta: ShardedBoardMeta = {
@@ -1950,14 +2714,11 @@ export class ShardedBoardStore {
         feedPageRefs: feed.refs,
         feedCount: feed.count,
         deleted: candidate.deleted,
-        // Both reclamation facts are about the commit that is about to happen,
-        // so the first generation that can report them is the next one. They are
-        // carried here rather than in the returning value because the return
-        // value is the mutation's result, not the store's health.
-
-
         retainsMetaRef: pointer.metaRef,
-      };
+        // The refs this generation replaced, recorded so the next writer can
+        // reclaim them one generation later, once no reachable meta pins them.
+        supersededRefs: superseded,
+        };
       const metaRef = await this.writeMeta(credential, meta);
       const nextPointer: ShardedBoardPointer = {
         schemaVersion: 3,
@@ -1980,7 +2741,7 @@ export class ShardedBoardStore {
         // publish.
         continue;
       }
-      await this.sweepAfterCommit(credential, bundle.meta, meta, superseded);
+      await this.sweepAfterCommit(credential, bundle.meta, meta);
       return {
         log: null,
         state: candidate,
@@ -2005,10 +2766,19 @@ export class ShardedBoardStore {
     credential: BoardCredential,
     supersededMeta: ShardedBoardMeta,
     committed: ShardedBoardMeta,
-    supersededRefs: string[],
   ): Promise<void> {
     try {
-      const shards = await this.reclaim(credential, supersededRefs);
+      // The refs this commit replaced are recorded in `committed` and are
+      // deliberately NOT deleted here: the generation this commit superseded
+      // still pins them, and a reader holding that older pointer must be able to
+      // finish. They are deleted by the next writer, from
+      // `supersededMeta.supersededRefs`, which is one generation too old to be
+      // pinned by anything still reachable.
+      // A ref this commit re-established is pinned by the generation that just
+      // committed, so it is not stale no matter what an older generation recorded
+      // about it. See `writtenRefs`.
+      const stale = supersededMeta.supersededRefs.filter((ref) => !this.writtenRefs.has(ref));
+      const shards = await this.reclaim(credential, stale);
       const metas = await this.reclaimRetention(credential, supersededMeta);
       this.lastSweep = {
         revision: committed.revision,
@@ -2049,6 +2819,7 @@ export class ShardedBoardStore {
     const credential = await verifyBoardCredential(credentialValue);
     const pointerStored = await this.readPointer();
     if (pointerStored === null) throw new ShardedBoardStoreError('Antonina materialized board pointer does not exist');
+    this.requireCurrentPointer(pointerStored);
     const meta = await this.readMeta(pointerStored.value, credential);
     return { credential, pointer: pointerStored.value, meta };
   }
@@ -2078,47 +2849,7 @@ export class ShardedBoardStore {
    * refuses to delete an immutable object -- and the honest accounting of what
    * remains there.
    */
-  async compact(
-    credentialValue: BoardCredential,
-    options: { confirm?: boolean } = {},
-  ): Promise<BoardCompactionReport> {
-    const credential = await verifyBoardCredential(credentialValue);
-    const pointerStored = await this.readPointer();
-    if (pointerStored === null) {
-      throw new ShardedBoardStoreError('Antonina materialized board pointer does not exist');
-    }
-    const meta = await this.readMeta(pointerStored.value, credential);
-    const reachable = await this.pinnedRefs(credential, meta);
-    // The chain records history, not survival, so a missing ancestor ends the
-    // walk rather than failing the report. On a board that has been reclaiming
-    // that is the ordinary case.
-    const chain: Array<{ ref: string; revision: number }> = [];
-    let cursor: string | null = meta.retainsMetaRef;
-    for (let depth = 0; cursor !== null && depth < 64; depth += 1) {
-      const ancestor = await this.readAncestorMeta(credential, cursor);
-      if (ancestor === null) break;
-      chain.push({ ref: cursor, revision: ancestor.revision });
-      cursor = ancestor.retainsMetaRef;
-    }
-    const retainedMetas = chain.slice(0, RETAINED_GENERATIONS);
-    const staleMetas = chain.slice(RETAINED_GENERATIONS);
-    let reclaimed = 0;
-    if (options.confirm === true) {
-      for (const { ref } of staleMetas) {
-        if (await this.deleteShard(credential.storageCapability, ref)) reclaimed += 1;
-      }
-    }
-    return {
-      boardId: meta.boardId,
-      revision: meta.revision,
-      reachableRefs: reachable.size,
-      retainedGenerationRevisions: retainedMetas.map((entry) => entry.revision),
-      reclaimedRefs: reclaimed,
-      reclaimableRefs: staleMetas.length,
-      retainedRefs: staleMetas.length - reclaimed,
-      lastSweep: this.sweepReport(),
-    };
-  }
+
 
   async getIssue(
     credentialValue: BoardCredential,
@@ -2210,11 +2941,15 @@ export class ShardedBoardStore {
     return this.readQueue(credential, meta);
   }
 
-  private async hydrateFeedEntry(
-    credential: BoardCredential,
-    meta: ShardedBoardMeta,
-    entry: StoredFeedEntry,
-  ): Promise<BoardFeedEntry> {
+  /**
+   * Validates one stored feed entry and returns it.
+   *
+   * No lookups: entries are self-contained (see `StoredFeedEntry`), so reading a
+   * feed page costs the pages themselves and nothing else. A comment entry must
+   * carry its author and body, and the shape is checked rather than trusted so a
+   * malformed page is reported rather than surfaced as a feed with null bodies.
+   */
+  private hydrateFeedEntry(entry: StoredFeedEntry): BoardFeedEntry {
     if (entry.kind !== 'comment-added') {
       return {
         id: entry.id,
@@ -2229,59 +2964,8 @@ export class ShardedBoardStore {
         body: null,
       };
     }
-
-    if (entry.commentRef === undefined && entry.commentIndex === undefined) {
-      if (typeof entry.author !== 'string' || typeof entry.body !== 'string') {
-        throw new ShardedBoardStoreError('Antonina inline feed comment is malformed');
-      }
-      return {
-        id: entry.id,
-        kind: entry.kind,
-        at: entry.at,
-        position: entry.position,
-        issueNumber: entry.issueNumber,
-        title: entry.title,
-        state: entry.state,
-        messageId: entry.messageId,
-        author: entry.author,
-        body: entry.body,
-      };
-    }
-
-    if (!Number.isSafeInteger(entry.commentIndex) || (entry.commentIndex as number) < 0) {
-      throw new ShardedBoardStoreError('Antonina feed comment reference is malformed');
-    }
-    // The address is an index into the issue's messages, so the comment page is
-    // whichever one the issue's *current* snapshot pins. A page is rewritten by
-    // every later comment to that issue, which is why the entry cannot name a
-    // page ref: the reclamation is entitled to delete the superseded one, and a
-    // sealed feed entry naming it would dangle permanently. A deleted issue
-    // resolves through its tombstone, so its comments stay readable too.
-    const index = entry.commentIndex as number;
-    const resolved = await this.readIssueSnapshotByNumber(credential, meta, entry.issueNumber);
-    if (resolved === null) {
-      throw new ShardedBoardStoreError('Antonina feed comment names an unresolvable issue');
-    }
-    const commentRef = resolved.snapshot.commentRefs[Math.floor(index / V3_COMMENT_PAGE_SIZE)];
-    if (commentRef === undefined) {
-      throw new ShardedBoardStoreError('Antonina feed comment index is past the issue thread');
-    }
-    const stored = await this.requireJson<unknown>(credential.storageCapability, commentRef);
-    const value = stored.value;
-    if (!isRecord(value)
-        || value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
-        || value.boardId !== meta.boardId
-        || value.number !== entry.issueNumber
-        || !Array.isArray(value.messages)) {
-      throw new ShardedBoardStoreError('Antonina feed comment page is malformed');
-    }
-    const message = value.messages[index % V3_COMMENT_PAGE_SIZE];
-    if (!isRecord(message)
-        || typeof message.id !== 'string'
-        || message.id !== entry.messageId
-        || typeof message.author !== 'string'
-        || typeof message.body !== 'string') {
-      throw new ShardedBoardStoreError('Antonina feed comment message is malformed');
+    if (typeof entry.author !== 'string' || typeof entry.body !== 'string') {
+      throw new ShardedBoardStoreError('Antonina feed comment is missing its body');
     }
     return {
       id: entry.id,
@@ -2292,16 +2976,50 @@ export class ShardedBoardStore {
       title: entry.title,
       state: entry.state,
       messageId: entry.messageId,
-      author: message.author,
-      body: message.body,
+      author: entry.author,
+      body: entry.body,
     };
   }
+
+
+  /** One message by its position in the issue's thread, or `null` if out of range. */
+
+
+  /**
+   * The message with this id, searched across the issue's current comment pages.
+   *
+   * Bounded by where the match is found rather than by the thread length: pages
+   * are fetched one at a time and the walk returns on the first hit. A comment's
+   * position never changes once written, so a board that has not been compacted
+   * finds it on the first or second page.
+   */
+
+
+  /** One comment page's messages, validated, or `null` if it is gone or malformed. */
+
 
   async readFeed(
     credentialValue: BoardCredential,
     request: BoardFeedRequest = {},
   ): Promise<BoardFeedPage> {
     const { credential, meta } = await this.requirePointerForCredential(credentialValue);
+    return this.readFeedFrom(credential, meta, request);
+  }
+
+  /**
+   * The feed of a named generation.
+   *
+   * The public read resolves the live pointer and then calls this, so there is one
+   * paging implementation rather than two. The import's verification needs the
+   * same paging against the *candidate* store, which is not the live pointer
+   * until the cutover commits -- and reading the live one there would verify the
+   * old board against itself.
+   */
+  private async readFeedFrom(
+    credential: BoardCredential,
+    meta: ShardedBoardMeta,
+    request: BoardFeedRequest = {},
+  ): Promise<BoardFeedPage> {
     const limit = feedLimit(request.limit);
     const cursor = request.cursor === undefined || request.cursor === null
       ? null
@@ -2321,7 +3039,7 @@ export class ShardedBoardStore {
     const pageEntries = entries.slice(0, limit);
     const last = pageEntries.at(-1);
     const hydrated = await Promise.all(
-      pageEntries.map((entry) => this.hydrateFeedEntry(credential, meta, entry)),
+      pageEntries.map((entry) => this.hydrateFeedEntry(entry)),
     );
     return {
       entries: hydrated,

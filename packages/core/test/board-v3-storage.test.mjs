@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { SignedBoardStore } from '../dist/board-store.js';
-import { base64UrlEncode, sha256 } from '../dist/canonical.js';
+import { base64UrlEncode, canonicalBytes, sha256 } from '../dist/canonical.js';
 import { fakeSkrynia } from './fake-skrynia.mjs';
+import { contractSkrynia } from './skrynia-contract.mjs';
 
 /**
  * The storage key a logical ref is stored under, derived the way the store
@@ -17,6 +18,54 @@ import { fakeSkrynia } from './fake-skrynia.mjs';
 async function resolve(server, credential, ref) {
   const bytes = new TextEncoder().encode(credential.storageCapability + ':' + ref);
   return server.objects.get('board-v3-' + base64UrlEncode(await sha256(bytes)))?.value ?? null;
+}
+
+/**
+ * Every shard one generation's meta pins, walked the way a reader walks it.
+ *
+ * This is the closure a reader that resolved a given pointer depends on, and it
+ * is what the retention-window tests assert over. Deriving it here rather than
+ * calling the store is deliberate: a helper built on the store's own read path
+ * would re-resolve the *live* pointer and pass with the retained generation
+ * deleted.
+ */
+async function closureOf(server, credential, meta) {
+  const refs = new Set([
+    ...meta.openPageRefs,
+    ...meta.closedPageRefs,
+    ...meta.feedPageRefs,
+    meta.queueRef,
+    meta.catalogRef,
+  ]);
+  for (const ref of meta.directoryRefs) {
+    if (ref === null) continue;
+    refs.add(ref);
+    const directory = await resolve(server, credential, ref);
+    for (const entry of directory?.entries ?? []) {
+      refs.add(entry.ref);
+      const snapshot = await resolve(server, credential, entry.ref);
+      for (const commentRef of snapshot?.commentRefs ?? []) refs.add(commentRef);
+    }
+  }
+  return [...refs];
+}
+
+/** One issue, hydrated, through a *given* meta rather than the live pointer. */
+async function readIssueAt(server, credential, meta, number) {
+  for (const ref of meta.directoryRefs) {
+    if (ref === null) continue;
+    const directory = await resolve(server, credential, ref);
+    const entry = directory?.entries.find((candidate) => candidate.number === number);
+    if (entry === undefined) continue;
+    const snapshot = await resolve(server, credential, entry.ref);
+    const messages = [];
+    for (const commentRef of snapshot.commentRefs) {
+      const page = await resolve(server, credential, commentRef);
+      messages.push(...(page?.messages ?? []));
+    }
+    return { ...snapshot.issue, messages };
+  }
+  throw new Error(`issue ${number} is not in this generation`);
 }
 
 /**
@@ -66,7 +115,22 @@ function usage(server) {
   return {
     objects: objects.length,
     bytes: objects.reduce((total, [, entry]) => total + JSON.stringify(entry.value).length, 0),
+    /**
+     * Objects that are not feed pages.
+     *
+     * Feed pages are product history and are meant to grow with the number of
+     * comments. Everything else is materialization: directory pages, issue
+     * snapshots, tombstones, comment pages, list pages, the queue, the catalog
+     * and the metas. Counting them apart is what lets a test assert bounded
+     * materialization without also asserting that the product stops growing.
+     */
+    nonFeed: objects.filter(([, entry]) => !isFeedPage(entry.value)).length,
   };
+}
+
+/** A materialized feed page: paged entries, and the only shard kind that is history. */
+function isFeedPage(value) {
+  return Array.isArray(value?.entries) && value.page !== undefined && value.state === undefined;
 }
 
 async function seed(server, issueCount) {
@@ -187,8 +251,8 @@ test('every shard is reclaimable by any client holding only the board key', asyn
   const stale = shards(server).map(([key]) => key);
   assert.ok(stale.length > 0);
   const second = makeStore(server);
-  const report = await second.compactionReport(credential);
-  assert.equal(report.retainedRefs, 0);
+  const cutover = await second.cutoverState(credential);
+  assert.equal(cutover.state, 'cutover-complete');
   for (let index = 0; index < 4; index += 1) {
     await second.appendFast(credential, {
       kind: 'issue.edit',
@@ -241,6 +305,48 @@ test('the fake models Skrynia minting a fresh capability per capability-write ob
   assert.equal(overview.issues[0].messageCount, 1);
 });
 
+test('a shard re-established by content addressing is not reclaimed', async () => {
+  const server = fakeSkrynia();
+  const { board, credential } = await seed(server, 3);
+  const meta = () => resolve(server, credential, server.objects.get('board-v2').value.metaRef);
+
+  // Reorder the queue A -> B -> A. A queue snapshot is just its numbers, so
+  // putting the order back writes the *same* content-addressed ref again, and
+  // that ref is in the first reorder's superseded list. Reclaiming purely on the
+  // recorded list would then delete a shard the live generation pins, and the
+  // next read of the board would fail to open.
+  const before = (await meta()).queueRef;
+  await board.appendFast(credential, { kind: 'queue.reorder', payload: { numbers: [2, 1, 3] } });
+  const reordered = (await meta()).queueRef;
+  await board.appendFast(credential, { kind: 'queue.reorder', payload: { numbers: [1, 2, 3] } });
+  const restored = (await meta()).queueRef;
+
+  assert.notEqual(reordered, before, 'a reorder must change the queue ref');
+  assert.equal(restored, before, 'restoring the order must restore the same content-addressed ref');
+
+  // Commit twice more, so the reclaim that would collect that recorded ref runs.
+  await board.appendFast(credential, {
+    kind: 'issue.comment',
+    payload: { number: 1, author: 'tester', body: 'after the revert' },
+  });
+  await board.appendFast(credential, {
+    kind: 'issue.comment',
+    payload: { number: 2, author: 'tester', body: 'and another' },
+  });
+
+  // The ref the live generation pins is still there, and the board reads.
+  assert.equal((await meta()).queueRef, before);
+  assert.notEqual(
+    await resolve(server, credential, before),
+    null,
+    'a re-established shard was reclaimed out from under the live generation',
+  );
+  assert.deepEqual(await board.getQueue(credential), [1, 2, 3]);
+  const issue = await board.getIssue(credential, 1);
+  assert.ok(issue, 'the board must still open after a reverted reorder');
+  assert.equal(issue.messages[0].body, 'after the revert');
+});
+
 test('comments on a deleted issue stay readable in the feed', async () => {
   const server = fakeSkrynia();
   const { board, credential } = await seed(server, 1);
@@ -269,32 +375,201 @@ test('comments on a deleted issue stay readable in the feed', async () => {
   assert.equal(await board.getIssue(credential, 1), null);
 });
 
-test('the superseded generation stays readable while it is retained', async () => {
+test('the superseded generation stays fully readable for the retention window', async () => {
+  const server = fakeSkrynia();
+  const { board, credential } = await seed(server, 2);
+
+  // Build a generation worth reading: an issue with a comment, so the closure
+  // spans a comment page, an issue snapshot, a directory page, list pages, a feed
+  // page, the queue and the catalog. Then edit it, so the commits below replace
+  // several of those shards at once.
+  await board.appendFast(credential, {
+    kind: 'issue.comment',
+    payload: { number: 1, author: 'tester', body: 'generation two' },
+  });
+  await board.appendFast(credential, {
+    kind: 'issue.edit',
+    payload: { number: 1, title: 'Issue 1', body: 'generation three' },
+  });
+  const capturedPointer = server.objects.get('board-v2').value;
+  const capturedMeta = await resolve(server, credential, capturedPointer.metaRef);
+  const capturedClosure = await closureOf(server, credential, capturedMeta);
+
+  // Commit once. This replaces several of the shards the captured generation
+  // pins, which is exactly the case the window exists for, and it is the only
+  // commit the window promises to cover.
+  await board.appendFast(credential, {
+    kind: 'issue.edit',
+    payload: { number: 1, title: 'Issue 1', body: 'generation four' },
+  });
+
+  // The property, read the way a reader holding the older pointer would read it:
+  // through the captured pointer, to the captured meta, to every shard that meta
+  // pins. Not through readOverview, which re-resolves the LIVE pointer and would
+  // pass with the whole retained generation deleted underneath it.
+  assert.equal(
+    server.objects.get('board-v2').value.revision,
+    capturedPointer.revision + 1,
+    'exactly one commit must have landed, since that is the window',
+  );
+  assert.ok(capturedClosure.length >= 6, 'the captured generation must be worth reading');
+  for (const ref of capturedClosure) {
+    assert.notEqual(
+      await resolve(server, credential, ref),
+      null,
+      `a shard the retained generation pins was reclaimed: ${ref}`,
+    );
+  }
+  // And the retained generation's own comment body is still readable, which is
+  // the user-visible form of the same property.
+  const retainedIssue = await readIssueAt(server, credential, capturedMeta, 1);
+  assert.equal(retainedIssue.messages.length, 1);
+  assert.equal(retainedIssue.messages[0].body, 'generation two');
+});
+
+test('a superseded shard survives exactly one generation, then goes', async () => {
   const server = fakeSkrynia();
   const { board, credential } = await seed(server, 1);
 
-  const generationZero = server.objects.get('board-v2').value;
-  await board.appendFast(credential, {
-    kind: 'issue.comment',
-    payload: { number: 1, author: 'tester', body: 'generation one' },
-  });
-  const generationOne = server.objects.get('board-v2').value;
+  // The ref of the issue-1 snapshot at each generation, so the test can watch a
+  // specific ref through the window instead of inferring the window from totals.
+  const snapshotRefAt = async () => {
+    const pointer = server.objects.get('board-v2').value;
+    const meta = await resolve(server, credential, pointer.metaRef);
+    for (const page of meta.directoryRefs) {
+      if (page === null) continue;
+      const directory = await resolve(server, credential, page);
+      const entry = directory?.entries.find((candidate) => candidate.number === 1);
+      if (entry !== undefined) return entry.ref;
+    }
+    return null;
+  };
+  const exists = async (ref) => ref !== null && await resolve(server, credential, ref) !== null;
 
-  // A reader that resolved the pointer before this commit must still be able to
-  // read every object that pointer named. This is the property the immutable
-  // design had for free and that the retention window buys back; without it,
-  // reclaiming the superseded generation would let a concurrent writer tear a
-  // read.
-  await board.appendFast(credential, {
-    kind: 'issue.edit',
-    payload: { number: 1, title: 'Issue 1', body: 'generation two' },
-  });
+  const history = [await snapshotRefAt()];
+  for (let index = 0; index < 4; index += 1) {
+    await board.appendFast(credential, {
+      kind: 'issue.edit',
+      payload: { number: 1, title: 'Issue 1', body: `revision ${index}` },
+    });
+    history.push(await snapshotRefAt());
+  }
 
-  assert.equal(generationOne.revision, generationZero.revision + 1);
-  const live = server.objects.get('board-v2').value;
+  // The ref pinned by generation g is replaced at g+1 and must still be readable
+  // there, because a reader that resolved g may still be reading. It is deleted
+  // at g+2, one generation after it stopped being pinned. With four commits
+  // after the first ref, that first ref is two generations past its window and
+  // the rest are still inside theirs.
+  assert.notEqual(history[0], history[1], 'each edit must produce a distinct snapshot ref');
+  for (let generation = 0; generation + 1 < history.length; generation += 1) {
+    const ref = history[generation];
+    const generationsPast = history.length - 1 - generation;
+    // Superseded at generation+1, deleted at generation+2.
+    assert.equal(
+      await exists(ref),
+      generationsPast < 2,
+      `a snapshot ref ${generationsPast} generation(s) past its window is `
+      + `${await exists(ref) ? 'still present' : 'absent'}`,
+    );
+  }
+  // The live generation pins a shard that exists, and its own ref is the newest.
+  const live = await closureOf(
+    server,
+    credential,
+    await resolve(server, credential, server.objects.get('board-v2').value.metaRef),
+  );
+  for (const ref of live) {
+    assert.notEqual(await resolve(server, credential, ref), null, `live ref reclaimed: ${ref}`);
+  }
+  assert.ok(live.includes(history[history.length - 1]));
+  assert.ok(
+    shards(server).length <= 40,
+    `four edits left ${shards(server).length} objects; the window is not closing`,
+  );
+});
+
+
+
+test('repeated create/comment/delete cycles do not grow the store', async () => {
+  const server = fakeSkrynia();
+  const { board, credential } = await seed(server, 3);
+
+  // The board's live size never changes: three issues, throughout, with the
+  // churn all on a fourth that is created, commented on and deleted every round.
+  // A tombstone per deletion is materialization, not product history, so this is
+  // the loop that separates the two.
+  const rounds = 200;
+  const marks = [];
+  for (let round = 0; round < rounds; round += 1) {
+    const number = 4 + round;
+    await board.appendFast(credential, {
+      kind: 'issue.create',
+      payload: { number, title: `Churn ${round}`, body: '' },
+    });
+    await board.appendFast(credential, {
+      kind: 'issue.comment',
+      payload: { number, author: 'tester', body: `comment ${round}` },
+    });
+    await board.appendFast(credential, { kind: 'issue.delete', payload: { number } });
+    if ((round + 1) % 50 === 0) marks.push({ rounds: round + 1, ...usage(server) });
+  }
+
+  // The live board is what the user sees, and it never moved.
   const overview = await board.readOverview(credential);
-  assert.equal(overview.revision, live.revision);
-  assert.equal(overview.issues[0].messageCount, 1);
+  assert.equal(overview.issues.length, 3, 'the live board must be back to its three issues');
+
+  // The store, however, must not have grown by two objects per round forever.
+  // The test separates the two kinds of growth rather than setting one total
+  // bound, because only one of them is a defect.
+  //
+  //   * feed pages are product history. One comment per round means the feed
+  //     genuinely grows, and requirement 4 says that history is retained. A
+  //     bound that forbade it would be forbidding the product.
+  //   * everything else is materialization, and requirement 1 says it must track
+  //     live board size. Tombstones and the comment pages they pin are the two per
+  //     round that the pre-fix design leaked; both are inside a fixed window now.
+  const first = marks[0];
+  const last = marks[marks.length - 1];
+  const roundsApart = last.rounds - first.rounds;
+  // The ceiling is the retention window, not the round count. A pre-fix store
+  // grows by 2 objects per round and is at 400 by round 200; this one plateaus at
+  // the window whatever the round count becomes. The bound is stated in objects so
+  // the test fails on a count rather than on a rate it has to derive.
+  assert.ok(
+    last.nonFeed <= 220,
+    `${roundsApart} create/comment/delete rounds left ${last.nonFeed} non-feed objects `
+    + `(${first.nonFeed} -> ${last.nonFeed}) on a board of constant live size`,
+  );
+  // And the marginal cost is far below the 2-per-round leak: over the last three
+  // quarters of the run the store must be adding well under one object per round.
+  assert.ok(
+    (last.nonFeed - first.nonFeed) / roundsApart < 0.5,
+    `non-feed objects grew at ${((last.nonFeed - first.nonFeed) / roundsApart).toFixed(2)} `
+    + `per round over ${roundsApart} rounds; pre-fix this is 2.00 per delete`,
+  );
+  // A deleted issue leaves nothing behind: no tombstone, no comment page, no
+  // directory entry. The directory is the issue's live set and nothing else.
+  const meta = await resolve(server, credential, server.objects.get('board-v2').value.metaRef);
+  const liveNumbers = [];
+  for (const ref of meta.directoryRefs) {
+    if (ref === null) continue;
+    const directory = await resolve(server, credential, ref);
+    for (const entry of directory.entries) liveNumbers.push(entry.number);
+  }
+  assert.deepEqual(liveNumbers, [1, 2, 3], 'only the live issues may be in the directory');
+  // The format carries no tombstone bookkeeping: the meta names no such field,
+  // which is asserted on the raw object so a reintroduction is caught even if a
+  // parser starts tolerating it again.
+  assert.equal(
+    Object.hasOwn(meta, 'retiringTombstones'),
+    false,
+    'the format must not carry tombstone bookkeeping at all',
+  );
+  // The last deleted issue's comment is still readable, because the feed entry
+  // carries its own text: deleting an issue costs nothing and loses nothing.
+  const feed = await board.readFeed(credential, { limit: 5 });
+  const latest = feed.entries.find((entry) => entry.kind === 'comment-added');
+  assert.equal(latest.body, `comment ${rounds - 1}`);
 });
 
 test('no ref the current generation pins is ever reclaimed', async () => {
@@ -372,32 +647,107 @@ test('no ref the current generation pins is ever reclaimed', async () => {
   assert.equal(feed.entries.length, 5);
 });
 
-test('compaction reports the reachable set and leaves foreign residue alone', async () => {
-  const server = fakeSkrynia();
-  const { board, credential } = await seed(server, 2);
-
-  for (let index = 0; index < 12; index += 1) {
-    await board.appendFast(credential, {
-      kind: 'issue.comment',
-      payload: { number: (index % 2) + 1, author: 'tester', body: `comment ${index}` },
-    });
-  }
-
-  // Residue in the shape the pre-fix model left it: an immutable object no
-  // pointer and no meta names. Antonina can enumerate nothing, so it cannot even
-  // see this, and it certainly cannot delete it.
-  const residue = 'v3:pre-fix-residue';
-  server.objects.set(residue, {
-    value: { schemaVersion: 2, boardId: 'other', head: 'dead', entries: [] },
-    mode: 'immutable',
-    capability: null,
-    revision: 1,
+test('an externally overwritten shard is detected when it is next rewritten', async () => {
+  // public-write objects are anonymously overwritable on the real server, so
+  // "no reader can observe a shard change" is a statement about Antonina's write
+  // discipline, not about Skrynia. This pins exactly what content addressing buys
+  // against that, and it is narrower than "detected":
+  //
+  //   * a shard's ref is the digest of its intended content, so the next write of
+  //     that content gets a 409 whose stored body no longer hashes to the ref, and
+  //     writeShard fails loudly rather than accepting the object as its own;
+  //   * a *read* of an overwritten shard is NOT detected. This design makes no
+  //     claim about that, and the test does not pretend otherwise.
+  const server = contractSkrynia();
+  let tick = 0;
+  let id = 0;
+  const board = new SignedBoardStore({
+    fetch: server.fetch.bind(server),
+    now: () => new Date(Date.UTC(2026, 8, 29, 12, 0, (tick += 1))),
+    newId: () => `overwrite-${++id}`,
   });
+  const initialized = await board.initialize({
+    schemaVersion: 3,
+    nextIssueNumber: 2,
+    issues: [{
+      number: 1,
+      title: 'Issue 1',
+      body: 'original body',
+      state: 'open',
+      createdAt: '2026-09-29T12:00:00.000Z',
+      updatedAt: '2026-09-29T12:00:00.000Z',
+      messages: [],
+    }],
+    resources: [],
+    targets: [],
+    dispatches: [],
+  });
+  // A fixed timestamp on every edit, so "second body" at this instant is
+  // byte-identical each time. That is what makes the rewrite below re-post the
+  // *same* ref rather than a new one, which is the only way to reach the 409.
+  const at = '2026-09-29T12:05:00.000Z';
+  const first = await board.appendFast(initialized.credential, {
+    kind: 'issue.edit',
+    timestamp: at,
+    payload: { number: 1, title: 'Issue 1', body: 'second body' },
+  });
+  assert.equal(first.state.board.issues[0].body, 'second body');
 
-  const report = await board.compactionReport(credential);
-  assert.ok(report.reachableRefs > 0);
-  // Initialization is revision 1, so twelve comments land on revision 13.
-  assert.equal(report.revision, 13);
-  assert.equal(report.lastSweep.error, null);
-  assert.ok(server.objects.has(residue), 'compaction must not delete objects it did not name');
+  // The snapshot shard for "second body", located the way a locator holder would:
+  // it is reachable from the pointer, and addressing it needs no credential.
+  const pointer = server.objects.get('board-v2').value;
+  const meta = await resolveStored(server, initialized.credential, pointer.metaRef);
+  const directory = await resolveStored(server, initialized.credential, meta.directoryRefs[0]);
+  const snapshotKey = await keyForRef(initialized.credential, directory.entries[0].ref);
+  const original = server.objects.get(snapshotKey).value;
+
+  // Tamper: replace the body of an object that is still named by a live meta.
+  const response = await server.fetch(`https://example.invalid/_skrynia/store/antonina/${snapshotKey}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...original, issue: { ...original.issue, body: 'tampered body' } }),
+  });
+  // The real server accepts this. If the double ever refuses it, it has drifted
+  // from the deployment and this whole file is measuring a fiction.
+  assert.equal(response.status, 200, 'the contract double must model anonymous overwrite');
+  assert.equal(
+    server.objects.get(snapshotKey).value.issue.body,
+    'tampered body',
+    'the overwrite must have replaced the body for the rest of this test to mean anything',
+  );
+
+  // Writing the same content again is the detection point: the ref is the digest
+  // of "second body", the object now holds "tampered body", and re-deriving the
+  // stored object does not reproduce the ref.
+  await assert.rejects(
+    () => board.appendFast(initialized.credential, {
+      kind: 'issue.edit',
+      timestamp: at,
+      payload: { number: 1, title: 'Issue 1', body: 'second body' },
+    }),
+    /shard collision/,
+    'rewriting a shard whose stored body no longer matches its ref must fail loudly',
+  );
+  // And the board is left serving the generation it was serving, not a shard
+  // someone else wrote.
+  const after = await board.readOverview(initialized.credential);
+  assert.equal(after.revision, pointer.revision);
 });
+
+/** The Skrynia key a logical ref resolves to, the way the store derives it. */
+async function keyForRef(credential, ref) {
+  const { createHash } = await import('node:crypto');
+  const digest = createHash('sha256')
+    .update(credential.storageCapability + ':' + ref)
+    .digest('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  return 'board-v3-' + digest;
+}
+
+/** The object stored under a ref, the way the store reads it. */
+async function resolveStored(server, credential, ref) {
+  return server.objects.get(await keyForRef(credential, ref))?.value ?? null;
+}
+

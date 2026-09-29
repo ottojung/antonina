@@ -140,7 +140,7 @@ test('initialize immediately replaces board-v2 history with one materialized poi
 
   const pointer = server.objects.get('board-v2').value;
   assert.equal(pointer.schemaVersion, 3);
-  assert.equal(pointer.format, 'materialized-snapshots');
+  assert.equal(pointer.format, 'compact-materialized-snapshots');
   assert.equal(pointer.head, initialized.state.head);
   assert.equal(initialized.log, null);
 
@@ -301,15 +301,16 @@ test('feed entries are materialized directly and read without history', async ()
     .flatMap((entry) => Array.isArray(entry.value?.entries) ? entry.value.entries : [])
     .find((entry) => entry?.kind === 'comment-added');
   assert.ok(storedFeedEntry);
-  assert.equal(Object.hasOwn(storedFeedEntry, 'author'), false);
-  assert.equal(Object.hasOwn(storedFeedEntry, 'body'), false);
-  // A comment entry addresses its message by index, not by the ref of the
-  // comment page that held it when the entry was written. A page is rewritten
-  // by every later comment to that issue, so a ref recorded here would name an
-  // object the store is entitled to reclaim, and this entry can be in an
-  // already-sealed page that nothing will ever rewrite.
+  // A comment entry is self-contained. It carries its own author and body rather
+  // than a reference into the issue's comment pages, because a reference from a
+  // sealed feed page into a rewritten comment page is a backwards edge that
+  // cannot be pinned -- and an entry in a sealed page is never rewritten, so
+  // such a reference would dangle permanently once reclamation is enabled.
+  assert.equal(storedFeedEntry.author, 'tester');
+  assert.equal(storedFeedEntry.body, 'feed message');
+  // And it names no shard at all: the feed is readable with no further lookups.
   assert.equal(Object.hasOwn(storedFeedEntry, 'commentRef'), false);
-  assert.equal(storedFeedEntry.commentIndex, 0);
+  assert.equal(Object.hasOwn(storedFeedEntry, 'commentIndex'), false);
 
   server.clearRequests();
   const page = await store.readFeed(initialized.credential, { limit: 10 });

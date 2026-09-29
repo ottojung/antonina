@@ -25,7 +25,8 @@ import { type BoardFeedPage, type BoardFeedRequest } from './feed.js';
 import {
   ShardedBoardStore,
   ShardedBoardStoreError,
-  type BoardCompactionReport,
+  type BoardCutoverState,
+  type BoardImportReport,
   type BoardOverview,
   type IssueListPage,
 } from './board-v3-store.js';
@@ -34,7 +35,7 @@ export const ANTONINA_NAMESPACE = 'antonina';
 export const SIGNED_BOARD_KEY = 'board-v2';
 export const DEFAULT_BOARD_BASE_URL = 'https://vau.place/_skrynia';
 
-export type { BoardCompactionReport, BoardSweepReport } from './board-v3-store.js';
+export type { BoardCutoverState, BoardImportReport, BoardSweepReport } from './board-v3-store.js';
 
 const DEFAULT_MAX_ATTEMPTS = 6;
 
@@ -428,28 +429,58 @@ export class SignedBoardStore {
   }
 
   /**
-   * Reports the store's storage shape and reclaims what this board's own
-   * retention chain says has aged out.
+   * Which side of the cutover the board is on, without changing anything.
    *
-   * This is the operator-facing half of the bounded-growth model, and it is
-   * destructive in the same way `collect delete` is: it deletes shard objects
-   * that no meta names any more. It is exposed here rather than folded into a
-   * mutation so that a front end can present it as a deliberate, confirmed
-   * action, and it never runs as a side effect of reading the board.
+   * `needs-import` is the state an operator must act on: the pointer names a
+   * pre-cutover store and this build will not serve it. Nothing in the runtime
+   * reads that store, so the import is the only way forward -- which is why this
+   * report exists, so a front end can say so before a user tries to work.
    */
-  async compactionReport(
+  async cutoverState(credentialValue: BoardCredential): Promise<BoardCutoverState> {
+    const credential = await verifyBoardCredential(credentialValue);
+    const pointerStored = await this.sharded.readPointer();
+    if (pointerStored === null) {
+      throw new SignedBoardStoreError('Antonina materialized board pointer does not exist');
+    }
+    const pointer = pointerStored.value;
+    const state = await this.sharded.cutoverState(credential, pointerStored);
+    return {
+      boardId: pointer.boardId,
+      state: state.legacyPointer === null ? 'cutover-complete' : 'needs-import',
+      revision: pointer.revision,
+      legacyPointer: state.legacyPointer,
+      report: state.report,
+    };
+  }
+
+  /**
+   * Imports a pre-cutover store into the current format and switches the board
+   * over to it.
+   *
+   * The whole migration in one call, because its phases cannot be usefully split:
+   * read the old store, verify the rebuilt board is semantically identical, and
+   * only then replace the pointer. A caller wanting "import but do not cut over"
+   * would be asking for a store nothing reads, since the pointer is the only way
+   * in.
+   *
+   * Reached only through an explicit confirmation. The old store is not touched
+   * object by object -- it is immutable, so Skrynia will not delete those objects
+   * in any case -- and is left whole for Skrynia or operator tooling to remove
+   * wholesale after the cutover is verified.
+   */
+  async importBoard(
     credentialValue: BoardCredential,
     options: { confirm?: boolean } = {},
-  ): Promise<BoardCompactionReport> {
+  ): Promise<BoardImportReport> {
     const credential = await verifyBoardCredential(credentialValue);
-    await this.ensureMaterialized(credential, null);
     try {
-      return await this.sharded.compact(credential, options);
+      return await this.sharded.importBoard(credential, options);
     } catch (error) {
       if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
       throw error;
     }
   }
+
 
   async readFeed(
     credentialValue: BoardCredential,

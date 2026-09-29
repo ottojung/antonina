@@ -288,10 +288,16 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
  *
  * The clone gets the source's persisted work identity -- declared cwd, title,
  * variant, native session, prompt history and terminal outcome -- and its own
- * id and its own record, with no process, runner, reservation, accepted prompt
- * or queued steer inherited. It is a snapshot, not a link: nothing in the
- * product reads the source in order to update the clone, or the clone in order
- * to update the source, and the two never share a file.
+ * id, its own record and its own lifecycle state, with no process, runner,
+ * reservation, accepted prompt or queued steer inherited. It is a snapshot, not
+ * a link: nothing in the product reads the source in order to update the clone,
+ * or the clone in order to update the source, and the two never share a file.
+ *
+ * A source that is currently running is forkable, and that is the case the
+ * feature exists for: because the clone names no process, no control command
+ * can reach the source through it. The clone does inherit the source's
+ * `native_session_id`, so the two agents share one backend conversation by
+ * design; the operator is told so.
  *
  * `--cwd` and `--title` are refused here rather than silently ignored. They
  * describe a fresh front's own declaration, and letting them apply to a fork
@@ -333,7 +339,9 @@ async function cmdFork(
     const cwd = persistedAgentCwd(meta);
     context.io.stdout(
       `Forked agent ${sourceId} into ${agentId} (state ${String(persistedLifecycleState(meta))}, ${String(meta.prompt_count)} prompts, ${cwd === null ? 'no declared working directory' : cwd}). `
-      + `The two agents are independent: neither observes or changes the other. Start work with \`antonina agent run --id ${agentId} --prompt 'task'\`.`,
+      + `The two agents are independent: neither observes or changes the other. `
+      + `They share one backend session, so running both will drive the same conversation. `
+      + `Start work with \`antonina agent run --id ${agentId} --prompt 'task'\`.`,
     );
   }
   return EXIT_OK;

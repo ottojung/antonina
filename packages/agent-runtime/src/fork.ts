@@ -23,32 +23,40 @@
  *    runner identity, or a runner reservation is a claim on ONE live process.
  *    Copying it would make two agent records name the same process, which is
  *    precisely the state the repository's rules forbid and which `stop`, `kill`
- *    and `delete` would then both act on. So forking a source that owns live
- *    work is refused, rather than being quietly made into an agent that believes
- *    it runs somebody else's process. See `forkBlocker`.
+ *    and `delete` would then both act on. So the snapshot clears every one of
+ *    those fields on the clone, whatever the source was doing.
+ *
+ * A source that is *live* is therefore not a reason to refuse. The clone names
+ * no process, so no control command can reach the source through it, and the
+ * issue's stated purpose -- forking an in-flight session so it can continue from
+ * the same point -- is exactly the live case. The snapshot is what makes that
+ * safe, not a gate. The one refusal that remains is a source whose durable
+ * authority is being revoked; see `forkBlocker`.
  *
  * The clone is not a verbatim byte copy either. It keeps the source's work
  * identity -- declared cwd, title, variant, `native_session_id` (so `run`
  * continues the same backend conversation), prompt history, and the terminal
  * outcome with its timestamps and exit status -- and it gets a fresh identity of
- * its own: new id, new creation time, and no process, runner, reservation,
- * accepted prompt or queued steer, because none of those are state a second
- * agent may own.
+ * its own: new id, new creation time, its own lifecycle state, and no process,
+ * runner, reservation, accepted prompt or queued steer, because none of those
+ * are state a second agent may own.
+ *
+ * A fork SHARES the source's backend session: `native_session_id` is carried
+ * deliberately, because that is what "continue from the same point" means. The
+ * two agent *records* are independent, and the two agents are separately
+ * runnable, so if both are run they will both drive that one backend
+ * conversation. This is a known, accepted overlap, not an oversight: dropping
+ * the session id would make the clone a fresh conversation and defeat the
+ * feature. Operators who want two genuinely separate conversations should fork
+ * a source and then start the clone with a new session.
  */
-import {
-  invocationAlive,
-  runnerAlive,
-  reservationInFlight,
-} from './lifecycle.js';
 import {
   AGENT_META_VERSION,
   deletePendingFlag,
-  pendingPrompt,
-  persistedLifecycleState,
   validateAgentMetadata,
   type AgentMetadata,
 } from './metadata.js';
-import { persistedAgentId, type ProcessProbeOptions } from './process.js';
+import { persistedAgentId } from './process.js';
 import {
   createAgentDirectory,
   readMeta,
@@ -73,58 +81,46 @@ export class AgentForkTargetExistsError extends Error {
 
 export class AgentForkSourceBusyError extends Error {
   constructor(agentId: string, reason: string) {
-    super(`cannot fork agent ${agentId}: it ${reason}; a fork cannot inherit live work or process ownership`);
+    super(`cannot fork agent ${agentId}: it ${reason}; a fork cannot outlive the source's own deletion`);
     this.name = 'AgentForkSourceBusyError';
   }
 }
 
-export type ForkBlocker =
-  | 'live_invocation'
-  | 'live_runner'
-  | 'runner_reservation'
-  | 'accepted_prompt'
-  | 'declared_running'
-  | 'delete_pending';
+export type ForkBlocker = 'delete_pending';
 
 /**
  * Why this source may not be forked right now, or `null` when it may.
  *
- * Every rung here is a claim on live work or on a process, checked through the
- * same `invocationAlive` / `runnerAlive` / `reservationInFlight` predicates the
- * lifecycle uses, which verify pid *and* start ticks *and* the agent env marker
- * and never fall back to a process name. Deliberately absent: anything about the
- * source's history, and anything that would require writing to the source to
- * find out. The source is never modified by a fork, not even to reconcile it
- * into a forkable state.
+ * There is exactly one rung, and it is not about live work. It is that the
+ * source's durable authority is being revoked: a `delete_pending` record is a
+ * tombstone whose directory is on its way out, so it is not a stable thing to
+ * snapshot, and a clone taken from one would outlive a deletion the operator
+ * asked for. That is a different hazard from process ownership, and it is the
+ * only condition here that the snapshot cannot neutralise.
+ *
+ * Deliberately absent, having previously been present: `live_invocation`,
+ * `live_runner`, `runner_reservation`, `accepted_prompt` and
+ * `declared_running`. Each of those refused a source merely for owning live
+ * work, which narrowed the issue's contract past the two failure conditions it
+ * names and disabled the feature for the in-flight session the issue is written
+ * for. They bought nothing: `forkMetaSnapshot` clears the pid/pgid/start-time
+ * triple, the invocation id, the runner identity, the runner reservation, the
+ * runner generation, the accepted prompt and the steer queue, so a clone of a
+ * running source names no process and no outstanding work, and `stop`, `kill`
+ * and `delete` cannot reach the source through it. Note also what their removal
+ * implies for this function: it no longer probes the process table at all, so
+ * nothing here infers ownership from a process name, or from a pid alone.
+ *
+ * Also absent by design: anything that would require writing to the source in
+ * order to find out. The source is never modified by a fork, not even to
+ * reconcile it into a forkable state.
  */
-export function forkBlocker(
-  source: AgentMetadata,
-  options: ProcessProbeOptions = {},
-  now = Date.now() / 1000,
-): ForkBlocker | null {
+export function forkBlocker(source: AgentMetadata): ForkBlocker | null {
   if (deletePendingFlag(source) === true) return 'delete_pending';
-  if (invocationAlive(source, options)) return 'live_invocation';
-  if (runnerAlive(source, options)) return 'live_runner';
-  if (reservationInFlight(source, now)) return 'runner_reservation';
-  let accepted: string | null;
-  try {
-    accepted = pendingPrompt(source);
-  } catch {
-    // Malformed pending-prompt authority is live-work uncertainty, not a
-    // licence to guess. Refuse rather than clone a record nobody can read.
-    return 'accepted_prompt';
-  }
-  if (accepted !== null) return 'accepted_prompt';
-  if (persistedLifecycleState(source) === 'running') return 'declared_running';
   return null;
 }
 
 const BLOCKER_REASONS: Readonly<Record<ForkBlocker, string>> = {
-  live_invocation: 'has a live backend process',
-  live_runner: 'has a live runner process',
-  runner_reservation: 'has a runner reservation in flight',
-  accepted_prompt: 'has an accepted prompt it has not run yet',
-  declared_running: 'is still recorded as running',
   delete_pending: 'is being deleted',
 };
 
@@ -149,6 +145,17 @@ export function forkMetaSnapshot(
   clone.id = newAgentId;
   clone.created_at = now;
   clone.last_activity_at = now;
+  // The clone's own lifecycle state, not the source's. The clone launched
+  // nothing, so inheriting the source's `state` would mint a record that says
+  // `running` while owning no process, no invocation and no runner -- one that
+  // `agent list` and `agent status` would report as running and that nothing
+  // would ever clear. `idle` is the coherent non-running value for a clone of a
+  // source in ANY state, not just a running one: the clone is a new agent that
+  // has not begun its own run, whatever the source had reached, and the source's
+  // own outcome is carried as history in `exit_code` / `finished_at` /
+  // `last_prompt`. Copying a terminal state instead would claim the clone had
+  // finished a run it never started.
+  clone.state = 'idle';
   // Process identity: not copied. A pid means "this agent launched and owns
   // that process"; the clone launched nothing.
   clone.pid = null;
@@ -183,18 +190,29 @@ export function forkMetaSnapshot(
  *
  * The target's directory is created exclusively, so an id that already exists
  * fails here rather than being adopted or overwritten. Nothing is written to the
- * source: it is read once, under its own lock, and only its record is consulted.
+ * source. It is read once, with a plain `readMeta`, and no lock is taken -- and
+ * none is needed: `writeMeta` publishes by `rename` from a temp file, so a
+ * concurrent reader observes either the whole pre-write record or the whole
+ * post-write one, never a torn mixture of the two. The read is a snapshot
+ * either way, which is all a fork claims to be. Taking the source's lock would
+ * also be the wrong tool: it would make a fork contend with the source's own
+ * writers, and the source must not be written to at all, not even to reconcile
+ * it into a forkable state.
+ *
+ * The write is all-or-nothing. If `writeMeta` throws, the directory this call
+ * created is removed again, so a failed fork leaves no half-created agent, no
+ * partial record and no `.tmp` residue, and the source is exactly as it was
+ * found.
  */
 export function forkAgent(
   sourceAgentId: string,
   newAgentId: string,
   options: StatePathsOptions = {},
-  probe: ProcessProbeOptions = {},
   now = Date.now() / 1000,
 ): AgentMetadata {
   const source = readMeta(sourceAgentId, options);
   if (source === null) throw new AgentForkSourceMissingError(sourceAgentId);
-  const blocker = forkBlocker(source, probe, now);
+  const blocker = forkBlocker(source);
   if (blocker !== null) throw new AgentForkSourceBusyError(sourceAgentId, BLOCKER_REASONS[blocker]);
   if (!createAgentDirectory(newAgentId, options)) throw new AgentForkTargetExistsError(newAgentId);
   const meta = forkMetaSnapshot(source, newAgentId, now);

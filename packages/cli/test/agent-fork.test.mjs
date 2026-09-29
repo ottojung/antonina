@@ -140,23 +140,59 @@ test('forking onto an id that already exists fails clearly and leaves that agent
   assert.deepEqual(JSON.parse(listed.stdout).agents.map((agent) => agent.id).sort(), ['a1', 'b2']);
 });
 
-test('a fork refuses to take on a process it cannot own', (t) => {
+test('a running source forks, and the clone owns nothing the source owns', (t) => {
   const { root, env, work } = world(t);
   seed(root, env, work, 'a1');
-  // An agent recorded as running owns live work by the durable record alone.
-  // The fork must refuse it rather than copying a state it cannot back up.
+  // The issue's own purpose: fork an agent that is mid-run. The durable record
+  // says running and names a process; the clone must not inherit any of it.
   const sourcePath = metaPath(root, 'a1');
   const meta = JSON.parse(readFileSync(sourcePath, 'utf8'));
   meta.state = 'running';
   meta.started_at = Date.now() / 1000;
+  // A complete, canonical invocation identity pointing at this test process.
+  const startTicks = Number(readFileSync(`/proc/${process.pid}/stat`, 'utf8').split(') ').pop().split(' ')[19]);
+  meta.pid = process.pid;
+  meta.pgid = process.pid;
+  meta.start_time = startTicks;
+  meta.invocation_id = 'a'.repeat(32);
+  writeFileSync(sourcePath, `${JSON.stringify(meta, null, 2)}\n`);
+  const before = readFileSync(sourcePath, 'utf8');
+
+  const forked = run(['agent', 'new', '--id', 'b2', '--fork', 'a1', '--json'], env);
+  assert.equal(forked.status, EXIT_OK, forked.stderr);
+  assert.equal(JSON.parse(forked.stdout).forked_from, 'a1');
+
+  const clone = readMeta(root, 'b2');
+  // Coherent and non-running, despite the source being mid-run.
+  assert.equal(clone.state, 'idle');
+  for (const field of ['pid', 'pgid', 'start_time', 'invocation_id', 'runner_pid', 'runner_start_time', 'runner_reservation', 'pending_prompt']) {
+    assert.equal(clone[field], null, `clone.${field} must be null`);
+  }
+  const status = run(['agent', 'status', '--id', 'b2', '--json'], env);
+  assert.equal(status.status, EXIT_OK, status.stderr);
+  assert.equal(JSON.parse(status.stdout).state, 'idle');
+  assert.equal(JSON.parse(status.stdout).alive, false);
+
+  // The source was not modified -- not even reconciled into a forkable state.
+  assert.equal(readFileSync(sourcePath, 'utf8'), before);
+  assert.equal(JSON.parse(readFileSync(sourcePath, 'utf8')).state, 'running');
+});
+
+test('a source being deleted is refused, and nothing is created', (t) => {
+  const { root, env, work } = world(t);
+  seed(root, env, work, 'a1');
+  // A tombstone is not a stable thing to snapshot: a clone taken from one would
+  // outlive the deletion the operator asked for.
+  const sourcePath = metaPath(root, 'a1');
+  const meta = JSON.parse(readFileSync(sourcePath, 'utf8'));
+  meta.delete_pending = true;
   writeFileSync(sourcePath, `${JSON.stringify(meta, null, 2)}\n`);
 
   const forked = run(['agent', 'new', '--id', 'b2', '--fork', 'a1'], env);
   assert.equal(forked.status, EXIT_ERROR);
-  assert.match(forked.stderr, /cannot fork agent a1/);
+  assert.match(forked.stderr, /being deleted/);
   assert.equal(existsSync(join(root, 'state', 'antonina', 'agents', 'b2')), false);
-  // The refusal wrote nothing, including not to the source.
-  assert.equal(JSON.parse(readFileSync(sourcePath, 'utf8')).state, 'running');
+  assert.equal(JSON.parse(readFileSync(sourcePath, 'utf8')).delete_pending, true);
 });
 
 test('fork flags are validated at the surface', (t) => {

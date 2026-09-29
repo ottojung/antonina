@@ -10,12 +10,14 @@
 //      unchanged -- twice, in both directions -- and by mutating the in-memory
 //      snapshot and observing the source record is untouched. A shallow copy
 //      fails the second of those; an aliased file fails the first.
-//   3. A fork never inherits process ownership. A source that owns live work --
-//      a live invocation, a live runner, a reservation in flight, an accepted
-//      prompt, a record still saying `running`, or a deletion tombstone -- is
-//      refused, and the refusal happens before anything is written.
+//   3. A fork never inherits process ownership, and it never inherits the
+//      source's lifecycle state. A genuinely live source -- a real live
+//      invocation with real start ticks and the env marker the runtime checks --
+//      forks successfully, and the clone names no process, no invocation and no
+//      runner, and derives a coherent non-running state.
 //   4. Both required failure modes are exercised: an unknown source id, and a
-//      new id that already exists. Neither leaves anything behind.
+//      new id that already exists. Neither leaves anything behind. So does a
+//      failed metadata write, which must leave no half-created agent.
 //
 // Every test isolates BOTH Antonina XDG roots, so none of them can read or write
 // the operator's real ~/.local/state/antonina or ~/.config/antonina.
@@ -25,7 +27,8 @@
 // packages/agent-runtime/test/process.test.mjs uses, so there is nothing to reap.
 
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import * as nodeFs from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
@@ -38,7 +41,8 @@ import {
   forkMetaSnapshot,
 } from '../dist/packages/agent-runtime/src/fork.js';
 import { idleMeta, validateAgentMetadata } from '../dist/packages/agent-runtime/src/metadata.js';
-import { updateMeta, createAgentDirectory, metaPath, readMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
+import { deriveState, invocationAlive, reservationInFlight } from '../dist/packages/agent-runtime/src/lifecycle.js';
+import { agentDir, agentsDir, updateMeta, createAgentDirectory, metaPath, readMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
 import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 
 const BACKEND_ERROR_FIELDS = 10;
@@ -81,6 +85,12 @@ function backendError(model) {
     backend_scope: 'request',
     diagnostic_bytes: 12,
   };
+}
+
+// The source's own state, read back from disk, so a test can assert the source
+// was not reconciled or otherwise disturbed by a fork.
+function sourceState() {
+  return readMeta('a1', { env: process.env }).state;
 }
 
 function finishedMeta(agentId, overrides = {}) {
@@ -142,12 +152,17 @@ test('a fork carries the source work identity and takes a new identity of its ow
   assert.equal(clone.variant, 'low');
   assert.equal(clone.prompt_count, 3);
   assert.equal(clone.last_prompt, 'third prompt');
-  assert.equal(clone.state, 'failed');
+  // The source's outcome is carried as history; the clone's own lifecycle state
+  // is its own and is never copied from the source.
   assert.equal(clone.exit_code, 7);
   assert.equal(clone.finished_at, 1_020);
   assert.deepEqual(clone.backend_error, backendError('model-one'));
 
-  // Its own identity.
+  // Its own identity, including its own lifecycle state: a clone of a FAILED
+  // source is idle, because the clone has not run and cannot claim an outcome
+  // it never reached. The source's outcome survives above as history.
+  assert.equal(clone.state, 'idle');
+  assert.equal(sourceState(), 'failed');
   assert.notEqual(clone.created_at, 1_000);
   // And no claim on live work or on a process.
   assert.equal(clone.pid, null);
@@ -242,8 +257,8 @@ test('a fork does not modify the source', (t) => {
   const before = bytes('a1');
   const beforeStat = statSync(metaPath('a1', { env: process.env }));
 
-  forkAgent('a1', 'b2', { env: process.env }, {}, 2_000);
-  forkAgent('a1', 'c3', { env: process.env }, {}, 2_000);
+  forkAgent('a1', 'b2', { env: process.env }, 2_000);
+  forkAgent('a1', 'c3', { env: process.env }, 2_000);
 
   assert.equal(bytes('a1'), before);
   assert.equal(statSync(metaPath('a1', { env: process.env })).mtimeMs, beforeStat.mtimeMs);
@@ -284,11 +299,12 @@ test('a fork onto an existing agent id fails and leaves that agent untouched', (
   assert.equal(readMeta('b2', { env: process.env }).title, 'existing agent');
 });
 
-test('a source with live work is refused, and no clone directory is created', (t) => {
+test('a genuinely live source forks, and the clone owns nothing the source owns', (t) => {
   withIsolatedXdg(t);
   // A real, live invocation: the pid is this very test process, and the record
-  // carries the start ticks and the env marker the runtime actually checks. No
-  // process is spawned, so there is nothing to reap.
+  // carries the start ticks and the env marker the runtime actually checks, so
+  // the product's own `invocationAlive`/`deriveState` agree this agent is
+  // running. No process is spawned, so there is nothing to reap.
   const live = {
     ...finishedMeta('a1'),
     state: 'running',
@@ -296,7 +312,22 @@ test('a source with live work is refused, and no clone directory is created', (t
     pgid: process.pid,
     start_time: procStartTicks(process.pid),
     invocation_id: INVOCATION_ID,
+    active_runner: true,
+    runner_pid: process.pid,
+    runner_start_time: procStartTicks(process.pid),
+    runner_gen: 4,
+    runner_reservation: {
+      state: 'reserved',
+      gen: 4,
+      owner_pid: process.pid,
+      owner_start_ticks: procStartTicks(process.pid),
+      reserved_at: Date.now() / 1000,
+      mode: 'continue',
+    },
     pending_prompt: 'accepted but not yet run',
+    steer_queue: [{ seq: 1, prompt: 'queued steer', queued_at: 1_500 }],
+    steer_seq: 1,
+    intent: 'steer',
   };
   validateAgentMetadata(live);
   seed('a1', live);
@@ -304,12 +335,94 @@ test('a source with live work is refused, and no clone directory is created', (t
   const root = withProc(t, {
     [process.pid]: { stat: statLine({ start: procStartTicks(process.pid) }), environ: `ANTONINA_AGENT_ID=a1\0ANTONINA_INVOCATION_ID=${INVOCATION_ID}\0` },
   });
+  const probe = { procRoot: root, signal: () => true };
 
+  // The product's own predicates say the source is live. That is the case the
+  // issue is written for, and it forks.
+  assert.equal(invocationAlive(live, probe), true);
+  const clone = forkAgent('a1', 'b2', { env: process.env }, 2_000);
+
+  // The clone claims no process, no invocation and no runner, so no control
+  // command can reach the source's process through it.
+  assert.equal(clone.pid, null);
+  assert.equal(clone.pgid, null);
+  assert.equal(clone.start_time, null);
+  assert.equal(clone.invocation_id, null);
+  assert.equal(clone.runner_pid, null);
+  assert.equal(clone.runner_start_time, null);
+  assert.equal(clone.active_runner, false);
+  assert.equal(clone.runner_gen, 0);
+  assert.equal(clone.runner_reservation, null);
+  // Nor does it inherit the work the source's process was serving.
+  assert.equal(clone.pending_prompt, null);
+  assert.deepEqual(clone.steer_queue, []);
+  assert.equal(clone.steer_seq, 0);
+  assert.equal(clone.intent, null);
+
+  // And the clone is not a record that claims to be running with nothing behind
+  // it. Its derived state is coherent and non-running.
+  assert.equal(clone.state, 'idle');
+  assert.equal(deriveState(clone, 2_000), 'idle');
+  assert.equal(invocationAlive(clone, probe), false);
+  assert.equal(reservationInFlight(clone, 2_000), false);
+  validateAgentMetadata(readMeta('b2', { env: process.env }));
+
+  // The source was not modified -- not even reconciled into a forkable state.
+  assert.equal(bytes('a1'), before);
+  assert.equal(sourceState(), 'running');
+});
+
+test('the clone takes its own lifecycle state from a source in every state', (t) => {
+  withIsolatedXdg(t);
+  // One assertion per persisted source state, because a clone must be coherent
+  // whichever state its source was in, not merely in the running case.
+  let index = 0;
+  for (const state of ['idle', 'running', 'succeeded', 'failed', 'stopped', 'killed']) {
+    index += 1;
+    const sourceId = `a${index}`;
+    const cloneId = `b${index}`;
+    seed(sourceId, {
+      ...finishedMeta(sourceId),
+      state,
+      // A running source carries a complete invocation identity, as it must to
+      // be canonical at all.
+      pid: state === 'running' ? process.pid : null,
+      pgid: state === 'running' ? process.pid : null,
+      start_time: state === 'running' ? procStartTicks(process.pid) : null,
+      invocation_id: state === 'running' ? INVOCATION_ID : null,
+    });
+    const clone = forkAgent(sourceId, cloneId, { env: process.env }, 2_000);
+    assert.equal(clone.state, 'idle', `clone of a ${state} source must be idle`);
+    assert.notEqual(deriveState(clone, 2_000), 'running');
+    assert.notEqual(deriveState(clone, 2_000), 'unknown');
+    validateAgentMetadata(clone);
+  }
+});
+
+test('forkBlocker refuses only a source whose authority is being revoked', (t) => {
+  withIsolatedXdg(t);
+  const terminal = finishedMeta('a1');
+
+  assert.equal(forkBlocker(terminal), null);
+  assert.equal(forkBlocker(idleMeta('a1', '/srv/work', null, 1_000)), null);
+  assert.equal(forkBlocker({ ...terminal, delete_pending: true }), 'delete_pending');
+
+  // Everything the previous rungs used to refuse is now forkable, because the
+  // snapshot neutralises it. The source's live work is exactly the case the
+  // issue exists for.
+  assert.equal(forkBlocker({ ...terminal, state: 'running' }), null);
+  assert.equal(forkBlocker({ ...terminal, pending_prompt: 'waiting' }), null);
+  assert.equal(forkBlocker({ ...terminal, active_runner: true, runner_gen: 2 }), null);
+
+  // A deletion tombstone is still refused, and the refusal happens before
+  // anything is written.
+  seed('a1', { ...terminal, delete_pending: true });
+  const before = bytes('a1');
   assert.throws(
-    () => forkAgent('a1', 'b2', { env: process.env }, { procRoot: root, signal: () => true }),
+    () => forkAgent('a1', 'b2', { env: process.env }, 2_000),
     (error) => {
       assert.ok(error instanceof AgentForkSourceBusyError);
-      assert.match(error.message, /live backend process/);
+      assert.match(error.message, /being deleted/);
       return true;
     },
   );
@@ -317,61 +430,35 @@ test('a source with live work is refused, and no clone directory is created', (t
   assert.equal(bytes('a1'), before);
 });
 
-test('forkBlocker names every reason a source may not be forked', (t) => {
+test('a failed metadata write leaves no half-created agent', (t) => {
   withIsolatedXdg(t);
-  const terminal = finishedMeta('a1');
-
-  // Nothing to inherit: a terminal agent is forkable.
-  assert.equal(forkBlocker(terminal), null);
-  assert.equal(forkBlocker(idleMeta('a1', '/srv/work', null, 1_000)), null);
-
-  assert.equal(
-    forkBlocker({ ...terminal, delete_pending: true }),
-    'delete_pending',
-  );
-  assert.equal(
-    forkBlocker({ ...terminal, pending_prompt: 'waiting' }),
-    'accepted_prompt',
-  );
-  assert.equal(
-    forkBlocker({ ...terminal, state: 'running' }),
-    'declared_running',
-  );
-  // Malformed pending-prompt authority is uncertainty, and uncertainty is a
-  // refusal, not a licence to guess.
-  const malformed = { ...terminal };
-  delete malformed.pending_prompt;
-  assert.equal(forkBlocker(malformed), 'accepted_prompt');
-
-  // A live runner and a live reservation are separate rungs from the live
-  // invocation above, and each is reachable on its own.
-  const liveRunner = { ...terminal, runner_pid: process.pid, runner_start_time: procStartTicks(process.pid) };
-  validateAgentMetadata(liveRunner);
-  const root = withProc(t, {
-    [process.pid]: { stat: statLine({ start: procStartTicks(process.pid) }), environ: 'ANTONINA_AGENT_ID=a1\0' },
-  });
-  assert.equal(forkBlocker(liveRunner, { procRoot: root, signal: () => true }), 'live_runner');
-
-  const reserved = {
-    ...terminal,
-    active_runner: true,
-    runner_gen: 2,
-    runner_reservation: {
-      state: 'reserved',
-      gen: 2,
-      owner_pid: process.pid,
-      owner_start_ticks: procStartTicks(process.pid),
-      reserved_at: Date.now() / 1000,
-      mode: 'continue',
-    },
+  seed('a1', finishedMeta('a1'));
+  const before = bytes('a1');
+  // Force the one failure that could leave a half-created agent: the record
+  // write itself. Every other store operation still goes through the real
+  // filesystem, so the rollback path under test is the product's own.
+  const fs = {
+    ...nodeFs,
+    writeFileSync() { throw new Error('injected write failure'); },
   };
-  validateAgentMetadata(reserved);
-  assert.equal(forkBlocker(reserved), 'runner_reservation');
+  const options = { env: process.env, fs };
 
-  // The same records with nothing alive behind them are forkable, so the rungs
-  // above are about live work and not merely about fields being present.
-  assert.equal(forkBlocker(liveRunner), null);
-  assert.equal(forkBlocker({ ...terminal, active_runner: true }), null);
+  assert.throws(
+    () => forkAgent('a1', 'b2', options, 2_000),
+    /failed to persist metadata for agent b2/,
+  );
+
+  // The directory this call created is gone, so there is no half-created agent
+  // for a later command to adopt.
+  assert.equal(existsSync(agentDir('b2', { env: process.env })), false);
+  assert.equal(readMeta('b2', { env: process.env }), null);
+  // No temp residue, and the source is exactly as it was found.
+  assert.deepEqual(
+    readdirSync(agentsDir({ env: process.env })).filter((name) => name.includes('.tmp')),
+    [],
+  );
+  assert.deepEqual(readdirSync(agentsDir({ env: process.env })), ['a1']);
+  assert.equal(bytes('a1'), before);
 });
 
 test('a fork keeps the record canonical even at a field boundary', (t) => {

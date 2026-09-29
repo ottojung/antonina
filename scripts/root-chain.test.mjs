@@ -140,7 +140,7 @@ test('no step of the root chain globs a directory that holds a suite with host p
     'this case is only meaningful while a suite with host preconditions lives in a directory the root chain could glob; '
     + 'if that suite moved, re-check this case rather than trusting it',
   );
-  for (const [command] of Object.entries(pkgScripts())) {
+  for (const command of Object.values(pkgScripts())) {
     for (const token of command.split(/\s+/)) {
       const dir = token.replace(/\/?\*[^/]*$/, '').replace(/\/$/, '');
       if (dir === '' || !preconditioned.has(dir)) continue;

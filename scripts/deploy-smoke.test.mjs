@@ -28,6 +28,12 @@
 //     working tree from inside a test.
 //   - a Chrome and a matching chromedriver, for the same three cases.
 //
+// Machine-readable, and read by `scripts/root-chain.test.mjs`: this suite
+// declares the preconditions it cannot meet on a bare checkout, so the root
+// chain's expansion check can see why it must not reach this file. The
+// `antonina-test-needs:` token is exact; the prose above is not read by
+// anything.
+//
 // It is therefore NOT in the root `npm test` chain, which every other suite
 // must stay runnable without a browser or a build. The CI job that provisions
 // both and runs this suite is `smoke-probe` in `.github/workflows/ci.yml`; a
@@ -37,6 +43,8 @@
 // The other cases here — the DOM-to-state classification, the unspawnable
 // driver, the timeout paths — need neither, so they run on a bare checkout and
 // can be reached with `node --test --test-name-pattern=...`.
+//
+// antonina-test-needs: browser, chromedriver, built-web-bundle
 
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -413,13 +421,32 @@ createServer((request, response) => {
 // have left CI green and the probe exercised by nobody again, which is the
 // exact condition the review raised. These two cases are the assertion.
 
+// This case used to assert the root chain's *text*: it looked for the literal
+// string `test:deploy-smoke` in `pkg.scripts.test`, and for any script whose
+// command mentions `deploy-smoke`. That approved a chain that did in fact
+// reach this suite, because the step that reached it was
+// `node --test scripts/*.test.mjs` — a glob, containing neither string. Board
+// 74 added this file to `scripts/`, the root chain went from 10 tests to 37,
+// and 27 of them need a real browser, a matching chromedriver and a built
+// `web/dist`. The guard approved all of it, and it approved it by reading text
+// where the defect was a file set.
+//
+// The guard now lives in `scripts/root-chain.test.mjs`, which expands the
+// chain's globs against the working tree and asserts on the resulting paths. It
+// is in the root chain itself, so it runs on a bare checkout with no browser —
+// which is the only environment in which a bare-checkout contract can be
+// checked. What is asserted here is what can be asserted from inside a suite
+// that itself needs a browser: the exclusion, and the deliberate reachability.
 test('the root npm test chain does not require a browser or a built bundle', () => {
   const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
   const chain = pkg.scripts.test;
   assert.ok(!chain.includes('test:deploy-smoke'), `the root \`npm test\` chain runs the deploy smoke suite: ${chain}`);
   // And the suite is still reachable, deliberately, by name.
   assert.equal(pkg.scripts['test:deploy-smoke'], 'node --test scripts/deploy-smoke.test.mjs');
-  // Nothing else in the chain may smuggle the browser back in.
+  // Nothing else in the chain may smuggle the browser back in. Still a text
+  // check, and still worth keeping as a cheap tripwire — but it is no longer
+  // the gate; the expansion check in `scripts/root-chain.test.mjs` is, and
+  // this case cannot stand in for it.
   for (const [name, command] of Object.entries(pkg.scripts)) {
     if (name === 'test' || name.startsWith('//') || name === 'test:deploy-smoke') continue;
     assert.ok(
@@ -427,6 +454,17 @@ test('the root npm test chain does not require a browser or a built bundle', () 
       `${name} pulls the deploy smoke suite into the root chain`,
     );
   }
+  // The gate that matters, named from here so that a reader of this file does
+  // not conclude that the checks above are the whole protection. It is not:
+  // this suite is not in the root chain, so it cannot guard the root chain.
+  assert.ok(
+    existsSync(join(repoRoot, 'scripts', 'root-chain.test.mjs')),
+    'scripts/root-chain.test.mjs is missing; the root chain has no expanding bare-checkout gate',
+  );
+  assert.ok(
+    pkg.scripts['test:build-identity'].includes('scripts/root-chain.test.mjs'),
+    'the expanding gate is not in the root `npm test` chain, so nothing runs it on a bare checkout',
+  );
 });
 
 test('the deploy smoke suite is gated by a CI job that provisions a browser', () => {

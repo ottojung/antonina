@@ -67,8 +67,17 @@ function ageAndArmOwnership(t, id) {
       gen: 1,
       mode: 'new',
       // This test process is genuinely alive and these are its real identity
-      // facts, so the reservation owner check holds and `reservationInFlight`
-      // is true on its own merits, with no reliance on the 5s grace window.
+      // facts, so the reservation is a well-formed one held by a real live
+      // owner rather than a shape no run could ever produce. It is NOT
+      // isolated ownership and this file proves nothing about the
+      // `reservationOwnerAlive` rung: the fixture also sets `active_runner`,
+      // and `cmdClean` tests `activeRunnerFlag(meta) !== false` before
+      // `reservationInFlight(meta)`, so that term short-circuits first. The
+      // rung is in fact unreachable from this guard — `reservationInFlight`
+      // returns false outright when `active_runner` is false, so the only
+      // fixtures that get past the earlier term are exactly the ones where the
+      // reservation term is already false. See `lifecycle.test.mjs:194` for the
+      // case that does pin the rung's true branch.
       owner_pid: process.pid,
       owner_start_ticks: procStartTicks(process.pid),
       reserved_at: 1,

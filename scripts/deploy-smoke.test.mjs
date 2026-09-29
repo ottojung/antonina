@@ -457,6 +457,15 @@ test('the root npm test chain does not require a browser or a built bundle', () 
   // The gate that matters, named from here so that a reader of this file does
   // not conclude that the checks above are the whole protection. It is not:
   // this suite is not in the root chain, so it cannot guard the root chain.
+  //
+  // This pair is kept as a tripwire, not as the guard. The same reachability is
+  // asserted in `.github/check-web-deploy-triggers.test.mjs`, which the root
+  // chain *does* run — that copy is the one that fires on a bare checkout,
+  // which is the only place a bare-checkout contract is checkable. These two
+  // assertions run only in CI with a browser and a built bundle, so on their
+  // own they would not have caught a gate removed from the chain. They are
+  // cheap, they fail in the CI environment where the browser suite lives, and
+  // a reader arriving at this file is told plainly where the real guard is.
   assert.ok(
     existsSync(join(repoRoot, 'scripts', 'root-chain.test.mjs')),
     'scripts/root-chain.test.mjs is missing; the root chain has no expanding bare-checkout gate',

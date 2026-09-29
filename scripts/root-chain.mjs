@@ -20,6 +20,14 @@
 // this module reads that marker off the file. A suite that is pulled into the
 // root chain and declares a need it cannot meet there fails, whether it got
 // there by a glob, by a rename, or by someone appending it by name.
+//
+// One honest limit, which the `unresolved` return is what makes visible: the
+// `node --test` steps are the ones this module can resolve to files. A
+// package-local runner step — `npm test --prefix web` — runs a file set that is
+// not derivable from here, so this module reports the step as unresolved rather
+// than claiming its files are browser-free. `scripts/root-chain.test.mjs`
+// enumerates the `web/` set itself and holds it to the same rule, so the limit
+// is covered rather than merely disclosed.
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';

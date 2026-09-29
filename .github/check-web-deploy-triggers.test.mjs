@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -174,4 +174,77 @@ test('a bundle import the checker cannot trace is reported next to the result', 
   const warningAt = result.stdout.indexOf('could not be traced');
   const resultAt = result.stdout.indexOf('RESULT:');
   assert.ok(warningAt !== -1 && resultAt !== -1 && warningAt < resultAt, 'the warning must be reported before the result line');
+});
+
+// --- is the bare-checkout gate still wired into the root chain? -------------
+// This case is not about the deploy trigger at all. It is here because of where
+// it lives, which is the only interesting property it has.
+//
+// `scripts/root-chain.test.mjs` is the gate that keeps the root `npm test`
+// chain runnable on a bare checkout with no browser, no chromedriver and no
+// built `web/dist` — the contract board 74 exists to restore. The defect the
+// review of that work found is that the gate had no guard on *itself*: deleting
+// `&& npm run test:build-identity` from `pkg.scripts.test` makes `npm test` exit
+// 0 having silently dropped all 17 of its tests, and nothing in the repository
+// noticed, because the only assertion that the gate is in the chain was
+// `scripts/deploy-smoke.test.mjs` — a suite the root chain does not run, by
+// design, because it needs a browser. The one check that the gate is reachable
+// on a bare checkout lived in a suite unreachable on a bare checkout.
+//
+// So the assertion has to sit in a suite the root chain *does* run, in a
+// subsystem the gate does not own. `test:workflow` is in the chain; `.github/`
+// is not a directory `scripts/root-chain.mjs` scans. That is the whole reason
+// this case is in this file and not in the gate.
+//
+// A test cannot assert its own reachability: the edit that breaks the gate is
+// precisely the edit that stops this file running. So the chain text is also
+// pinned here, explicitly, rather than left to be implied.
+test('the root npm test chain still runs the bare-checkout gate', () => {
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+
+  // This file is the witness, so its own reachability is asserted too. If
+  // `test:workflow` is ever dropped from the chain, the case below is
+  // unreachable and the guard it provides silently evaporates — the same
+  // failure shape as the one this case exists to catch.
+  assert.ok(
+    pkg.scripts.test.includes('npm run test:workflow'),
+    `the root \`npm test\` chain does not run \`test:workflow\`, so this file never guards anything: ${pkg.scripts.test}`,
+  );
+  // Which file `test:workflow` runs is not pinned as a string. It is
+  // `node --test .github/*.test.mjs` — a glob — and asserting the literal
+  // filename inside it would be the very mistake the bare-checkout gate exists
+  // to stop: a text match that approves whatever the glob happens to expand to.
+  // So the pattern is expanded against the real directory instead.
+  const witnesses = pkg.scripts['test:workflow']
+    .split(/\s+/)
+    // The interpreter is a token too; only patterns can name a file.
+    .filter((token) => token !== '' && !token.startsWith('-') && token !== 'node')
+    .flatMap((pattern) => {
+      const prefix = pattern.replace(/\/?\*[^/]*$/, '');
+      if (prefix === '') return [];
+      assert.ok(existsSync(join(repoRoot, prefix)), `\`test:workflow\` names ${pattern}, whose directory does not exist`);
+      return readdirSync(join(repoRoot, prefix))
+        .filter((name) => name.endsWith('.test.mjs'))
+        .map((name) => join(prefix, name).split('\\').join('/'));
+    });
+  assert.ok(
+    witnesses.includes('.github/check-web-deploy-triggers.test.mjs'),
+    `\`test:workflow\` (${pkg.scripts['test:workflow']}) no longer runs this file, so the reachability `
+      + `assertions below would be dead code; it runs ${JSON.stringify(witnesses)}`,
+  );
+
+  // The gate's own step, in the chain.
+  assert.ok(
+    pkg.scripts.test.includes('npm run test:build-identity'),
+    `the root \`npm test\` chain does not run \`test:build-identity\`, so scripts/root-chain.test.mjs `
+      + `is never executed and \`npm test\` is green having stopped running it: ${pkg.scripts.test}`,
+  );
+  assert.ok(
+    pkg.scripts['test:build-identity'].includes('scripts/root-chain.test.mjs'),
+    '`test:build-identity` does not name scripts/root-chain.test.mjs, so the bare-checkout gate does not run',
+  );
+  assert.ok(
+    existsSync(join(repoRoot, 'scripts', 'root-chain.test.mjs')),
+    'scripts/root-chain.test.mjs is missing; the root chain has no expanding bare-checkout gate',
+  );
 });

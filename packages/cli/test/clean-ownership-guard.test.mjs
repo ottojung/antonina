@@ -54,6 +54,13 @@ function ageAndArmOwnership(t, id) {
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   Object.assign(meta, {
     state: 'succeeded',
+    // created_at is aged alongside finished_at (board issue 129). The retention
+    // anchor is the LATER of the two, so an agent that was created seconds ago
+    // and claims to have finished in 1970 is a record no writer in this
+    // repository can produce, and backdating only finished_at would now make
+    // these fixtures assert about an unreachable state instead of about the
+    // ownership guard they exist to pin.
+    created_at: 1,
     finished_at: 1,
     exit_code: 0,
     active_runner: true,
@@ -116,6 +123,7 @@ test('clean still removes an unowned terminal agent alongside a guarded one', (t
   const free = JSON.parse(readFileSync(freeMeta, 'utf8'));
   Object.assign(free, {
     state: 'failed',
+    created_at: 1,
     finished_at: 1,
     active_runner: false,
     runner_reservation: null,

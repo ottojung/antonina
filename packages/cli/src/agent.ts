@@ -942,6 +942,65 @@ async function cmdDelete(args: string[], context: AgentCommandContext): Promise<
   return EXIT_OK;
 }
 
+/**
+ * The two questions the retention sweep asks about a record, kept apart because
+ * they were previously one expression and the conflation is board issue 129.
+ *
+ * `retentionEligibleState` is "has this record's work finished?". Two answers
+ * count, and they are answers rather than accidents:
+ *
+ *   - a terminal state, which is what every writer other than the fork produces
+ *     once a run ends (`finalizeTerminal` writes the terminal state and the
+ *     `finished_at` together); and
+ *   - `idle` together with a persisted `finished_at`, which is the state
+ *     `forkMetaSnapshot` produces for a clone of a source that had already
+ *     finished. It is coherent, not corrupt: the clone is a new agent that has
+ *     begun no run of its own, and the work it carries forward is finished. The
+ *     previous predicate asked only the first question, so that record matched
+ *     neither test and was retained forever and invisibly -- it recurred on every
+ *     fork of a finished agent.
+ *
+ * `retentionAnchor` is "how old is it, for retention purposes?", and it is the
+ * LATER of the record's `finished_at` and its own `created_at`. For every record
+ * the product creates itself those are ordered -- `created_at` is stamped at
+ * creation and `finished_at` at the end of a later run -- so the later of the
+ * two IS `finished_at` and this changes no existing behaviour. The single
+ * exception is the fork, which stamps `created_at` as now and inherits
+ * `finished_at` from a source that may be arbitrarily old, and there the anchor
+ * is the clone's own creation.
+ *
+ * That asymmetry is the decision, not an accident of implementation. A clone is
+ * a durable object the operator just asked for; its retention window running
+ * from its own creation means `agent clean` can never delete an artifact seconds
+ * old because the session it was forked from ended months ago. The opposite
+ * choice -- anchoring on `finished_at` alone -- would make `agent clean --days
+ * 14` delete a fork made moments ago from a three-month-old source, and if the
+ * source has since been deleted that clone is the last copy of that history, so
+ * the sweep would be silently destroying the work the fork was made to preserve.
+ * Leaking a record forever is the milder failure; deleting it early is
+ * irreversible.
+ *
+ * Reversal condition: if `agent clean` is ever specified as strictly "the age
+ * of the finished work" rather than "the age of the record", both helpers change
+ * with it -- `retentionAnchor` becomes plain `finished_at` and a fork's
+ * retention window begins at the source's outcome again. A second reversal
+ * condition: if fork snapshots ever stop inheriting `finished_at`, the idle
+ * clause of `retentionEligibleState` becomes unreachable and should be deleted
+ * rather than left as a dead branch.
+ */
+function retentionEligibleState(meta: AgentMetadata): boolean {
+  const state = deriveState(meta);
+  if ((TERMINAL_STATES as readonly string[]).includes(state)) return true;
+  return state === 'idle' && persistedTimestamp(meta.finished_at) !== null;
+}
+
+function retentionAnchor(meta: AgentMetadata): number | null {
+  const finished = persistedTimestamp(meta.finished_at);
+  if (finished === null) return null;
+  const created = persistedTimestamp(meta.created_at);
+  return created === null ? finished : Math.max(finished, created);
+}
+
 async function cmdClean(args: string[], context: AgentCommandContext): Promise<number> {
   const parsed = parse(args, ['--dry-run']);
   if (parsed.positionals.length !== 0) throw new UsageError('clean: unexpected positional arguments');
@@ -950,9 +1009,9 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
   const cutoff = Date.now() / 1000 - days * 86_400;
   const candidates = agentIds(context).filter((agentId) => {
     const meta = readMeta(agentId, paths(context));
-    if (meta === null || !(TERMINAL_STATES as readonly string[]).includes(deriveState(meta))) return false;
-    const finished = persistedTimestamp(meta.finished_at);
-    return finished !== null && finished < cutoff;
+    if (meta === null || !retentionEligibleState(meta)) return false;
+    const anchor = retentionAnchor(meta);
+    return anchor !== null && anchor < cutoff;
   });
   for (const agentId of candidates) {
     if (parsed.flags.has('--dry-run')) {
@@ -967,12 +1026,11 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
       } catch {
         return;
       }
-      const state = deriveState(meta);
-      const finished = persistedTimestamp(meta.finished_at);
+      const anchor = retentionAnchor(meta);
       if (
-        !(TERMINAL_STATES as readonly string[]).includes(state)
-        || finished === null
-        || finished >= cutoff
+        !retentionEligibleState(meta)
+        || anchor === null
+        || anchor >= cutoff
         || invocationAlive(meta)
         || activeRunnerFlag(meta) !== false
         || reservationInFlight(meta)

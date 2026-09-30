@@ -215,10 +215,19 @@ export function forkMetaSnapshot(
  * writers, and the source must not be written to at all, not even to reconcile
  * it into a forkable state.
  *
- * The write is all-or-nothing. If `writeMeta` throws, the directory this call
- * created is removed again, so a failed fork leaves no half-created agent, no
- * partial record and no `.tmp` residue, and the source is exactly as it was
- * found.
+ * Everything from the claim to the last byte is all-or-nothing. The protected
+ * region starts at the claim, not at the write, because two of the steps after
+ * the claim can fail: `forkMetaSnapshot` (its id guard, and `validateAgentMetadata`
+ * on the assembled clone) and `writeMeta`. A step that is allowed to fail while
+ * holding a claimed target, and that leaves the target on disk when it does, is
+ * how a failed fork becomes a half-created agent -- a directory under
+ * `agents/` with no readable record in it, which `agentIds` enumerates and
+ * `readMeta` then refuses, so the residue breaks `agent list` and `agent clean`
+ * for the whole state root until someone removes it by hand. So the region covers
+ * the whole creation sequence: if any step after the claim throws, the directory
+ * this call created is removed again, and a failed fork leaves no half-created
+ * agent, no partial record and no `.tmp` residue, with the source exactly as it
+ * was found.
  */
 export function forkAgent(
   sourceAgentId: string,
@@ -231,14 +240,17 @@ export function forkAgent(
   const blocker = forkBlocker(source);
   if (blocker !== null) throw new AgentForkSourceBusyError(sourceAgentId, BLOCKER_REASONS[blocker]);
   if (!createAgentDirectory(newAgentId, options)) throw new AgentForkTargetExistsError(newAgentId);
-  const meta = forkMetaSnapshot(source, newAgentId, now);
   try {
+    // Built inside the protected region, not before it: this is the step that
+    // validates the id it was handed and the record it is about to publish, so
+    // a failure here is as much a failed fork as a failure to write it.
+    const meta = forkMetaSnapshot(source, newAgentId, now);
     writeMeta(newAgentId, meta, options);
+    return meta;
   } catch (error) {
     // A half-created agent is worse than none: remove what this call made and
     // leave the source exactly as it was found.
     removeAgentDirectory(newAgentId, options);
     throw error;
   }
-  return meta;
 }

@@ -396,7 +396,10 @@ test('clean dry-run observes and clean removes old terminal agents', (t) => {
   assert.equal(run(['agent', 'new', '--id', 'f00d', '--cwd', work], env).status, 0);
   const path = metaPath(root, 'f00d');
   const meta = JSON.parse(readFileSync(path, 'utf8'));
-  Object.assign(meta, { state: 'succeeded', finished_at: 1, active_runner: false });
+  // created_at is aged alongside finished_at: since board issue 129 the retention
+  // anchor is the LATER of the two, so an agent created seconds ago that claims
+  // to have finished in 1970 is a record no writer here can produce.
+  Object.assign(meta, { state: 'succeeded', created_at: 1, finished_at: 1, active_runner: false });
   writeFileSync(path, JSON.stringify(meta));
 
   const dry = run(['agent', 'clean', '--days', '1', '--dry-run'], env);

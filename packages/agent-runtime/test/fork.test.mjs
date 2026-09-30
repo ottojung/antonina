@@ -22,7 +22,8 @@
 //      assert, so it is pinned here against the code rather than the prose.
 //   5. Both required failure modes are exercised: an unknown source id, and a
 //      new id that already exists. Neither leaves anything behind. So does a
-//      failed metadata write, which must leave no half-created agent.
+//      failed metadata write, and so does a failed meta snapshot -- both of
+//      which must leave no half-created agent (board issue 130, defect 1).
 //
 // Every test isolates BOTH Antonina XDG roots, so none of them can read or write
 // the operator's real ~/.local/state/antonina or ~/.config/antonina.
@@ -502,6 +503,51 @@ test('a failed metadata write leaves no half-created agent', (t) => {
     readdirSync(agentsDir({ env: process.env })).filter((name) => name.includes('.tmp')),
     [],
   );
+  assert.deepEqual(readdirSync(agentsDir({ env: process.env })), ['a1']);
+  assert.equal(bytes('a1'), before);
+});
+
+// Board issue 130, defect 1: the whole creation sequence must be protected, not
+// just the record write.
+//
+// The property pinned here is ATOMICITY OF THE CREATION SEQUENCE, forced rather
+// than raced. The step forced to fail is `forkMetaSnapshot`, and it is forced
+// with the product's own id guard -- `forkMetaSnapshot` calls
+// `persistedAgentId(newAgentId) !== newAgentId` and throws -- rather than with
+// an injected `fs`. That choice is deliberate and load-bearing: an injected
+// `fs` that throws from `writeFileSync` (the case the test above uses) throws
+// from INSIDE the try that already rolls back, so it passes whether or not the
+// snapshot step is protected, and it would pin nothing about defect 1. The id
+// guard throws from the snapshot step, which is where the gap was.
+//
+// Why the id guard is a real path and not a contrivance: `createAgentDirectory`
+// claims the target id with a single non-recursive `mkdirSync`, and nothing
+// before `forkMetaSnapshot` validates the id, so an id the store will happily
+// create a directory for but the metadata guard rejects reaches the snapshot
+// step with a directory already on disk. That is exactly the state defect 1 is
+// about: a target directory exists, with no complete metadata, and nothing
+// removes it. 'B2' is such an id: `normalizeAgentId` lower-cases, so it is not
+// a persisted id, while the filesystem has no such opinion.
+test('a failed meta snapshot leaves no half-created agent', (t) => {
+  withIsolatedXdg(t);
+  seed('a1', finishedMeta('a1'));
+  const before = bytes('a1');
+
+  assert.throws(
+    () => forkAgent('a1', 'B2', { env: process.env }, 2_000),
+    /managed-agent id is malformed/,
+  );
+
+  // No partial target survives: not the directory this call created, not a
+  // record inside it, and not temp residue.
+  assert.equal(existsSync(agentDir('B2', { env: process.env })), false);
+  assert.equal(existsSync(metaPath('B2', { env: process.env })), false);
+  assert.deepEqual(
+    readdirSync(agentsDir({ env: process.env })).filter((name) => name.includes('.tmp')),
+    [],
+  );
+  // The only agent left in the state root is the source, byte-for-byte as found,
+  // so `agent list` and `agent clean` still see a coherent state root.
   assert.deepEqual(readdirSync(agentsDir({ env: process.env })), ['a1']);
   assert.equal(bytes('a1'), before);
 });

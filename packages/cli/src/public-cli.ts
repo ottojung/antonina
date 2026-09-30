@@ -51,6 +51,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--finished': 'Show terminal agents only.',
   '--follow': 'Follow output until the agent stops.',
   '--force': 'Force the requested operation.',
+  '--fork': 'Create the new agent as a snapshot of this existing agent id. If the source has a backend session, the clone continues it: running both drives one conversation. There is no per-fork opt-out.',
   '--guidance': 'Repository-relative guidance document path; may be repeated.',
   '--host': 'Host identifier/address.',
   '--id': 'Identifier for the selected command.',
@@ -323,11 +324,11 @@ const BOARD_SPECS: readonly CommandSpec[] = [
 const AGENT_SPECS: readonly CommandSpec[] = [
   {
     path: ['new'],
-    summary: 'Create an idle managed agent.',
-    values: ['--id', '--cwd', '--title'],
+    summary: 'Create an idle managed agent, or a snapshot of an existing one with --fork.',
+    values: ['--id', '--cwd', '--title', '--fork'],
     flags: ['--json'],
     required: ['--id'],
-    normalize: (p) => ['new', ...valueArgs(p, ['--id', '--cwd', '--title']), ...flagArgs(p, ['--json'])],
+    normalize: (p) => ['new', ...valueArgs(p, ['--id', '--cwd', '--title', '--fork']), ...flagArgs(p, ['--json'])],
   },
   {
     path: ['list'],

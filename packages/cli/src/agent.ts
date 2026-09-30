@@ -339,7 +339,7 @@ async function cmdFork(
     const cwd = persistedAgentCwd(meta);
     context.io.stdout(
       `Forked agent ${sourceId} into ${agentId} (state ${String(persistedLifecycleState(meta))}, ${String(meta.prompt_count)} prompts, ${cwd === null ? 'no declared working directory' : cwd}). `
-      + `The two agents are independent: neither observes or changes the other. `
+      + `The clone inherits the source's backend session, and apart from that session the two records are independent: neither is ever read in order to update the other. `
       + `They share one backend session, so running both will drive the same conversation. `
       + `Start work with \`antonina agent run --id ${agentId} --prompt 'task'\`.`,
     );

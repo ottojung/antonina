@@ -51,7 +51,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--finished': 'Show terminal agents only.',
   '--follow': 'Follow output until the agent stops.',
   '--force': 'Force the requested operation.',
-  '--fork': 'Create the new agent as a snapshot of this existing agent id. The clone continues the source\'s backend session, so running both at once drives one conversation; there is no per-fork opt-out.',
+  '--fork': 'Create the new agent as a snapshot of this existing agent id. If the source has a backend session, the clone continues it: running both drives one conversation. There is no per-fork opt-out.',
   '--guidance': 'Repository-relative guidance document path; may be repeated.',
   '--host': 'Host identifier/address.',
   '--id': 'Identifier for the selected command.',

@@ -224,5 +224,12 @@ test('the help text advertises the fork option', (t) => {
   const help = run(['agent', 'new', '--help'], env);
   assert.equal(help.status, EXIT_OK, help.stderr);
   assert.match(help.stdout, /--fork/);
+  // Both halves of the disclosure, not just the opening clause: the bare prefix
+  // match below would survive a rewrite of every sentence after it, which is
+  // exactly the defect class this issue exists to remove. The substantive,
+  // backend-free check of the same claim is the session contract pair in
+  // packages/agent-runtime/test/fork.test.mjs.
   assert.match(help.stdout, /--fork <value>\s+Create the new agent as a snapshot of this existing agent id\./);
+  assert.match(help.stdout, /If the source has a backend session, the clone continues it: running both drives one conversation\./);
+  assert.match(help.stdout, /There is no per-fork opt-out\./);
 });

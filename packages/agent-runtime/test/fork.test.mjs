@@ -15,7 +15,12 @@
 //      invocation with real start ticks and the env marker the runtime checks --
 //      forks successfully, and the clone names no process, no invocation and no
 //      runner, and derives a coherent non-running state.
-//   4. Both required failure modes are exercised: an unknown source id, and a
+//   4. The session contract, in both directions. A clone INHERITS the source's
+//      recorded backend session, and leaves the source's record UNMODIFIED --
+//      in both directions, for a source that has a session and for one that
+//      does not. This is the contract the fork.ts header and the --fork help
+//      assert, so it is pinned here against the code rather than the prose.
+//   5. Both required failure modes are exercised: an unknown source id, and a
 //      new id that already exists. Neither leaves anything behind. So does a
 //      failed metadata write, which must leave no half-created agent.
 //
@@ -266,6 +271,46 @@ test('a fork does not modify the source', (t) => {
   const left = readMeta('b2', { env: process.env });
   const right = readMeta('c3', { env: process.env });
   assert.equal(JSON.stringify({ ...left, id: 'X' }), JSON.stringify({ ...right, id: 'X' }));
+});
+
+test('a fork inherits the source backend session and leaves the source record unmodified, in both directions', async (t) => {
+  withIsolatedXdg(t);
+
+  // Direction one, session present: the clone takes the source's recorded
+  // native_session_id verbatim. This is what `cmdRun` later reads to choose
+  // mode: 'continue', so it is the field that makes the two agents two turns of
+  // one conversation. A clone that dropped it, or invented its own, would be
+  // the per-fork opt-out the product does not have.
+  seed('a1', finishedMeta('a1'));
+  const sourceBefore = bytes('a1');
+  const withSession = forkAgent('a1', 'b2', { env: process.env }, 2_000);
+  const sourceOnDisk = readMeta('a1', { env: process.env });
+  assert.equal(sourceOnDisk.native_session_id, 'sess-abcdef0123456789');
+  assert.equal(withSession.native_session_id, sourceOnDisk.native_session_id);
+  assert.equal(readMeta('b2', { env: process.env }).native_session_id, sourceOnDisk.native_session_id);
+  // The converse: the source's session is left exactly as it was found. A fork
+  // that cleared, replaced or normalised the field would break the continuation
+  // it is built to serve.
+  assert.equal(bytes('a1'), sourceBefore);
+  assert.equal(sourceOnDisk.native_session_id, 'sess-abcdef0123456789');
+
+  // Direction two, session absent: an unrun source has recorded null, so the
+  // clone inherits null and `run` takes mode: 'new' for it. The pair is what
+  // makes the "fork an unrun source for a separate conversation" claim in the
+  // header a tested property rather than a comment.
+  seed('a3', idleMeta('a3', '/srv/work', null, 1_000));
+  assert.equal(readMeta('a3', { env: process.env }).native_session_id, null);
+  const unrunBefore = bytes('a3');
+  const withoutSession = forkAgent('a3', 'b4', { env: process.env }, 2_000);
+  assert.equal(withoutSession.native_session_id, null);
+  assert.equal(readMeta('b4', { env: process.env }).native_session_id, null);
+  assert.equal(readMeta('a3', { env: process.env }).native_session_id, null);
+  assert.equal(bytes('a3'), unrunBefore);
+
+  // And the field is terminal on the clone too: running the clone cannot
+  // rewrite the source's session, because the two records share nothing.
+  await updateMeta('b2', (meta) => { meta.prompt_count = 1; }, { env: process.env });
+  assert.equal(readMeta('a1', { env: process.env }).native_session_id, 'sess-abcdef0123456789');
 });
 
 test('a fork of an unknown source id fails and creates nothing', (t) => {

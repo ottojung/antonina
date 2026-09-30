@@ -43,7 +43,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--credential': 'Print only the initialized credential.',
   '--cursor': 'Paging cursor.',
   '--cwd': 'Working directory the front runs in; declared, never inherited from the invoking shell.',
-  '--days': 'Retention age in days.',
+  '--days': 'Retention age in days, measured from the later of the agent\'s finished_at and its own created_at. A fork created today from a session that finished three months ago is therefore kept for the full window from today; measuring from finished_at alone would let a sweep delete that clone, which is the last copy of that history once the source is gone.',
   '--description': 'Human-readable description.',
   '--detach': 'Return after starting background work.',
   '--dry-run': 'Report what would change without changing it.',
@@ -397,7 +397,7 @@ const AGENT_SPECS: readonly CommandSpec[] = [
   },
   {
     path: ['clean'],
-    summary: 'Delete old terminal agents.',
+    summary: 'Delete old finished agents: any in a terminal state, plus any idle agent a fork created from an already-finished one.',
     values: ['--days'],
     flags: ['--dry-run'],
     normalize: (p) => ['clean', ...valueArgs(p, ['--days']), ...flagArgs(p, ['--dry-run'])],

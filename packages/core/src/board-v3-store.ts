@@ -607,8 +607,11 @@ function parseMeta(value: unknown): ShardedBoardMeta {
       : [],
     /**
      * Absent on a meta written before this counter existed, and zero is the
-     * right reading: nothing was ever recorded as undeletable. Under-counting the
-     * leak is the failure mode, so this is a floor and the report says so.
+     * right reading. What such a meta never recorded is an *object* this board
+     * had identified as superseded and could not confirm deleting; it is not a
+     * claim that nothing was ever undeletable, which is a property of the server
+     * and not of this format. Under-counting the leak is the failure mode, so
+     * this is a floor and the report says so.
      */
     unreclaimableShards: typeof value.unreclaimableShards === 'number'
       && Number.isSafeInteger(value.unreclaimableShards)
@@ -1855,12 +1858,17 @@ export class ShardedBoardStore {
    *
    * The walk is one walk, backwards over the meta chain, and it is the age of the
    * *meta* that decides. A generation's `supersededRefs` is eligible exactly when
-   * the generation that recorded it is old enough that no reader can still be
-   * inside it. On a board committing faster than the window that makes several
-   * generations eligible at once, and reclaiming only the most recent one -- which
-   * is what a commit-count rule does -- would either never reclaim anything or
-   * reclaim something a reader is still inside. This is the whole difference
-   * between a window and a counter.
+   * the generation that recorded it is old enough that no reader should still be
+   * inside it. "Should", and at the scope `RETENTION_MIN_AGE_MS` is stated at
+   * 168-174: the age rule is sound only under the conjunction of Antonina never
+   * overwriting a shard, locators being unguessable without the board credential,
+   * and the window's 300 s bounding a real read, which is a judgement and not a
+   * measurement. This function compares timestamps and establishes no part of
+   * that conjunction itself. On a board committing faster than the window that
+   * makes several generations eligible at once, and reclaiming only the most
+   * recent one -- which is what a commit-count rule does -- would either never
+   * reclaim anything or reclaim something a reader is still inside. This is the
+   * whole difference between a window and a counter.
    *
    * The meta object goes with its refs, and it has to be in the same walk. A meta
    * is named by the pointer rather than by another meta, so it is outside the
@@ -1886,9 +1894,9 @@ export class ShardedBoardStore {
    * not a broken board.
    *
    * Never throws. The commit is the mutation; a failed reclamation is a leak, not
-   * a failed write, and one undeletable object must not abort the rest -- which
-   * would turn a single refusal into every superseded object of the mutation being
-   * undeleted too.
+   * a failed write, and one object the server *refused* must not abort the rest --
+   * which would turn a single refusal into every superseded object of the mutation
+   * being left behind too.
    */
   private async reclaimOutsideWindow(
     credential: BoardCredential,
@@ -1929,8 +1937,14 @@ export class ShardedBoardStore {
 
 
   /**
-   * Whether a generation has been committed long enough ago that no reader can
+   * Whether a generation has been committed long enough ago that no reader should
    * still be reading what it pinned.
+   *
+   * A predicate over `updatedAt` and nothing else. It does not know whether the
+   * pinned shards are unchanged, and it cannot: that half of the property is
+   * Antonina's own write discipline plus the locator secrecy set out at 168-174,
+   * and the window's bound on read duration is the judgement stated at 141-145,
+   * not a fact this function establishes.
    *
    * An unparseable or future `updatedAt` reads as *not* outside the window. Both
    * are the conservative direction: a clock that disagrees with itself delays
@@ -2484,8 +2498,18 @@ export class ShardedBoardStore {
    * pre-cutover `immutable` objects, and Skrynia removed the `immutable` mode from
    * the creation vocabulary while deliberately making the legacy objects it left
    * on disk deletable, so the API would delete them if this code asked. The store
-   * is intact because nothing here addresses it, and the pre-cutover store's
-   * semantics differ from the reclaimed format's in every other respect too.
+   * is intact because nothing here addresses it, and not because the two formats
+   * are alike. Two differences this file establishes about the pre-cutover store,
+   * named here rather than left as a general assertion, and not as an exhaustive
+   * list: its meta is read as a plain record instead of through `parseMeta`
+   * (2173-2176), and its feed entries take three paths: an entry whose kind is not
+   * `comment-added` is returned with a null author and body, one whose author and
+   * body are already inline strings is returned with that text, and one that names
+   * a comment is looked up by its `commentRef` page, then by its `commentIndex` in
+   * the issue's own thread, then by `messageId` in that thread (2295-2325). Those
+   * are reasons the import rebuilds rather
+   * than translates; neither is a protection, and this file does not claim the two
+   * formats are otherwise identical.
    */
   async importBoard(
     credentialValue: BoardCredential,
@@ -3335,23 +3359,6 @@ export class ShardedBoardStore {
       body: entry.body,
     };
   }
-
-
-  /** One message by its position in the issue's thread, or `null` if out of range. */
-
-
-  /**
-   * The message with this id, searched across the issue's current comment pages.
-   *
-   * Bounded by where the match is found rather than by the thread length: pages
-   * are fetched one at a time and the walk returns on the first hit. A comment's
-   * position never changes once written, so a board that has not been compacted
-   * finds it on the first or second page.
-   */
-
-
-  /** One comment page's messages, validated, or `null` if it is gone or malformed. */
-
 
   async readFeed(
     credentialValue: BoardCredential,

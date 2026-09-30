@@ -2502,8 +2502,12 @@ export class ShardedBoardStore {
    * are alike. Two differences this file establishes about the pre-cutover store,
    * named here rather than left as a general assertion, and not as an exhaustive
    * list: its meta is read as a plain record instead of through `parseMeta`
-   * (2173-2176), and its feed entries name a comment by page ref or index instead
-   * of carrying the text (2301-2325). Those are reasons the import rebuilds rather
+   * (2173-2176), and its feed entries take three paths: an entry whose kind is not
+   * `comment-added` is returned with a null author and body, one whose author and
+   * body are already inline strings is returned with that text, and one that names
+   * a comment is looked up by its `commentRef` page, then by its `commentIndex` in
+   * the issue's own thread, then by `messageId` in that thread (2295-2325). Those
+   * are reasons the import rebuilds rather
    * than translates; neither is a protection, and this file does not claim the two
    * formats are otherwise identical.
    */

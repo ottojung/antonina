@@ -931,10 +931,17 @@ export interface BoardImportReport {
   /** True only when every check passed. */
   equivalent: boolean;
   /**
-   * The old store, left whole. It is immutable, so Skrynia will not delete those
-   * objects, and it is not reachable from the new pointer; removing it is a
-   * namespace-level action for Skrynia or operator tooling, deliberately not
-   * this code.
+   * The old store, left whole. It is not reachable from the new pointer, so
+   * removing it is a namespace-level action for Skrynia or operator tooling,
+   * deliberately not this code.
+   *
+   * What keeps it intact is this code's restraint, not a server guarantee. Its
+   * shards are pre-cutover `immutable` objects, and when Skrynia removed the
+   * `immutable` mode from the creation vocabulary it made the legacy objects that
+   * mode left on disk deliberately *deletable*, precisely so that superseded
+   * storage would be reclaimable. The API would now delete them. Nothing in the
+   * pre-cutover store is protected at the object level, and nothing here should be
+   * read as saying otherwise.
    */
   legacyStore: {
     pointer: string;
@@ -1131,6 +1138,63 @@ export class ShardedBoardStore {
    * also what makes an externally overwritten shard *detectable* rather than
    * silently believed: a PUT that replaced the body would make this check fail
    * loudly instead of being absorbed as a benign 409.
+   *
+   * WHY NO `If-Match` ON ANY SHARD OPERATION. Deliberate, recorded here because the
+   * absence is otherwise indistinguishable from an oversight. The question is
+   * whether a stale ETag is the difference between a benign retry and silent
+   * corruption, and on this format it is not -- for either shard operation.
+   *
+   *   * The create path has no prior version to condition on, so there is no
+   *     meaningful `If-Match` value to send against a POST that is meant to
+   *     either create the ref or confirm it. The check this path actually has is
+   *     strictly stronger than an ETag comparison: 409 plus content
+   *     re-derivation, which rejects a body that is not the one this ref names --
+   *     including a body an anonymous writer put there, which an ETag read before
+   *     the POST would not catch.
+   *   * The delete path's failure mode is authority, not concurrency. The real
+   *     hazard is deleting a ref that a newer generation pinned again, and that is
+   *     a question about which generation pins this ref, answered on the client by
+   *     `introducedRefs` and `pinnedAgain` where the knowledge lives. A stale
+   *     ETag on the DELETE would mean "someone replaced this object since we
+   *     decided to delete it", and deleting it is still the intent, so a 412
+   *     there would be a spurious retry rather than a protection. Antonina never
+   *     GETs the ETag it would have to condition on, and by the time it did, an
+   *     ETag would be the wrong instrument for that question.
+   *
+   * `If-Match` therefore stays on the pointer CAS in `commitPointer`, which is the
+   * only operation where a lost race is silent corruption rather than a benign
+   * refusal: two writers that both PUT successfully would publish a generation
+   * computed from a base neither of them saw. It is also the only operation that
+   * changes what any client will read.
+   *
+   * REVERSAL CONDITION, and this is the part that matters later: any future
+   * read-modify-write against an *existing* shard -- an in-place update, as
+   * opposed to today's write-a-new-ref-and-supersede-the-old -- makes `If-Match`
+   * mandatory on that operation, and this decision must be revisited before such a
+   * change is written. The feed tail page is the obvious candidate: `appendFeed`
+   * currently rewrites it through `writeShard` as a POST of a new content-
+   * addressed ref, and it is safe only because it is content-addressed. Turning it
+   * into an in-place PUT removes the property this design rests on.
+   *
+   * WHY THE PROBE TRANSCRIPT IS NOT COMMITTED AS A FIXTURE. A deliberate absence,
+   * recorded so it is not read as an oversight. The 2026-09-29 probe transcript
+   * that established the overwrite and reclaim premises exists and is not in this
+   * repository, and it is not committed, because committing it would make the
+   * artefact durable, widely read, and easy to treat as the contract it is not. It
+   * would also be a second-hand transcription: nobody here ran the probe, so a
+   * committed transcript would carry one more remove of authority between the
+   * observation and the reader than the prose already committed here does. What is
+   * committed instead is the prose contract in the test suite, labelled in both
+   * places it appears -- `test/skrynia-contract.mjs` and
+   * `test/board-v3-storage.test.mjs` -- as a dated observation of one deployment
+   * and not a specification, with its own limits stated: the probe was
+   * unauthenticated, the server carried no version identifier to pin it to, and
+   * the scope of a capability across namespaces or keys was deliberately not
+   * tested. Those labels are the protection this outcome asks for; a transcript
+   * fixture would add risk, not remove it. Reversal condition: if a future
+   * deployment is versioned and the same matrix is re-run against two of them, a
+   * labelled fixture becomes worth committing, because it would then be pinned to
+   * something rather than to a date.
    */
   private async writeShard(
     storageCapability: string,
@@ -1169,6 +1233,9 @@ export class ShardedBoardStore {
    * wrote it. No credential is sent, and none is needed: DELETE on a
    * public-write object is unauthenticated, which is the property that makes a
    * shard reclaimable by a client that never saw its creating response.
+   *
+   * No `If-Match` is sent here, deliberately; the decision and its reversal
+   * condition are recorded on `writeShard`.
    *
    * Best-effort by design: this runs after the pointer has already committed, so
    * a failure here is a leak, never a lost write, and it is reported rather than
@@ -1212,6 +1279,12 @@ export class ShardedBoardStore {
     return 'error';
   }
 
+  /**
+   * The one conditional write in this format, and the only one that needs to be.
+   * `If-Match` is load-bearing here and deliberately absent from every shard
+   * operation; the decision, its reason and its reversal condition are recorded on
+   * `writeShard`.
+   */
   private async commitPointer(
     storageCapability: string,
     etag: string,
@@ -2395,10 +2468,15 @@ export class ShardedBoardStore {
    * replaced under `If-Match`, which is the only atomic step and the only one that
    * changes what any client will read.
    *
-   * The old store is never written to and never deleted from. Its objects are
-   * `immutable`, so Skrynia refuses to delete them through the API regardless, and
-   * the pointer no longer names them, so they are unreachable garbage for Skrynia's
-   * own namespace-level collection to remove wholesale.
+   * The old store is never written to and never deleted from, and the pointer no
+   * longer names it, so it is unreachable garbage for Skrynia's own
+   * namespace-level collection to remove wholesale. That is a statement about
+   * this code and about reachability, not about protection: its objects are
+   * pre-cutover `immutable` objects, and Skrynia removed the `immutable` mode from
+   * the creation vocabulary while deliberately making the legacy objects it left
+   * on disk deletable, so the API would delete them if this code asked. The store
+   * is intact because nothing here addresses it, and the pre-cutover store's
+   * semantics differ from the reclaimed format's in every other respect too.
    */
   async importBoard(
     credentialValue: BoardCredential,

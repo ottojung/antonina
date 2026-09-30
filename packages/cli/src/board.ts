@@ -968,6 +968,24 @@ function humanLines(result: CommandResult): string[] {
         : `the pre-cutover store holds at least ${report.legacyStore.shardObjects} object(s) and is `
           + 'left whole and unreachable; ' + report.legacyStore.note.split('; ')[1],
     );
+    // The reclaim premise is a dated observation of one deployment, and this is
+    // the line that says whether it is still holding. A non-zero count means
+    // superseded objects are piling up that Antonina could not delete, which is
+    // the condition the bounded-storage fix exists to prevent and the one an
+    // operator can act on -- so it is stated as a warning, not folded into a
+    // summary the reader has to notice.
+    if (report.state === 'cutover-complete') {
+      const leaked = report.storage.unreclaimableShards;
+      lines.push(
+        leaked === 0
+          ? `reclamation is keeping up; ${report.storage.note}`
+          : `WARNING: ${leaked} superseded shard object(s) could not be deleted `
+            + `(at least; the count lags the newest sweep by one commit) -- `
+            + report.storage.note,
+      );
+    } else {
+      lines.push(report.storage.note);
+    }
     return lines;
   }
 

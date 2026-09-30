@@ -86,25 +86,84 @@ const SHARD_REF_PREFIX = 'v3:';
 
 /**
  * Generations of materialization kept readable behind the pointer, counted back
- * from it.
+ * from it. This is a *safety floor on commit depth*, not the retention window:
+ * it is what makes the delete set unreachable from any pointer a reader can
+ * still be holding.
  *
  * There is no lease and no compare-and-delete in Skrynia, so the only way to let
  * a slow reader finish is to keep what it may still be reading. A reader that
  * resolved the pointer at revision `N` reads `meta(N)` and then the shards
  * `meta(N)` pins; when revision `N+1` commits, the refs `N+1` *replaced* are
  * still pinned by `N` and must survive. They become unreachable from `N+1` and
- * are deleted by the generation after that, at `N+2`.
+ * are eligible by depth at `N+2`.
  *
  * The delay is implemented by recording, in each meta, the refs that generation
- * replaced, and deleting the recorded set of the `RETAINED_GENERATIONS`-th
- * ancestor on every commit. That keeps the arithmetic in one place and costs no
- * extra read at the default depth, because the required meta is the one the
- * writer has already read off the pointer.
+ * replaced, and reclaiming the recorded sets of every generation that has fallen
+ * outside `RETENTION_MIN_AGE_MS` as the sweep walks back down the chain. That
+ * keeps the arithmetic in one place and costs no extra read at the default
+ * depth, because every meta it needs is one the writer has already read or that
+ * the walk reads on the way.
  *
- * With the default of 1, a reader that stalls across two further commits can see
- * a 404 for a shard it was reading. That is the residual window the reclaimable
- * model does not have, and it is the price of bounded storage; widening the
- * constant widens the window.
+ * Depth alone is not the window, and the difference is not academic: a commit
+ * count is a statement about how often writers commit, and nothing about how
+ * long a *read* takes. A board committing every 200 ms retires a resolved
+ * generation's shards in 400 ms, which is inside a single `readBundle` fan-out
+ * of one GET per issue, and the reader gets a 404 that `requireJson` reports as
+ * `Antonina board key does not open the current materialized snapshot` -- a
+ * message that names a credential problem, because that is the only thing a
+ * missing object has ever meant in this file. So the window is time, below.
+ */
+
+/**
+ * How long a superseded generation's materialization is kept after the commit
+ * that superseded it, in milliseconds. This is the retention *window*; the
+ * constant above is how far back the delete set is walked to find it.
+ *
+ * Both conditions must hold before anything is reclaimed: the generation is at
+ * least `RETAINED_GENERATIONS` commits back, and it is at least this old. The
+ * first is a safety property and the second is the reader's grace period, and
+ * neither subsumes the other: the depth rule alone retires a generation while a
+ * reader is still inside it, and the age rule alone would eventually let the
+ * sweep delete a shard the generation behind the pointer still pins.
+ *
+ * Sizing. 300 s against a full board hydration, which is the longest read a
+ * reader can be in the middle of. The bound is taken against the WORST case --
+ * every object fetched one at a time -- deliberately, so it does not depend on
+ * the fan-out's concurrency: `readBundle` reads the meta and the directory
+ * pages, then every issue snapshot, then the queue and the catalog, and each
+ * issue reads its snapshot and then its comment pages. A 100-issue board with
+ * ten comments each is on the order of 1,100 objects; at a pessimistic 100 ms
+ * per round trip that is ~110 s even serialized, and 300 s is roughly a 3x
+ * margin on that figure. The real read is faster than the bound because the
+ * issues are fetched concurrently; the margin is for the parts the client does
+ * not control, which is server queueing and a slow object.
+ *
+ * The number is a judgement, and it is the one judgement in this file: the
+ * production board's size and its read latency are both unmeasured, because
+ * Antonina has no listing API and I did not read the live board. It is stated
+ * here as a constant with its reasoning attached rather than as a bare number
+ * precisely because it cannot be derived from anything on this host.
+ *
+ * What it costs, stated as the bound it implies: a commit rate of `c` per
+ * millisecond retains at most `c * 300 s` extra generations of materialization,
+ * so the storage the window holds is proportional to how often the board is
+ * written, not to how long it has been written. On a board a human paces, that
+ * is a handful of generations. On a board committing thousands of times a
+ * second it would not be, and the honest statement is that this window and
+ * bounded storage are in tension at high commit rates -- the trade is visible
+ * in this constant rather than hidden in a comment.
+ *
+ * A board that stops being written stops reclaiming, because the sweep only
+ * runs after a commit. That is the same property the commit-depth rule always
+ * had; nothing is lost by it, since the objects it is waiting to delete are
+ * already unreachable from the pointer.
+ */
+const RETENTION_MIN_AGE_MS = 300_000;
+
+/**
+ * The floor, restated as what it is: the delete set is walked back this many
+ * commits from the one just committed, so nothing a pointer behind the current
+ * one still pins is ever in it.
  *
  * The window is a *deletion* window only. What keeps the retained generation
  * internally consistent is that Antonina never overwrites a shard and shard
@@ -116,7 +175,42 @@ const SHARD_REF_PREFIX = 'v3:';
  */
 const RETAINED_GENERATIONS = 1;
 
-0;
+/**
+ * What one DELETE of a superseded shard did. Four outcomes rather than a boolean,
+ * because the difference between "already gone" and "refused" is the difference
+ * between a healthy board and a broken premise, and folding them is what made
+ * this failure undetectable. See `deleteShard`.
+ */
+type DeleteOutcome = 'deleted' | 'absent' | 'refused' | 'error';
+
+/**
+ * Attempts per reclaimed shard, and the backoff between them.
+ *
+ * Only the outcomes that could plausibly be transient are retried: a `403` is a
+ * policy answer and a `404` is the goal state, so both are returned on the first
+ * response. The numbers are small on purpose -- the sweep is per-ref work on the
+ * path after every commit, and a board whose server is down should not pay a
+ * long backoff on every superseded shard of every mutation.
+ */
+const RECLAIM_DELETE_ATTEMPTS = 3;
+const RECLAIM_RETRY_BACKOFF_MS = 25;
+
+/**
+ * How many generations one sweep will walk back.
+ *
+ * A bound, not a policy: the walk stops on its own at the first generation still
+ * inside the window, so on a healthy board this is never reached. It exists
+ * because the chain is data -- a corrupted or hand-edited `retainsMetaRef` could
+ * otherwise make one commit's post-CAS sweep walk without end, which is the one
+ * place in this file where a bug would be a hang rather than a wrong value.
+ */
+const RETAINED_GENERATION_WALK_LIMIT = 64;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 interface JsonObject<T> {
   value: T;
@@ -159,9 +253,10 @@ export interface ShardedBoardMeta {
    *
    * This chain is the only reason the per-generation meta objects do not
    * accumulate. A meta is named by the pointer rather than by another meta, so
-   * it is outside the `pinnedRefs` closure and `reclaim` never sees it; the
-   * chain is what lets a writer walk back and delete the metas that have aged
-   * past `RETAINED_GENERATIONS`. It is `null` on a meta written before the
+   * it is outside the `pinnedRefs` closure and the shard reclamation never sees
+   * it; the chain is what lets a writer walk back and reclaim the generations
+   * that have fallen outside the retention window -- both their meta objects and
+   * the shard refs they recorded. It is `null` on a meta written before the
    * chain existed, which reads as "no ancestors", and on the first meta of a
    * board.
    */
@@ -184,17 +279,43 @@ export interface ShardedBoardMeta {
    */
   supersededRefs: string[];
   /**
-   * Deleted issues whose tombstone is still inside the feed-retention window,
-   * oldest first.
+   * Every shard ref this generation wrote: the materialization it introduced.
    *
-   * This is what makes tombstone retention O(1) amortized rather than a scan. A
-   * tombstone is pinned by the directory page that holds it, so nothing ages one
-   * out on its own; keeping the set here, ordered by the feed position at which
-   * the issue was deleted, means a writer can expire the ones that have aged out
-   * by looking only at the front of the list. Enumerating the directory to find
-   * them would cost a full board walk on every mutation, which is exactly what
-   * the summary-only read path exists to avoid.
+   * This is what makes a deep reclamation walk safe. A ref recorded in some older
+   * generation's `supersededRefs` may have been written again by any generation
+   * since -- content addressing makes that real, not theoretical: edit an issue
+   * from body A to body B and back to A, and A's ref is recorded as superseded
+   * when B is written and written again when the body goes back, and the
+   * generation that recorded the supersession is not the generation before the
+   * re-write. A sweep walking back over several generations therefore has to know
+   * what each of them wrote, and this is that, in the data, for the cost of a
+   * short list per generation: a mutation writes a handful of shards and carries
+   * the rest of the board forward by reference.
+   *
+   * It is also the exact statement of what the generation changed, which is worth
+   * having in the format on its own terms.
    */
+  introducedRefs: string[];
+  /**
+   * How many shard objects this board has identified as superseded and could not
+   * delete, cumulatively over its whole life.
+   *
+   * This exists because the reclaim premise is a dated observation rather than a
+   * specification: a deployment that stops accepting unauthenticated `DELETE` on
+   * `public-write` turns every reclamation into a no-op, the namespace regrows
+   * exactly as it did before the fix, and the board hits its quota again. A
+   * counter that lives only in a running process cannot catch that, because the
+   * process that would notice is not the one that ran the failing sweeps -- so
+   * the count is written into the durable format, carried forward by each
+   * generation, and read by `importBoard` and `cutoverState` for an operator.
+   *
+   * It is a count of *identifications*, not of surviving objects: a ref another
+   * reclaimer already deleted is counted here too (a 404 is the goal state), so
+   * the number is an upper bound on the leak and a non-zero value is a prompt to
+   * look, not proof of one. The generation that reports it is the one after the
+   * sweep that measured it, so it lags by exactly one commit.
+   */
+  unreclaimableShards: number;
 }
 
 
@@ -475,6 +596,22 @@ function parseMeta(value: unknown): ShardedBoardMeta {
     supersededRefs: Array.isArray(value.supersededRefs)
       ? value.supersededRefs.map((entry) => requireText(entry, 'superseded reference'))
       : [],
+    // Absent on a meta written before this shape existed, and empty is the right
+    // reading: nothing is known to have been introduced, so the guard falls back
+    // to the committing writer's own refs, which is the pre-existing behaviour.
+    introducedRefs: Array.isArray(value.introducedRefs)
+      ? value.introducedRefs.map((entry) => requireText(entry, 'introduced reference'))
+      : [],
+    /**
+     * Absent on a meta written before this counter existed, and zero is the
+     * right reading: nothing was ever recorded as undeletable. Under-counting the
+     * leak is the failure mode, so this is a floor and the report says so.
+     */
+    unreclaimableShards: typeof value.unreclaimableShards === 'number'
+      && Number.isSafeInteger(value.unreclaimableShards)
+      && value.unreclaimableShards >= 0
+      ? value.unreclaimableShards
+      : 0,
   };
 }
 
@@ -689,18 +826,44 @@ function feedEntryForMutation(
 export interface BoardSweepReport {
   /** The generation the sweep ran for, or `null` before the first mutation. */
   revision: number | null;
-  /** Shard objects the last successful sweep deleted. */
+  /**
+   * True when the sweep declined to run because the superseded generation was
+   * still inside the retention window. Nothing was deleted and nothing failed.
+   */
+  skipped: boolean;
+  /** Objects the last sweep deleted. */
   reclaimed: number;
   /**
-   * Shard objects the last sweep identified as superseded but could not
-   * delete. A non-zero value is a permanent leak, not a retryable one: a shard
-   * written under the pre-cutover `immutable` mode is not deletable through the
-   * API at all, so it is removed only by Skrynia collecting the namespace, and a
-   * board that has been cut over no longer has any `immutable` shard of its own.
+   * Objects the last sweep identified as superseded but could not confirm
+   * deleted: already absent, refused, or errored. This is what the next
+   * generation carries into its durable `unreclaimableShards` total, so it is an
+   * upper bound on the leak and not a measurement of it -- a `404` counts here
+   * even though the object is already gone.
    */
   retained: number;
+  /**
+   * Of `retained`, the ones the server refused with `403`.
+   *
+   * This is the number that means the reclaim premise has stopped holding rather
+   * than that there was a race. Nothing on this path has a benign `403`: every
+   * ref in the delete set was written `public-write` by this materialiser, so a
+   * refusal means the server's policy changed, every sweep from then on is a
+   * no-op, and the namespace regrows. It is reported separately because it is the
+   * one that should stop an operator.
+   */
+  refused: number;
+  /** Of `retained`, the ones whose DELETE failed for a reason worth retrying. */
+  failed: number;
   at: string | null;
   error: string | null;
+}
+
+/** Per-outcome counts from one reclamation pass. */
+interface ReclaimOutcome {
+  deleted: number;
+  absent: number;
+  refused: number;
+  error: number;
 }
 
 /**
@@ -778,6 +941,28 @@ export interface BoardImportReport {
     shardObjects: number;
     note: string;
   };
+  /**
+   * The board's storage health, in the one form an operator can act on: a running
+   * total carried in the durable format by every generation, so it is still true
+   * when the process that ran the failing sweeps has exited.
+   *
+   * This is here because the reclaim premise -- that Skrynia accepts an
+   * unauthenticated DELETE on a `public-write` object -- is a dated observation
+   * of one deployment and not a specification. If it stops holding, reclamation
+   * becomes a silent no-op, the namespace regrows exactly as it did before this
+   * format existed, and the board hits its quota again. A non-zero
+   * `unreclaimableShards` is the one signal that says so.
+   */
+  storage: {
+    /**
+     * Superseded shard objects this board has identified and could not confirm
+     * deleting, cumulatively. An upper bound on the leak rather than a
+     * measurement of it: a ref another reclaimer already deleted counts here
+     * too, and the number lags the most recent sweep by one commit.
+     */
+    unreclaimableShards: number;
+    note: string;
+  };
 }
 
 export interface BoardCutoverState {
@@ -815,8 +1000,11 @@ export class ShardedBoardStore {
   private writtenRefs = new Set<string>();
   private lastSweep: BoardSweepReport = {
     revision: null,
+    skipped: false,
     reclaimed: 0,
     retained: 0,
+    refused: 0,
+    failed: 0,
     at: null,
     error: null,
   };
@@ -983,22 +1171,45 @@ export class ShardedBoardStore {
    * shard reclaimable by a client that never saw its creating response.
    *
    * Best-effort by design: this runs after the pointer has already committed, so
-   * a failure here is a leak, never a lost write, and it is counted and reported
-   * rather than thrown. Both non-success outcomes are benign and expected:
-   * `404` is the goal state already holding (which is how a lost race between
-   * two reclaimers resolves, and what a re-run after a successful delete sees),
-   * and `403` is a shard written under the pre-cutover `immutable` mode, which
-   * Skrynia does not delete at all. Neither is an error and neither is retried.
+   * a failure here is a leak, never a lost write, and it is reported rather than
+   * thrown. What the four outcomes mean is the whole of the reclaim premise, so
+   * they are distinguished rather than folded:
+   *
+   *   * `200` -- deleted. The only outcome that is a success.
+   *   * `404` -- already gone, which is the goal state. Benign: this is how a
+   *     lost race between two reclaimers resolves, and what a second pass over an
+   *     already-swept set sees. Counted, because a 404 still means the object may
+   *     have been in the namespace, but not as an anomaly.
+   *   * `403` -- refused. There is no benign cause for this on the reclamation
+   *     path: `supersededRefs` is only ever populated with refs the new
+   *     materialiser wrote as `public-write`, so a pre-cutover `immutable` shard
+   *     can never be in the set. A 403 means the server's policy changed under
+   *     the premise, which is the failure that silently turns this whole fix into
+   *     a no-op, so it is counted separately and never retried -- a policy will
+   *     not answer differently on the next attempt, and retrying would multiply
+   *     the cost of a broken premise by the attempt count on every mutation.
+   *   * anything else, or a transport failure -- an error, retried a small number
+   *     of times because it is the one outcome plausibly worth retrying, and
+   *     counted if it survives.
    */
-  private async deleteShard(storageCapability: string, ref: string): Promise<boolean> {
-    const response = await this.fetcher(await this.url(storageCapability, ref), {
-      method: 'DELETE',
-    });
-    if (response.status === 200) return true;
-    // 404 is already the goal state, and 403 is a shard written under the
-    // pre-fix immutable mode, which Skrynia will not delete. Both are counted
-    // by the caller, which reports them rather than repeating them forever.
-    return false;
+  private async deleteShard(storageCapability: string, ref: string): Promise<DeleteOutcome> {
+    const url = await this.url(storageCapability, ref);
+    for (let attempt = 1; attempt <= RECLAIM_DELETE_ATTEMPTS; attempt += 1) {
+      let response: Response;
+      try {
+        response = await this.fetcher(url, { method: 'DELETE' });
+      } catch (error) {
+        if (attempt === RECLAIM_DELETE_ATTEMPTS) return 'error';
+        await delay(RECLAIM_RETRY_BACKOFF_MS * attempt);
+        continue;
+      }
+      if (response.status === 200) return 'deleted';
+      if (response.status === 404) return 'absent';
+      if (response.status === 403) return 'refused';
+      if (attempt === RECLAIM_DELETE_ATTEMPTS) return 'error';
+      await delay(RECLAIM_RETRY_BACKOFF_MS * attempt);
+    }
+    return 'error';
   }
 
   private async commitPointer(
@@ -1166,8 +1377,12 @@ export class ShardedBoardStore {
 
   /**
    * Resolves an issue by number through the directory.
-   * the resolution a feed entry uses, so it must not skip the tombstone: a
-   * comment on a deleted issue is still board history and still has to hydrate.
+   *
+   * The directory is the whole live set: a deleted issue has no entry, so this
+   * returns `null` for it, and there is no tombstone to consult. That is safe for
+   * a comment on a deleted issue because the feed entry carries its own body --
+   * a comment is still board history and still readable without hydrating an
+   * issue that is not there.
    */
   private async readIssueSnapshotByNumber(
     credential: BoardCredential,
@@ -1520,7 +1735,7 @@ export class ShardedBoardStore {
   /**
    * Every shard object one generation's meta pins, as refs.
    *
-   * This is the reachability closure, and it is used only by `compact`'s report
+   * This is the reachability closure, and it is used only by the import report
    * -- never on the mutation path. Enumerating it requires reading every
    * directory page and every issue snapshot, which is precisely the work the
    * summary-only read path exists to avoid, so a mutation derives what it may
@@ -1553,75 +1768,96 @@ export class ShardedBoardStore {
   }
 
   /**
-   * Deletes the refs a committed mutation superseded.
+   * Reclaims every generation that has fallen outside the retention window: the
+   * shard refs it superseded, and the meta object itself.
    *
-   * It runs after the pointer has already committed and never throws: the
-   * commit is the mutation, and a failed reclamation is a leak, not a failed
-   * write. The count of what it could not delete is returned so an operator can
-   * see it; the cause of a non-zero count is always a shard in a mode Skrynia
-   * will not delete, never a transient transport failure.
+   * The walk is one walk, backwards over the meta chain, and it is the age of the
+   * *meta* that decides. A generation's `supersededRefs` is eligible exactly when
+   * the generation that recorded it is old enough that no reader can still be
+   * inside it. On a board committing faster than the window that makes several
+   * generations eligible at once, and reclaiming only the most recent one -- which
+   * is what a commit-count rule does -- would either never reclaim anything or
+   * reclaim something a reader is still inside. This is the whole difference
+   * between a window and a counter.
+   *
+   * The meta object goes with its refs, and it has to be in the same walk. A meta
+   * is named by the pointer rather than by another meta, so it is outside the
+   * shard closure and nothing else would ever reclaim it; without this the fix
+   * would move the unbounded growth from shards to metas. It is the same age rule,
+   * because a reader that resolved the pointer has to be able to fetch the meta it
+   * names.
+   *
+   * The walk starts at the generation the committed one superseded and runs back
+   * to the walk limit, deleting from every generation it finds outside the window
+   * and collecting from every generation it visits. Collecting matters: a ref
+   * recorded as superseded by generation `g` may have been written again by any
+   * generation between `g` and the one that just committed, and deleting it would
+   * break a reader holding one of those. That is the A->B->A edit, and it is why
+   * `introducedRefs` exists. The set accumulated is exactly the generations newer
+   * than the one whose delete set is being processed, which is the only set that
+   * can possibly still pin the ref.
+   *
+   * The walk tolerates a chain that has already been cut: the chain records what
+   * was superseded, not what still exists, so a missing meta is the normal end of
+   * the walk rather than an error. And the walk limit truncates in the safe
+   * direction -- anything not examined is simply not deleted, which is a leak and
+   * not a broken board.
+   *
+   * Never throws. The commit is the mutation; a failed reclamation is a leak, not
+   * a failed write, and one undeletable object must not abort the rest -- which
+   * would turn a single refusal into every superseded object of the mutation being
+   * undeleted too.
    */
-  private async reclaim(
+  private async reclaimOutsideWindow(
     credential: BoardCredential,
-    refs: string[],
-  ): Promise<{ reclaimed: number; retained: number }> {
-    let reclaimed = 0;
-    for (const ref of new Set(refs)) {
-      if (await this.deleteShard(credential.storageCapability, ref)) reclaimed += 1;
-    }
-    return { reclaimed, retained: new Set(refs).size - reclaimed };
-  }
-
-  /**
-   * Deletes the meta objects that have aged past the retention window.
-   *
-   * A meta is outside the shard closure because the pointer names it, and it is
-   * the one object that is necessarily different on every generation. Without
-   * this the fix would move the unbounded growth from shards to metas and the
-   * store would still grow with the mutation count, just more slowly.
-   *
-   * The walk descends from the superseded generation and tolerates a chain that
-   * has already been cut. It has to: the chain records what was superseded, not
-   * what still exists, and a healthy board's ancestors are reclaimed by earlier
-   * walks, so a missing ref is the normal end of the walk rather than an error.
-   */
-  /**
-   * Drops the tombstones whose feed entries have aged out, returning the ones
-   * that remain and the refs the drop makes reclaimable.
-   *
-   * A tombstone is pinned by a directory page, so it never ages out by itself;
-   * this is what bounds the set. The window is measured in feed positions
-   * because a tombstone exists only to serve feed entries, so "old enough" is
-   * exactly "more than `DELETED_ISSUE_FEED_RETENTION` entries ago".
-   *
-   * Only the front of the list is examined. The list is ordered by deletion
-   * position because entries are appended in feed order, so the expired ones are
-   * always a prefix and no scan is needed -- which is the difference between
-   * O(expired) and a full directory walk per mutation.
-   *
-   * The refs returned are the tombstone and the comment pages it was the only
-   * pinner of. They go through the ordinary superseded path, so they are deleted
-   * one generation later like anything else, and a reader inside the window is
-   * unaffected.
-   */
-  private async reclaimRetention(
-    credential: BoardCredential,
-    superseded: ShardedBoardMeta,
-  ): Promise<number> {
-    let cursor = superseded.retainsMetaRef;
+    committed: ShardedBoardMeta,
+  ): Promise<{ outcome: ReclaimOutcome; eligible: boolean }> {
+    const outcome: ReclaimOutcome = { deleted: 0, absent: 0, refused: 0, error: 0 };
+    // What must survive whatever the recorded lists say: what this commit wrote,
+    // and everything a generation after a recorded one wrote again.
+    const pinnedAgain = new Set<string>(this.writtenRefs);
+    let cursor = committed.retainsMetaRef;
+    // The depth floor, before the age rule gets a say: a generation this recent is
+    // never a candidate however old its timestamp claims to be.
     for (let kept = 1; cursor !== null && kept < RETAINED_GENERATIONS; kept += 1) {
       const meta = await this.readAncestorMeta(credential, cursor);
-      if (meta === null) return 0;
+      if (meta === null) return { outcome, eligible: false };
+      for (const ref of meta.introducedRefs) pinnedAgain.add(ref);
       cursor = meta.retainsMetaRef;
     }
-    let reclaimed = 0;
-    for (let depth = 0; cursor !== null && depth < 64; depth += 1) {
-      if (await this.deleteShard(credential.storageCapability, cursor)) reclaimed += 1;
+    let eligible = false;
+    for (let depth = 0; cursor !== null && depth < RETAINED_GENERATION_WALK_LIMIT; depth += 1) {
       const meta = await this.readAncestorMeta(credential, cursor);
       if (meta === null) break;
+      if (this.outsideRetentionWindow(meta)) {
+        eligible = true;
+        for (const ref of new Set(meta.supersededRefs)) {
+          if (pinnedAgain.has(ref)) continue;
+          outcome[await this.deleteShard(credential.storageCapability, ref)] += 1;
+        }
+        outcome[await this.deleteShard(credential.storageCapability, cursor)] += 1;
+      }
+      // After processing, not before: what this generation wrote says nothing
+      // about whether the refs IT superseded are still pinned by a newer one.
+      for (const ref of meta.introducedRefs) pinnedAgain.add(ref);
       cursor = meta.retainsMetaRef;
     }
-    return reclaimed;
+    return { outcome, eligible };
+  }
+
+
+  /**
+   * Whether a generation has been committed long enough ago that no reader can
+   * still be reading what it pinned.
+   *
+   * An unparseable or future `updatedAt` reads as *not* outside the window. Both
+   * are the conservative direction: a clock that disagrees with itself delays
+   * reclamation, and delaying a delete is a leak rather than a broken board.
+   */
+  private outsideRetentionWindow(meta: ShardedBoardMeta): boolean {
+    const committedAt = Date.parse(meta.updatedAt);
+    if (Number.isNaN(committedAt)) return false;
+    return this.now().getTime() - committedAt >= RETENTION_MIN_AGE_MS;
   }
 
   async migrate(
@@ -1761,6 +1997,8 @@ export class ShardedBoardStore {
       deleted: false,
       retainsMetaRef: null,
       supersededRefs: [],
+      introducedRefs: [],
+      unreclaimableShards: 0,
     };
     const metaRef = await this.writeMeta(credential, meta);
     const pointer: ShardedBoardPointer = {
@@ -2131,6 +2369,8 @@ export class ShardedBoardStore {
       deleted: logical.deleted,
       retainsMetaRef: null,
       supersededRefs: [],
+      introducedRefs: [],
+      unreclaimableShards: 0,
     };
     const metaRef = await this.writeMeta(credential, meta);
     return {
@@ -2203,6 +2443,14 @@ export class ShardedBoardStore {
         pointer: legacyPointer.metaRef,
         shardObjects: legacyObjects,
         note: 'the pre-cutover store is left whole and unreachable; Skrynia removes it, not Antonina',
+      },
+      storage: {
+        // The board has never run a sweep in this format, so it has no total to
+        // report and saying "0" would claim a health the board has not been
+        // observed to have. The note carries the fact instead.
+        unreclaimableShards: 0,
+        note: 'not yet cut over, so this board has not reclaimed anything in this format; '
+          + 'its superseded objects are not deletable through the API at all',
       },
     };
 
@@ -2375,6 +2623,12 @@ export class ShardedBoardStore {
         pointer: '',
         shardObjects: 0,
         note: 'already cut over; there is no pre-cutover store to remove',
+      },
+      storage: {
+        unreclaimableShards: meta.unreclaimableShards,
+        note: meta.unreclaimableShards === 0
+          ? 'reclamation is keeping up with the board'
+          : 'storage is growing faster than it is reclaimed; the reclaim premise may no longer hold',
       },
     };
   }
@@ -2718,6 +2972,14 @@ export class ShardedBoardStore {
         // The refs this generation replaced, recorded so the next writer can
         // reclaim them one generation later, once no reachable meta pins them.
         supersededRefs: superseded,
+        // Every ref this generation wrote, so a later sweep walking back over it
+        // can tell which refs a newer generation has put back.
+        introducedRefs: [...this.writtenRefs].sort(),
+        // The previous generation's running total of what its own sweep could not
+        // delete, carried forward so the number survives the process that measured
+        // it. One commit of lag is deliberate: this meta is written before the
+        // sweep that would amend it.
+        unreclaimableShards: bundle.meta.unreclaimableShards + this.lastSweep.retained,
         };
       const metaRef = await this.writeMeta(credential, meta);
       const nextPointer: ShardedBoardPointer = {
@@ -2741,7 +3003,7 @@ export class ShardedBoardStore {
         // publish.
         continue;
       }
-      await this.sweepAfterCommit(credential, bundle.meta, meta);
+      await this.sweepAfterCommit(credential, meta);
       return {
         log: null,
         state: candidate,
@@ -2760,39 +3022,55 @@ export class ShardedBoardStore {
    * strictly after the pointer CAS: before the commit the superseded generation
    * is still what a concurrent reader is reading, and after it the new
    * generation is what every reader will see. Everything it deletes is named by
-   * the superseded generation's own meta and by nothing in the new one.
+   * the recorded `supersededRefs` of some generation outside the retention
+   * window, and by nothing any generation inside it still pins.
    */
   private async sweepAfterCommit(
     credential: BoardCredential,
-    supersededMeta: ShardedBoardMeta,
     committed: ShardedBoardMeta,
   ): Promise<void> {
+    // The refs this commit replaced are recorded in `committed` and are
+    // deliberately NOT reclaimed here: the generation this commit superseded
+    // still pins them, and a reader holding that older pointer must be able to
+    // finish. What is eligible is whatever `reclaimOutsideWindow` finds on the
+    // chain, and the rule it applies is the age of the generation that recorded
+    // the set -- not the number of commits since. A commit count is a statement
+    // about how often writers commit and nothing about how long a read takes; a
+    // board committing twice inside one `readBundle` fan-out would have a
+    // resolved generation's shards deleted out from under the reader, which
+    // surfaces as a 404 that `requireJson` reports as a credential problem.
     try {
-      // The refs this commit replaced are recorded in `committed` and are
-      // deliberately NOT deleted here: the generation this commit superseded
-      // still pins them, and a reader holding that older pointer must be able to
-      // finish. They are deleted by the next writer, from
-      // `supersededMeta.supersededRefs`, which is one generation too old to be
-      // pinned by anything still reachable.
-      // A ref this commit re-established is pinned by the generation that just
-      // committed, so it is not stale no matter what an older generation recorded
-      // about it. See `writtenRefs`.
-      const stale = supersededMeta.supersededRefs.filter((ref) => !this.writtenRefs.has(ref));
-      const shards = await this.reclaim(credential, stale);
-      const metas = await this.reclaimRetention(credential, supersededMeta);
+      const { outcome, eligible } = await this.reclaimOutsideWindow(credential, committed);
       this.lastSweep = {
         revision: committed.revision,
-        reclaimed: shards.reclaimed + metas,
-        retained: shards.retained,
+        // Every generation still inside the window, which on a healthy board is
+        // the normal state of a sweep and not a failure of one. It is recorded so
+        // a test can tell "the window held" from "the sweep ran and found
+        // nothing", which are the same object count and opposite meanings.
+        skipped: !eligible,
+        reclaimed: outcome.deleted,
+        // Everything not confirmed deleted is carried into the next generation's
+        // durable total. `absent` is included deliberately: the object may have
+        // been in the namespace, and that count is documented as an upper bound
+        // on the leak rather than a measurement of it.
+        retained: outcome.absent + outcome.refused + outcome.error,
+        refused: outcome.refused,
+        failed: outcome.error,
         at: this.now().toISOString(),
         error: null,
       };
     } catch (error) {
-      // A leak, not a lost write. Recorded so the compaction report can say so.
+      // A leak, not a lost write. Recorded on the sweep report, and carried into
+      // the next generation's durable total by the same rule as any other
+      // non-result, so an operator sees it through `importBoard` rather than
+      // through a method with no callers.
       this.lastSweep = {
         revision: committed.revision,
+        skipped: false,
         reclaimed: 0,
-        retained: 0,
+        retained: 1,
+        refused: 0,
+        failed: 1,
         at: null,
         error: error instanceof Error ? error.message : String(error),
       };
@@ -2825,31 +3103,20 @@ export class ShardedBoardStore {
   }
 
   /**
-   * What the last mutation's reclamation did. Read by the compaction report, and
-   * exposed here so a test can assert reclamation happened without having to
-   * count objects in the fake store.
+   * What the last mutation's reclamation did, in this process.
+   *
+   * This is per-process state, so it is NOT the operator's view: it says nothing
+   * about sweeps this process did not run, which is exactly the case that matters
+   * when the reclaim premise has quietly stopped holding. The durable, process-
+   * independent half is `unreclaimableShards` on the live meta, which every
+   * generation carries forward and which `importBoard` and `cutoverState` report.
+   *
+   * What this is for is a test asserting that a sweep ran, was skipped by the
+   * window, or refused a shard, without having to count objects in the fake.
    */
   sweepReport(): BoardSweepReport {
     return { ...this.lastSweep };
   }
-
-  /**
-   * Reports the store's storage shape, and reclaims what this board's own
-   * retention chain says has aged out when `confirm` is set.
-   *
-   * Reclamation is behind an explicit confirmation for the same reason
-   * `collect delete` is: it deletes objects, so a front end must be able to show
-   * an operator what would go before anything goes. Without `confirm` this
-   * computes the same numbers and deletes nothing.
-   *
-   * On a board that has been sweeping since the fix there is nothing left to
-   * reclaim and the report is a description of a healthy store. Its purpose is
-   * the board that has NOT been sweeping -- one written by the pre-fix immutable
-   * model, whose superseded objects Antonina cannot delete because Skrynia
-   * refuses to delete an immutable object -- and the honest accounting of what
-   * remains there.
-   */
-
 
   async getIssue(
     credentialValue: BoardCredential,

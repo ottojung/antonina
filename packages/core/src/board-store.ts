@@ -27,6 +27,7 @@ import {
   ShardedBoardStoreError,
   type BoardCutoverState,
   type BoardImportReport,
+  type BoardSweepReport,
   type BoardOverview,
   type IssueListPage,
 } from './board-v3-store.js';
@@ -426,6 +427,19 @@ export class SignedBoardStore {
       if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
       throw error;
     }
+  }
+
+  /**
+   * What the last mutation's reclamation did, in this process.
+   *
+   * Exposed because the store it wraps has one and a test needs to tell "the
+   * retention window held and nothing was reclaimed" from "the sweep ran and
+   * reclaimed nothing" -- two states with the same object count and opposite
+   * meanings. It is not the operator's view: the durable, process-independent
+   * half is `storage` on the import report, which `importBoard` returns.
+   */
+  sweepReport(): BoardSweepReport {
+    return this.sharded.sweepReport();
   }
 
   /**

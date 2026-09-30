@@ -39,11 +39,16 @@ test.after(async () => {
  */
 function legacyServer() {
   const server = fakeSkrynia();
+  // One simulated minute per timestamp, for the same reason the storage suite
+  // does it: the retention window is five minutes, so a store ticking one second
+  // at a time never leaves the window and the growth bound below would be
+  // measuring a store that never reclaims anything. See `makeStore` in
+  // board-v3-storage.test.mjs.
   let tick = 0;
   let id = 0;
   const store = new SignedBoardStore({
     fetch: server.fetch.bind(server),
-    now: () => new Date(Date.UTC(2026, 8, 29, 12, 0, (tick += 1))),
+    now: () => new Date(Date.UTC(2026, 8, 29, 12, 0, (tick += 1) * 60)),
     newId: () => `import-test-${++id}`,
   });
   // Initialize a board to obtain a real credential and the capability, then

@@ -94,15 +94,56 @@ test.after(async () => {
  * clock would be floored by `canonicalTimestampAtOrAfter` to the previous meta's
  * timestamp, so two edits of the same issue would be byte-identical and the
  * content-addressed store would correctly decline to write a second object.
+ *
+ * The step is one simulated MINUTE per timestamp the store takes, and that is
+ * load-bearing rather than cosmetic. The retention window is
+ * `RETENTION_MIN_AGE_MS = 300_000` -- five minutes, sized against a full board
+ * hydration -- and a store ticking one second at a time would never leave the
+ * window, so nothing would ever be reclaimed and every count in this file would
+ * be measuring an un-reclaimed store. At a minute a tick the window holds the
+ * handful of generations it is supposed to hold, which is what a real board
+ * looks like, and the retention tests below drive the window explicitly through
+ * `clock.advance` rather than by counting commits.
  */
-function makeStore(server) {
-  let tick = 0;
+const MINUTE_MS = 60_000;
+
+/**
+ * The store's `RETENTION_MIN_AGE_MS`, restated here so the tests below drive the
+ * window deliberately rather than by counting commits. It is duplicated on
+ * purpose: a test that reads the constant out of the module under test cannot
+ * fail when the constant is wrong, and "five minutes" is the property these tests
+ * are pinning.
+ */
+const RETENTION_WINDOW_MS = 5 * MINUTE_MS;
+
+function makeClock(startMs, stepMs = MINUTE_MS) {
+  let ms = startMs;
+  return {
+    now: () => {
+      ms += stepMs;
+      return new Date(ms);
+    },
+    /** Jump the wall clock, which is how a test crosses the retention window. */
+    advance: (byMs) => {
+      ms += byMs;
+    },
+  };
+}
+
+/**
+ * A second store over the same server. It shares the clock by default, and it
+ * has to: the retention window is decided by comparing a meta's `updatedAt`
+ * against the writer's own clock, so a second store on a fresh clock would be
+ * reading a board whose metas are from the future and would reclaim nothing.
+ */
+function makeStore(server, clock = makeClock(Date.UTC(2026, 8, 29, 12, 0, 0))) {
   let id = 0;
-  return new SignedBoardStore({
+  const board = new SignedBoardStore({
     fetch: server.fetch.bind(server),
-    now: () => new Date(Date.UTC(2026, 8, 29, 12, 0, 0) + (tick += 1) * 1000),
+    now: clock.now,
     newId: () => `v3-storage-test-${++id}`,
   });
+  return { board, clock };
 }
 
 function shards(server) {
@@ -133,8 +174,8 @@ function isFeedPage(value) {
   return Array.isArray(value?.entries) && value.page !== undefined && value.state === undefined;
 }
 
-async function seed(server, issueCount) {
-  const board = makeStore(server);
+async function seed(server, issueCount, stepMs) {
+  const { board, clock } = makeStore(server, makeClock(Date.UTC(2026, 8, 29, 12, 0, 0), stepMs));
   const initialized = await board.initialize({
     schemaVersion: 3,
     nextIssueNumber: issueCount + 1,
@@ -151,7 +192,7 @@ async function seed(server, issueCount) {
     targets: [],
     dispatches: [],
   });
-  return { board, credential: initialized.credential };
+  return { board, credential: initialized.credential, clock };
 }
 
 test('storage growth is bounded by live board size, not by total mutation count', async () => {
@@ -228,7 +269,7 @@ test('repeated edits of one issue do not grow the store', async () => {
 
 test('every shard is reclaimable by any client holding only the board key', async () => {
   const server = fakeSkrynia();
-  const { board, credential } = await seed(server, 2);
+  const { board, credential, clock } = await seed(server, 2);
 
   await board.appendFast(credential, {
     kind: 'issue.comment',
@@ -250,7 +291,7 @@ test('every shard is reclaimable by any client holding only the board key', asyn
   // board credential, can delete a shard written by the first.
   const stale = shards(server).map(([key]) => key);
   assert.ok(stale.length > 0);
-  const second = makeStore(server);
+  const second = makeStore(server, clock).board;
   const cutover = await second.cutoverState(credential);
   assert.equal(cutover.state, 'cutover-complete');
   for (let index = 0; index < 4; index += 1) {
@@ -307,7 +348,7 @@ test('the fake models Skrynia minting a fresh capability per capability-write ob
 
 test('a shard re-established by content addressing is not reclaimed', async () => {
   const server = fakeSkrynia();
-  const { board, credential } = await seed(server, 3);
+  const { board, credential, clock } = await seed(server, 3, 1000);
   const meta = () => resolve(server, credential, server.objects.get('board-v2').value.metaRef);
 
   // Reorder the queue A -> B -> A. A queue snapshot is just its numbers, so
@@ -324,11 +365,22 @@ test('a shard re-established by content addressing is not reclaimed', async () =
   assert.notEqual(reordered, before, 'a reorder must change the queue ref');
   assert.equal(restored, before, 'restoring the order must restore the same content-addressed ref');
 
-  // Commit twice more, so the reclaim that would collect that recorded ref runs.
+  // Commit past the retention window, so the recorded list really is walked and
+  // the reclaim that would collect that ref actually runs. The clock jump is
+  // what crosses the window: without it the sweep correctly declines, and this
+  // test would pass for the wrong reason.
+  clock.advance(RETENTION_WINDOW_MS + MINUTE_MS);
   await board.appendFast(credential, {
     kind: 'issue.comment',
     payload: { number: 1, author: 'tester', body: 'after the revert' },
   });
+  const sweep = board.sweepReport();
+  assert.equal(sweep.skipped, false, 'the sweep must run once the window has passed');
+  assert.ok(
+    sweep.reclaimed > 0,
+    'the sweep outside the retention window must actually reclaim something, '
+    + 'or this test is asserting nothing',
+  );
   await board.appendFast(credential, {
     kind: 'issue.comment',
     payload: { number: 2, author: 'tester', body: 'and another' },
@@ -375,9 +427,14 @@ test('comments on a deleted issue stay readable in the feed', async () => {
   assert.equal(await board.getIssue(credential, 1), null);
 });
 
-test('the superseded generation stays fully readable for the retention window', async () => {
+test('a resolved generation stays fully readable for the whole retention window', async () => {
   const server = fakeSkrynia();
-  const { board, credential } = await seed(server, 2);
+  // A SECOND-resolution clock here, deliberately: the property under test is that
+  // the window is measured in time, so the commits have to be close together in
+  // time and be many of them. The growth tests above use the minute-resolution
+  // default, which is the opposite situation -- a long quiet board -- and both are
+  // real.
+  const { board, credential, clock } = await seed(server, 2, 1000);
 
   // Build a generation worth reading: an issue with a comment, so the closure
   // spans a comment page, an issue snapshot, a directory page, list pages, a feed
@@ -394,42 +451,104 @@ test('the superseded generation stays fully readable for the retention window', 
   const capturedPointer = server.objects.get('board-v2').value;
   const capturedMeta = await resolve(server, credential, capturedPointer.metaRef);
   const capturedClosure = await closureOf(server, credential, capturedMeta);
-
-  // Commit once. This replaces several of the shards the captured generation
-  // pins, which is exactly the case the window exists for, and it is the only
-  // commit the window promises to cover.
-  await board.appendFast(credential, {
-    kind: 'issue.edit',
-    payload: { number: 1, title: 'Issue 1', body: 'generation four' },
-  });
-
-  // The property, read the way a reader holding the older pointer would read it:
-  // through the captured pointer, to the captured meta, to every shard that meta
-  // pins. Not through readOverview, which re-resolves the LIVE pointer and would
-  // pass with the whole retained generation deleted underneath it.
-  assert.equal(
-    server.objects.get('board-v2').value.revision,
-    capturedPointer.revision + 1,
-    'exactly one commit must have landed, since that is the window',
-  );
+  const capturedMetaKey = await keyForRef(credential, capturedPointer.metaRef);
   assert.ok(capturedClosure.length >= 6, 'the captured generation must be worth reading');
-  for (const ref of capturedClosure) {
-    assert.notEqual(
-      await resolve(server, credential, ref),
-      null,
-      `a shard the retained generation pins was reclaimed: ${ref}`,
+
+  // Commit repeatedly, and keep committing until the clock has moved past the
+  // whole window. This is the property the store claims and the one the review
+  // measured it did not have: the previous version of this test committed ONCE
+  // and asserted the window was one commit wide, which is a commit count wearing
+  // a window's name. Here the number of commits is irrelevant and only the
+  // elapsed time matters -- these four commits land inside a minute of simulated
+  // time and the window is five.
+  const editsInsideWindow = 4;
+  for (let index = 0; index < editsInsideWindow; index += 1) {
+    await board.appendFast(credential, {
+      kind: 'issue.edit',
+      payload: { number: 1, title: 'Issue 1', body: `generation ${index + 4}` },
+    });
+    // The property, read the way a reader holding the older pointer would read
+    // it: through the captured pointer, to the captured meta, to every shard that
+    // meta pins. Not through readOverview, which re-resolves the LIVE pointer and
+    // would pass with the whole captured generation deleted underneath it.
+    for (const ref of capturedClosure) {
+      assert.notEqual(
+        await resolve(server, credential, ref),
+        null,
+        `a shard the captured generation pins was reclaimed ${index + 1} commit(s) in, `
+        + `still inside the window: ${ref}`,
+      );
+    }
+    assert.equal(
+      server.objects.get('board-v2').value.revision,
+      capturedPointer.revision + index + 1,
+      'the commits under test must have landed',
+    );
+    assert.ok(
+      board.sweepReport().skipped,
+      `the sweep must decline while the captured generation is inside the window `
+      + `(commit ${index + 1})`,
     );
   }
-  // And the retained generation's own comment body is still readable, which is
+  assert.ok(
+    (server.objects.get('board-v2').value.revision - capturedPointer.revision) > 1,
+    'more than one commit must have landed, or this test is the old one-commit test',
+  );
+  // And the captured generation's own comment body is still readable, which is
   // the user-visible form of the same property.
   const retainedIssue = await readIssueAt(server, credential, capturedMeta, 1);
   assert.equal(retainedIssue.messages.length, 1);
   assert.equal(retainedIssue.messages[0].body, 'generation two');
+
+  // Now the window closes. One commit after the clock has moved past it, the
+  // captured generation's shards -- and the meta that named them -- are gone, and
+  // the board is still readable. This is the other half: a window that never
+  // closes is not a window, it is a leak.
+  clock.advance(RETENTION_WINDOW_MS + MINUTE_MS);
+  await board.appendFast(credential, {
+    kind: 'issue.edit',
+    payload: { number: 1, title: 'Issue 1', body: 'after the window' },
+  });
+  assert.equal(board.sweepReport().skipped, false, 'the sweep must run once the window has passed');
+  assert.ok(board.sweepReport().reclaimed > 0, 'a sweep outside the window must reclaim something');
+  // The live generation's closure is exactly the set of captured refs that are
+  // still pinned -- shards whose content did not change are shared with the live
+  // generation and must NOT be reclaimed -- so the two assertions are the same
+  // assertion stated from both sides, and between them they are exact: nothing
+  // the live generation pins went, and nothing else survived.
+  const liveMeta = await resolve(server, credential, server.objects.get('board-v2').value.metaRef);
+  const live = await closureOf(server, credential, liveMeta);
+  for (const ref of live) {
+    assert.notEqual(
+      await resolve(server, credential, ref),
+      null,
+      `the sweep reclaimed a ref the live generation pins: ${ref}`,
+    );
+  }
+  for (const ref of capturedClosure) {
+    if (live.includes(ref)) continue;
+    assert.equal(
+      await resolve(server, credential, ref),
+      null,
+      `a shard outside the retention window is still present: ${ref}`,
+    );
+  }
+  assert.ok(
+    capturedClosure.some((ref) => !live.includes(ref)),
+    'the commits must have replaced at least one shard, or this test proves nothing',
+  );
+  assert.equal(
+    server.objects.has(capturedMetaKey),
+    false,
+    'the meta outside the retention window is still present',
+  );
+  const liveIssue = await readIssueAt(server, credential, liveMeta, 1);
+  assert.equal(liveIssue.body, 'after the window', 'the live board must survive its own reclamation');
 });
 
-test('a superseded shard survives exactly one generation, then goes', async () => {
+test('a superseded shard survives the window and then goes, and the window is time', async () => {
   const server = fakeSkrynia();
-  const { board, credential } = await seed(server, 1);
+  const { board, credential, clock } = await seed(server, 1, 1000);
 
   // The ref of the issue-1 snapshot at each generation, so the test can watch a
   // specific ref through the window instead of inferring the window from totals.
@@ -446,6 +565,10 @@ test('a superseded shard survives exactly one generation, then goes', async () =
   };
   const exists = async (ref) => ref !== null && await resolve(server, credential, ref) !== null;
 
+  // Four edits, each replacing the issue snapshot. Every one of the superseded
+  // refs is more than one generation old by the end, so a commit-count rule would
+  // have deleted all of them. A time rule deletes none of them yet, because the
+  // whole run is four simulated minutes and the window is five.
   const history = [await snapshotRefAt()];
   for (let index = 0; index < 4; index += 1) {
     await board.appendFast(credential, {
@@ -454,37 +577,46 @@ test('a superseded shard survives exactly one generation, then goes', async () =
     });
     history.push(await snapshotRefAt());
   }
-
-  // The ref pinned by generation g is replaced at g+1 and must still be readable
-  // there, because a reader that resolved g may still be reading. It is deleted
-  // at g+2, one generation after it stopped being pinned. With four commits
-  // after the first ref, that first ref is two generations past its window and
-  // the rest are still inside theirs.
   assert.notEqual(history[0], history[1], 'each edit must produce a distinct snapshot ref');
-  for (let generation = 0; generation + 1 < history.length; generation += 1) {
-    const ref = history[generation];
-    const generationsPast = history.length - 1 - generation;
-    // Superseded at generation+1, deleted at generation+2.
-    assert.equal(
-      await exists(ref),
-      generationsPast < 2,
-      `a snapshot ref ${generationsPast} generation(s) past its window is `
-      + `${await exists(ref) ? 'still present' : 'absent'}`,
+  for (let generation = 0; generation < history.length - 1; generation += 1) {
+    assert.ok(
+      await exists(history[generation]),
+      `a snapshot ref superseded ${history.length - 1 - generation} generation(s) ago must `
+      + 'survive while it is still inside the retention window',
     );
   }
-  // The live generation pins a shard that exists, and its own ref is the newest.
-  const live = await closureOf(
-    server,
-    credential,
-    await resolve(server, credential, server.objects.get('board-v2').value.metaRef),
+
+  // Past the window. The oldest recorded set is eligible; the generations newer
+  // than the window are not, and the live one never is.
+  clock.advance(RETENTION_WINDOW_MS + MINUTE_MS);
+  await board.appendFast(credential, {
+    kind: 'issue.edit',
+    payload: { number: 1, title: 'Issue 1', body: 'past the window' },
+  });
+  assert.equal(await exists(history[0]), false, 'the oldest superseded ref must be reclaimed');
+  assert.equal(
+    await exists(history[history.length - 1]),
+    true,
+    'the ref the live generation pins must never be reclaimed',
   );
+
+  // The live generation pins a shard that exists, and the ref the live
+  // generation pins is the newest one, not any of the superseded ones.
+  const liveMeta = await resolve(server, credential, server.objects.get('board-v2').value.metaRef);
+  const live = await closureOf(server, credential, liveMeta);
   for (const ref of live) {
     assert.notEqual(await resolve(server, credential, ref), null, `live ref reclaimed: ${ref}`);
   }
-  assert.ok(live.includes(history[history.length - 1]));
+  const newest = await snapshotRefAt();
+  assert.ok(live.includes(newest), 'the live closure must pin the live snapshot ref');
+  assert.equal(
+    history.filter((ref) => live.includes(ref)).length,
+    0,
+    'a superseded snapshot ref must not still be pinned by the live generation',
+  );
   assert.ok(
     shards(server).length <= 40,
-    `four edits left ${shards(server).length} objects; the window is not closing`,
+    `five edits left ${shards(server).length} objects; the window is not closing`,
   );
 });
 
@@ -646,6 +778,365 @@ test('no ref the current generation pins is ever reclaimed', async () => {
   const feed = await board.readFeed(credential, { limit: 5 });
   assert.equal(feed.entries.length, 5);
 });
+
+/**
+ * A Skrynia that answers a shard DELETE with a chosen status.
+ *
+ * This is how the reclaim premise is falsified on demand. The premise -- that
+ * `public-write` is reclaimable, so a client holding only the board key can
+ * delete a shard it did not create -- is a dated observation of one deployment
+ * (probed 2026-09-29), not a specification. If a future deployment stops
+ * accepting unauthenticated DELETE, every sweep becomes a no-op, the namespace
+ * regrows exactly as it did before this format existed, and the board hits its
+ * quota again. Nothing about the code can prevent that; what the code can do is
+ * make it visible, and that is what these tests pin.
+ */
+function refusingDeletes(server, status) {
+  const attempts = { count: 0, keys: new Set() };
+  const keyOf = (url) => decodeURIComponent(String(url).split('/').at(-1));
+  const fetchWithPolicy = async (url, init) => {
+    if (init?.method === 'DELETE' && String(url).includes('/board-v3-')) {
+      attempts.count += 1;
+      attempts.keys.add(keyOf(url));
+      return new Response(JSON.stringify({ error: 'refused' }), {
+        status,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return server.fetch(url, init);
+  };
+  return { server, fetchWithPolicy, attempts };
+}
+
+test('a server that refuses DELETE is counted, reported, and never silent', async () => {
+  // 403 is the status with no benign cause on this path: nothing in the delete set
+  // was ever written `immutable`, so a refusal means the policy changed.
+  const { server, fetchWithPolicy, attempts } = refusingDeletes(fakeSkrynia(), 403);
+  let tick = 0;
+  let id = 0;
+  const clock = { ms: Date.UTC(2026, 8, 29, 12, 0, 0) };
+  const board = new SignedBoardStore({
+    fetch: fetchWithPolicy,
+    now: () => new Date((clock.ms += 1000) + (tick += 0)),
+    newId: () => `refused-${++id}`,
+  });
+  const initialized = await board.initialize({
+    schemaVersion: 3,
+    nextIssueNumber: 2,
+    issues: [{
+      number: 1,
+      title: 'Issue 1',
+      body: 'body',
+      state: 'open',
+      createdAt: '2026-09-29T12:00:00.000Z',
+      updatedAt: '2026-09-29T12:00:00.000Z',
+      messages: [],
+    }],
+    resources: [],
+    targets: [],
+    dispatches: [],
+  });
+  const credential = initialized.credential;
+
+  // Inside the window: the sweep must not even try, so a refusal costs nothing.
+  await board.appendFast(credential, {
+    kind: 'issue.edit',
+    payload: { number: 1, title: 'Issue 1', body: 'revision one' },
+  });
+  assert.equal(attempts.count, 0, 'a sweep inside the window must not issue a DELETE at all');
+  assert.equal(board.sweepReport().skipped, true);
+
+  // Past the window: every DELETE is refused, and each one is counted as a
+  // refusal -- separately from a failure, and never silently.
+  clock.ms += RETENTION_WINDOW_MS + MINUTE_MS;
+  const before = shards(server).length;
+  await board.appendFast(credential, {
+    kind: 'issue.edit',
+    payload: { number: 1, title: 'Issue 1', body: 'revision two' },
+  });
+  const sweep = board.sweepReport();
+  assert.ok(attempts.count > 0, 'the sweep outside the window must have tried to reclaim');
+  assert.equal(sweep.reclaimed, 0, 'a refused delete is not a reclaim');
+  assert.ok(sweep.refused > 0, 'a 403 must be counted as a refusal');
+  assert.equal(sweep.failed, 0, 'a 403 is a policy answer, not a transport failure to retry');
+  assert.equal(sweep.error, null);
+  assert.ok(
+    shards(server).length > before,
+    'nothing may be reclaimed when every delete is refused',
+  );
+
+  // The count is durable, not per-process: the next generation carries it, and
+  // the report an operator reads carries it. This is the whole of the fix for a
+  // silent failure -- the previous design counted it in a method with no callers.
+  await board.appendFast(credential, {
+    kind: 'issue.edit',
+    payload: { number: 1, title: 'Issue 1', body: 'revision three' },
+  });
+  const report = await board.importBoard(credential);
+  assert.equal(report.state, 'cutover-complete');
+  assert.ok(
+    report.storage.unreclaimableShards > 0,
+    'the operator report must show that objects are not being reclaimed',
+  );
+  assert.match(report.storage.note, /growing faster than it is reclaimed/);
+  // And the number only ever goes up: it is a count of identifications, and a
+  // later healthy sweep must not erase the history of the refusals.
+  const carried = report.storage.unreclaimableShards;
+  await board.appendFast(credential, {
+    kind: 'issue.edit',
+    payload: { number: 1, title: 'Issue 1', body: 'revision four' },
+  });
+  await board.appendFast(credential, {
+    kind: 'issue.edit',
+    payload: { number: 1, title: 'Issue 1', body: 'revision five' },
+  });
+  const later = await board.importBoard(credential);
+  assert.ok(
+    later.storage.unreclaimableShards >= carried,
+    `the durable leak total went backwards: ${carried} -> ${later.storage.unreclaimableShards}`,
+  );
+  // The board still works. A reclamation that cannot delete anything is a storage
+  // problem, and must not become a correctness one.
+  const live = await board.getIssue(credential, 1);
+  assert.equal(live?.body, 'revision five');
+});
+
+test('a delete that finds the object already gone is a goal state, not a refusal', async () => {
+  // The 404/403 conflation the review named: a lost race between two reclaimers,
+  // or a second pass over an already-swept set, produces 404 and is completely
+  // benign. It is counted in the running total (the object may have been in the
+  // namespace) but it is never a refusal, because a refusal is the signal that
+  // the reclaim premise has stopped holding.
+  const { server, fetchWithPolicy, attempts } = refusingDeletes(fakeSkrynia(), 404);
+  let id = 0;
+  const clock = { ms: Date.UTC(2026, 8, 29, 12, 0, 0) };
+  const board = new SignedBoardStore({
+    fetch: fetchWithPolicy,
+    now: () => new Date((clock.ms += 1000)),
+    newId: () => `absent-${++id}`,
+  });
+  const initialized = await board.initialize({
+    schemaVersion: 3,
+    nextIssueNumber: 2,
+    issues: [{
+      number: 1,
+      title: 'Issue 1',
+      body: 'body',
+      state: 'open',
+      createdAt: '2026-09-29T12:00:00.000Z',
+      updatedAt: '2026-09-29T12:00:00.000Z',
+      messages: [],
+    }],
+    resources: [],
+    targets: [],
+    dispatches: [],
+  });
+  const credential = initialized.credential;
+  await board.appendFast(credential, {
+    kind: 'issue.edit',
+    payload: { number: 1, title: 'Issue 1', body: 'revision one' },
+  });
+  clock.ms += RETENTION_WINDOW_MS + MINUTE_MS;
+  await board.appendFast(credential, {
+    kind: 'issue.edit',
+    payload: { number: 1, title: 'Issue 1', body: 'revision two' },
+  });
+  const sweep = board.sweepReport();
+  assert.ok(attempts.count > 0);
+  assert.equal(sweep.refused, 0, 'a 404 is not a refusal');
+  assert.equal(sweep.failed, 0, 'a 404 is not a failure');
+  assert.equal(sweep.reclaimed, 0, 'a 404 is not a reclaim either');
+  assert.ok(sweep.retained > 0, 'a 404 is still counted in the running leak total');
+  // One more commit, because the durable total is written by the generation AFTER
+  // the sweep that measured it -- the sweep runs after its own meta is committed,
+  // so the count always lags by exactly one generation.
+  await board.appendFast(credential, {
+    kind: 'issue.edit',
+    payload: { number: 1, title: 'Issue 1', body: 'revision three' },
+  });
+  const report = await board.importBoard(credential);
+  assert.ok(report.storage.unreclaimableShards > 0, 'the running total must reach the report');
+  assert.match(report.storage.note, /keeping up|may no longer hold/);
+});
+
+test('the store holds the live generation, the ones inside the window, and nothing else', async () => {
+  // A correctness test, not an upper-bound test.
+  //
+  // Every count in this file is monotone in deletion: deleting sooner only makes
+  // a count smaller, so a count cannot tell "reclaimed exactly the superseded
+  // set" from "reclaimed everything, including shards a reader inside the
+  // window is still reading". This one can. It reconstructs the exact set of
+  // objects the store is entitled to hold -- the live generation's closure, plus
+  // the closure of every generation still inside the window, plus their metas --
+  // and requires the namespace to equal it. An over-deleting sweep leaves
+  // something missing and fails; an under-deleting one leaves something extra and
+  // fails too. The two failure directions a count cannot see.
+  const server = fakeSkrynia();
+  const { board, credential, clock } = await seed(server, 3, 1000);
+
+  // A mixed workload, tracked so it stays legal: a closed issue cannot be edited
+  // or commented on, and a workload that trips over that would be testing the
+  // wrong thing. Each kind replaces a different set of shards, which is what
+  // makes the eligible set differ from generation to generation.
+  const state = new Map([[1, 'open'], [2, 'open'], [3, 'open']]);
+  const mixed = async (index) => {
+    const number = (index % 3) + 1;
+    const open = state.get(number) === 'open';
+    if (index % 4 === 0) {
+      await board.appendFast(credential, {
+        kind: 'issue.comment',
+        payload: { number, author: 'tester', body: `comment ${index}` },
+      });
+    } else if (index % 4 === 1 && open) {
+      await board.appendFast(credential, {
+        kind: 'issue.edit',
+        payload: { number, title: `Issue ${number} ${index}`, body: `body ${index}` },
+      });
+    } else if (open) {
+      await board.appendFast(credential, { kind: 'issue.close', payload: { number } });
+      state.set(number, 'closed');
+    } else {
+      await board.appendFast(credential, { kind: 'issue.reopen', payload: { number } });
+      state.set(number, 'open');
+    }
+  };
+  // A queue reorder A -> B -> A in the middle, so the store also exercises a ref
+  // that is recorded as superseded and then written again: an over-deleting sweep
+  // takes that one first.
+  for (let index = 0; index < 12; index += 1) await mixed(index);
+  // Read the queue the board actually holds rather than deriving it: the runtime
+  // owns which issues are queued, and a workload that guesses is testing the
+  // guess.
+  const queueNow = async () => [...await board.getQueue(credential)].sort((a, b) => a - b);
+  const first = await queueNow();
+  if (first.length > 1) {
+    await board.appendFast(credential, { kind: 'queue.reorder', payload: { numbers: [...first].reverse() } });
+  }
+  for (let index = 12; index < 24; index += 1) await mixed(index);
+  const second = await queueNow();
+  if (second.length > 1) {
+    await board.appendFast(credential, { kind: 'queue.reorder', payload: { numbers: second } });
+  }
+  for (let index = 24; index < 36; index += 1) await mixed(index);
+
+  /** Every generation still reachable through the meta chain, newest first. */
+  const chainOf = async () => {
+    const chain = [];
+    let metaRef = server.objects.get('board-v2').value.metaRef;
+    for (let depth = 0; depth < 200; depth += 1) {
+      const meta = await resolve(server, credential, metaRef);
+      if (meta === null) break;
+      chain.push({ metaRef, meta });
+      if (meta.retainsMetaRef === null) break;
+      metaRef = meta.retainsMetaRef;
+    }
+    return chain;
+  };
+
+  /**
+   * Every object the store is entitled to hold right now, computed from the data
+   * and never from the store's own opinion of what it did.
+   *
+   * Three disjoint parts, and all three are derived from the meta chain:
+   *
+   *   1. each generation still inside the window, its whole read closure and its
+   *      own meta -- what a reader holding that pointer needs;
+   *   2. each generation still inside the window's `supersededRefs` -- objects it
+   *      has already stopped pinning but may not yet delete, because the
+   *      generation that recorded them is itself inside the window;
+   *   3. a ref an OLDER generation recorded as superseded that a NEWER generation
+   *      has since written again -- the A->B->A edit. Those are past due and are
+   *      deliberately not deleted, because the newer generation pins them.
+   *
+   * Nothing else may be there. An object outside this set is garbage no reader
+   * can reach; an object missing from it is a board that does not open. Both
+   * directions are asserted below, which is what a count cannot do.
+   */
+  const entitledObjects = async () => {
+    const chain = await chainOf();
+    const inside = [];
+    for (const generation of chain) {
+      if (clock.ms - Date.parse(generation.meta.updatedAt) >= RETENTION_WINDOW_MS) break;
+      inside.push(generation);
+    }
+    const entitled = new Set();
+    for (const { metaRef, meta } of inside) {
+      entitled.add(await keyForRef(credential, metaRef));
+      for (const ref of await closureOf(server, credential, meta)) {
+        entitled.add(await keyForRef(credential, ref));
+      }
+      for (const ref of meta.supersededRefs) entitled.add(await keyForRef(credential, ref));
+    }
+    // "Newer" is the store's own order, so it is the chain index.
+    const introducedAt = new Map();
+    chain.forEach(({ meta }, index) => {
+      for (const ref of meta.introducedRefs) {
+        if (!introducedAt.has(ref)) introducedAt.set(ref, index);
+      }
+    });
+    for (let index = inside.length; index < chain.length; index += 1) {
+      for (const ref of chain[index].meta.supersededRefs) {
+        const back = introducedAt.get(ref);
+        if (back !== undefined && back < index) entitled.add(await keyForRef(credential, ref));
+      }
+    }
+    return { entitled, chain, inside };
+  };
+
+  const { entitled, chain, inside } = await entitledObjects();
+  assert.ok(chain.length >= 2, 'the chain must hold more than the live generation');
+  assert.ok(inside.length >= 2, 'the window must hold more than one generation here');
+  assert.ok(
+    entitled.size > 20,
+    `the entitled set is implausibly small (${entitled.size}); the test is not measuring a board`,
+  );
+
+  // The exact set, both ways. `shards` is everything except the pointer.
+  const present = new Set(shards(server).map(([key]) => key));
+  assert.deepEqual(
+    [...entitled].filter((key) => !present.has(key)),
+    [],
+    'the store reclaimed an object a generation inside the window pins, or one '
+    + 'that is still pending reclamation',
+  );
+  assert.deepEqual(
+    [...present].filter((key) => !entitled.has(key)),
+    [],
+    'the store holds an object no generation inside the window pins and no '
+    + 'generation has recorded: it is garbage no reader can reach',
+  );
+
+  // And the same statement again after the window has closed on everything but
+  // the live generation, which is the state the store is in most of the time.
+  clock.advance(RETENTION_WINDOW_MS + MINUTE_MS);
+  await board.appendFast(credential, {
+    kind: 'issue.comment',
+    payload: { number: 1, author: 'tester', body: 'after the window' },
+  });
+  const later = await entitledObjects();
+  assert.equal(
+    later.inside.length,
+    1,
+    'one commit after the jump, only the live generation is inside the window',
+  );
+  const presentAfter = new Set(shards(server).map(([key]) => key));
+  assert.deepEqual(
+    [...later.entitled].filter((key) => !presentAfter.has(key)),
+    [],
+    'a sweep outside the window reclaimed something a retained generation pins',
+  );
+  assert.deepEqual(
+    [...presentAfter].filter((key) => !later.entitled.has(key)),
+    [],
+    'a sweep outside the window left something behind that nothing pins',
+  );
+  assert.ok(
+    later.entitled.size < entitled.size,
+    'the window must actually have closed on something, or nothing was reclaimed',
+  );
+});
+
+
 
 test('an externally overwritten shard is detected when it is next rewritten', async () => {
   // public-write objects are anonymously overwritable on the real server, so

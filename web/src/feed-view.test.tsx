@@ -162,7 +162,7 @@ describe('the feed container, mounted', () => {
 
     render(<FeedView readFeed={read} issues={[issue(7)]} generation={0} onOpenIssue={(number) => { opened.push(number); }} />);
     const list = await screen.findByRole('list', { name: 'Board activity, newest first' });
-    const button = within(list).getByRole('button', { name: '#7 Issue 7' });
+    const button = await within(list).findByRole('button', { name: '#7 Issue 7' });
     await act(async () => { fireEvent.click(button); });
 
     expect(opened).toEqual([7]);

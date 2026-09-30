@@ -217,8 +217,11 @@ test('the imported store is compact: no superseded artifact is carried across', 
     const report = await store.importBoard(credential, { confirm: true });
 
     // Every shard the old store named is still there, untouched: the import does
-    // not delete, because Skrynia will not delete an immutable object and the old
-    // store is left whole for Skrynia to remove wholesale.
+    // not delete, and not because the storage would stop it -- the pre-cutover
+    // shards are `immutable` objects Skrynia deliberately left deletable. The
+    // import leaves the old store whole because the new pointer does not name it,
+    // so there is nothing here that addresses it; it is left for Skrynia to
+    // remove wholesale.
     const legacyShardKeys = [
       ...fixture.keys.directory,
       ...fixture.keys.openPages,

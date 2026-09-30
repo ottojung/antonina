@@ -478,9 +478,11 @@ export class SignedBoardStore {
    * in.
    *
    * Reached only through an explicit confirmation. The old store is not touched
-   * object by object -- it is immutable, so Skrynia will not delete those objects
-   * in any case -- and is left whole for Skrynia or operator tooling to remove
-   * wholesale after the cutover is verified.
+   * object by object -- not because the storage would refuse, which it would not:
+   * the pre-cutover shards are `immutable` objects that Skrynia deliberately left
+   * deletable -- but because the new pointer does not name them, so this code has
+   * no handle to address them with. It is left whole for Skrynia or operator
+   * tooling to remove wholesale after the cutover is verified.
    */
   async importBoard(
     credentialValue: BoardCredential,

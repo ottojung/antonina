@@ -277,8 +277,9 @@ test('every shard is reclaimable by any client holding only the board key', asyn
   });
 
   // The whole fix in one assertion, and the specific thing that went wrong
-  // before: the pre-fix model wrote every shard as `immutable`, which Skrynia
-  // will not delete at all, and a first attempt at the fix wrote them as
+  // before: the pre-fix model wrote every shard as `immutable`, a mode Skrynia
+  // has since dropped from the creation vocabulary and which now buys no
+  // protection at all, and a first attempt at the fix wrote them as
   // `capability-write`, whose per-object capability no later client can present.
   const modes = new Set(shards(server).map(([, entry]) => entry.mode));
   assert.deepEqual([...modes], ['public-write']);
@@ -1242,3 +1243,137 @@ async function resolveStored(server, credential, ref) {
   return server.objects.get(await keyForRef(credential, ref))?.value ?? null;
 }
 
+
+/**
+ * The shard locator every write in this file goes through, as a predicate.
+ *
+ * A shard key is `board-v3-` + base64url(sha256(storageCapability + ':' + ref))
+ * (board-v3-store.ts `locator`). The pointer is the one other key the store
+ * addresses, and it is named `board-v2` -- which is why `shards()` above filters
+ * on that exact string rather than on a prefix. Matching the shard prefix is
+ * therefore the narrowest way to ask "was that a shard?", and it is what makes
+ * the control below discriminate: a request to the pointer is not a shard
+ * request, and a request to a shard is not silently tolerated either way.
+ */
+function isShardKey(key) {
+  return key.startsWith('board-v3-');
+}
+
+test('Antonina itself only ever POSTs a shard, and never replaces one in place', async () => {
+  // The first clause of this issue's outcome 4: a shard written `public-write`
+  // must not be silently replaced *by Antonina*. The existing test above pins
+  // detection of an EXTERNAL overwrite; nothing pinned the half that is ours.
+  //
+  // This is deliberately a control over observed traffic rather than an
+  // assertion about a counter or a source pattern, because the failure it exists
+  // to catch is silent: on this format a `PUT` to a shard key SUCCEEDS. Both
+  // doubles authorise it -- `fake-skrynia.mjs` treats a null capability hash as
+  // authorised, which is every `public-write` shard -- so an author who added an
+  // in-place shard write would break the central invariant of this store and
+  // turn the entire suite green. A test that merely counted writes, or that read
+  // the source for a forbidden call, would not notice. This one watches the wire.
+  //
+  // `If-Match` belongs to the pointer CAS and only to the pointer CAS; see the
+  // recorded decision on `writeShard`. So the rule pinned here is exact: against
+  // a shard key this store may GET and may POST, and may do nothing else. A
+  // POST to a ref that already exists is answered 409 by the server and turned
+  // into a loud `shard collision` by `writeShard`, which is the other half of
+  // this property and is pinned by the test above.
+  const server = contractSkrynia();
+  const wire = [];
+  let tick = 0;
+  let id = 0;
+  const board = new SignedBoardStore({
+    fetch: (url, init = {}) => {
+      const method = (init.method ?? 'GET').toUpperCase();
+      const key = decodeURIComponent(String(url).split('/').pop() ?? '');
+      wire.push({ method, key });
+      return server.fetch(url, init);
+    },
+    now: () => new Date(Date.UTC(2026, 8, 29, 12, 0, (tick += 1))),
+    newId: () => `no-put-${++id}`,
+  });
+
+  const initialized = await board.initialize({
+    schemaVersion: 3,
+    nextIssueNumber: 2,
+    issues: [{
+      number: 1,
+      title: 'Issue 1',
+      body: 'original body',
+      state: 'open',
+      createdAt: '2026-09-29T12:00:00.000Z',
+      updatedAt: '2026-09-29T12:00:00.000Z',
+      messages: [],
+    }],
+    resources: [],
+    targets: [],
+    dispatches: [],
+  });
+  const credential = initialized.credential;
+
+  // A workload chosen to touch every shard kind the store maintains, because a
+  // control that only ever exercises one write path would leave the others free.
+  // A fixed timestamp per edit keeps each edit's snapshot content-addressed, so
+  // re-running one of these is a POST to an existing ref (409) rather than a
+  // new ref -- the interesting case, and the one a silent PUT would bypass.
+  const at = '2026-09-29T12:05:00.000Z';
+  await board.appendFast(credential, { kind: 'issue.edit', timestamp: at, payload: { number: 1, title: 'Issue 1', body: 'edited body' } });
+  await board.appendFast(credential, { kind: 'issue.comment', timestamp: at, payload: { number: 1, author: 'tester', body: 'a comment' } });
+  await board.appendFast(credential, { kind: 'queue.reorder', timestamp: at, payload: { numbers: [1] } });
+  await board.appendFast(credential, { kind: 'issue.close', timestamp: at, payload: { number: 1 } });
+  await board.appendFast(credential, { kind: 'issue.reopen', timestamp: at, payload: { number: 1 } });
+  await board.appendFast(credential, { kind: 'issue.delete', timestamp: at, payload: { number: 1 } });
+  // Reads, so the rule is stated over a mixed trace rather than a write-only one.
+  await board.readOverview(credential);
+
+  const shardTraffic = wire.filter((request) => isShardKey(request.key));
+  const shardMethods = [...new Set(shardTraffic.map((request) => request.method))].sort();
+
+  // NON-VACUITY, and this is the half that matters. An empty trace would satisfy
+  // the rule below trivially, so the control first proves it watched real shard
+  // traffic: reads happened, and writes happened, and they were POSTs. Without
+  // these three assertions a store that simply stopped writing shards would pass
+  // the control below while violating the property far more seriously.
+  assert.ok(
+    shardTraffic.length > 0,
+    'the control observed no shard traffic at all, so it constrains nothing; '
+    + 'the workload must actually have read and written shards',
+  );
+  assert.ok(
+    shardTraffic.some((request) => request.method === 'GET'),
+    'no shard was ever read, so the trace does not exercise the read path',
+  );
+  assert.ok(
+    shardTraffic.some((request) => request.method === 'POST'),
+    'no shard was ever written, so the trace does not exercise the write path '
+    + 'and could not detect an in-place replace',
+  );
+  assert.ok(
+    shardTraffic.length > 10,
+    `only ${shardTraffic.length} shard requests were observed; too few to be a `
+    + 'workload rather than a single incidental call',
+  );
+
+  // The control. Anything other than GET or POST against a shard key is a
+  // replace, a partial update, or a delete this design does not perform.
+  const forbidden = shardTraffic.filter(
+    (request) => request.method !== 'GET' && request.method !== 'POST',
+  );
+  assert.deepEqual(
+    forbidden,
+    [],
+    'Antonina must never write a shard by any means other than POST: on this '
+    + 'format a PUT to a shard key succeeds, so an in-place replace would be '
+    + 'silent and would break the property the whole retention design rests on',
+  );
+  // Stated as a set as well, so the failure message names the methods that
+  // appeared rather than only the offending requests.
+  assert.deepEqual(
+    shardMethods,
+    ['GET', 'POST'],
+    `shard keys were addressed with ${JSON.stringify(shardMethods)}; only GET `
+    + 'and POST are correct here, and the pointer CAS in `commitPointer` is the '
+    + 'one place `If-Match` belongs',
+  );
+});

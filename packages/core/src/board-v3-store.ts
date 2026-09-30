@@ -589,8 +589,11 @@ function parseMeta(value: unknown): ShardedBoardMeta {
      * both read as "nothing to inherit": no predecessor chain, and nothing
      * waiting to be reclaimed. That is the conservative reading for the chain --
      * a board with no chain simply has no ancestors to walk -- and the right one
-     * for the reclaim list, because a pre-fix meta's superseded shards were
-     * written immutable and are not deletable in any case.
+     * for the reclaim list, and for a reason that has nothing to do with what the
+     * storage would do if asked: a meta written before this shape existed never
+     * recorded a ref as superseded in the first place, so there is nothing
+     * recorded here to sweep. That is a statement about this code's own write
+     * history, and it holds whatever the server does with a shard.
      */
     retainsMetaRef: typeof value.retainsMetaRef === 'string' ? value.retainsMetaRef : null,
     supersededRefs: Array.isArray(value.supersededRefs)
@@ -1154,12 +1157,18 @@ export class ShardedBoardStore {
    *   * The delete path's failure mode is authority, not concurrency. The real
    *     hazard is deleting a ref that a newer generation pinned again, and that is
    *     a question about which generation pins this ref, answered on the client by
-   *     `introducedRefs` and `pinnedAgain` where the knowledge lives. A stale
-   *     ETag on the DELETE would mean "someone replaced this object since we
-   *     decided to delete it", and deleting it is still the intent, so a 412
-   *     there would be a spurious retry rather than a protection. Antonina never
-   *     GETs the ETag it would have to condition on, and by the time it did, an
-   *     ETag would be the wrong instrument for that question.
+   *     `introducedRefs` and `pinnedAgain` where the knowledge lives. An ETag is
+   *     the wrong instrument for that question twice over. It would be the wrong
+   *     one because deleting the object is still the intent whoever replaced it --
+   *     the thing to protect is a ref, and a ref is a name this code holds, not a
+   *     body on the server. And it could not be enforced anyway: at Skrynia
+   *     `0b5adde` (and unchanged at `21eca665`) `If-Match` is read in `handlePut`
+   *     only, and `handleDelete` never looks at the header, so a conditional DELETE
+   *     would be accepted unconditionally and there is no 412 here to be a spurious
+   *     retry or a protection. That is a dated reading of one revision, not a
+   *     specification, and a Skrynia change that taught `handleDelete` to honour
+   *     `If-Match` would falsify this paragraph rather than satisfy it. Antonina
+   *     never GETs the ETag it would have to condition on in any case.
    *
    * `If-Match` therefore stays on the pointer CAS in `commitPointer`, which is the
    * only operation where a lost race is silent corruption rather than a benign
@@ -2527,8 +2536,9 @@ export class ShardedBoardStore {
         // report and saying "0" would claim a health the board has not been
         // observed to have. The note carries the fact instead.
         unreclaimableShards: 0,
-        note: 'not yet cut over, so this board has not reclaimed anything in this format; '
-          + 'its superseded objects are not deletable through the API at all',
+        note: 'not yet cut over, so this board has reclaimed nothing in this format; '
+          + 'nothing protects those objects from the API, which would delete them, '
+          + 'and this code never asks because the pre-cutover store is unreachable from the new pointer',
       },
     };
 

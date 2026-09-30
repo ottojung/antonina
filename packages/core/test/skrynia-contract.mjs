@@ -17,12 +17,28 @@
  *     hash. It does **not** adopt the caller's `X-Skrynia-Capability`.
  *  2. `handleDelete` allows `DELETE` for `public-write` **without** a capability,
  *     and checks a capability only for `capability-write`.
- *  3. `DELETE` is refused for `immutable`.
+ *  3. `handleDelete` refuses **nothing** on the grounds of `immutable`: there is no
+ *     `immutable` branch in it at all. `immutable` is a mode that can no longer be
+ *     *created*; the objects it left on disk are deliberately deletable, so that
+ *     superseded storage is reclaimable.
  *  4. An inbound `X-Skrynia-Capability` on POST is **ignored silently** in both
  *     modes: never rejected, never honoured.
  *  5. **`public-write` objects are anonymously overwritable.** A `PUT` with no
  *     capability is accepted and replaces the body. `If-Match` is honoured when
  *     supplied and is **optional**.
+ *  6. `If-Match` is read in `handlePut` only. `handleDelete` never reads it, so a
+ *     conditional DELETE is accepted unconditionally and no 412 is reachable there.
+ *
+ * Clause 3 was originally written here as "`DELETE` is refused for `immutable`",
+ * and clause 2's `handleDelete` was given a 403 for it. That modelled a server
+ * revision in which the refusal existed, and it was found false against
+ * `ottojung/skrynia@0b5adde:src/server.js:281-287`, whose `handleDelete` has no
+ * `immutable` branch and whose own comment reads "Legacy immutable objects are
+ * deletable so superseded storage is reclaimable". A double that encodes the
+ * behaviour under dispute is worse than no double: it launders a false claim into
+ * a green suite, and it contradicted the corrected prose in
+ * `board-v3-store.ts` inside one package. It is recorded here rather than silently
+ * dropped so that a later reader does not reintroduce it.
  *
  * Clause 2 is what the whole reclamation design rests on, and clause 1 is what
  * made the first attempt at this fix a production no-op. Clause 5 is the one
@@ -145,8 +161,13 @@ export function contractSkrynia() {
 
       if (method === 'DELETE') {
         if (current === undefined) return new Response(null, { status: 404 });
-        // Clause 3: immutable is refused.
-        if (current.mode === 'immutable') return jsonResponse({ error: 'immutable' }, 403);
+        // Clause 3: there is deliberately NO immutable refusal here. `immutable`
+        // is a mode that can no longer be created; the objects it left on disk
+        // are deletable on purpose, so that superseded storage is reclaimable.
+        // Modelling a 403 for them would be encoding the behaviour under dispute.
+        // Clause 6: `handleDelete` does not read `If-Match` either, so a
+        // conditional DELETE is accepted unconditionally. That is modelled by
+        // simply not looking at the header below.
         // Clause 2: the capability is checked for capability-write only. A
         // public-write object is deletable with no capability presented at all.
         if (current.mode === 'capability-write'

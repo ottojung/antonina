@@ -47,8 +47,19 @@
  * runnable, so if both are run they will both drive that one backend
  * conversation. This is a known, accepted overlap, not an oversight: dropping
  * the session id would make the clone a fresh conversation and defeat the
- * feature. Operators who want two genuinely separate conversations should fork
- * a source and then start the clone with a new session.
+ * feature.
+ *
+ * There is currently no way to give a clone its own backend session, and that
+ * is a known gap rather than a hidden one. `native_session_id` is terminal once
+ * set: `cmdRun` selects `mode: 'continue'` from the recorded session and never
+ * re-consults session discovery, and the only two writers of the field
+ * (`rememberFreshSession` and the `cmdRun` session-recovery branch) both write
+ * only when it is null. So a clone of a source that has a recorded session can
+ * never be given a different one, and no command exists to start one. A clone
+ * of a source that has no recorded session yet does start its own, because
+ * `agent new` records a null session. An operator who wants two genuinely
+ * separate conversations must therefore fork a source that has not been run
+ * yet, or run the two agents at different times; the board owes an opt-out.
  */
 import {
   AGENT_META_VERSION,

@@ -500,7 +500,7 @@ export class BoardApi {
    * without `confirm` it is a plan that writes nothing.
    */
   async importBoard(options: { confirm?: boolean } = {}): Promise<BoardImportReport> {
-    const credential = await this.fastReadCredential();
+    const credential = this.requireCredential();
     const report = await this.store.importBoard(credential, options);
     // A cutover replaces the board, so anything the caller remembered about its
     // head is no longer a thing this client has seen.

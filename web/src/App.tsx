@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createBrowserBoardApi, targetViews, type BoardFeedEntry, type BoardFeedPage, type DaemonHostView, type IssueListSummary, type TargetView } from './api';
 import { resourceState, type BoardIssue, type BoardResource } from './model';
-import { BOARD_VIEWS, DEFAULT_BOARD_URL_STATE, ISSUE_FILTERS, boardHomeState, boardHref, boardUrlFor, issueHref, parseBoardUrl, tabHref, writeBoardUrl, type BoardUrlState, type BoardView } from './board-url';
+import { BOARD_VIEWS, DEFAULT_BOARD_URL_STATE, DEFAULT_ISSUE_PAGE, ISSUE_FILTERS, boardHomeState, boardHref, boardUrlFor, issueHref, parseBoardUrl, tabHref, writeBoardUrl, type BoardUrlState, type BoardView } from './board-url';
 import { TARGETS_EMPTY, TARGETS_HINT, TARGET_ACCESS_LABEL, TARGET_CLEANUP_LABEL, TARGET_KIND_LABEL, TARGET_PERSISTENCE_LABEL, TARGET_STATUS_LABEL, targetCatalogRows } from './targets';
-import { COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, appendFeedPage, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, overviewLoaded, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type BoardSummary, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
+import { clampIssuePage, ISSUE_PAGE_NEXT, ISSUE_PAGE_PREVIOUS, ISSUE_PAGE_SIZE, hasIssuePages, issuePage, issuePageCount, issuePageRange, COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, appendFeedPage, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, overviewLoaded, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type BoardSummary, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -64,7 +64,25 @@ export default function App() {
   // Same names as the setters they replace, so every existing call site reads
   // as before: a filter or a selection is still just a state change, and the
   // address follows it.
-  const setView = useCallback((next: View) => { navigate({ view: next, selectedNumber: undefined }); }, [navigate]);
+  // A real tab change returns to the first page, because `tabUrlState` — which is
+  // what the tab's own href already advertises — says so, and a copied address
+  // and a click have to land on the same screen. A navigation to the view the
+  // reader is already on is *not* a tab change: creating an issue calls
+  // `setView('issues')` while the reader sits on page 2, and that must not throw
+  // away the page they chose.
+  const setView = useCallback((next: View) => {
+    setLocation((current) => boardUrlFor(
+      current.view === next ? { view: next, selectedNumber: undefined } : { view: next, selectedNumber: undefined, page: DEFAULT_ISSUE_PAGE },
+      current,
+    ));
+  }, []);
+  // A filter change reselects which issues the list holds, so the page number is
+  // *preserved* rather than reset: `clampIssuePage` moves an out-of-range page
+  // down onto the last page that exists, which keeps the reader's position in
+  // the list while guaranteeing a valid page. Resetting to 1 would be the other
+  // defensible choice, but issue 140's controls are specified to preserve the
+  // page and clamp it, and the merge keeps that behaviour rather than silently
+  // replacing it.
   const setFilter = useCallback((next: IssueFilter) => { navigate({ filter: next }); }, [navigate]);
   const setSettingsOpen = useCallback((next: boolean) => { navigate({ settingsOpen: next }); }, [navigate]);
   const setSelectedNumber = useCallback((next: number | undefined) => { navigate({ selectedNumber: next }); }, [navigate]);
@@ -90,6 +108,14 @@ export default function App() {
   // indefinitely. The key carries no entries of its own: the feed is always
   // whatever the core projection last returned.
   const [feedGeneration, setFeedGeneration] = useState(0);
+  // The one page number for both features. Issue 140's controls move it and
+  // issue 139 owns where it lives, so this is not a second `useState` beside the
+  // URL's `page`: a single number read from `location` and written back through
+  // `navigate`. A second source of truth here would be the one-way street the
+  // merge exists to avoid — the controls would set state the URL never learned
+  // about, and a reload or a Back would silently undo the reader's paging.
+  // The name is the one issue 140's `onPage` wiring already reads as.
+  const setIssuePageIndex = useCallback((next: number) => { navigate({ page: next }); }, [navigate]);
 
   const refresh = useCallback(async () => {
     try {
@@ -135,6 +161,18 @@ export default function App() {
   // copied from Resources, Targets or Feed names the same route the app opens.
   const issueHrefHere = useCallback((number: number) => issueHref(number, location, window.location.pathname), [location]);
   const visible = ready ? visibleIssues(ready.board.issues, ready.queue, filter) : [];
+  // The page is a slice of the ordered list, never a second ordering of it: the
+  // whole filtered list is what the queue controls compute their moves against,
+  // and only the rows on screen are handed to the list.
+  //
+  // There is exactly one page number in this file: the one out of the URL. 140's
+  // `useState(1)` is gone, because two of them is what the auto-merge produced —
+  // `location.page` published as `data-issue-page` while `issuePageIndex` did the
+  // slicing — and that tree draws page 1 for `?page=3` and writes nothing to the
+  // address when the reader presses Next. Here the drawn page is derived from the
+  // address, so the address and the rows cannot drift apart in either direction.
+  const pageIndex = clampIssuePage(page, visible.length);
+  const paged = useMemo(() => issuePage(visible, pageIndex), [visible, pageIndex]);
   const counts = issueCounts(board?.issues ?? []);
   const hasWriteAccess = access === 'editable';
   const empty = emptyIssueList(filter, hasWriteAccess);
@@ -280,14 +318,19 @@ export default function App() {
     </header>
     {error && <div className="notice error" role="alert"><span>{error}</span><button onClick={() => setError(undefined)} aria-label="Dismiss error">Dismiss</button></div>}
     {notice && <div className="notice success" role="status"><span>{notice}</span><button onClick={() => setNotice(undefined)} aria-label="Dismiss message">Dismiss</button></div>}
-    <main className={`workspace ${view}-view ${selectedNumber !== undefined ? 'has-selection' : ''}`} data-issue-page={page}>
+    <main className={`workspace ${view}-view ${selectedNumber !== undefined ? 'has-selection' : ''}`} data-issue-page={pageIndex}>
       <aside className="issue-pane" aria-label={TAB_PANE_LABEL[view]}>
         <div className="pane-heading"><div><p className="eyebrow">One board, everyone’s work</p><h1>{TAB_TITLE[view]}</h1><p>{view === 'issues' ? <>{QUEUE_HINT} Track what needs attention and discuss the details together.</> : TAB_HINT[view]}</p></div></div>
         {view === 'issues' ? <>
           {hasWriteAccess ? <CreateIssueForm onSubmit={createIssue} />
             : <AccessNotice access={access} className="access-callout" onAction={() => setSettingsOpen(true)} />}
+{/* Issue 139 makes these real links so a filter is addressable; issue
+              140 paginates the list the filter selects. The two coexist on one
+              render site: the anchors carry `filter` in their href, and the
+              list below them draws `paged` with its own controls. */}
           <nav className="filters" aria-label="Filter issues">{(ISSUE_FILTERS as readonly IssueFilter[]).map((value) => <a key={value} role="button" className={filter === value ? 'active' : ''} aria-pressed={filter === value} href={boardHref(boardUrlFor({ filter: value }, location), window.location.pathname)} onClick={(event) => { event.preventDefault(); setFilter(value); }}>{filterLabel(value)}<span>{counts[value]}</span></a>)}</nav>
-          <div className="issue-list" aria-label="Issues"><IssueQueue issues={visible} queue={load.queue} hasWriteAccess={hasWriteAccess} selectedNumber={selectedNumber} onSelect={setSelectedNumber} onReorder={reorderQueue} empty={empty} /></div>
+          <div className="issue-list" aria-label="Issues"><IssueQueue issues={visible} page={paged} queue={load.queue} hasWriteAccess={hasWriteAccess} selectedNumber={selectedNumber} onSelect={setSelectedNumber} onReorder={reorderQueue} empty={empty} /></div>
+          <IssuePagination total={visible.length} page={pageIndex} onPage={setIssuePageIndex} />
         </>           : view === 'resources'
           ? <ResourcesView board={board!} issues={board!.issues} access={access} onOpenIssue={openIssue} onAdd={(host, path, number) => run(() => api.addResourceDependency(host, path, number), 'Resource dependency added')} onRemove={(resource, number) => run(() => api.removeResourceDependency(resource.host, resource.path, number), resource.issueNumbers.length === 1 ? 'Dependency removed; resource unregistered' : 'Resource dependency removed')} onEnableEditing={() => setSettingsOpen(true)} hrefForIssue={issueHrefHere} />
           : view === 'targets'
@@ -428,8 +471,15 @@ export function issueMovedToPosition(event: { preventDefault(): void }, order: n
   return moveQueueTo(order, number, to);
 }
 
-export function IssueQueue({ issues, queue, hasWriteAccess, selectedNumber, onSelect, onReorder, empty }: {
+export function IssueQueue({ issues, page = issues, queue, hasWriteAccess, selectedNumber, onSelect, onReorder, empty }: {
   issues: IssueListRow[];
+  /**
+   * The rows to draw. The list renders one page of them while `issues` stays the
+   * whole filtered list, because every queue control below computes its move
+   * from that list: a step, a drop or a chosen position must commit the entire
+   * shared queue, and a page of it is not a queue the board would accept.
+   */
+  page?: IssueListRow[];
   queue: number[];
   hasWriteAccess: boolean;
   selectedNumber: number | undefined;
@@ -442,7 +492,7 @@ export function IssueQueue({ issues, queue, hasWriteAccess, selectedNumber, onSe
   // move-to all recompute a full permutation from the snapshot that was rendered.
   const order = openQueueOrder(issues, queue);
   return <>
-    {issues.map((issue) => <IssueQueueRow key={issue.number} issue={issue} order={order} position={queuePosition(order, issue.number)} hasWriteAccess={hasWriteAccess} selected={issue.number === selectedNumber} onSelect={onSelect} onReorder={onReorder} />)}
+    {page.map((issue) => <IssueQueueRow key={issue.number} issue={issue} order={order} position={queuePosition(order, issue.number)} hasWriteAccess={hasWriteAccess} selected={issue.number === selectedNumber} onSelect={onSelect} onReorder={onReorder} />)}
     {!issues.length && <div className="empty-state"><h2>{empty.title}</h2><p>{empty.body}</p></div>}
   </>;
 }
@@ -515,6 +565,37 @@ function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSel
   </div>;
 }
 
+
+/**
+ * The Issues list's own pagination: which slice is on screen, and the two
+ * controls that move between slices.
+ *
+ * It is offered only when the filtered list really has more than one page. A
+ * board with three issues is not given two permanently disabled buttons and a
+ * "1–3 of 3" line; there is nothing there to page through.
+ *
+ * Both controls are real buttons, so they are keyboard reachable, and each is
+ * disabled exactly when there is nowhere to go — Previous on the first page,
+ * Next on the last — rather than hidden, so the position line stays a stable
+ * landmark as the reader moves. The position line is a polite live region, so
+ * paging announces the new range instead of silently swapping the rows under the
+ * reader.
+ */
+export function IssuePagination({ total, page, pageSize = ISSUE_PAGE_SIZE, onPage }: {
+  total: number;
+  page: number;
+  pageSize?: number;
+  onPage: (page: number) => void;
+}) {
+  if (!hasIssuePages(total, pageSize)) return null;
+  const index = clampIssuePage(page, total, pageSize);
+  const pages = issuePageCount(total, pageSize);
+  return <nav className="issue-pagination" aria-label="Issue list pages">
+    <button type="button" className="quiet" aria-label={ISSUE_PAGE_PREVIOUS} disabled={index <= 1} onClick={() => onPage(index - 1)}>Previous</button>
+    <p className="issue-page-range" role="status">{issuePageRange(total, index, pageSize)}</p>
+    <button type="button" className="quiet" aria-label={ISSUE_PAGE_NEXT} disabled={index >= pages} onClick={() => onPage(index + 1)}>Next</button>
+  </nav>;
+}
 
 /** The keystroke a submit shortcut is decided from, and nothing else about the event. */
 export type ShortcutKey = Pick<ReactKeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey' | 'repeat'>;

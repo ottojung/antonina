@@ -79,10 +79,12 @@ test('the traced make target comes from a run step, not from a comment', (t) => 
   // instead of `build` would have emptied the input set rather than kept it. The
   // count is the traced bundle inputs this revision actually has, so adding a
   // `web/**` or `packages/core/src/**` source file is expected to move it and
-  // this number with it. 36 is this revision: 35 before, plus
-  // `web/vite.config.ts`, which `web/tsconfig.node.json` includes as a bare
-  // filename and which the bare-directory expansion could not see.
-  assert.match(result.stdout, /traced bundle inputs: 36/);
+  // this number with it. 40 is this revision: 36 before, plus the four web
+  // sources board issues 139 and 140 added — `board-url.ts`, `board-url.test.ts`,
+  // `board-url-app.test.tsx` and `issues-pagination.test.tsx`. The assertion stays
+  // the exact number on purpose, so the next added source file moves it again
+  // rather than the check quietly widening into a wildcard.
+  assert.match(result.stdout, /traced bundle inputs: 40/);
 });
 
 test('a bare filename include is traced as the file it names', (t) => {

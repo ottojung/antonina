@@ -288,6 +288,79 @@ export function visibleIssues<T extends Pick<BoardIssue, 'number' | 'state'>>(is
 }
 
 /**
+ * How many issues one page of the Issues list holds.
+ *
+ * 50 is the number the board's own storage and feed pages use, so the browser's
+ * page and the paged records behind it agree on a chunk rather than the list
+ * inventing a second one. It is a default argument throughout, never a number
+ * repeated at a call site.
+ */
+export const ISSUE_PAGE_SIZE = 50;
+
+/**
+ * How many pages a list of `total` issues occupies: one page for an empty list,
+ * because "page 1 of 1" is the only page there is and not a division by zero.
+ */
+export function issuePageCount(total: number, pageSize = ISSUE_PAGE_SIZE): number {
+  if (pageSize <= 0) return 1;
+  return Math.max(1, Math.ceil(Math.max(0, total) / pageSize));
+}
+
+/**
+ * The page the list may actually be showing, given the page that was asked for.
+ *
+ * This is the whole clamping rule, and it is deliberately the simplest one that
+ * satisfies every case the list has to survive: the requested page is preserved
+ * whenever a page of that number still exists, and clamped to the last existing
+ * page otherwise. Nothing here knows what caused the change, so a create, a
+ * close, a reopen, a delete, a reorder, a filter change and a periodic board
+ * re-read are all the same event — the list got shorter or longer — and all get
+ * the same answer.
+ *
+ * The consequence worth stating: a reader on page 3 of 3 who closes the top
+ * issue stays on the last page rather than being thrown back to page 1, and a
+ * reader who opens an issue and comes back finds the same page unless it no
+ * longer exists. A page is never reset to 1 by a mutation; only an out-of-range
+ * index moves, and it only ever moves down.
+ */
+export function clampIssuePage(page: number, total: number, pageSize = ISSUE_PAGE_SIZE): number {
+  if (!Number.isInteger(page) || page < 1) return 1;
+  return Math.min(page, issuePageCount(total, pageSize));
+}
+
+/**
+ * The one page of an already-ordered list, clamped the same way. Pagination is a
+ * slice of the semantic order `visibleIssues` produced and never a second sort:
+ * open issues stay in the board's queue order, closed issues keep their stable
+ * order, and `all` is still open-first. Only the window onto that order moves.
+ */
+export function issuePage<T>(items: readonly T[], page: number, pageSize = ISSUE_PAGE_SIZE): T[] {
+  const index = clampIssuePage(page, items.length, pageSize);
+  return items.slice((index - 1) * pageSize, index * pageSize);
+}
+
+/**
+ * The position line: which issues are on screen out of how many the filter
+ * matched. An empty list says so in its own words rather than claiming a range
+ * it has none of.
+ */
+export function issuePageRange(total: number, page: number, pageSize = ISSUE_PAGE_SIZE): string {
+  if (total <= 0) return 'No issues';
+  const index = clampIssuePage(page, total, pageSize);
+  const from = (index - 1) * pageSize + 1;
+  return `${from}–${Math.min(from + pageSize - 1, total)} of ${total}`;
+}
+
+/** Whether there is more than one page at all, so a short list is never given dead controls. */
+export function hasIssuePages(total: number, pageSize = ISSUE_PAGE_SIZE): boolean {
+  return issuePageCount(total, pageSize) > 1;
+}
+
+export const ISSUE_PAGE_PREVIOUS = 'Previous page';
+
+export const ISSUE_PAGE_NEXT = 'Next page';
+
+/**
  * Moves one queued issue to another slot, returning the whole reordered queue.
  * A commit is only accepted when it names every open issue exactly once, so a
  * move sends the entire list, never the pair it swapped. `null` means the board

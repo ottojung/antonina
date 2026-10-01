@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createBrowserBoardApi, targetViews, type BoardFeedEntry, type BoardFeedPage, type DaemonHostView, type IssueListSummary, type TargetView } from './api';
 import { resourceState, type BoardIssue, type BoardResource } from './model';
+import { BOARD_VIEWS, DEFAULT_BOARD_URL_STATE, ISSUE_FILTERS, boardHomeState, boardHref, boardUrlFor, issueHref, parseBoardUrl, tabHref, writeBoardUrl, type BoardUrlState, type BoardView } from './board-url';
 import { TARGETS_EMPTY, TARGETS_HINT, TARGET_ACCESS_LABEL, TARGET_CLEANUP_LABEL, TARGET_KIND_LABEL, TARGET_PERSISTENCE_LABEL, TARGET_STATUS_LABEL, targetCatalogRows } from './targets';
 import { COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, appendFeedPage, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, overviewLoaded, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type BoardSummary, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
-type View = 'issues' | 'resources' | 'feed' | 'targets';
-const TABS: readonly View[] = ['issues', 'resources', 'feed', 'targets'];
+type View = BoardView;
+const TABS: readonly View[] = BOARD_VIEWS;
 const TAB_TITLE: { readonly [V in View]: string } = { issues: 'Issues', resources: 'Resources', feed: 'Feed', targets: 'Targets' };
 const TAB_PANE_LABEL: { readonly [V in View]: string } = {
   issues: 'Shared issue list',
@@ -38,18 +39,52 @@ export default function App() {
   const session = useMemo(() => createBrowserBoardApi(), []);
   const api = session.api;
   const [load, setLoad] = useState<BoardLoad>({ status: 'loading' });
-  const [view, setView] = useState<View>('issues');
-  const [selectedNumber, setSelectedNumber] = useState<number>();
+  // Board issue 139: the addressable half of the UI state — tab, selected
+  // issue, issue filter, issues-page number and the settings panel — is one
+  // object read from the query string and written back to it, so a link opens
+  // the screen it names. `parseBoardUrl` degrades every unrecognized value to a
+  // default, and nothing outside `BOARD_URL_KEYS` is ever read or written, so a
+  // stale URL cannot blank the board and no credential can ride along.
+  const [location, setLocation] = useState<BoardUrlState>(() => parseBoardUrl(window.location.search));
+  const { view, selectedNumber, filter, settingsOpen, page } = location;
   const [selectedIssue, setSelectedIssue] = useState<BoardIssue>();
-  const [filter, setFilter] = useState<IssueFilter>('open');
   const [displayName, setDisplayName] = useState(() => window.localStorage.getItem(DISPLAY_NAME_KEY) ?? '');
   const [access, setAccess] = useState<BoardAccess>('read-only');
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [credentialInput, setCredentialInput] = useState('');
   const [unlocking, setUnlocking] = useState(false);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [initializing, setInitializing] = useState(false);
+  // Every internal navigation goes through here, so the URL and the state can
+  // never disagree: one updater produces the next state, and the effect below
+  // is the only thing that writes the address bar.
+  const navigate = useCallback((changes: Partial<BoardUrlState>) => {
+    setLocation((current) => boardUrlFor(changes, current));
+  }, []);
+  // Same names as the setters they replace, so every existing call site reads
+  // as before: a filter or a selection is still just a state change, and the
+  // address follows it.
+  const setView = useCallback((next: View) => { navigate({ view: next, selectedNumber: undefined }); }, [navigate]);
+  const setFilter = useCallback((next: IssueFilter) => { navigate({ filter: next }); }, [navigate]);
+  const setSettingsOpen = useCallback((next: boolean) => { navigate({ settingsOpen: next }); }, [navigate]);
+  const setSelectedNumber = useCallback((next: number | undefined) => { navigate({ selectedNumber: next }); }, [navigate]);
+  // The Issues-page number is part of the address, so it survives a reload and
+  // lands in a shared link. Board issue 140 owns the slicing and the
+  // Previous/Next controls that move it; this side holds and restores the
+  // number itself, and publishes it as `data-issue-page` for that front.
+  // The first write of a loaded page replaces its history entry, so arriving on
+  // a stale URL and having it cleaned up does not leave a dead entry behind
+  // Back; every navigation after that is a real entry.
+  const replacedInitialUrl = useRef(false);
+  useEffect(() => {
+    writeBoardUrl(location, window.location, window.history, replacedInitialUrl.current ? 'push' : 'replace');
+    replacedInitialUrl.current = true;
+  }, [location]);
+  useEffect(() => {
+    const restore = () => setLocation(parseBoardUrl(window.location.search));
+    window.addEventListener('popstate', restore);
+    return () => window.removeEventListener('popstate', restore);
+  }, []);
   // Bumped by every successful board read, so the feed tab re-reads the log on
   // the same cadence as the rest of the board instead of holding a page of it
   // indefinitely. The key carries no entries of its own: the feed is always
@@ -96,16 +131,23 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [hasBoard, refresh]);
 
+  // One href builder for every issue link outside the issue list, so a link
+  // copied from Resources, Targets or Feed names the same route the app opens.
+  const issueHrefHere = useCallback((number: number) => issueHref(number, location, window.location.pathname), [location]);
   const visible = ready ? visibleIssues(ready.board.issues, ready.queue, filter) : [];
   const counts = issueCounts(board?.issues ?? []);
   const hasWriteAccess = access === 'editable';
   const empty = emptyIssueList(filter, hasWriteAccess);
   const selected = selectedIssue?.number === selectedNumber ? selectedIssue : undefined;
   useEffect(() => {
-    if (selectedNumber !== undefined && !visible.some((issue) => issue.number === selectedNumber)) {
-      setSelectedNumber(undefined);
-    }
-  }, [selectedNumber, visible]);
+    // Only a board that has been read can say an issue is not there. Before the
+    // first read `visible` is empty, and clearing then would drop the issue a
+    // direct link named before the board had a chance to answer. A link to an
+    // issue the board does not hold is still cleared — once the read is in, and
+    // the URL is rewritten to the list, so a stale link lands on the board.
+    if (ready === undefined || selectedNumber === undefined) return;
+    if (!visible.some((issue) => issue.number === selectedNumber)) setSelectedNumber(undefined);
+  }, [ready, selectedNumber, visible]);
   useEffect(() => {
     if (selectedNumber === undefined || ready === undefined
         || !ready.board.issues.some((issue) => issue.number === selectedNumber)) {
@@ -142,7 +184,7 @@ export default function App() {
     const form = event.currentTarget; const body = (form.elements.namedItem('body') as HTMLTextAreaElement).value;
     const result = await run(() => api.comment(selected.number, displayName, body), 'Message posted'); if (result) form.reset();
   }
-  function openIssue(number: number) { setView('issues'); setFilter('all'); setSelectedNumber(number); }
+  function openIssue(number: number) { setLocation((current) => boardUrlFor({ view: 'issues', selectedNumber: number, filter: 'all' }, current)); }
   function saveDisplayName(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault(); const clean = displayName.trim(); if (!clean) return;
     window.localStorage.setItem(DISPLAY_NAME_KEY, clean); setDisplayName(clean); setNotice('Display name saved in this browser');
@@ -228,22 +270,26 @@ export default function App() {
 
   return <div className="app-shell">
     <header className="topbar">
-      <button className="brand" onClick={() => { setView('issues'); setSelectedNumber(undefined); }} aria-label="Back to all Antonina issues"><span className="brand-mark" aria-hidden="true">A</span><span><strong>Antonina</strong><small>Shared issue board</small></span></button>
-      <nav className="main-nav" aria-label="Main navigation">{TABS.map((item) => <button key={item} className={view === item ? 'active' : ''} aria-current={view === item ? 'page' : undefined} onClick={() => { setView(item); setSelectedNumber(undefined); }}>{item}</button>)}</nav>
+      {/* The nav and the brand are real anchors, not only click handlers: a tab
+          is a screen with an address of its own, so its link can be copied,
+          opened in a new tab, and reached by Back. `role="button"` keeps the
+          accessible role the styles and the existing tests already speak. */}
+      <a className="brand" role="button" href={boardHref(boardHomeState(location), window.location.pathname)} onClick={(event) => { event.preventDefault(); setLocation((current) => boardHomeState(current)); }} aria-label="Back to all Antonina issues"><span className="brand-mark" aria-hidden="true">A</span><span><strong>Antonina</strong><small>Shared issue board</small></span></a>
+      <nav className="main-nav" aria-label="Main navigation">{TABS.map((item) => <a key={item} role="button" className={view === item ? 'active' : ''} aria-current={view === item ? 'page' : undefined} href={tabHref(item, location, window.location.pathname)} onClick={(event) => { event.preventDefault(); setView(item); setSelectedNumber(undefined); }}>{item}</a>)}</nav>
       <div className="top-actions"><span className={`access-pill ${hasWriteAccess ? 'writable' : ''}`}><span aria-hidden="true" />{hasWriteAccess ? 'Can edit' : 'Read only'}</span><button className="quiet" onClick={() => void refresh()}>Refresh</button><button className="quiet" onClick={() => setSettingsOpen(true)}>Settings</button></div>
     </header>
     {error && <div className="notice error" role="alert"><span>{error}</span><button onClick={() => setError(undefined)} aria-label="Dismiss error">Dismiss</button></div>}
     {notice && <div className="notice success" role="status"><span>{notice}</span><button onClick={() => setNotice(undefined)} aria-label="Dismiss message">Dismiss</button></div>}
-    <main className={`workspace ${view}-view ${selectedNumber !== undefined ? 'has-selection' : ''}`}>
+    <main className={`workspace ${view}-view ${selectedNumber !== undefined ? 'has-selection' : ''}`} data-issue-page={page}>
       <aside className="issue-pane" aria-label={TAB_PANE_LABEL[view]}>
         <div className="pane-heading"><div><p className="eyebrow">One board, everyone’s work</p><h1>{TAB_TITLE[view]}</h1><p>{view === 'issues' ? <>{QUEUE_HINT} Track what needs attention and discuss the details together.</> : TAB_HINT[view]}</p></div></div>
         {view === 'issues' ? <>
           {hasWriteAccess ? <CreateIssueForm onSubmit={createIssue} />
             : <AccessNotice access={access} className="access-callout" onAction={() => setSettingsOpen(true)} />}
-          <nav className="filters" aria-label="Filter issues">{(['open', 'closed', 'all'] as const).map((value) => <button key={value} className={filter === value ? 'active' : ''} aria-pressed={filter === value} onClick={() => setFilter(value)}>{filterLabel(value)}<span>{counts[value]}</span></button>)}</nav>
+          <nav className="filters" aria-label="Filter issues">{(ISSUE_FILTERS as readonly IssueFilter[]).map((value) => <a key={value} role="button" className={filter === value ? 'active' : ''} aria-pressed={filter === value} href={boardHref(boardUrlFor({ filter: value }, location), window.location.pathname)} onClick={(event) => { event.preventDefault(); setFilter(value); }}>{filterLabel(value)}<span>{counts[value]}</span></a>)}</nav>
           <div className="issue-list" aria-label="Issues"><IssueQueue issues={visible} queue={load.queue} hasWriteAccess={hasWriteAccess} selectedNumber={selectedNumber} onSelect={setSelectedNumber} onReorder={reorderQueue} empty={empty} /></div>
         </>           : view === 'resources'
-          ? <ResourcesView board={board!} issues={board!.issues} access={access} onOpenIssue={openIssue} onAdd={(host, path, number) => run(() => api.addResourceDependency(host, path, number), 'Resource dependency added')} onRemove={(resource, number) => run(() => api.removeResourceDependency(resource.host, resource.path, number), resource.issueNumbers.length === 1 ? 'Dependency removed; resource unregistered' : 'Resource dependency removed')} onEnableEditing={() => setSettingsOpen(true)} />
+          ? <ResourcesView board={board!} issues={board!.issues} access={access} onOpenIssue={openIssue} onAdd={(host, path, number) => run(() => api.addResourceDependency(host, path, number), 'Resource dependency added')} onRemove={(resource, number) => run(() => api.removeResourceDependency(resource.host, resource.path, number), resource.issueNumbers.length === 1 ? 'Dependency removed; resource unregistered' : 'Resource dependency removed')} onEnableEditing={() => setSettingsOpen(true)} hrefForIssue={issueHrefHere} />
           : view === 'targets'
           // The browser cannot read a host's daemon report: those are files on
           // the operator's own machine, and a page that fetched them would be
@@ -251,8 +297,8 @@ export default function App() {
           // views and states `unknown` for every persistent host's live capacity,
           // which is the truth from here. `antonina board target list
           // --telemetry` is where a host's own numbers come from.
-          ? <TargetsView targets={targetViews(board!)} hosts={[]} onOpenIssue={openIssue} />
-          : <FeedView readFeed={session.readFeed} issues={board!.issues} generation={feedGeneration} onOpenIssue={openIssue} />}
+          ? <TargetsView targets={targetViews(board!)} hosts={[]} onOpenIssue={openIssue} hrefForIssue={issueHrefHere} />
+          : <FeedView readFeed={session.readFeed} issues={board!.issues} generation={feedGeneration} onOpenIssue={openIssue} hrefForIssue={issueHrefHere} />}
       </aside>
       {view === 'issues' ? selected ? <Thread issue={selected} access={access} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.number, body), 'Description updated')} close={() => void run(() => api.close(selected.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.number), 'Issue reopened')} back={() => setSelectedNumber(undefined)} />
         : selectedNumber !== undefined
@@ -401,6 +447,19 @@ export function IssueQueue({ issues, queue, hasWriteAccess, selectedNumber, onSe
   </>;
 }
 
+/**
+ * The click handler behind an issue link.
+ *
+ * A link is a real `href` so it can be copied and opened in a new tab, and a
+ * click on it is handled in the app rather than followed, so the board changes
+ * screens without a document load. The event is optional so the handler can be
+ * invoked directly, without a browser event, by a test that renders the view
+ * through `renderToStaticMarkup`.
+ */
+export function issueLinkClick(open: (number: number) => void, number: number): (event?: { preventDefault(): void }) => void {
+  return (event) => { event?.preventDefault(); open(number); };
+}
+
 function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSelect, onReorder }: {
   issue: IssueListRow;
   order: number[];
@@ -524,14 +583,14 @@ function AccessNotice({ access, readOnly, className, onAction }: { access: ReadO
   return <div className={className}><div><strong>{callout.title}</strong><p>{callout.body}</p></div><button onClick={onAction}>{callout.action}</button></div>;
 }
 
-function ResourcesView({ board, issues, access, onOpenIssue, onAdd, onRemove, onEnableEditing }: { board: BoardSummary; issues: IssueReference[]; access: BoardAccess; onOpenIssue: (number: number) => void; onAdd: (host: string, path: string, number: number) => Promise<unknown>; onRemove: (resource: BoardResource, number: number) => Promise<unknown>; onEnableEditing: () => void }) {
+function ResourcesView({ board, issues, access, onOpenIssue, onAdd, onRemove, onEnableEditing, hrefForIssue }: { board: BoardSummary; issues: IssueReference[]; access: BoardAccess; onOpenIssue: (number: number) => void; hrefForIssue?: (number: number) => string; onAdd: (host: string, path: string, number: number) => Promise<unknown>; onRemove: (resource: BoardResource, number: number) => Promise<unknown>; onEnableEditing: () => void }) {
   const grouped = groupResources(board.resources);
   async function add(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await onAdd(String(data.get('host')), String(data.get('path')), Number(data.get('issue'))); if (result) form.reset(); }
   return <div className="resources-view">
     {access === 'editable' && <form className="resource-form" onSubmit={add}><h2>Register a resource</h2><p>Add a host and path, protected by at least one open issue.</p><label htmlFor="resource-host">Lubko host</label><input id="resource-host" name="host" placeholder="lubko://server-name" required /><label htmlFor="resource-path">Absolute path</label><input id="resource-path" name="path" placeholder="/registered/path" required /><label htmlFor="resource-issue">Open issue</label><select id="resource-issue" name="issue" required><option value="">Choose an issue</option>{issues.filter((issue) => issue.state === 'open').map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add dependency</button></form>}
     {access !== 'editable' && <AccessNotice access={access} className="access-callout" onAction={onEnableEditing} />}
 
-    {grouped.map(([host, resources]) => <section className="resource-host" key={host}><h2>{host}</h2>{resources.map((resource) => <article className="resource-card" key={resource.path}><header><code>{resource.path}</code><span className={`resource-state ${resourceState(resource, issues)}`}>{resourceState(resource, issues)}</span></header><div className="dependency-chips">{resource.issueNumbers.map((number) => { const issue = issues.find((entry) => entry.number === number)!; return <span className="dependency-chip" key={number}><button onClick={() => onOpenIssue(number)}>#{number} {issue.title}</button><span className={`state-label ${issue.state}`}>{issue.state}</span>{access === 'editable' && <button aria-label={`Remove issue ${number}`} onClick={() => void onRemove(resource, number)}>×</button>}</span>; })}</div>{access === 'editable' && <AddDependency resource={resource} issues={issues} add={onAdd} />}</article>)}</section>)}
+    {grouped.map(([host, resources]) => <section className="resource-host" key={host}><h2>{host}</h2>{resources.map((resource) => <article className="resource-card" key={resource.path}><header><code>{resource.path}</code><span className={`resource-state ${resourceState(resource, issues)}`}>{resourceState(resource, issues)}</span></header><div className="dependency-chips">{resource.issueNumbers.map((number) => { const issue = issues.find((entry) => entry.number === number)!; return <span className="dependency-chip" key={number}><a role="button" href={hrefForIssue?.(number)} onClick={issueLinkClick(onOpenIssue, number)}>#{number} {issue.title}</a><span className={`state-label ${issue.state}`}>{issue.state}</span>{access === 'editable' && <button aria-label={`Remove issue ${number}`} onClick={() => void onRemove(resource, number)}>×</button>}</span>; })}</div>{access === 'editable' && <AddDependency resource={resource} issues={issues} add={onAdd} />}</article>)}</section>)}
     {!board.resources.length && <div className="empty-state"><h2>No resources registered</h2><p>Registered paths appear here grouped by Lubko host.</p></div>}
   </div>;
 }
@@ -545,11 +604,12 @@ function AddDependency({ resource, issues, add }: { resource: BoardResource; iss
  * when the reader asks for the next page — and the next page is requested with
  * the token the backend returned, never with an offset the browser computed.
  */
-export function FeedView({ readFeed, issues, generation, onOpenIssue }: {
+export function FeedView({ readFeed, issues, generation, onOpenIssue, hrefForIssue }: {
   readFeed: FeedRead;
   issues: IssueReference[];
   generation: number;
   onOpenIssue: (number: number) => void;
+  hrefForIssue?: (number: number) => string;
 }) {
   const [page, setPage] = useState<BoardFeedPage | null>(null);
   const [error, setError] = useState<string>();
@@ -597,6 +657,7 @@ export function FeedView({ readFeed, issues, generation, onOpenIssue }: {
     error={error}
     onShowMore={() => void showMore()}
     onOpenIssue={onOpenIssue}
+    hrefForIssue={hrefForIssue}
   />;
 }
 
@@ -627,9 +688,15 @@ export interface FeedThreadProps {
   error: string | undefined;
   onShowMore: () => void;
   onOpenIssue: (number: number) => void;
+  /**
+   * The address of one issue's thread, so a feed entry is a real link a reader
+   * can copy or open in a new tab. It defaults to the board's own issue route
+   * for a caller that has no current location to build it from.
+   */
+  hrefForIssue?: (number: number) => string;
 }
 
-export function FeedThread({ entries, nextCursor, total, issues, loading, error, onShowMore, onOpenIssue }: FeedThreadProps) {
+export function FeedThread({ entries, nextCursor, total, issues, loading, error, onShowMore, onOpenIssue, hrefForIssue = (number) => issueHref(number, DEFAULT_BOARD_URL_STATE) }: FeedThreadProps) {
   const date = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
   const untracked = unplacedIssueNumbers(issues, entries, nextCursor, total);
   return <div className="feed-view-inner">
@@ -644,7 +711,7 @@ export function FeedThread({ entries, nextCursor, total, issues, loading, error,
             goes to that issue's own thread. */}
         {entry.kind === 'issue-deleted'
           ? <span className="feed-issue">#{entry.issueNumber} {entry.title}</span>
-          : <button className="feed-issue" onClick={() => onOpenIssue(entry.issueNumber)}>#{entry.issueNumber} {entry.title}</button>}
+          : <a className="feed-issue" role="button" href={hrefForIssue(entry.issueNumber)} onClick={issueLinkClick(onOpenIssue, entry.issueNumber)}>#{entry.issueNumber} {entry.title}</a>}
         <span className="feed-summary">{feedEntrySummary(entry)}</span>
       </span>
       <time className="feed-at" dateTime={entry.at}>{date.format(new Date(entry.at))}</time>
@@ -672,10 +739,11 @@ export function FeedThread({ entries, nextCursor, total, issues, loading, error,
  * procedure: the procedure changes when the backend changes, and a second copy
  * in board state is a second copy that goes stale.
  */
-export function TargetsView({ targets, hosts, onOpenIssue }: {
+export function TargetsView({ targets, hosts, onOpenIssue, hrefForIssue }: {
   targets: TargetView[];
   hosts: DaemonHostView[];
   onOpenIssue: (number: number) => void;
+  hrefForIssue?: (number: number) => string;
 }) {
   const rows = targetCatalogRows(targets, hosts);
   return <div className="targets-view">
@@ -707,7 +775,7 @@ export function TargetsView({ targets, hosts, onOpenIssue }: {
       <section className="target-guidance"><h3>Guidance</h3><ul>{access.guidance.map((path) => <li key={path}><code>{path}</code></li>)}</ul></section>
       <footer className="target-links">
         {target.resources.length > 0 && <p>{target.resources.length} registered resource{target.resources.length === 1 ? '' : 's'} on this host — registered paths live under Resources, not here.</p>}
-        {target.dispatchedIssues.length > 0 && <p className="target-dispatched">Dispatched: {target.dispatchedIssues.map((number) => <button key={number} onClick={() => onOpenIssue(number)}>#{number}</button>)}</p>}
+        {target.dispatchedIssues.length > 0 && <p className="target-dispatched">Dispatched: {target.dispatchedIssues.map((number) => <a role="button" key={number} href={hrefForIssue?.(number)} onClick={issueLinkClick(onOpenIssue, number)}>#{number}</a>)}</p>}
       </footer>
     </article>)}
     {rows.length === 0 && <div className="empty-state"><h2>{TARGETS_EMPTY.title}</h2><p>{TARGETS_EMPTY.body}</p></div>}

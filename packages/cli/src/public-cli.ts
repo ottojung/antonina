@@ -184,6 +184,22 @@ const BOARD_SPECS: readonly CommandSpec[] = [
       ...jsonArg(p),
     ],
   }),
+  withJson({
+    path: ['review'],
+    summary: 'Record a review verdict about one exact commit of an issue.',
+    values: ['--id', '--verdict', '--commit', '--reviewer', '--rationale'],
+    required: ['--id', '--verdict', '--rationale'],
+    normalize: (p) => [
+      'review',
+      p.values.get('--id')!,
+      '--verdict',
+      p.values.get('--verdict')!,
+      '--rationale',
+      p.values.get('--rationale')!,
+      ...valueArgs(p, ['--commit', '--reviewer']),
+      ...jsonArg(p),
+    ],
+  }),
   ...(['close', 'reopen', 'delete'] as const).map((command): CommandSpec => withJson({
     path: [command],
     summary: command === 'close' ? 'Close an issue.' : command === 'reopen' ? 'Reopen an issue.' : 'Delete an issue.',

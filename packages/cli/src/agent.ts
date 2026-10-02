@@ -829,6 +829,31 @@ async function waitForRunnerGone(
   return meta === null || !runnerAlive(meta);
 }
 
+/**
+ * A stop/kill command is complete only when both the invocation and its detached
+ * runner are gone. The runner owns the final state-file writes; returning while
+ * it is still alive lets callers tear down or reuse that directory while a
+ * background process is still mutating it.
+ */
+async function reapRunnerBeforeReturn(
+  agentId: string,
+  command: 'stop' | 'kill',
+  context: AgentCommandContext,
+): Promise<void> {
+  if (await waitForRunnerGone(agentId, context, 2_000)) return;
+
+  let current = readMeta(agentId, paths(context));
+  if (current !== null) signalRunner(current, command === 'stop' ? 'SIGTERM' : 'SIGKILL');
+  if (await waitForRunnerGone(agentId, context, 2_000)) return;
+
+  if (command === 'stop') {
+    current = readMeta(agentId, paths(context));
+    if (current !== null) signalRunner(current, 'SIGKILL');
+    if (await waitForRunnerGone(agentId, context, 2_000)) return;
+  }
+  throw new Error(`agent ${agentId} runner did not terminate`);
+}
+
 async function stopLike(
   command: 'stop' | 'kill',
   args: string[],
@@ -887,6 +912,7 @@ async function stopLike(
     current.active_runner = false;
     current.runner_reservation = null;
   }, paths(context));
+  await reapRunnerBeforeReturn(agentId, command, context);
   context.io.stdout(`${command === 'stop' ? 'stopped' : 'killed'} agent ${agentId}`);
   return EXIT_OK;
 }

@@ -553,13 +553,11 @@ describe('the board addressed by URL, mounted', () => {
   });
 
   it('keeps the board credential out of the URL on every screen', async () => {
-    // The security model, stated as an assertion about the address bar. This
-    // browser holds the credential (`hasCredential` is true), so the URL is being
-    // written by an authorized session — and it still carries nothing but
-    // selectors. The credential lives in localStorage and is never read from or
-    // written to the URL, so a link copied from here opens a useful board view
-    // in a browser that has none of it, and leaks nothing to the many places a
-    // URL travels that a credential does not.
+    // This mounted test owns the URL half of the security boundary. The session
+    // deliberately exposes a credential through the same public methods App can
+    // call, so navigation must still serialize selectors only. It does NOT claim
+    // to prove where production persists that credential: api.test.ts separately
+    // pins BrowserBoardSession + browserStorage against the real localStorage key.
     await openAt('/board');
     await clickTab('resources');
     await clickTab('feed');
@@ -575,9 +573,9 @@ describe('the board addressed by URL, mounted', () => {
     for (const key of [...new URLSearchParams(search()).keys()]) {
       expect(['view', 'issue', 'filter', 'page', 'settings']).toContain(key);
     }
-    // And the credential is where the credential model says it is: in this
-    // browser's storage, not in anything a link could carry.
-    expect(window.localStorage.getItem('antonina:board-v2:credential')).toBeNull();
+    // Production persistence is deliberately tested at the BrowserBoardSession
+    // boundary, not inferred from this mocked session. This test's contract ends
+    // at the address bar.
   });
 
   it('opens a copied link usefully in a browser that holds no credential', async () => {

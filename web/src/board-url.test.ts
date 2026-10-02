@@ -222,11 +222,20 @@ describe('credential safety', () => {
       READY,
       { ...DEFAULT_BOARD_URL_STATE, view: 'resources', settingsOpen: true, page: 3 },
       { ...DEFAULT_BOARD_URL_STATE, selectedNumber: 4242, filter: 'closed' },
+      // A non-default Resources page, so the subset check actually exercises the
+      // `resources` key rather than skipping it as a default.
+      { ...DEFAULT_BOARD_URL_STATE, view: 'resources', resourcePage: 3, commentPage: 2, page: 2 },
     ];
     for (const state of states) {
       const keys = [...new URLSearchParams(boardSearch(state)).keys()];
       expect(keys.every((key) => BOARD_URL_KEYS.includes(key as (typeof BOARD_URL_KEYS)[number]))).toBe(true);
     }
+    // The list names every key the serializer can write, and the Resources page
+    // is one of them. Asserted here so the claim is checked rather than
+    // advertised: dropping `'resources'` from `BOARD_URL_KEYS` leaves every other
+    // test in this file green, so only this line notices.
+    expect(BOARD_URL_KEYS).toContain('resources');
+    expect([...new URLSearchParams(boardSearch({ ...DEFAULT_BOARD_URL_STATE, view: 'resources', resourcePage: 3 })).keys()]).toContain('resources');
   });
 
   it('reads no key outside the allowlist, so a pasted secret is discarded', () => {

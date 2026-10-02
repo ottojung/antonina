@@ -239,7 +239,13 @@ async function recordSpawned(
     meta.exit_code = null;
     meta.exit_signal = null;
     meta.backend_error = null;
-    meta.error = null;
+    // As in `beginInvocation`: a note an earlier invocation recorded stays on
+    // the record until some invocation replaces it. Every field that would give
+    // it a run to belong to is reset just above, so it cannot be read as this
+    // spawn's outcome, and `meta.backend_error` being cleared here is what
+    // stops `displayableAgentError` from re-deriving and quoting it against this
+    // record. Board issue 167 owns the recording policy and resolved it as
+    // persistence.
     meta.active_runner = true;
     accepted = true;
   }, options);

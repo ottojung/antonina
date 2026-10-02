@@ -100,9 +100,15 @@ export function beginInvocation(meta: AgentMetadata, prompt: string, now: number
   meta.finished_at = null;
   meta.exit_code = null;
   meta.exit_signal = null;
-  // A new invocation starts with no reason attached to it. Leaving the previous
-  // invocation's note in place would attribute it to whatever ends this one.
-  meta.error = null;
+  // `meta.error` is deliberately not reset here. A note recorded for one
+  // invocation stays on the record until some invocation replaces it, and every
+  // field that would give it a run to belong to is reset above: `exit_code`,
+  // `exit_signal` and `stop_reason` are null while this invocation is live, so
+  // an inherited note cannot be read as this invocation's outcome. Consumers
+  // that show the note are required to label it as a *last* recorded note rather
+  // than this run's cause; see `displayableAgentError` in packages/cli/src/agent.ts.
+  // Board issue 167 owns the recording policy and resolved it as persistence,
+  // so clearing here is out of scope for a visibility change.
   meta.intent = null;
   meta.stop_reason = null;
   meta.pid = null;

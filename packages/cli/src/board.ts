@@ -22,7 +22,6 @@ import {
   DEFAULT_FEED_LIMIT,
   type BoardFeedEntry,
   type BoardFeedPage,
-  type BoardFeedRequest,
 } from '../../core/src/feed.js';
 import {
   defaultExecutionTargetAccessMethod,
@@ -158,7 +157,8 @@ function parsePositiveInteger(raw: string | undefined, name: string): number {
 }
 
 function pageNumber(raw: string | undefined): number {
-  return raw === undefined ? 1 : parsePositiveInteger(raw, '--page');
+  if (raw === undefined) throw new AntoninaApiError('--page is required');
+  return parsePositiveInteger(raw, '--page');
 }
 
 function pageSlice<T>(values: readonly T[], page: number, pageSize = DEFAULT_COLLECTION_PAGE_SIZE): T[] {
@@ -398,22 +398,15 @@ async function execute(
     }
     case 'feed': {
       const limitOption = option(parsed.args, '--limit');
-      const cursorOption = option(limitOption.rest, '--cursor');
-      const pageOption = option(cursorOption.rest, '--page');
+      const pageOption = option(limitOption.rest, '--page');
       if (pageOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for feed');
-      if (cursorOption.value !== undefined && pageOption.value !== undefined) {
-        throw new AntoninaApiError('--page cannot be combined with --cursor');
-      }
       const limit = limitOption.value === undefined
         ? DEFAULT_FEED_LIMIT
         : parsePositiveInteger(limitOption.value, '--limit');
-      if (pageOption.value !== undefined) {
-        return { mode: 'feed', value: await readNumberedFeedPage(client, pageNumber(pageOption.value), limit) };
-      }
-      const request: BoardFeedRequest = cursorOption.value === undefined && limitOption.value === undefined
-        ? {}
-        : { limit, cursor: cursorOption.value ?? null };
-      return { mode: 'feed', value: await client.readFeed(request) };
+      return {
+        mode: 'feed',
+        value: await readNumberedFeedPage(client, pageNumber(pageOption.value), limit),
+      };
     }
     case 'list': {
       const stateOption = option(parsed.args, '--state');

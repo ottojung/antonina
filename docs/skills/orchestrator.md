@@ -70,15 +70,20 @@ Closing an issue removes it from the queue. Reopening it appends it. Treat both 
 At the beginning of every pass:
 
 1. Verify board access.
-2. Read the queue.
-3. Inspect enough queued issues, in queue order, to classify ongoing work, ownership, blockers, and actionability.
-4. Reconcile any referenced agent, worktree, branch, pull request, job, or other durable artifact before trusting an old status comment.
-5. Build a portfolio of useful concurrent work rather than stopping after one issue.
+2. Read the queue plus compact agent/resource state.
+3. Inspect only enough queued state, in queue order, to identify the first clearly actionable, non-conflicting front.
+4. Claim and launch that front promptly; do not finish an exhaustive queue audit first.
+5. Continue scanning and launching additional independent fronts, reconciling only the durable artifacts needed for each scheduling decision.
+6. Build a portfolio of useful concurrent work rather than stopping after one issue.
+
+Use a **launch-early** policy. Full issue-history or repository investigation is not a prerequisite to delegation when a safe agent can perform that investigation itself. Large append-only issue histories are especially unsuitable as serial orchestrator work: prefer compact queue/list/feed/resource/agent state for scheduling, and delegate deep history reading, code archaeology, diagnosis, review, or research to an Antonina agent. Read a full issue record in the orchestrator only when its exact content is needed to avoid a concrete ownership, safety, or scope mistake.
+
+When enough clearly independent actionable work exists and host resources permit it, aim to establish several concurrent fronts quickly; roughly five active Antonina agents is a useful operating target, not a quota. Do not delay the first launch merely to prove that all later slots are also safe.
 
 Selection proceeds in phases:
 
-1. **Recoverable ongoing work.** Reconcile and continue every issue whose existing work can usefully continue now: a live subordinate agent to inspect or steer, a handoff with a clear next step, a branch or pull request awaiting the next local action, or interrupted work whose durable state is recoverable.
-2. **Breadth scan.** Scan the queue from front to back. For each actionable unclaimed issue, ask whether it is clearly safe and useful to execute concurrently with the work already admitted into this pass. Admit it when the answer is yes; otherwise defer it and keep scanning.
+1. **Recoverable ongoing work.** Reconcile and continue every issue whose existing work can usefully continue now: a live subordinate agent to inspect or steer, a handoff with a clear next step, a branch or pull request awaiting the next local action, or interrupted work whose durable state is recoverable. Deep recovery work belongs to an agent; the orchestrator should establish ownership and launch/steer it.
+2. **Breadth scan.** Scan the queue from front to back. As soon as an actionable unclaimed issue is clearly safe and useful, claim and launch it before continuing the scan. For each later issue, ask whether it is clearly safe and useful to execute concurrently with the work already admitted into this pass. Admit it when the answer is yes; otherwise defer it and keep scanning.
 3. **Prefer obvious independence.** Issues from clearly unrelated projects or repositories should normally be admitted concurrently unless they share an explicit dependency, deployment target, mutable external resource, or other concrete conflict. Do not stop scanning merely because an earlier issue is already being worked on.
 4. **Be conservative within one project.** When two issues appear to belong to the same project, defer additional work unless there is positive evidence that the fronts are independent. The same repository is not proof of conflict: monorepos may contain independent packages, apps, services, or subsystems that can safely progress in separate worktrees.
 5. **Depth scan.** After establishing broad cross-project parallelism, revisit deferred same-project issues in queue order and admit additional work when independence is evident.

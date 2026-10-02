@@ -43,6 +43,7 @@ import {
 import { procStartTicks, signalMarkedInvocationProcesses } from './process.js';
 import {
   logPath,
+  logSize,
   readMeta,
   updateMeta,
   type StatePathsOptions,
@@ -206,7 +207,9 @@ async function reclaimOrStop(agentId: string, options: RunnerOptions): Promise<b
       return;
     }
     if (queue.length > 0) {
-      popSteerIntoPending(meta, Date.now() / 1000);
+      // The drained continuation begins where the log ends right now, so its own
+      // run scope excludes everything the interrupted invocation wrote.
+      popSteerIntoPending(meta, Date.now() / 1000, { logOffset: logSize(agentId, options) });
       meta.active_runner = true;
       busy = true;
       return;

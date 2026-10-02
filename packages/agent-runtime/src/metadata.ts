@@ -82,6 +82,16 @@ const BACKEND_SIGNAL_FIELDS = [
 
 const SIGNAL_DEATH_CLASSIFICATION = 'external_signal_kill';
 
+/**
+ * Optional byte cursor into `output.log`: the offset at which the output of the
+ * currently accepted invocation begins. It is validated when present and allowed
+ * to be absent, exactly like `BACKEND_SIGNAL_FIELDS`, because a record written
+ * before this field existed has no run-scoped cursor and must still be a
+ * canonical record. `null` and absence both mean "no invocation has been
+ * accepted yet", not a malformed record.
+ */
+const RUN_LOG_CURSOR_FIELD = 'run_log_offset';
+
 export class MalformedPendingPromptMetadataError extends Error {
   constructor() {
     super('persisted pending prompt authority is not canonical');
@@ -215,7 +225,7 @@ function canonicalSteerQueue(value: unknown, sequence: number): boolean {
 }
 
 export function validateAgentMetadata(meta: AgentMetadata): void {
-  if (!exactKeys(meta, TOP_LEVEL_FIELDS)) {
+  if (!exactKeysWithOptional(meta, TOP_LEVEL_FIELDS, [RUN_LOG_CURSOR_FIELD])) {
     throw new MalformedAgentMetadataError('managed-agent metadata fields are not canonical');
   }
   if (meta.agent_version !== AGENT_META_VERSION) {
@@ -291,6 +301,21 @@ export function validateAgentMetadata(meta: AgentMetadata): void {
   if (meta.error !== null && (typeof meta.error !== 'string' || meta.error.length === 0)) {
     throw new MalformedAgentMetadataError('managed-agent error is malformed');
   }
+  if (persistedRunLogOffset(meta) === null && meta[RUN_LOG_CURSOR_FIELD] !== null && meta[RUN_LOG_CURSOR_FIELD] !== undefined) {
+    throw new MalformedAgentMetadataError('managed-agent run_log_offset is malformed');
+  }
+}
+
+/**
+ * The byte offset into `output.log` where the currently accepted invocation's
+ * output begins, or `null` when no invocation has been accepted (absent field,
+ * an explicit `null`, or a malformed value).
+ */
+export function persistedRunLogOffset(meta: AgentMetadata): number | null {
+  if (!hasOwn(meta, RUN_LOG_CURSOR_FIELD)) return null;
+  const value = meta[RUN_LOG_CURSOR_FIELD];
+  if (value === null) return null;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 export function persistedLifecycleState(meta: AgentMetadata): PersistedAgentState | null {
@@ -469,6 +494,7 @@ export function idleMeta(agentId: string, cwd: string | null, title: string | nu
     pending_prompt: null,
     last_prompt: null,
     error: null,
+    run_log_offset: null,
     agent_version: AGENT_META_VERSION,
   };
   validateAgentMetadata(meta);

@@ -874,6 +874,87 @@ test('attached prompt streams output and returns invocation status', (t) => {
   assertFixtureInvoked(handle, 'attached');
 });
 
+// Board issue 177: run scope. An attached run reports the output of the
+// invocation it accepted, not the transcript every earlier run accumulated.
+// The two markers below are per-run: the fixture prints `FAKE:<last prompt>`, so
+// `FAKE:first` exists only because the first run happened and `FAKE:second` only
+// because the second did. That is what makes the exclusion assertion
+// non-vacuous -- the excluded text is proven to exist in the same log the third
+// command still reads.
+test('a second run reports only its own output while agent log keeps the whole history', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '177a', '--cwd', work], env).status, 0);
+
+  const first = run(['agent', 'run', '--id', '177a', '--prompt', 'first'], env);
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /FAKE:first/);
+
+  const second = run(['agent', 'run', '--id', '177a', '--prompt', 'second'], env);
+  assert.equal(second.status, 0, second.stderr);
+  // Its own progress is still surfaced...
+  assert.match(second.stdout, /FAKE:second/);
+  // ...and the earlier run's output is not.
+  assert.doesNotMatch(
+    second.stdout,
+    /FAKE:first/,
+    'a second run replayed the first run\'s output instead of its own',
+  );
+
+  // Non-vacuity: both runs really did produce output, both really are in the
+  // durable log, and both really did reach the backend.
+  const durable = readFileSync(join(root, 'state', 'antonina', 'agents', '177a', 'output.log'), 'utf8');
+  assert.match(durable, /FAKE:first/);
+  assert.match(durable, /FAKE:second/);
+  const meta = JSON.parse(readFileSync(metaPath(root, '177a'), 'utf8'));
+  assert.equal(meta.prompt_count, 2);
+
+  // The accumulated history is still `agent log`'s, unchanged.
+  const log = run(['agent', 'log', '--id', '177a', '--lines', '500'], env);
+  assert.equal(log.status, 0, log.stderr);
+  assert.match(log.stdout, /FAKE:first/, 'agent log no longer reports the first run');
+  assert.match(log.stdout, /FAKE:second/, 'agent log no longer reports the second run');
+});
+
+// The same boundary across a steer. An attached `--steer` command must not
+// replay the invocation it interrupted, and the cursor the runtime records when
+// the runner drains the queued prompt must scope the run that follows: the third
+// run reports its own output only, though two invocations preceded it.
+test('run scope survives a steer: neither the steer nor the next run replays earlier output', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', 'a11d', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'a11d', '--detach', '--prompt', 'slow'], env).status, 0);
+  await waitFor(root, 'a11d', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
+
+  const steer = run(['agent', 'run', '--id', 'a11d', '--steer', '--prompt', 'redirect'], env);
+  assert.ok(
+    steer.status === 0 || steer.status === 1,
+    `a steer run did not reach a lifecycle outcome: ${steer.status} ${steer.stderr}`,
+  );
+  assert.doesNotMatch(steer.stdout, /slow-start/, 'a steer run replayed the interrupted invocation');
+  await waitFor(root, 'a11d', (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false, 12_000);
+
+  // Non-vacuity: the interrupted invocation and the drained continuation both
+  // really did write, so the markers excluded below really do exist.
+  const durable = readFileSync(join(root, 'state', 'antonina', 'agents', 'a11d', 'output.log'), 'utf8');
+  assert.match(durable, /slow-start/);
+  assert.match(durable, /FAKE:redirect/);
+
+  const third = run(['agent', 'run', '--id', 'a11d', '--prompt', 'third'], env);
+  assert.equal(third.status, 0, third.stderr);
+  assert.match(third.stdout, /FAKE:third/);
+  assert.doesNotMatch(third.stdout, /slow-start/, 'a run replayed the interrupted invocation');
+  assert.doesNotMatch(third.stdout, /FAKE:redirect/, 'a run replayed the drained steer continuation');
+
+  const log = run(['agent', 'log', '--id', 'a11d', '--lines', '500'], env);
+  assert.equal(log.status, 0, log.stderr);
+  assert.match(log.stdout, /slow-start/, 'agent log no longer reports the interrupted invocation');
+  assert.match(log.stdout, /FAKE:redirect/, 'agent log no longer reports the drained continuation');
+  assert.match(log.stdout, /FAKE:third/, 'agent log no longer reports the third run');
+  assertFixtureInvoked(handle, 'redirect');
+  assertFixtureInvoked(handle, 'third');
+});
+
 test('graceful stop and wait timeout expose stable lifecycle results', async (t) => {
   const { root, work, env } = fixture(t);
   assert.equal(run(['agent', 'new', '--id', '5a0f', '--cwd', work], env).status, 0);

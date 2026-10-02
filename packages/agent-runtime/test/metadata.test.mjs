@@ -11,6 +11,7 @@ import {
   persistedControlField,
   persistedLifecycleState,
   persistedNativeSessionId,
+  persistedRunLogOffset,
   persistedTimestamp,
   persistedVariant,
   runnerGeneration,
@@ -118,6 +119,11 @@ test('schema v4 rejects old versions, missing fields and unknown fields', () => 
   assert.throws(() => validateAgentMetadata(old), /unsupported managed-agent metadata version/);
 
   for (const key of Object.keys(base)) {
+    // `run_log_offset` is the one field a record is allowed to omit: it was
+    // added after records already existed on disk, and a record written before
+    // it existed must still be canonical rather than rejected. Its shape is
+    // asserted separately, below.
+    if (key === 'run_log_offset') continue;
     const missing = { ...base };
     delete missing[key];
     assert.throws(
@@ -131,6 +137,29 @@ test('schema v4 rejects old versions, missing fields and unknown fields', () => 
     () => validateAgentMetadata({ ...base, legacy_field: true }),
     /fields are not canonical/,
   );
+});
+
+test('a record may omit run_log_offset, but a present one must be a byte cursor', () => {
+  const base = idleMeta('a11d', '/tmp/work', null, 100.5);
+  assert.equal(base.run_log_offset, null);
+
+  const absent = { ...base };
+  delete absent.run_log_offset;
+  assert.doesNotThrow(() => validateAgentMetadata(absent));
+  assert.equal(persistedRunLogOffset(absent), null);
+
+  assert.equal(persistedRunLogOffset(base), null);
+  assert.equal(persistedRunLogOffset({ ...base, run_log_offset: 0 }), 0);
+  assert.equal(persistedRunLogOffset({ ...base, run_log_offset: 4096 }), 4096);
+
+  for (const malformed of [-1, 1.5, '0', Number.NaN, {}]) {
+    assert.equal(persistedRunLogOffset({ ...base, run_log_offset: malformed }), null);
+    assert.throws(
+      () => validateAgentMetadata({ ...base, run_log_offset: malformed }),
+      /run_log_offset is malformed/,
+      `malformed run_log_offset unexpectedly accepted: ${JSON.stringify(malformed)}`,
+    );
+  }
 });
 
 test('schema v4 rejects partial process identities and malformed structured authority', () => {

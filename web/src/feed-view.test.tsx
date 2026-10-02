@@ -11,7 +11,7 @@ process.env.XDG_CONFIG_HOME = '/nonexistent-antonina-web-feed-mount-config';
 import { FeedView } from './App';
 import { DEFAULT_FEED_LIMIT, type BoardFeedEntry, type BoardFeedEntryKind, type BoardFeedPage, type BoardFeedRequest } from './api';
 import type { BoardIssue } from './model';
-import { FEED_EMPTY, FEED_MORE_LABEL } from './ui-state';
+import { FEED_EMPTY } from './ui-state';
 
 afterEach(cleanup);
 
@@ -53,8 +53,56 @@ function reader(pages: BoardFeedPage[]): { read: (request?: BoardFeedRequest) =>
   return { read, seen };
 }
 
-function mount(read: (request?: BoardFeedRequest) => Promise<BoardFeedPage>, overrides: { generation?: number; issues?: BoardIssue[] } = {}) {
-  return render(<FeedView readFeed={read} issues={overrides.issues ?? [issue(1)]} generation={overrides.generation ?? 0} onOpenIssue={() => {}} />);
+/**
+ * A fake log served the way the real projection serves one: `total` counts the
+ * log and the entries handed back are those after the cursor, newest first, up to
+ * the requested limit, with a token while entries remain behind them.
+ *
+ * `reader` above replays a staged list, which is right for a test that wants to
+ * hand the view exact pages. This one is right for a test about paging, because
+ * the numbered reader asks for the newest page first to learn the log's total and
+ * then steps the cursor — a staged list would have to be written twice over for
+ * every page it lands on.
+ */
+function logFeed(total: number, kind: BoardFeedEntryKind = 'issue-created', from = 1) {
+  const seen: BoardFeedRequest[] = [];
+  // The entries are built with their POSITION as both id and order, so the fake
+  // log is stable across reads: a cursor then means what the real projection's
+  // means, and two reads of the same page return the same rows.
+  const ordered = Array.from({ length: total }, (_, index) => ({
+    id: `log-${index + 1}`,
+    kind,
+    at: STAMP,
+    position: index + 1,
+    issueNumber: from + index,
+    title: `Issue ${from + index}`,
+    state: 'open' as const,
+    messageId: null,
+    author: null,
+    body: null,
+  }));
+  const read = async (request: BoardFeedRequest = {}) => {
+    seen.push(request);
+    const limit = request.limit ?? DEFAULT_FEED_LIMIT;
+    const position = request.cursor === undefined || request.cursor === null ? null : Number(String(request.cursor).replace('v1.', ''));
+    // Newest first, and everything committed before the cursor when one is given.
+    const remaining = position === null ? [...ordered].reverse() : ordered.filter((each) => each.position < position).reverse();
+    const entries = remaining.slice(0, limit);
+    const last = entries[entries.length - 1];
+    return { entries, nextCursor: remaining.length > entries.length && last !== undefined ? `v1.${last.position}` : null, total: ordered.length, limit };
+  };
+  return { read, seen };
+}
+
+function mount(read: (request?: BoardFeedRequest) => Promise<BoardFeedPage>, overrides: { generation?: number; issues?: BoardIssue[]; page?: number; onPage?: (page: number) => void } = {}) {
+  return render(<FeedView
+    readFeed={read}
+    issues={overrides.issues ?? [issue(1)]}
+    generation={overrides.generation ?? 0}
+    page={overrides.page ?? 1}
+    onPage={overrides.onPage ?? (() => {})}
+    onOpenIssue={() => {}}
+  />);
 }
 
 describe('the feed container, mounted', () => {
@@ -93,7 +141,7 @@ describe('the feed container, mounted', () => {
 
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toBe('the board log is not readable from this browser');
-    expect(screen.queryByRole('button', { name: FEED_MORE_LABEL })).toBeNull();
+    expect(screen.queryByRole('navigation', { name: 'Board feed pages' })).toBeNull();
     expect(read).toHaveBeenCalledTimes(1);
   });
 
@@ -113,24 +161,83 @@ describe('the feed container, mounted', () => {
     expect(screen.queryByText(FEED_EMPTY.title)).toBeNull();
   });
 
-  it('asks for older entries with the token the backend issued and appends what comes back', async () => {
-    const first = entry('comment-added', 3);
-    const older = entry('issue-created', 2);
-    const { read, seen } = reader([page([first], 'v1.token', 2), page([older], null, 2)]);
+  it('shows one page and never a merge of the pages behind it', async () => {
+    // The defect board 173 names. A reader who moves from page 1 to page 2 must
+    // be left with 50 rows on screen, not 110: the container hands the view the
+    // page it read and nothing accumulates across it.
+    const { read, seen } = logFeed(60);
 
-    const { container } = mount(read);
+    const { container, rerender } = mount(read, { page: 1 });
+    await screen.findByRole('list', { name: 'Board activity, newest first' });
+    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(50));
+    const firstPage = Array.from(container.querySelectorAll('[data-feed-id]')).map((row) => row.getAttribute('data-feed-id'));
+    seen.length = 0;
+
+    await act(async () => { rerender(<FeedView readFeed={read} issues={[issue(1)]} generation={0} page={2} onPage={() => {}} onOpenIssue={() => {}} />); });
+
+    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(10));
+    // Page 2 was reached by asking for the cursor the newest page returned, and
+    // the page on screen is page 2 alone.
+    // Only the two reads page 2 needed: the newest page for the log's total, then
+    // one cursor step. The open of page 1 is not counted here.
+    expect(seen).toEqual([{ limit: DEFAULT_FEED_LIMIT }, { limit: DEFAULT_FEED_LIMIT, cursor: 'v1.11' }]);
+    // The rows of page 1 are gone from the document, not merely pushed down it:
+    // this is the assertion the accumulator model could not have passed.
+    const drawn = Array.from(container.querySelectorAll('[data-feed-id]')).map((row) => row.getAttribute('data-feed-id'));
+    for (const gone of firstPage) expect(drawn).not.toContain(gone);
+  });
+
+  it('offers numbered boundaries with the right disabled edges, and reports the range', async () => {
+    const { read, seen } = logFeed(120);
+
+    const { container } = mount(read, { page: 1 });
     await screen.findByRole('list', { name: 'Board activity, newest first' });
 
-    const more = screen.getByRole('button', { name: FEED_MORE_LABEL });
-    await act(async () => { fireEvent.click(more); });
+    const nav = screen.getByRole('navigation', { name: 'Board feed pages' });
+    const [previous, next] = within(nav).getAllByRole('button');
+    expect(previous.hasAttribute('disabled')).toBe(true);
+    expect(next.hasAttribute('disabled')).toBe(false);
+    // Range and count text, both about the log rather than about what has been read.
+    expect(within(nav).getByRole('status').textContent).toBe('1–50 of 120');
+    expect(container.querySelector('.feed-count')?.textContent).toBe('50 of 120 recorded entries');
 
-    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(2));
-    expect(seen).toEqual([{ limit: DEFAULT_FEED_LIMIT }, { limit: DEFAULT_FEED_LIMIT, cursor: 'v1.token' }]);
-    const rows = Array.from(container.querySelectorAll('[data-feed-id]')).map((row) => row.getAttribute('data-feed-id'));
-    // Appended below what is already shown; nothing is re-sorted, and the
-    // exhausted token takes the control away again.
-    expect(rows).toEqual([first.id, older.id]);
-    expect(screen.queryByRole('button', { name: FEED_MORE_LABEL })).toBeNull();
+    // Next is live, Previous is not: the middle of the log.
+    expect(seen).toHaveLength(1);
+  });
+
+  it('clamps a page the log cannot fill down onto the last one that it can', async () => {
+    // A hand-edited or stale link must land on something real rather than on a
+    // blank tab, and must not walk ninety-nine pages to discover that.
+    const { read, seen } = logFeed(120);
+
+    const { container } = mount(read, { page: 99 });
+
+    await waitFor(() => expect(container.querySelectorAll('.feed-entry')).toHaveLength(20));
+    expect(within(screen.getByRole('navigation', { name: 'Board feed pages' })).getByRole('status').textContent).toBe('101–120 of 120');
+    // Clamped before the walk: the newest page for the total, then two steps.
+    expect(seen).toEqual([
+      { limit: DEFAULT_FEED_LIMIT },
+      { limit: DEFAULT_FEED_LIMIT, cursor: 'v1.71' },
+      { limit: DEFAULT_FEED_LIMIT, cursor: 'v1.21' },
+    ]);
+  });
+
+  it('hands the page control the neighbour page number, and nothing else', async () => {
+    const { read } = logFeed(400);
+    const onPage = vi.fn();
+
+    const { container } = mount(read, { page: 2, onPage });
+    await screen.findByRole('list', { name: 'Board activity, newest first' });
+
+    const nav = screen.getByRole('navigation', { name: 'Board feed pages' });
+    const [previous, next] = within(nav).getAllByRole('button');
+    await act(async () => { fireEvent.click(previous); });
+    await act(async () => { fireEvent.click(next); });
+
+    expect(onPage.mock.calls).toEqual([[1], [3]]);
+    // The control moves the number; it does not read anything itself.
+    expect(container.querySelectorAll('.feed-entry')).toHaveLength(50);
+    expect(container.querySelectorAll('.feed-entry')).toHaveLength(50);
   });
 
   it('re-reads when a verified board read bumps the generation', async () => {
@@ -146,7 +253,7 @@ describe('the feed container, mounted', () => {
     await screen.findByRole('list', { name: 'Board activity, newest first' });
     expect(seen).toHaveLength(1);
 
-    await act(async () => { rerender(<FeedView readFeed={read} issues={[issue(1)]} generation={1} onOpenIssue={() => {}} />); });
+    await act(async () => { rerender(<FeedView readFeed={read} issues={[issue(1)]} generation={1} page={1} onPage={() => {}} onOpenIssue={() => {}} />); });
 
     expect(seen).toHaveLength(2);
     expect(container.textContent).toContain('fresh read');
@@ -160,7 +267,7 @@ describe('the feed container, mounted', () => {
     const opened: number[] = [];
     const { read } = reader([page(entries, null, 1)]);
 
-    render(<FeedView readFeed={read} issues={[issue(7)]} generation={0} onOpenIssue={(number) => { opened.push(number); }} />);
+    render(<FeedView readFeed={read} issues={[issue(7)]} generation={0} page={1} onPage={() => {}} onOpenIssue={(number) => { opened.push(number); }} />);
     const list = await screen.findByRole('list', { name: 'Board activity, newest first' });
     const button = await within(list).findByRole('button', { name: '#7 Issue 7' });
     await act(async () => { fireEvent.click(button); });

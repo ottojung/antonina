@@ -10,6 +10,7 @@ import {
   ISSUE_FILTERS,
   DEFAULT_BOARD_URL_STATE,
   DEFAULT_COMMENT_PAGE,
+  DEFAULT_FEED_PAGE,
   DEFAULT_ISSUE_PAGE,
   boardHref,
   boardHomeState,
@@ -26,7 +27,7 @@ import {
   type BoardUrlState,
 } from './board-url';
 
-const READY: BoardUrlState = { view: 'issues', selectedNumber: 7, filter: 'all', settingsOpen: false, page: 2, commentPage: DEFAULT_COMMENT_PAGE };
+const READY: BoardUrlState = { view: 'issues', selectedNumber: 7, filter: 'all', settingsOpen: false, page: 2, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE };
 
 function fakeHistory() {
   const calls: { mode: 'push' | 'replace'; url: string }[] = [];
@@ -167,6 +168,7 @@ describe('navigating between states', () => {
       settingsOpen: false,
       page: DEFAULT_ISSUE_PAGE,
       commentPage: DEFAULT_COMMENT_PAGE,
+      feedPage: DEFAULT_FEED_PAGE,
     });
   });
 
@@ -181,13 +183,14 @@ describe('navigating between states', () => {
   });
 
   it('goes home to the Issues tab with nothing selected', () => {
-    expect(boardHomeState(READY)).toEqual({ view: 'issues', selectedNumber: undefined, filter: 'open', settingsOpen: false, page: DEFAULT_ISSUE_PAGE, commentPage: DEFAULT_COMMENT_PAGE });
+    expect(boardHomeState(READY)).toEqual({ view: 'issues', selectedNumber: undefined, filter: 'open', settingsOpen: false, page: DEFAULT_ISSUE_PAGE, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE });
   });
 
   it('tells two states apart only by what they show', () => {
     expect(sameBoardUrl(READY, { ...READY })).toBe(true);
     expect(sameBoardUrl(READY, { ...READY, page: 3 })).toBe(false);
     expect(sameBoardUrl(READY, { ...READY, commentPage: 3 })).toBe(false);
+    expect(sameBoardUrl(READY, { ...READY, feedPage: 3 })).toBe(false);
     expect(sameBoardUrl(READY, { ...READY, settingsOpen: true })).toBe(false);
   });
 });

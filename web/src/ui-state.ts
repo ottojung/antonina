@@ -548,9 +548,61 @@ export const FEED_EMPTY = {
   body: 'Entries appear here as soon as the board records its first operation.',
 } as const;
 
-export const FEED_MORE_LABEL = 'Show older entries';
-
 export const FEED_COUNT_LABEL = (shown: number, total: number) => `${shown} of ${total} recorded entries`;
+
+/**
+ * How many entries one page of the feed holds.
+ *
+ * It is the projection's own `DEFAULT_FEED_LIMIT` rather than a number written
+ * here, for the reason `feedFirstPageRequest` exists: a page in the browser and a
+ * page of `antonina board feed` are the same page, and two literals that both
+ * say 50 is two values that can drift. It is 50, which is also `ISSUE_PAGE_SIZE`
+ * and `COMMENT_PAGE_SIZE`, so every numbered page on the board is one chunk.
+ */
+export const FEED_PAGE_SIZE = DEFAULT_FEED_LIMIT;
+
+/**
+ * The feed's paging, as the same model the Issues list and a conversation use.
+ *
+ * These are the `issuePage*` helpers applied to the feed's own entry count and
+ * page size, exactly as `commentPage*` applies them to a message count. They are
+ * not a second implementation: the page count, the clamp, the range line and the
+ * "is there more than one page" question are all answered by the same four
+ * functions, so the feed cannot disagree with the rest of the board about what a
+ * page number means or what happens to one that no longer exists.
+ */
+export function feedPageCount(total: number, pageSize = FEED_PAGE_SIZE): number {
+  return issuePageCount(total, pageSize);
+}
+
+/**
+ * The page of the feed the reader may actually be on, given the page that was
+ * asked for. Out of range moves down onto the last existing page, exactly as
+ * `clampIssuePage` does, so a feed that got shorter between reads keeps the
+ * reader on a page that exists instead of blanking the tab.
+ */
+export function clampFeedPage(page: number, total: number, pageSize = FEED_PAGE_SIZE): number {
+  return clampIssuePage(page, total, pageSize);
+}
+
+/**
+ * Which entries are on screen out of how many the log holds.
+ *
+ * The count is `total`, which the projection reports for the whole feed rather
+ * than for the page, so the range line is about the log and not about the window
+ * onto it — the same thing `issuePageRange` says about a filtered issue list.
+ */
+export function feedPageRange(total: number, page: number, pageSize = FEED_PAGE_SIZE): string {
+  return issuePageRange(total, page, pageSize);
+}
+
+/** Whether the log is long enough to be worth paging at all. */
+export function hasFeedPages(total: number, pageSize = FEED_PAGE_SIZE): boolean {
+  return hasIssuePages(total, pageSize);
+}
+
+/** What the feed's Previous/Next control announces itself as paging. */
+export const FEED_PAGES_LABEL = 'Board feed pages';
 
 /**
  * The one shape the feed is read through, wherever it is called from: the bare
@@ -561,37 +613,53 @@ export const FEED_COUNT_LABEL = (shown: number, total: number) => `${shown} of $
 export type { FeedRead } from './api';
 
 /**
- * The request the feed tab opens with. It asks the core projection for its own
- * default page — 50 entries — rather than naming a number here, so the browser
- * and `antonina board feed` have one default rather than two that can drift.
+ * The request the feed tab opens with, and the request any page after the first
+ * is reached by. It asks the core projection for its own default page — 50
+ * entries — rather than naming a number here, so the browser and
+ * `antonina board feed` have one default rather than two that can drift.
  */
 export function feedFirstPageRequest(): BoardFeedRequest {
-  return { limit: DEFAULT_FEED_LIMIT };
+  return { limit: FEED_PAGE_SIZE };
 }
 
 /**
- * The one read the tab opens with, named so the path a detached read has to
- * survive is a function that can be called and tested rather than an effect
- * body. The read is taken as the prop hands it over and called on its own.
- */
-export async function readFeedFirstPage(readFeed: FeedRead): Promise<BoardFeedPage> {
-  return readFeed(feedFirstPageRequest());
-}
-
-/**
- * One page back, using the token the previous page returned.
+ * The numbered feed page the reader asked for, as the ONE page that is kept.
  *
- * The cursor is handed to the projection exactly as it arrived. It is a position
- * in the materialized feed, not an offset, so the page this returns is the set
- * of entries committed before that position — a walk that neither skips nor
- * repeats an entry, and that still works for a position whose issue the board no
- * longer holds. The merged page keeps the token for its own next call, so a
- * reader can keep walking until the projection returns `null` and the feed is
- * exhausted.
+ * The projection's API is cursor-based and that stays an implementation detail
+ * of this function: to reach page `page` it walks forward from the newest page,
+ * handing each token back to the projection exactly as it arrived, and returns
+ * only the page that was asked for. Nothing merges and nothing accumulates, so
+ * the number of entries the caller holds is the number of entries on one page
+ * however deep into the log the reader has been — which is the whole point, and
+ * is the same shape the public CLI's `readNumberedFeedPage` produces.
+ *
+ * A `page` below 1 is page 1, and a page past the end of the log is the last
+ * page that exists: both are the `clampIssuePage` rule this model already uses
+ * everywhere else. The page that exists is only known once the newest page has
+ * been read — it is the page that reports the log's `total` — so that read
+ * happens first and the clamp follows it, rather than an out-of-range link
+ * asking the projection for a page it has no entries for.
+ *
+ * The walk costs one request per page, because a cursor names a position and
+ * not an offset. That is a cost of the cursor API and is stated in the report
+ * for issue 174 as a `packages/core` concern; it is not worked around here,
+ * because a browser-side offset the server cannot honour would be an invention.
  */
-export async function appendFeedPage(readFeed: FeedRead, current: BoardFeedPage, cursor: string): Promise<BoardFeedPage> {
-  const older = await readFeed({ limit: DEFAULT_FEED_LIMIT, cursor });
-  return { ...older, entries: [...current.entries, ...older.entries] };
+export async function readFeedPage(readFeed: FeedRead, page: number, pageSize = FEED_PAGE_SIZE): Promise<BoardFeedPage> {
+  const newest = await readFeed(feedFirstPageRequest());
+  const wanted = clampFeedPage(page, newest.total, pageSize);
+  let current = newest;
+  for (let number = 1; number < wanted; number += 1) {
+    // The projection stops issuing tokens at the end of the log. A page number
+    // past that point has no entries behind it, so the walk stops rather than
+    // asking again, and the empty page it ends on keeps the log's own `total`
+    // so the caller still knows how long the feed is.
+    if (current.nextCursor === null) {
+      return { entries: [], nextCursor: null, total: current.total, limit: current.limit };
+    }
+    current = await readFeed({ limit: pageSize, cursor: current.nextCursor });
+  }
+  return current;
 }
 
 /**
@@ -650,6 +718,19 @@ export function untrackedIssueNumbers<T extends Pick<BoardIssue, 'number'>>(issu
  * view says nothing rather than something weaker. A board that is entirely
  * untracked is still reported, as soon as the reader has walked the feed to its
  * end and can honestly be told the log holds nothing for those issues.
+ *
+ * WHAT NUMBERED PAGING COSTS HERE, STATED RATHER THAN PAPERED OVER (board 173).
+ * This gate needs the WHOLE log's entries in hand, and numbered pagination
+ * deliberately keeps only one page: the tab that renders page 3 of a 60-entry log
+ * holds 50 entries and a `nextCursor`, so the honest answer here is no issues and
+ * the caveat stays silent. That is the safe direction — the alternative would be
+ * a claim about every issue on the board made from a single page of entries — but
+ * it does mean the browser no longer raises this caveat, where the old
+ * append-everything walk did once a reader had walked to the end. The rule is
+ * unchanged, and the view that feeds it a complete walk still satisfies it;
+ * restoring the caveat for a paged reader needs the union of issue numbers across
+ * the log, which is a `packages/core` projection question rather than something to
+ * re-accumulate in the browser.
  */
 export function unplacedIssueNumbers<T extends Pick<BoardIssue, 'number'>>(issues: readonly T[], entries: BoardFeedEntry[], nextCursor: string | null, total: number): number[] {
   if (nextCursor !== null || entries.length < total) return [];

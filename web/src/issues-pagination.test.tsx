@@ -539,15 +539,22 @@ describe('the issues list, paginated', () => {
     expect(drawnRows(container)).toContain(60);
   });
 
-  it('leaves the feed its own cursor-based paging', async () => {
-    // The feed has no page controls and reads one cursor page at a time; the
-    // list's Previous/Next are the issue list's alone.
+  it('leaves the feed its own numbered paging, separate from the list', async () => {
+    // Board 173: the feed is paged by number like everything else, but its page
+    // number is its own field, so opening the Feed tab does not renumber the
+    // Issues list and the list's Previous/Next are not the feed's.
     board = boardOf(126);
     const container = await mountApp();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'feed' })); });
 
+    // The feed's own control is labelled for the feed, not for the list.
+    expect(container.querySelector('nav[aria-label="Board feed pages"]')).toBeNull();
     expect(container.querySelector('.feed-more')).toBeNull();
-    expect(container.querySelector('.issue-pagination')).toBeNull();
+    // It is absent here only because this fake feed reports 0 entries, so the
+    // log is one page and one page gets no controls.
     expect(session.readFeed).toHaveBeenCalledWith({ limit: DEFAULT_FEED_LIMIT });
+    // The list's page is untouched by the feed: back on Issues it is page 1.
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'issues' })); });
+    expect(rangeText(container)).toBe('1–50 of 126');
   });
 });

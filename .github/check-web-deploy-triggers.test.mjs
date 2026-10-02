@@ -85,8 +85,10 @@ test('the traced make target comes from a run step, not from a comment', (t) => 
   // the exact number on purpose, so the next added source file moves it again
   // rather than the check quietly widening into a wildcard. 41 is this revision:
   // 40 before, plus `issue-conversation-pagination.test.tsx`, which board issue
-  // 174 added to cover the paged issue conversation.
-  assert.match(result.stdout, /traced bundle inputs: 41/);
+  // 174 added to cover the paged issue conversation. 42 is this revision: 41
+  // before, plus `feed-pagination.test.tsx`, which board issue 173 added to cover
+  // the feed's numbered pages and their addressable page state.
+  assert.match(result.stdout, /traced bundle inputs: 42/);
 });
 
 test('a bare filename include is traced as the file it names', (t) => {

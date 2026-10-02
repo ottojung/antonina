@@ -19,7 +19,17 @@ process.env.XDG_CONFIG_HOME = '/nonexistent-antonina-web-feed-tab-config';
 import { FeedThread, type FeedThreadProps } from './App';
 import { DEFAULT_FEED_LIMIT, type BoardFeedEntry, type BoardFeedEntryKind, type BoardFeedPage, type BoardFeedRequest } from './api';
 import type { BoardIssue } from './model';
-import { appendFeedPage, feedFirstPageRequest, FEED_COUNT_LABEL, FEED_MORE_LABEL } from './ui-state';
+import {
+  clampFeedPage,
+  FEED_COUNT_LABEL,
+  FEED_PAGE_SIZE,
+  FEED_PAGES_LABEL,
+  feedFirstPageRequest,
+  feedPageCount,
+  feedPageRange,
+  hasFeedPages,
+  readFeedPage,
+} from './ui-state';
 
 // The web suite runs in a node environment with no document and no layout
 // engine, so nothing here can be scrolled, hovered or clicked by a browser.
@@ -58,12 +68,12 @@ function page(entries: BoardFeedEntry[], nextCursor: string | null, total = entr
 function props(overrides: Partial<FeedThreadProps> = {}): FeedThreadProps {
   return {
     entries: [],
-    nextCursor: null,
     total: 0,
+    page: 1,
     issues: [],
     loading: false,
     error: undefined,
-    onShowMore: () => {},
+    onPage: () => {},
     onOpenIssue: () => {},
     ...overrides,
   };
@@ -164,21 +174,58 @@ describe('the feed tab', () => {
     expect(markup).toContain('#8 Issue 8');
   });
 
-  it('offers the older-entries control only while the backend holds a continuation', () => {
+  it('draws Previous and Next only while the log is longer than one page', () => {
+    // One page is not a paged list, so a short log is given no navigation at all
+    // rather than two dead buttons. This is the same rule `IssuePagination`
+    // applies to the Issues list and to a conversation.
     const entries = [entry('issue-created', 1)];
-    const markup = renderToStaticMarkup(<FeedThread {...props({ entries, nextCursor: 'v1.token', total: 400 })} />);
 
-    expect(markup).toContain(FEED_MORE_LABEL);
-    expect(renderToStaticMarkup(<FeedThread {...props({ entries, nextCursor: null, total: 1 })} />)).not.toContain(FEED_MORE_LABEL);
+    expect(renderToStaticMarkup(<FeedThread {...props({ entries, total: 400 })} />)).toContain('Board feed pages');
+    expect(renderToStaticMarkup(<FeedThread {...props({ entries, total: 1, page: 1 })} />)).not.toContain('Board feed pages');
+    // And a log of exactly one page is not two pages because the count rounds up.
+    expect(hasFeedPages(FEED_PAGE_SIZE)).toBe(false);
+    expect(hasFeedPages(FEED_PAGE_SIZE + 1)).toBe(true);
   });
 
-  it('asks for older entries through the control it rendered', () => {
-    const onShowMore = vi.fn();
-    const more = byClass({ entries: [entry('issue-created', 1)], nextCursor: 'v1.token', total: 400, onShowMore }, 'feed-more');
+  it('disables Previous on the first page and Next on the last, and neither in the middle', () => {
+    const nav = (page: number) => byClass({ entries: [entry('issue-created', 1)], total: 400, page }, 'quiet');
 
-    expect(more).toHaveLength(1);
-    (more[0] as Button).props.onClick?.();
-    expect(onShowMore).toHaveBeenCalledTimes(1);
+    expect(nav(1).map((button) => button.props.disabled)).toEqual([true, false]);
+    expect(nav(4).map((button) => button.props.disabled)).toEqual([false, false]);
+    expect(nav(8).map((button) => button.props.disabled)).toEqual([false, true]);
+  });
+
+  it('says which entries are on screen out of how many the log holds', () => {
+    // The range line is about the LOG, not about what has been read so far: the
+    // projection's `total` counts the whole feed, so page 2 of a 400-entry log
+    // says 51–100 of 400 rather than counting from one.
+    expect(feedPageRange(400, 1)).toBe('1–50 of 400');
+    expect(feedPageRange(400, 8)).toBe('351–400 of 400');
+    expect(feedPageCount(400)).toBe(8);
+    expect(feedPageCount(0)).toBe(1);
+    // The last page is short, and the range says so instead of claiming 351–400.
+    expect(feedPageRange(51, 2)).toBe('51–51 of 51');
+    // An empty log says so in its own words rather than claiming a range.
+    expect(feedPageRange(0, 1)).toBe('No issues');
+  });
+
+  it('asks for the neighbouring page through the controls it rendered', () => {
+    const onPage = vi.fn();
+    const buttons = byClass({ entries: [entry('issue-created', 1)], total: 400, page: 4, onPage }, 'quiet');
+
+    expect(buttons).toHaveLength(2);
+    (buttons[0] as Button).props.onClick?.();
+    (buttons[1] as Button).props.onClick?.();
+    expect(onPage.mock.calls).toEqual([[3], [5]]);
+  });
+
+  it('clamps a page past the end of the log down onto the last page that exists', () => {
+    // A link naming a page the log cannot fill must not blank the tab, and must
+    // not leave the address claiming a page that is not the one on screen.
+    expect(clampFeedPage(9, 400)).toBe(8);
+    expect(clampFeedPage(0, 400)).toBe(1);
+    expect(clampFeedPage(1, 0)).toBe(1);
+    expect(clampFeedPage(Number.NaN, 400)).toBe(1);
   });
 
   it('shows nothing but the empty state before the board has recorded an operation', () => {
@@ -186,7 +233,7 @@ describe('the feed tab', () => {
 
     expect(markup).toContain('No activity recorded yet');
     expect(markup).not.toContain('feed-entry');
-    expect(markup).not.toContain(FEED_MORE_LABEL);
+    expect(markup).not.toContain('Board feed pages');
   });
 
   it('says that message edits and per-field issue-edit history are not tracked, without inventing them', () => {
@@ -240,24 +287,28 @@ describe('the feed tab', () => {
       // silent.
       const entries = Array.from({ length: 50 }, (_, index) => entry('issue-created', 50 - index));
       const issues = Array.from({ length: 60 }, (_, index) => issue(index + 1));
-      const markup = renderToStaticMarkup(<FeedThread {...props({ entries, nextCursor: 'v1.more', total: 55, issues })} />);
+      const markup = renderToStaticMarkup(<FeedThread {...props({ entries, total: 55, issues })} />);
 
       expect(entries).toHaveLength(50);
       expect(issues).toHaveLength(60);
-      expect(markup).toContain(FEED_MORE_LABEL);
+      // Numbered pages, so the reader can move on to the unread rest rather than
+      // the log ending at this page — and the caveat still says nothing, because
+      // a page of 50 entries cannot place issue 51.
+      expect(markup).toContain('Board feed pages');
       expect(markup).not.toContain('already on the board');
       expect(markup).not.toContain('#51');
       expect(markup).not.toContain('.feed-caveat');
     });
 
     it('names the same ten once the walk has read the log to its end', () => {
-      // The claim is not dropped, it is deferred: with no token left and every
-      // entry the projection counted in hand, the difference is real and the
-      // caveat says so — and says that the whole feed was read, because that is
-      // what it now depends on.
+      // The rule itself is unchanged: every entry the projection counted is in
+      // hand, so the difference is real and the caveat says so — and says that
+      // the whole feed was read, because that is what it depends on. What
+      // numbered pagination changes is who can satisfy it (see the note on
+      // `unplacedIssueNumbers`), not what it says when they do.
       const entries = Array.from({ length: 50 }, (_, index) => entry('issue-created', 50 - index));
       const issues = Array.from({ length: 60 }, (_, index) => issue(index + 1));
-      const markup = renderToStaticMarkup(<FeedThread {...props({ entries, nextCursor: null, total: 50, issues })} />);
+      const markup = renderToStaticMarkup(<FeedThread {...props({ entries, total: 50, issues })} />);
 
       expect(markup).toContain('read the whole feed');
       expect(markup).toContain('#51, #52, #53, #54, #55, #56, #57, #58, #59, #60');
@@ -265,11 +316,11 @@ describe('the feed tab', () => {
     });
 
     it('stays silent when the entries in hand fall short of what the log holds', () => {
-      // The token is gone but the walk came up short, so the reader still
-      // cannot tell a pre-log issue from an unread one. No continuation token is
-      // offered either — the backend issued none — and the caveat stays off.
+      // The entries in hand fall short of what the log holds, so the reader
+      // still cannot tell a pre-log issue from an unread one and the caveat
+      // stays off.
       const entries = [entry('issue-created', 1)];
-      const markup = renderToStaticMarkup(<FeedThread {...props({ entries, nextCursor: null, total: 9, issues: [issue(1), issue(2)] })} />);
+      const markup = renderToStaticMarkup(<FeedThread {...props({ entries, total: 9, issues: [issue(1), issue(2)] })} />);
 
       expect(markup).not.toContain('already on the board');
       expect(markup).not.toContain('read the whole feed');
@@ -310,8 +361,11 @@ describe('the feed tab in the app shell', () => {
     // inlined in the effect, which is what lets a detached read be exercised
     // directly: the test in api.test.ts calls this same reader with a session
     // method that has lost its receiver, the way this prop has.
-    expect(app).toMatch(/await readFeedFirstPage\(read\)/);
+    expect(app).toMatch(/await readFeedPage\(readFeedRead, page\)/);
     expect(app).toMatch(/readFeed: FeedRead;/);
+    // The accumulator is gone: the container holds the one page it read and has
+    // no way to merge another into it.
+    expect(app).not.toMatch(/appendFeedPage|FEED_MORE_LABEL/);
   });
 });
 
@@ -323,39 +377,70 @@ describe('the requests the feed tab sends', () => {
     expect(DEFAULT_FEED_LIMIT).toBe(50);
   });
 
-  it('carries the backend cursor back unchanged to load older entries', async () => {
+  it('reaches page 2 by walking the cursor forward and returns only that page', async () => {
     const seen: Array<BoardFeedRequest> = [];
+    const newest = [entry('issue-created', 3), entry('issue-created', 2)];
     const older = [entry('issue-created', 1)];
     const readFeed = async (request: BoardFeedRequest = {}) => {
       seen.push(request);
-      return page(older, 'v1.next-token', 3);
+      return request.cursor === undefined ? page(newest, 'v1.token', 60) : page(older, null, 60);
     };
-    const current = page([entry('comment-added', 3), entry('issue-created', 2)], 'v1.first-token', 3);
 
-    const merged = await appendFeedPage(readFeed, current, current.nextCursor!);
+    const read = await readFeedPage(readFeed, 2);
 
-    expect(seen).toEqual([{ limit: DEFAULT_FEED_LIMIT, cursor: 'v1.first-token' }]);
-    // Newest first throughout: the older page is appended below what is already
-    // shown, and nothing the browser holds is re-sorted.
-    expect(merged.entries.map((each) => each.id)).toEqual([...current.entries, ...older].map((each) => each.id));
-    // The token the backend returned with the new page is kept, so the next
-    // walk continues from there rather than restarting.
-    expect(merged.nextCursor).toBe('v1.next-token');
-    expect(merged.total).toBe(3);
+    // The newest page is read first because only it reports the log's `total`,
+    // and the cursor walk hands each token back unchanged.
+    expect(seen).toEqual([{ limit: DEFAULT_FEED_LIMIT }, { limit: DEFAULT_FEED_LIMIT, cursor: 'v1.token' }]);
+    // One page, not a merge: the caller holds 1 entry, not 3.
+    expect(read.entries.map((each) => each.id)).toEqual([older[0].id]);
+    expect(read.total).toBe(60);
+  });
+
+  it('reads page 1 with a single request and no cursor at all', async () => {
+    const seen: Array<BoardFeedRequest> = [];
+    const readFeed = async (request: BoardFeedRequest = {}) => {
+      seen.push(request);
+      return page([entry('issue-created', 1)], null, 1);
+    };
+
+    const read = await readFeedPage(readFeed, 1);
+
+    expect(seen).toEqual([{ limit: DEFAULT_FEED_LIMIT }]);
+    expect(read.entries).toHaveLength(1);
+  });
+
+  it('clamps a page past the end of the log before it walks, so it asks for no page', async () => {
+    // A hand-edited `?entries=9` on a two-page log lands on the last page that
+    // exists rather than walking to nothing. The clamp needs the log's `total`,
+    // so the newest page is read first and the walk then stops.
+    const seen: Array<BoardFeedRequest> = [];
+    const readFeed = async (request: BoardFeedRequest = {}) => {
+      seen.push(request);
+      return page([entry('issue-created', 1)], request.cursor === undefined ? 'v1.token' : null, 60);
+    };
+
+    const read = await readFeedPage(readFeed, 99);
+
+    expect(seen).toHaveLength(2);
+    expect(read.entries).toHaveLength(1);
+    expect(read.nextCursor).toBeNull();
+    expect(feedPageCount(read.total)).toBe(2);
   });
 
   it('stops walking when the backend stops issuing a token, without asking again', async () => {
     const seen: Array<BoardFeedRequest> = [];
     const readFeed = async (request: BoardFeedRequest = {}) => {
       seen.push(request);
-      return page([entry('issue-created', 1)], null, 2);
+      // The log reports 200 entries and issues no token: the walk past the end
+      // must stop rather than loop, and must say the log is 200 long.
+      return page([entry('issue-created', 1)], null, 200);
     };
-    const current = page([entry('issue-created', 2)], 'v1.token', 2);
 
-    const merged = await appendFeedPage(readFeed, current, 'v1.token');
+    const read = await readFeedPage(readFeed, 3);
 
     expect(seen).toHaveLength(1);
-    expect(merged.nextCursor).toBeNull();
-    expect(merged.entries).toHaveLength(2);
+    expect(read.entries).toEqual([]);
+    expect(read.nextCursor).toBeNull();
+    expect(read.total).toBe(200);
   });
 });

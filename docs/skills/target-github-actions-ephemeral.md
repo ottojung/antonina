@@ -94,7 +94,7 @@ Two consequences worth stating plainly, because they are easy to get backwards:
 ## How an orchestrator should use this target
 
 1. Ask the board for the target: `antonina board target list --kind
-   ephemeral-environment`, or `target show ID` for one target's access method,
+   ephemeral-environment --page 1`, or `target show ID` for one target's access method,
    persistence, garbage collection, limitations and guidance references.
 2. Choose this target only when the work genuinely needs no durable filesystem
    and no durable path — a build, a test run, a one-shot fix whose result is

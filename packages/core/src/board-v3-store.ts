@@ -1494,13 +1494,34 @@ export class ShardedBoardStore {
     };
     if (!withMessages) return { snapshot, issue: issueFromCore(core, []) };
 
-    const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, index) =>
-      this.readCommentShard(credential, meta, snapshot, index)));
+    const pages = await Promise.all(snapshot.commentRefs.map(
+      (commentRef, index) => this.readCommentPage(credential, meta, snapshot.number, commentRef, index + 1),
+    ));
     const messages = pages.flat();
     if (messages.length !== snapshot.messageCount) {
       throw new ShardedBoardStoreError('Antonina issue message count does not match its comment pages');
     }
     return { snapshot, issue: issueFromCore(core, messages) };
+  }
+
+  private async readCommentPage(
+    credential: BoardCredential,
+    meta: ShardedBoardMeta,
+    number: number,
+    commentRef: string,
+    page: number,
+  ): Promise<BoardMessage[]> {
+    const pageStored = await this.requireJson<unknown>(credential.storageCapability, commentRef);
+    const pageValue = pageStored.value;
+    if (!isRecord(pageValue)
+        || pageValue.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
+        || pageValue.boardId !== meta.boardId
+        || pageValue.number !== number
+        || pageValue.page !== page
+        || !Array.isArray(pageValue.messages)) {
+      throw new ShardedBoardStoreError('Antonina comment page is malformed');
+    }
+    return clone(pageValue.messages as BoardMessage[]);
   }
 
   /**
@@ -3331,6 +3352,49 @@ export class ShardedBoardStore {
       total: snapshot.messageCount,
       messages: await this.readCommentShard(credential, meta, snapshot, page - 1),
     };
+  }
+
+  /**
+   * Read one logical issue page newest-first without hydrating the entire
+   * append-only comment history. Storage comment shards are oldest-first, so a
+   * logical page can straddle two physical shards.
+   *
+   * This is the CLI's `board issue show --page N` read and is deliberately a
+   * different unit of paging from `readIssueCommentPage` above: this one pages
+   * LOGICAL pages newest-first (page 1 is the newest 50 messages), that one
+   * pages PHYSICAL shards oldest-first and fetches at most one shard. Both
+   * coexist so neither caller is asked to accept the other's page order.
+   */
+  async getIssuePage(
+    credentialValue: BoardCredential,
+    number: number,
+    page: number,
+  ): Promise<BoardIssue | null> {
+    const { credential, meta } = await this.requirePointerForCredential(credentialValue);
+    const resolved = await this.readIssueSnapshotByNumber(credential, meta, number, false);
+    if (resolved === null) return null;
+
+    const { snapshot, issue } = resolved;
+    const end = Math.max(0, snapshot.messageCount - (page - 1) * V3_COMMENT_PAGE_SIZE);
+    const start = Math.max(0, end - V3_COMMENT_PAGE_SIZE);
+    if (start >= end) return issue;
+
+    const firstPhysicalIndex = Math.floor(start / V3_COMMENT_PAGE_SIZE);
+    const lastPhysicalIndex = Math.floor((end - 1) / V3_COMMENT_PAGE_SIZE);
+    const physicalPages = await Promise.all(
+      snapshot.commentRefs
+        .slice(firstPhysicalIndex, lastPhysicalIndex + 1)
+        .map((commentRef, offset) => this.readCommentPage(
+          credential,
+          meta,
+          number,
+          commentRef,
+          firstPhysicalIndex + offset + 1,
+        )),
+    );
+    const physicalStart = firstPhysicalIndex * V3_COMMENT_PAGE_SIZE;
+    const messages = physicalPages.flat().slice(start - physicalStart, end - physicalStart);
+    return { ...issue, messages: clone(messages) };
   }
 
   private async readIssuePageFromMeta(

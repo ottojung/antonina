@@ -125,10 +125,11 @@ test('unknown options and duplicate scalar options are rejected', () => {
 });
 
 
-test('collection commands require --page and single-item reads do not accept it', () => {
+test('paginated reads require --page and unpaginated single-item reads reject it', () => {
   assert.deepEqual(run('board', ['list', '--page', '2']), ['list', '--page', '2']);
   assert.deepEqual(run('board', ['queue', 'list', '--page', '3']), ['queue', 'list', '--page', '3']);
   assert.deepEqual(run('board', ['feed', '--page', '4']), ['feed', '--page', '4']);
+  assert.deepEqual(run('board', ['show', '--id', '1', '--page', '2']), ['show', '1', '--page', '2']);
   assert.deepEqual(
     run('board', ['resource', 'list', '--host', 'marceline-dev', '--page', '2']),
     ['resource', 'list', '--host', 'marceline-dev', '--page', '2'],
@@ -144,6 +145,7 @@ test('collection commands require --page and single-item reads do not accept it'
     ['board', ['list']],
     ['board', ['queue', 'list']],
     ['board', ['feed']],
+    ['board', ['show', '--id', '1']],
     ['board', ['resource', 'list']],
     ['board', ['target', 'list']],
     ['board', ['collect', 'list', '--host', 'marceline-dev']],
@@ -169,10 +171,9 @@ test('collection commands require --page and single-item reads do not accept it'
     (error) => error instanceof PublicCliUsageError && /unknown option --cursor/.test(error.message),
   );
 
-  assert.throws(
-    () => preparePublicCommand('board', ['show', '--id', '1', '--page', '2']),
-    (error) => error instanceof PublicCliUsageError && /unknown option --page/.test(error.message),
-  );
+  const showHelp = preparePublicCommand('board', ['show', '--help']);
+  assert.equal(showHelp.kind, 'help');
+  assert.match(showHelp.text, /--page <value>.*required/);
   assert.throws(
     () => preparePublicCommand('agent', ['status', '--id', 'a11d', '--page', '2']),
     (error) => error instanceof PublicCliUsageError && /unknown option --page/.test(error.message),

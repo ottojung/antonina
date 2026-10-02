@@ -430,6 +430,34 @@ export class SignedBoardStore {
     }
   }
 
+  /**
+   * One logical issue page, newest-first, without hydrating the whole
+   * append-only comment history.
+   *
+   * This is the read behind `antonina board issue show --page N`. It is a
+   * separate method from `readIssueCommentPage` because the two page in
+   * opposite directions over different units: this one pages a LOGICAL page of
+   * `V3_COMMENT_PAGE_SIZE` messages newest-first, so a page can straddle two
+   * physical comment shards, while `readIssueCommentPage` pages the PHYSICAL
+   * shards oldest-first and fetches at most one of them. `getIssue` still means
+   * "the whole issue, every message" to its existing callers and is unchanged.
+   */
+  async getIssuePage(
+    credentialValue: BoardCredential,
+    number: number,
+    page: number,
+    previouslyAcceptedHead?: string | null,
+  ): Promise<BoardIssue | null> {
+    const credential = await verifyBoardCredential(credentialValue);
+    await this.ensureMaterialized(credential, previouslyAcceptedHead);
+    try {
+      return await this.sharded.getIssuePage(credential, number, page);
+    } catch (error) {
+      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
+      throw error;
+    }
+  }
+
   async readIssuePage(
     credentialValue: BoardCredential,
     state: IssueState,

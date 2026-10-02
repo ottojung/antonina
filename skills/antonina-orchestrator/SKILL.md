@@ -40,12 +40,12 @@ Use JSON output for orchestration decisions.
 antonina board access --json
 antonina board queue list --page 1 --json
 antonina board list --state open --page 1 --json
-antonina board show --id NUMBER --json
+antonina board show --id NUMBER --page 1 --json
 ```
 
 Collection reads never choose a page implicitly. The following commands require a 1-based `--page N`: `board queue list`, `board list`, `board feed`, `board resource list`, `board target list`, `board collect list`, and `agent list`. Page 1 is the start of each collection; for issues it contains the highest-priority open issues first. The default page size is 50. `board feed --limit N` and `agent list --limit N` change their page size without making `--page` optional.
 
-When a pass needs more than the first page, increment the page number explicitly until enough state has been read or an empty page is reached. If the pass mutates queue membership or order while scanning — for example by closing, reopening, creating, or reordering issues — restart any priority-sensitive scan at page 1 before making further scheduling decisions. Single-record reads such as `board show --id NUMBER`, `board target show --id ID`, and `agent status --id ID` are deliberately unpaginated and return the whole record.
+When a pass needs more than the first page, increment the page number explicitly until enough state has been read or an empty page is reached. `board show --id NUMBER --page 1` returns the issue description plus the newest comment page; increment `--page` to read older comments when the current state is not yet clear. If the pass mutates queue membership or order while scanning — for example by closing, reopening, creating, or reordering issues — restart any priority-sensitive scan at page 1 before making further scheduling decisions. Other single-record reads such as `board target show --id ID` and `agent status --id ID` remain unpaginated.
 
 New issue bodies and new comments are capped at 1,000 Unicode characters. Keep orchestrator comments compact and put large diagnostics, reviews, transcripts, or generated reports in a durable artifact, then link or name that artifact from the comment instead of pasting it into the board. Historical oversized content is still returned in full by single-record reads.
 
@@ -89,7 +89,7 @@ There is no worker-count target, quota, soft cap, default maximum, or notion of 
 
 Begin with a compact breadth sweep to discover candidate fronts, but discovery is not enough to assign work. Before launching, steering, or materially re-scoping any agent for an issue, the orchestrator itself must understand that issue's current state. At minimum, read the issue description and its most recent comments. Read enough of the recent tail to reconstruct the current goal, latest decisions, blockers, existing work/ownership, and the immediate next step; if those facts are not clear, expand farther back until they are. Never launch an implementation, review, research, or reconnaissance agent from title/collection metadata alone.
 
-For very large append-only histories, do not ingest the whole history merely to satisfy this requirement. Use the single-issue JSON as data: inspect the description and extract the newest comments from its ordered message list, expanding backward as needed. Old archaeology can be delegated after this current-state read, but the orchestrator must know what it is delegating and why before creating the agent. A reconnaissance agent is appropriate for resolving older or deeper uncertainty, not for replacing the orchestrator's minimum understanding of the issue's present state.
+For very large append-only histories, start with `board show --id NUMBER --page 1` and read older pages only until the current state is clear. Old archaeology can be delegated after this current-state read, but the orchestrator must know what it is delegating and why before creating the agent. A reconnaissance agent is appropriate for resolving older or deeper uncertainty, not for replacing the orchestrator's minimum understanding of the issue's present state.
 
 Selection proceeds in phases:
 
@@ -285,7 +285,7 @@ Never put secrets in issue bodies, comments, branch names, logs quoted into comm
 antonina board access --json
 antonina board queue list --page 1 --json
 antonina board list --state open --page 1 --json
-antonina board show --id NUMBER --json
+antonina board show --id NUMBER --page 1 --json
 
 # append coordination state
 antonina board comment --id NUMBER --body BODY

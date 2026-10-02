@@ -194,7 +194,7 @@ test('the target commands parse only the typed vocabulary', async () => {
     ['target', 'set', 'phoebe-dev', '--status', 'sleeping'],
     ['target', 'list', '--page', '1', '--backend', 'ssh'],
     ['dispatch', 'select', '--capability', 'teleport'],
-    ['target', 'list', 'extra'],
+    ['target', 'list', '--page', '1', 'extra'],
     ['target', 'nonsense'],
     ['dispatch', 'nonsense'],
   ]) {

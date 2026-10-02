@@ -160,6 +160,15 @@ test('collection commands require --page and single-item reads do not accept it'
   assert.equal(listHelp.kind, 'help');
   assert.match(listHelp.text, /--page <value>.*required/);
 
+  const feedHelp = preparePublicCommand('board', ['feed', '--help']);
+  assert.equal(feedHelp.kind, 'help');
+  assert.match(feedHelp.text, /--page <value>.*required/);
+  assert.doesNotMatch(feedHelp.text, /--cursor/);
+  assert.throws(
+    () => preparePublicCommand('board', ['feed', '--page', '1', '--cursor', 'legacy']),
+    (error) => error instanceof PublicCliUsageError && /unknown option --cursor/.test(error.message),
+  );
+
   assert.throws(
     () => preparePublicCommand('board', ['show', '--id', '1', '--page', '2']),
     (error) => error instanceof PublicCliUsageError && /unknown option --page/.test(error.message),

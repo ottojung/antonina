@@ -78,7 +78,9 @@ At the beginning of every pass:
 
 Use a **launch-early** policy. Full issue-history or repository investigation is not a prerequisite to delegation when a safe agent can perform that investigation itself. Large append-only issue histories are especially unsuitable as serial orchestrator work: prefer compact queue/list/feed/resource/agent state for scheduling, and delegate deep history reading, code archaeology, diagnosis, review, or research to an Antonina agent. Read a full issue record in the orchestrator only when its exact content is needed to avoid a concrete ownership, safety, or scope mistake.
 
-When enough clearly independent actionable work exists and host resources permit it, aim to establish several concurrent fronts quickly; roughly five active Antonina agents is a useful operating target, not a quota. Do not delay the first launch merely to prove that all later slots are also safe.
+A live Antonina agent with a known issue/worktree is already reconciled enough for frontier accounting. Count it as occupied capacity and do not deep-read its issue, re-review its work, or supervise it before filling clearly safe empty slots. If an old handoff or stale reservation needs substantial investigation before it can resume, delegate that reconciliation to an agent (read-only when appropriate) instead of turning it into serial orchestrator work. Uncertainty about an issue's internals is a reason to launch a bounded reconnaissance/review agent when that can be done safely, not a reason to stall the whole frontier.
+
+When enough clearly independent actionable work exists and host resources permit it, aim to establish several concurrent fronts quickly; roughly five active Antonina agents is a useful operating target, not a quota. Fill obvious empty slots before doing deep harvest, review, or recovery work on already represented fronts. Do not delay the first launch merely to prove that all later slots are also safe.
 
 Selection proceeds in phases:
 

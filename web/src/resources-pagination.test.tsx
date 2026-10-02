@@ -108,9 +108,15 @@ const session = {
     }),
     removeResourceDependency: vi.fn(async (host: string, path: string, number: number) => {
       removedDependencies.push({ host, path, number });
-      registered = registered.map((entry) => (entry.host === host && entry.path === path
-        ? { ...entry, issueNumbers: entry.issueNumbers.filter((each) => each !== number) }
-        : entry));
+      // Production-shaped, from `packages/core/src/operations.ts`: a resource
+      // whose last dependency goes is DELETED, not left behind with an empty
+      // list. That is the only mutation that can shorten the collection under a
+      // reader, which is exactly what the clamp exists for.
+      registered = registered.flatMap((entry) => {
+        if (entry.host !== host || entry.path !== path) return [entry];
+        const issueNumbers = entry.issueNumbers.filter((each) => each !== number);
+        return issueNumbers.length === 0 ? [] : [{ ...entry, issueNumbers }];
+      });
       return undefined;
     }),
   },
@@ -132,8 +138,19 @@ vi.mock('./api', async (importOriginal) => {
 
 /** The resources view, mounted on the Resources tab with whatever URL the test left. */
 async function mountResources(): Promise<HTMLElement> {
+  // The board must have RENDERED, not merely have called the API: between the two
+  // the DOM is still App's loading branch — `<main class="centered">… Loading
+  // your shared board…</main>` — which has no tab in it to click. So this waits
+  // on the DOM the way the sibling helpers do (`issues-pagination.test.tsx`
+  // waits for `.issue-row`; there is no `.issue-row` on this tab yet, so it
+  // waits for the loaded board's own nav), and then on the resources it draw.
+  // `readsBefore` is what keeps a second mount in one test honest: without it
+  // the call count from the FIRST mount is already there, so the wait would be
+  // satisfied before the new render had done anything.
+  const readsBefore = session.readOverview.mock.calls.length;
   const { container } = render(<App />);
-  await waitFor(() => expect(session.readOverview).toHaveBeenCalled());
+  await waitFor(() => expect(session.readOverview.mock.calls.length).toBeGreaterThan(readsBefore));
+  await waitFor(() => expect(container.querySelector('.main-nav')).not.toBeNull());
   if (!container.querySelector('.resources-view')) {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'resources' })); });
   }
@@ -378,10 +395,36 @@ describe('grouping and dependency controls while paged', () => {
 
     expect(removedDependencies).toEqual([{ host: 'lubko://one', path, number: 1 }]);
     // The write went through the same commit path as any other, so the board is
-    // re-read and the page it lands on is a page of the board as it now is.
+    // re-read and the page it lands on is a page of the board as it now is. The
+    // card's issue 1 was the resource's only dependency, so production deletes
+    // the resource and the collection is one shorter — page 1 is still page 1.
     await waitFor(() => expect(session.readOverview.mock.calls.length).toBeGreaterThan(1));
-    expect(rangeText(container)).toBe('1–50 of 126');
+    expect(rangeText(container)).toBe('1–50 of 125');
     expect(drawnPaths(container)).toHaveLength(RESOURCE_PAGE_SIZE);
+    expect(drawnPaths(container)).not.toContain(path);
+  });
+
+  it('clamps down when a removal shortens the collection past the page being read', async () => {
+    // 101 resources on the URL's page 3, which holds exactly one card: the last
+    // one. Removing its only dependency deletes it (production shape, above), so
+    // the collection becomes 100 and the page the reader is on no longer exists.
+    registered = resourcesOn('lubko://one', 101);
+    window.history.replaceState(null, '', '/?view=resources&resources=3');
+    const container = await mountResources();
+    expect(rangeText(container)).toBe('101–101 of 101');
+
+    const card = container.querySelector('.resource-card') as HTMLElement;
+    await act(async () => { fireEvent.click(within(card).getByRole('button', { name: 'Remove issue 1' })); });
+    await waitFor(() => expect(session.readOverview.mock.calls.length).toBeGreaterThan(1));
+
+    // Out of range moves DOWN onto the last page that exists, and the view stays
+    // coherent about it: page 2 of a 100-resource collection, fully drawn, with
+    // the boundaries disabled at their own ends.
+    expect(rangeText(container)).toBe('51–100 of 100');
+    expect(drawnPaths(container)).toHaveLength(RESOURCE_PAGE_SIZE);
+    expect(drawnPaths(container)).toEqual(resourcesOn('lubko://one', 100).slice(50, 100).map((each) => each.path));
+    expect(nextButton().disabled).toBe(true);
+    expect(previousButton().disabled).toBe(false);
   });
 
   it('keeps the add-dependency form and the register form working on a page', async () => {

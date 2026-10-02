@@ -10,11 +10,15 @@ import type { IssueFilter } from './ui-state';
  * rather than in path segments — a path route would 404 on reload, and a hash
  * route would hide the state from anything that reads the URL as text.
  *
- * Credential safety is structural, not a promise: the state is seven
- * allowlisted fields, the serializer can only ever emit keys in
- * `BOARD_URL_KEYS`, and the parser reads only those keys, so a board
- * credential, token or key cannot be carried into the URL by construction even
- * if one were pasted into the address bar by hand. See `board-url.test.ts`.
+ * Credential safety is structural, not a promise, and the mechanism is the two
+ * fixed field lists below: `boardSearch` writes its query string by setting
+ * named keys it chooses itself, and `parseBoardUrl` reads it by asking for named
+ * keys it chooses itself. Neither enumerates the search string, so a board
+ * credential, token or key cannot be carried into the URL even if one were
+ * pasted into the address bar by hand — it is read by neither and written by
+ * neither. `BOARD_URL_KEYS` names that fixed field list for readers and for
+ * tests; it is the documented shape of the address, not the filter that enforces
+ * it. See `board-url.test.ts`.
  */
 
 export type BoardView = 'issues' | 'resources' | 'feed' | 'targets';
@@ -82,9 +86,12 @@ export const DEFAULT_BOARD_URL_STATE: BoardUrlState = {
 };
 
 /**
- * Every key the URL may carry. The serializer emits nothing outside this set and
- * the parser reads nothing outside it, which is what makes "no board secret in
- * the URL" a property of the module rather than of anyone's care.
+ * Every key the URL may carry: the seven named fields the parser reads and the
+ * serializer writes. This list does not filter anything — it is the documented
+ * shape of the address, asserted against the serializer's output by
+ * `board-url.test.ts`, and reported on by `boardUrlKeys`. The property that no
+ * board secret reaches the URL is enforced by those two functions naming their
+ * own fields, not by this list.
  */
 export const BOARD_URL_KEYS = ['view', 'issue', 'filter', 'page', 'thread', 'resources', 'settings'] as const;
 

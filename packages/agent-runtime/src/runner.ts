@@ -8,8 +8,10 @@ import {
   buildAgentCommand,
   classifyBackendFailure,
   classifySignalDeath,
+  describeBackendDeath,
   describeSignalDeath,
   discoverSessionId,
+  lastLogLineExcerpt,
   type BackendError,
 } from './backend.js';
 import {
@@ -211,6 +213,7 @@ async function recordSpawned(
     meta.exit_code = null;
     meta.exit_signal = null;
     meta.backend_error = null;
+    meta.error = null;
     meta.active_runner = true;
     accepted = true;
   }, options);
@@ -260,6 +263,7 @@ async function finalizeInvocation(
   options: RunnerOptions,
   oom: OomBracket | null,
   isContinue: boolean,
+  tailExcerpt: string | null = null,
 ): Promise<void> {
   // Read outside the metadata callback: the callback runs under the state lock,
   // and it should be doing durable-state work, not file I/O against /sys and
@@ -309,8 +313,23 @@ async function finalizeInvocation(
         lifetimeSeconds: oom === null ? null : Date.now() / 1000 - oom.startedAt,
       })
       : null;
-    meta.backend_error = code === 0 || death !== null ? death : backendError;
-    finalizeTerminal(meta, state, Date.now() / 1000, code, signal, death === null ? undefined : describeSignalDeath(death) ?? undefined);
+    // A death on a signal is not a backend failure, whatever the log says: the
+    // signal death (external) or the operator signal (clean stop/kill) already
+    // accounts for it.
+    meta.backend_error = code === 0 || signal !== null || death !== null ? death : backendError;
+    // Board 159. A `failed` with no signal and a captured non-zero exit is the
+    // backend saying it failed, and that record used to carry no reason at all:
+    // `state failed`, `exit_code 1`, `backend_error null`, `error null`. It was
+    // therefore indistinguishable, in durable state, from a record in which the
+    // runtime lost the invocation before any exit status existed. The note names
+    // which one this is, and it is only ever written for this path, so the
+    // runtime-lost case keeps its own distinct wording from reconcileDeadMeta.
+    const note = death !== null
+      ? describeSignalDeath(death) ?? undefined
+      : state === 'failed' && code !== 0 && signal === null
+        ? describeBackendDeath(backendError, tailExcerpt) ?? undefined
+        : undefined;
+    finalizeTerminal(meta, state, Date.now() / 1000, code, signal, note);
   }, options);
 }
 
@@ -476,7 +495,10 @@ async function runInvocation(
     // interrupts it. Preserve that session whenever it can be discovered so
     // queued steering continues the same native conversation.
     if (!isContinue) await rememberFreshSession(agentId, options);
-    await finalizeInvocation(agentId, result, backendError, options, oom, isContinue);
+    // Only read for a note: a successful exit and a signalled death both ignore
+    // it, so the file is not read on the paths where nothing is written.
+    const tailExcerpt = code !== 0 && result.signal === null ? lastLogLineExcerpt(logFile, invocationLogStart) : null;
+    await finalizeInvocation(agentId, result, backendError, options, oom, isContinue, tailExcerpt);
     return true;
   }
 }

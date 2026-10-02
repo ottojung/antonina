@@ -141,6 +141,28 @@ export function describeSignalDeath(error: BackendError | null): string | null {
   return `${head}; cgroup memory.events rose by oom ${oom} and oom_kill ${kills}${window}${kills > 0 ? ', so the OOM killer fired inside the agent lifetime' : ', with no OOM kill recorded inside the agent lifetime'}`;
 }
 
+/**
+ * A one-line reason for a non-signal, non-zero backend exit, for the `error`
+ * note that `agent status` and the board carry.
+ *
+ * Its job is to make the durable record say *which* of the two very different
+ * things happened: the backend itself failed (this), or the runtime lost the
+ * invocation before any exit status existed (`reconcileDeadMeta`'s note, which
+ * carries no exit code at all). Before board 159 both produced a bare `failed`.
+ */
+export function describeBackendDeath(error: BackendError | null, excerpt: string | null): string | null {
+  if (error === null) {
+    const tail = excerpt === null ? '' : `; the last line it wrote was: ${excerpt}`;
+    return `the backend process exited unsuccessfully without writing a diagnostic this runtime could read${tail}`;
+  }
+  if (error.classification === SIGNAL_DEATH_CLASSIFICATION) return describeSignalDeath(error);
+  if (error.classification === UNRECOGNIZED_BACKEND_FAILURE) {
+    const tail = excerpt === null ? '' : `; the last line it wrote was: ${excerpt}`;
+    return `the backend process exited unsuccessfully and this runtime does not recognise the failure${tail}`;
+  }
+  return `the backend process reported ${error.classification}${excerpt === null ? '' : `; the last line it wrote was: ${excerpt}`}`;
+}
+
 interface BackendFailureRule {
   marker: string;
   classification: string;
@@ -157,7 +179,83 @@ const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
     transient: true,
     automaticRetrySafe: false,
   },
+  // Board 159. The backend prints this and exits non-zero at the end of an
+  // otherwise complete turn; observed in three managed agents on 2026-10-02
+  // (`agents/94d01`, `agents/92a01`, `agents/136d`), all three of which had
+  // already done their work. The cause is upstream of this repository, so all
+  // the runtime can do is name the failure class rather than leave the terminal
+  // record blank. Deliberately not `transient`: nothing here says the same
+  // request would succeed next time, and a retry would re-run a completed turn.
+  {
+    marker: 'Failed to execute statement',
+    classification: 'backend_statement_execution_error',
+    provider: 'opencode',
+    transient: false,
+    automaticRetrySafe: false,
+  },
 ];
+
+/**
+ * Classification for a non-zero backend exit that matched no rule.
+ *
+ * Before this existed, `classifyBackendFailure` returned null for every
+ * unrecognised non-zero exit, so `finalizeInvocation` recorded the turn as
+ * `failed` with `exit_code 1`, `backend_error null` and `error null`: a
+ * terminal state with no reason at all, and therefore indistinguishable in
+ * durable state from a record in which the runtime lost track of the
+ * invocation. A bare non-zero exit *is* a fact about the backend, so it gets a
+ * classification of its own.
+ */
+export const UNRECOGNIZED_BACKEND_FAILURE = 'unrecognized_backend_failure';
+
+const EXCERPT_MAX_CHARS = 200;
+
+/**
+ * Strips the backend's terminal ANSI styling and collapses the line, so the
+ * excerpt a human reads is the sentence rather than the escape codes.
+ */
+// eslint-disable-next-line no-control-regex
+const ANSI = /\u001B\[[0-9;?]*[ -/]*[@-~]/g;
+// Token-shaped runs are replaced rather than truncated: the point of an excerpt
+// is to name the failure, and a credential-shaped run is not part of the name.
+const SECRET_PATTERNS: readonly RegExp[] = [
+  /\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g,
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{8,}/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{8,}/g,
+  /\bBearer\s+\S+/gi,
+  /\b[A-Fa-f0-9]{32,}\b/g,
+];
+
+export function redactLogExcerpt(line: string): string {
+  let out = line.replace(ANSI, '');
+  for (const pattern of SECRET_PATTERNS) out = out.replace(pattern, '[redacted]');
+  return out.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * The last non-empty line the backend wrote inside this invocation, redacted
+ * and length-capped, or null when there is none.
+ *
+ * Read from the invocation's own log window only (`start`), so a resumed
+ * transcript cannot attribute an earlier invocation's last words to this one.
+ */
+export function lastLogLineExcerpt(path: string, start: number): string | null {
+  let data: Buffer;
+  let size: number;
+  try {
+    size = statSync(path).size;
+    const begin = Math.max(start, size - BACKEND_DIAGNOSTIC_MAX_BYTES);
+    data = readFileSync(path).subarray(begin, size);
+  } catch {
+    return null;
+  }
+  const lines = data.toString('utf8').split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const excerpt = redactLogExcerpt(lines[index] ?? '');
+    if (excerpt.length > 0) return excerpt.slice(0, EXCERPT_MAX_CHARS);
+  }
+  return null;
+}
 
 interface SessionRow {
   id: string;
@@ -306,7 +404,11 @@ export function classifyBackendFailure(
   exitCode: number,
   isContinue = false,
 ): BackendError | null {
-  if (exitCode === 0 || !Number.isSafeInteger(start) || start < 0) return null;
+  // A negative code is the runner's encoding of a signal death (`-signum`),
+  // not an exit status, and a signal death is classified by
+  // `classifySignalDeath`. It must not be read here as a backend failure: an
+  // operator's own SIGTERM would then be recorded as the backend dying.
+  if (exitCode === 0 || exitCode < 0 || !Number.isSafeInteger(start) || start < 0) return null;
   let data: Buffer;
   let size: number;
   try {
@@ -318,7 +420,28 @@ export function classifyBackendFailure(
   }
   const text = data.toString('utf8');
   const rule = BACKEND_FAILURE_RULES.find((candidate) => text.includes(candidate.marker));
-  if (!rule) return null;
+  if (rule === undefined) {
+    // An empty window is not an unrecognised failure: a spawn that never
+    // produced a byte (`child.once('error')` yields exit 127) also exits
+    // non-zero, and calling that a backend failure would misattribute it. The
+    // runner already has a stated reason for that case.
+    if (text.trim().length === 0) return null;
+    // A non-zero exit with a readable log window is still a fact about the
+    // backend, and it gets a classification. Returning null here is what left
+    // the 2026-10-02 deaths recorded as `failed` with no reason anywhere.
+    return {
+      classification: UNRECOGNIZED_BACKEND_FAILURE,
+      provider: null,
+      model: AGENT_MODEL,
+      request_boundary: isContinue ? 'continuation' : 'fresh_session',
+      reference: null,
+      transient: false,
+      automatic_retry_safe: false,
+      fresh_session_useful: null,
+      backend_scope: 'unknown',
+      diagnostic_bytes: Math.min(Math.max(0, size - start), BACKEND_DIAGNOSTIC_MAX_BYTES),
+    };
+  }
   const match = /"ref"\s*:\s*"([^"\r\n]+)"/.exec(text);
   return {
     classification: rule.classification,

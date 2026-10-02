@@ -220,8 +220,11 @@ describe('issue list pagination state', () => {
 
   it('slices the semantic order rather than re-ordering it, for every filter', () => {
     // Deliberately awkward: the board's queue is 60, 40, 10, ... and the closed
-    // tail is not in it. Open must stay in queue order, closed in ascending
-    // number, and all open-queue-first.
+    // tail is not in it. Open must stay in queue order, closed in the board's
+    // closing order (here every closing time is the same stamp, so the
+    // tie-break decides and it is the reverse of ascending number), and all
+    // open-queue-first. `closed-issue-order.test.tsx` is where the closed order
+    // itself is pinned down; this case is about the slice.
     const all = [...Array.from({ length: 60 }, (_, index) => issue(index + 1)),
       ...Array.from({ length: 20 }, (_, index) => issue(100 + index, 'closed'))];
     // A complete queue: every open issue exactly once, which is what the board
@@ -346,12 +349,15 @@ describe('the issues list, paginated', () => {
     const container = await mountApp();
 
     await act(async () => { chooseFilter('Closed'); });
-    // The closed tail pages on its own total, in its own stable order, and does
-    // not carry the open list's queue positions with it.
+    // The closed tail pages on its own total, in the board's closed order, and
+    // does not carry the open list's queue positions with it. This fixture
+    // closes every issue at the same instant, so the order is the tie-break
+    // (highest issue number first) rather than a closing time; the closing-time
+    // order itself is pinned in `closed-issue-order.test.tsx`.
     expect(rangeText(container)).toBe('1–50 of 60');
-    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => index + 121));
+    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => 180 - index));
     await goNext(container);
-    expect(drawnRows(container)).toEqual(Array.from({ length: 10 }, (_, index) => index + 171));
+    expect(drawnRows(container)).toEqual(Array.from({ length: 10 }, (_, index) => 130 - index));
     expect(rangeText(container)).toBe('51–60 of 60');
     expect(previousButton(container).disabled).toBe(false);
     expect(nextButton(container).disabled).toBe(true);
@@ -365,11 +371,16 @@ describe('the issues list, paginated', () => {
     await goNext(container);
     // The open queue ends mid-page: page 3 is the last twenty open issues
     // followed by the first thirty closed ones, in that order.
-    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => index + 101));
+    expect(drawnRows(container)).toEqual([
+      ...Array.from({ length: 20 }, (_, index) => index + 101),
+      ...Array.from({ length: 30 }, (_, index) => 180 - index),
+    ]);
     expect(rangeText(container)).toBe('101–150 of 180');
 
     await goNext(container);
-    expect(drawnRows(container)).toEqual(Array.from({ length: 30 }, (_, index) => index + 151));
+    // The last page is the rest of the closed tail, still in the closed order
+    // and still not re-sorted into the open list's numbering.
+    expect(drawnRows(container)).toEqual(Array.from({ length: 30 }, (_, index) => 150 - index));
     expect(rangeText(container)).toBe('151–180 of 180');
     expect(nextButton(container).disabled).toBe(true);
 
@@ -391,7 +402,7 @@ describe('the issues list, paginated', () => {
     // Three closed issues are one page, so the reader lands on it and the
     // controls are gone rather than left disabled on a page that does not exist.
     expect(rangeText(container)).toBe('');
-    expect(drawnRows(container)).toEqual([127, 128, 129]);
+    expect(drawnRows(container)).toEqual([129, 128, 127]);
     expect(pagination(container)).toBeNull();
 
     await act(async () => { chooseFilter('Open'); });

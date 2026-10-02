@@ -1,4 +1,4 @@
-import { BoardDeletedError, BoardTrustRequiredError, DEFAULT_FEED_LIMIT } from './api';
+import { BoardDeletedError, BoardTrustRequiredError, compareClosedIssues, DEFAULT_FEED_LIMIT } from './api';
 import type {
   BoardFeedEntry,
   BoardFeedEntryKind,
@@ -265,13 +265,25 @@ export function openQueueOrder<T extends Pick<BoardIssue, 'number' | 'state'>>(i
 }
 
 /**
- * Closed issues. The queue holds open issues by construction, so a closed
- * issue has no priority position to take and is listed in ascending issue
- * number: oldest closed work first, a stable order that does not shuffle as
- * timestamps move.
+ * Closed issues, in the board's own closed order: most recently closed first,
+ * ties broken by the higher issue number.
+ *
+ * The queue holds open issues by construction, so a closed issue has no
+ * priority position to take, and issue number is not one either -- it says when
+ * an issue was filed, not when the work finished. The key is the closing
+ * timestamp, and the comparator is core's `compareClosedIssues`, which is the
+ * same one the store wrote the materialized closed list pages with. So this is
+ * not a second sort of an order core invented differently: it is that order,
+ * re-derived for the flat summary list the browser holds. It is applied to the
+ * whole filtered list, before `issuePage` slices it, so the order is global and
+ * pages are windows onto it rather than independently sorted pages.
  */
-export function closedIssueOrder<T extends Pick<BoardIssue, 'number' | 'state'>>(issues: readonly T[]): number[] {
-  return issues.filter((issue) => issue.state === 'closed').map((issue) => issue.number).sort((left, right) => left - right);
+export function closedIssueOrder<T extends Pick<BoardIssue, 'number' | 'state' | 'updatedAt'> & { closedAt?: string | null }>(issues: readonly T[]): number[] {
+  const closed = issues.filter((issue) => issue.state === 'closed');
+  return closed
+    .slice()
+    .sort((left, right) => compareClosedIssues(left, right))
+    .map((issue) => issue.number);
 }
 
 /**
@@ -279,7 +291,7 @@ export function closedIssueOrder<T extends Pick<BoardIssue, 'number' | 'state'>>
  * unqueued tail, and `all` is the queue first with the closed tail after it, so
  * the open work a reader came for is always at the top in priority order.
  */
-export function visibleIssues<T extends Pick<BoardIssue, 'number' | 'state'>>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
+export function visibleIssues<T extends Pick<BoardIssue, 'number' | 'state' | 'updatedAt'> & { closedAt?: string | null }>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
   const byNumber = new Map(issues.map((issue) => [issue.number, issue]));
   const open = openQueueOrder(issues, queue).map((number) => byNumber.get(number)!);
   if (filter === 'open') return open;

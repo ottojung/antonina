@@ -1,3 +1,4 @@
+import { compareClosedIssues } from './board-v3-store.js';
 import type { BoardOverview, IssueCommentPage, IssueListSummary } from './board-v3-store.js';
 import {
   ANTONINA_NAMESPACE,
@@ -427,7 +428,7 @@ export class BoardApi {
         const listed = await this.store.readIssuePage(credential, issueState, page);
         if (listed === null) {
           const issues = (await this.loadBoard()).issues;
-          return issues
+          const summarized = issues
             .filter((issue) => state === undefined || issue.state === state)
             .map((issue) => ({
               number: issue.number,
@@ -438,8 +439,11 @@ export class BoardApi {
               closedAt: issue.state === 'closed' ? issue.updatedAt : null,
               messageCount: issue.messages.length,
               hasBody: issue.body.length > 0,
-            }))
-            .sort((left, right) => left.number - right.number);
+            }));
+          // The board whose pages are not materialized yet still has one closed
+          // order, and it is the same one the materialized pages are written in.
+          if (issueState === 'closed') return summarized.sort(compareClosedIssues);
+          return summarized.sort((left, right) => left.number - right.number);
         }
         summaries.push(...listed.entries);
         listedCount += listed.entries.length;
@@ -918,6 +922,8 @@ export type {
   IssueListPage,
   IssueListSummary,
 } from './board-v3-store.js';
+export { closingTimeOf, compareClosedIssues } from './board-v3-store.js';
+export type { ClosedIssueOrderKey } from './board-v3-store.js';
 export {
   EXECUTION_TARGET_ACCESS_METHODS,
   EXECUTION_TARGET_BACKENDS,

@@ -87,7 +87,7 @@ test('a fork creates an independent agent from an existing one', (t) => {
   assert.deepEqual(clone.steer_queue, []);
 
   // Both agents are independently visible to the rest of the CLI.
-  const listed = run(['agent', 'list', '--json'], env);
+  const listed = run(['agent', 'list', '--page', '1', '--json'], env);
   assert.equal(listed.status, EXIT_OK, listed.stderr);
   const ids = JSON.parse(listed.stdout).agents.map((agent) => agent.id).sort();
   assert.deepEqual(ids, ['a1', 'b2']);
@@ -136,7 +136,7 @@ test('forking onto an id that already exists fails clearly and leaves that agent
   assert.equal(readFileSync(metaPath(root, 'b2'), 'utf8'), before);
   assert.deepEqual(readMeta(root, 'b2'), existing);
   // The source is untouched, and there is still exactly one record per id.
-  const listed = run(['agent', 'list', '--json'], env);
+  const listed = run(['agent', 'list', '--page', '1', '--json'], env);
   assert.deepEqual(JSON.parse(listed.stdout).agents.map((agent) => agent.id).sort(), ['a1', 'b2']);
 });
 

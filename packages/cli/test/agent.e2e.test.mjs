@@ -780,7 +780,7 @@ test('list and status fail closed on malformed or old metadata', (t) => {
   assert.equal(status.status, 1);
   assert.match(status.stderr, /created_at is malformed/);
 
-  const listed = run(['agent', 'list', '--json'], env);
+  const listed = run(['agent', 'list', '--page', '1', '--json'], env);
   assert.equal(listed.status, 1);
   assert.match(listed.stderr, /created_at is malformed/);
 
@@ -1666,7 +1666,7 @@ test('a front runs in, and reports, the directory declared by --cwd on run', asy
   const status = run(['agent', 'status', '--id', 'c0de', '--json'], env);
   assert.equal(status.status, 0, status.stderr);
   assert.equal(JSON.parse(status.stdout).cwd, declared);
-  const listed = run(['agent', 'list', '--json'], env);
+  const listed = run(['agent', 'list', '--page', '1', '--json'], env);
   assert.equal(listed.status, 0, listed.stderr);
   const entry = JSON.parse(listed.stdout).agents.find((agent) => agent.id === 'c0de');
   assert.equal(entry.cwd, declared);
@@ -1762,14 +1762,18 @@ test('run refuses a --cwd that is not an existing directory', (t) => {
 
 
 
-test('agent list uses --page with --limit as the page size', (t) => {
+test('agent list requires --page and uses --limit as the page size', (t) => {
   const { work, env } = fixture(t);
   for (const id of ['a001', 'a002', 'a003']) {
     const created = run(['agent', 'new', '--id', id, '--cwd', work], env);
     assert.equal(created.status, 0, created.stderr);
   }
 
-  const all = run(['agent', 'list', '--json'], env);
+  const missing = run(['agent', 'list', '--json'], env);
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /--page is required/);
+
+  const all = run(['agent', 'list', '--page', '1', '--json'], env);
   assert.equal(all.status, 0, all.stderr);
   assert.equal(JSON.parse(all.stdout).agents.length, 3);
 

@@ -358,7 +358,8 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
   const pageSize = parsed.values.has('--limit')
     ? positiveInteger(parsed.values.get('--limit'), '--limit')
     : 50;
-  const page = parsed.values.has('--page') ? positiveInteger(parsed.values.get('--page'), '--page') : 1;
+  if (!parsed.values.has('--page')) throw new UsageError('list: --page is required');
+  const page = positiveInteger(parsed.values.get('--page'), '--page');
   const entries: Array<{ agentId: string; meta: AgentMetadata; state: string; summary: ReturnType<typeof summary> }> = [];
   for (const agentId of agentIds(context)) {
     const meta = await reconcileAgent(agentId, context);

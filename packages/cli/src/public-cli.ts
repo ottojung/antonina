@@ -41,7 +41,6 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--clear-limitations': 'Retract the target\'s caveats.',
   '--confirm': 'Confirm the destructive operation.',
   '--credential': 'Print only the initialized credential.',
-  '--cursor': 'Paging cursor.',
   '--cwd': 'Working directory the front runs in; declared, never inherited from the invoking shell.',
   '--days': 'Retention age in days, measured from the later of the agent\'s finished_at and its own created_at. A fork created today from a session that finished three months ago is therefore kept for the full window from today; measuring from finished_at alone would let a sweep delete that clone, which is the last copy of that history once the source is gone.',
   '--description': 'Human-readable description.',
@@ -59,7 +58,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--json': 'Emit JSON.',
   '--killed': 'Show killed agents only.',
   '--kind': 'Execution-target kind.',
-  '--limit': 'Maximum number of records.',
+  '--limit': 'Page size for commands that support it.',
   '--limitation': 'Operational caveat; may be repeated.',
   '--lines': 'Number of log lines.',
   '--page': '1-based page number.',
@@ -127,6 +126,7 @@ const BOARD_SPECS: readonly CommandSpec[] = [
     path: ['queue', 'list'],
     summary: 'Print one page of the shared issue queue.',
     values: ['--page'],
+    required: ['--page'],
     normalize: (p) => ['queue', 'list', ...valueArgs(p, ['--page']), ...jsonArg(p)],
   }),
   withJson({
@@ -139,13 +139,15 @@ const BOARD_SPECS: readonly CommandSpec[] = [
   withJson({
     path: ['feed'],
     summary: 'Read one page of the board activity feed.',
-    values: ['--limit', '--cursor', '--page'],
-    normalize: (p) => ['feed', ...valueArgs(p, ['--limit', '--cursor', '--page']), ...jsonArg(p)],
+    values: ['--limit', '--page'],
+    required: ['--page'],
+    normalize: (p) => ['feed', ...valueArgs(p, ['--limit', '--page']), ...jsonArg(p)],
   }),
   withJson({
     path: ['list'],
     summary: 'List one page of board issues, highest-priority open issues first.',
     values: ['--state', '--page'],
+    required: ['--page'],
     normalize: (p) => ['list', ...valueArgs(p, ['--state', '--page']), ...jsonArg(p)],
   }),
   withJson({
@@ -198,6 +200,7 @@ const BOARD_SPECS: readonly CommandSpec[] = [
     path: ['resource', 'list'],
     summary: 'List one page of registered board resources.',
     values: ['--host', '--issue', '--page'],
+    required: ['--page'],
     normalize: (p) => ['resource', 'list', ...valueArgs(p, ['--host', '--issue', '--page']), ...jsonArg(p)],
   }),
   ...(['add', 'remove'] as const).map((subcommand): CommandSpec => withJson({
@@ -218,6 +221,7 @@ const BOARD_SPECS: readonly CommandSpec[] = [
     path: ['target', 'list'],
     summary: 'List one page of execution targets.',
     values: ['--backend', '--kind', '--page'],
+    required: ['--page'],
     normalize: (p) => ['target', 'list', ...valueArgs(p, ['--backend', '--kind', '--page']), ...jsonArg(p)],
   }),
   withJson({
@@ -301,7 +305,7 @@ const BOARD_SPECS: readonly CommandSpec[] = [
     path: ['collect', 'list'],
     summary: 'List one page of collectible resources on one host.',
     values: ['--host', '--page'],
-    required: ['--host'],
+    required: ['--host', '--page'],
     normalize: (p) => [
       'collect', 'list', '--host', p.values.get('--host')!,
       ...valueArgs(p, ['--page']),
@@ -341,6 +345,7 @@ const AGENT_SPECS: readonly CommandSpec[] = [
     summary: 'List one page of managed agents.',
     values: ['--limit', '--page'],
     flags: ['--json', '--running', '--finished', '--succeeded', '--failed', '--stopped', '--killed'],
+    required: ['--page'],
     normalize: (p) => [
       'list',
       ...valueArgs(p, ['--limit', '--page']),

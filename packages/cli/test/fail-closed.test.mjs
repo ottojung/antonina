@@ -89,7 +89,7 @@ test('list does not lock or rewrite metadata for non-running agents', async (t) 
   });
 
   const code = await runAgentCommand(
-    ['list', '--json'],
+    ['list', '--page', '1', '--json'],
     context(work, state, output.io, readOnlyFs),
   );
 

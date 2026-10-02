@@ -41,7 +41,7 @@ jobs:
           npm install --prefix /tmp/antonina-install "$package"
           antonina=/tmp/antonina-install/node_modules/.bin/antonina
           export XDG_STATE_HOME=/tmp/antonina-state
-          output="$("$antonina" agent list --json)"
+          output="$("$antonina" agent list --page 1 --json)"
           test "$output" = '{"agents":[]}'
 
           cat >/tmp/antonina-fake-bin/opencode <<'EOF'

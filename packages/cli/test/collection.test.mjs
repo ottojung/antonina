@@ -125,7 +125,7 @@ async function seededWorkTree(context) {
 test('collect list prints every collectible path with the board and the revision it came from', async () => {
   await withWorkTree(async (context) => {
     const { build } = await seededWorkTree(context);
-    const { code, out, err } = await run(['collect', 'list', '--host', HOST], {
+    const { code, out, err } = await run(['collect', 'list', '--page', '1', '--host', HOST], {
       createClient: () => context.reader,
     });
 
@@ -150,7 +150,7 @@ test('collect list reports one identical revision across all entries', async () 
     await context.writer.close(1);
     const revision = context.writer.getRememberedHead();
 
-    const { code, out } = await run(['collect', 'list', '--host', HOST, '--json'], {
+    const { code, out } = await run(['collect', 'list', '--page', '1', '--host', HOST, '--json'], {
       createClient: () => context.reader,
     });
 
@@ -171,7 +171,7 @@ test('collect list reports one identical revision across all entries', async () 
 test('collect list excludes paths protected by an open dependency', async () => {
   await withWorkTree(async (context) => {
     const { build } = await seededWorkTree(context);
-    const { code, out } = await run(['collect', 'list', '--host', HOST, '--json'], {
+    const { code, out } = await run(['collect', 'list', '--page', '1', '--host', HOST, '--json'], {
       createClient: () => context.reader,
     });
 
@@ -184,7 +184,7 @@ test('collect list excludes paths protected by an open dependency', async () => 
 
 test('collect list requires --host', async () => {
   await withWorkTree(async (context) => {
-    const { code, out, err } = await run(['collect', 'list'], { createClient: () => context.reader });
+    const { code, out, err } = await run(['collect', 'list', '--page', '1'], { createClient: () => context.reader });
     assert.equal(code, 1);
     assert.deepEqual(out, []);
     assert.match(err[0], /--host/);
@@ -194,7 +194,7 @@ test('collect list requires --host', async () => {
 test('collect list refuses a host that is not a lubko host identity', async () => {
   await withWorkTree(async (context) => {
     for (const host of ['https://example.com', 'lubko://', 'not-a-host']) {
-      const { code, out, err } = await run(['collect', 'list', '--host', host], {
+      const { code, out, err } = await run(['collect', 'list', '--page', '1', '--host', host], {
         createClient: () => context.reader,
       });
       assert.equal(code, 1, host);
@@ -207,14 +207,14 @@ test('collect list refuses a host that is not a lubko host identity', async () =
 test('collect list requires the board credential', async () => {
   await withWorkTree(async (context) => {
     await seededWorkTree(context);
-    const { code, out, err } = await run(['collect', 'list', '--host', HOST], {
+    const { code, out, err } = await run(['collect', 'list', '--page', '1', '--host', HOST], {
       createClient: () => context.reader,
     });
     assert.equal(code, 0);
     assert.deepEqual(err, []);
     assert.equal(out.length, 1);
 
-    const withoutKey = await run(['collect', 'list', '--host', HOST], {
+    const withoutKey = await run(['collect', 'list', '--page', '1', '--host', HOST], {
       createClient: () => api(context.server),
     });
     assert.equal(withoutKey.code, 1);
@@ -226,7 +226,7 @@ test('collect list requires the board credential', async () => {
 test('collect list surfaces a missing board as a failure and never as an empty list', async () => {
   await withWorkTree(async () => {
     const missing = fakeSkrynia();
-    for (const argv of [['collect', 'list', '--host', HOST], ['collect', 'list', '--host', HOST, '--json']]) {
+    for (const argv of [['collect', 'list', '--page', '1', '--host', HOST], ['collect', 'list', '--page', '1', '--host', HOST, '--json']]) {
       const { code, out, err } = await run(argv, { createClient: () => api(missing) });
       assert.equal(code, 1, argv.join(' '));
       assert.deepEqual(out, [], argv.join(' '));
@@ -242,7 +242,7 @@ test('collect list surfaces a missing board as a failure and never as an empty l
 
 test('collect list surfaces an inaccessible board and names the board credential', async () => {
   await withWorkTree(async (context) => {
-    const { code, out, err } = await run(['collect', 'list', '--host', HOST], {
+    const { code, out, err } = await run(['collect', 'list', '--page', '1', '--host', HOST], {
       createClient: () => api(context.server),
     });
     assert.equal(code, 1);
@@ -255,7 +255,7 @@ test('collect list surfaces an inaccessible board and names the board credential
 test('collect list needs no managed roots configured', async () => {
   await withWorkTree(async (context) => {
     await seededWorkTree(context);
-    const { code, out, err } = await run(['collect', 'list', '--host', HOST], {
+    const { code, out, err } = await run(['collect', 'list', '--page', '1', '--host', HOST], {
       env: { [MANAGED_ROOTS_ENV]: '' },
       createClient: () => context.reader,
     });

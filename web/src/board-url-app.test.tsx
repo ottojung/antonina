@@ -572,7 +572,7 @@ describe('the board addressed by URL, mounted', () => {
     const url = window.location.href;
     expect(url).not.toContain(SECRET);
     expect(url).not.toMatch(/credential|token|secret|root-1/i);
-    for (const key of [...new URLSearchParams(search).keys()]) {
+    for (const key of [...new URLSearchParams(search()).keys()]) {
       expect(['view', 'issue', 'filter', 'page', 'settings']).toContain(key);
     }
     // And the credential is where the credential model says it is: in this

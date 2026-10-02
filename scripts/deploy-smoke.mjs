@@ -444,7 +444,7 @@ const body = document.body;
 const errorPanel = document.querySelector('.load-error');
 const firstRun = document.querySelector('.first-run');
 const rows = document.querySelectorAll('.issue-row');
-const counts = Array.from(document.querySelectorAll('.filters button')).map((b) => text(b));
+const counts = Array.from(document.querySelectorAll('.filters a')).map((b) => text(b));
 // The page reports the facts, not the verdict: which screens are present and
 // what their titles say. classifyObservation() below turns those facts into a
 // state, and it does that in Node where it can be unit-tested, because the
@@ -462,7 +462,7 @@ return {
   firstRunTitle: text(firstRun && firstRun.querySelector('h1')),
   firstRunBody: text(firstRun && firstRun.querySelector('p:not(.eyebrow):not([role])')),
   alert: text(document.querySelector('[role="alert"]')),
-  tabs: Array.from(document.querySelectorAll('nav.main-nav button')).map((b) => text(b)),
+  tabs: Array.from(document.querySelectorAll('nav.main-nav a')).map((b) => text(b)),
   issueRows: rows.length,
   filterCounts: counts,
   version: (document.querySelector('meta[name="antonina:build"]') || {}).content || null,
@@ -471,7 +471,7 @@ return {
 `;
 
 const CLICK_TAB = `
-const tab = Array.from(document.querySelectorAll('nav.main-nav button'))
+const tab = Array.from(document.querySelectorAll('nav.main-nav a'))
   .find((b) => b.textContent.trim().toLowerCase() === String(arguments[0]).toLowerCase());
 if (!tab) return false;
 tab.click();

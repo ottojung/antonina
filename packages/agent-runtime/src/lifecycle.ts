@@ -100,6 +100,9 @@ export function beginInvocation(meta: AgentMetadata, prompt: string, now: number
   meta.finished_at = null;
   meta.exit_code = null;
   meta.exit_signal = null;
+  // A new invocation starts with no reason attached to it. Leaving the previous
+  // invocation's note in place would attribute it to whatever ends this one.
+  meta.error = null;
   meta.intent = null;
   meta.stop_reason = null;
   meta.pid = null;

@@ -12,6 +12,7 @@ import {
   DEFAULT_OPENCODE_BIN,
   OPENCODE_BIN_ENV,
   SIGNAL_DEATH_CLASSIFICATION,
+  UNRECOGNIZED_BACKEND_FAILURE,
   backendRetryDelay,
   buildAgentCommand,
   classifyBackendFailure,
@@ -141,7 +142,21 @@ test('ordinary task failure is not misclassified and continuation stays explicit
   const root = fixture(t);
   const log = join(root, 'output.log');
   writeFileSync(log, 'deterministic task failure\n');
-  assert.equal(classifyBackendFailure(log, 0, 1), null);
+  // Board 159: an unmodelled non-zero exit is no longer a null verdict, because
+  // a null verdict left the durable record with no reason in it at all. What
+  // this test guards -- that an ordinary failure is not read as the modelled
+  // server error -- is unchanged, and is asserted as a classification and its
+  // flags rather than as a null.
+  const ordinary = classifyBackendFailure(log, 0, 1);
+  assert.equal(ordinary?.classification, UNRECOGNIZED_BACKEND_FAILURE);
+  assert.notEqual(ordinary?.classification, 'transient_backend_server_error');
+  assert.equal(ordinary?.transient, false);
+  assert.equal(ordinary?.automatic_retry_safe, false);
+
+  // An empty window is still declined: a spawn that produced no bytes also
+  // exits non-zero, and that is not a backend failure.
+  writeFileSync(log, '');
+  assert.equal(classifyBackendFailure(log, 0, 127), null);
 
   writeFileSync(log, 'Unexpected server error\n');
   const continuation = classifyBackendFailure(log, 0, 1, true);
@@ -168,7 +183,13 @@ test('a prior invocation server error is never attributed to the next invocation
   // the cap clamps neither.
   assert.ok(size < BACKEND_DIAGNOSTIC_MAX_BYTES, 'fixture must be small enough that the cap is not load-bearing');
 
-  assert.equal(classifyBackendFailure(log, start, 1, false), null);
+  // Board 159: not null any more, but still not the prior invocation's verdict.
+  // The subject of this case is confinement to the window, and that is asserted
+  // by the classification being the generic unrecognised one rather than the
+  // prior invocation's `transient_backend_server_error`.
+  const confined = classifyBackendFailure(log, start, 1, false);
+  assert.equal(confined?.classification, UNRECOGNIZED_BACKEND_FAILURE);
+  assert.notEqual(confined?.classification, 'transient_backend_server_error');
 
   // The same confinement governs the byte count: diagnostics describe this
   // invocation's own output, not everything the file has ever held.

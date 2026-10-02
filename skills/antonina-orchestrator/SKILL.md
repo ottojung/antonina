@@ -92,6 +92,14 @@ On a persistent host, also serialize heavy validation/build/mutation fronts for 
 
 Development can often proceed concurrently even when integration must later serialize. Separate branches or worktrees may be safe to implement in parallel and then merge into a shared release branch one at a time.
 
+## Release-branch authority
+
+When the target repository instructions designate an active release or integration branch, treat that branch as agent-owned unless those instructions explicitly say otherwise. After required implementation, validation, and review, the orchestrator must integrate the work into that branch and push the resulting branch state to its remote. Do not invent a human approval step between a reviewed issue branch and its release branch.
+
+A pull request can be used as a review mechanism when tooling and credentials are available, but it is not itself an authority boundary. Missing GitHub PR/API credentials do not make release integration human-only when normal Git credentials can merge and push the designated release branch.
+
+A repository may reserve promotion from its release branch into its default branch for a human. That restriction applies only to the default-branch promotion; never reinterpret it as a prohibition on agents merging or pushing the release branch itself.
+
 Do not manufacture work merely to stay busy.
 
 ## Actionability
@@ -231,7 +239,7 @@ Before closing an issue:
 4. close the issue with `antonina board close --id NUMBER`;
 5. verify that the issue is closed and no longer appears in the queue.
 
-Use `handoff` for a human-only action only when the remaining action genuinely cannot be delegated — for example, the issue explicitly reserves the decision to a human, required credentials or permissions are unavailable to agents, a physical/third-party action is required, or a material ambiguity has no governing criteria. Name the exact human action and why an agent cannot perform it. If you cannot name such a reason, continue the issue instead of inventing an approval step.
+Use `handoff` for a human-only action only when the remaining action genuinely cannot be delegated — for example, the issue explicitly reserves the decision to a human, required credentials or permissions for every permitted completion path are unavailable to agents, a physical/third-party action is required, or a material ambiguity has no governing criteria. Missing credentials for an optional mechanism such as creating a GitHub pull request do not qualify when the required repository state can still be reached through ordinary Git integration and push. Name the exact human action and why an agent cannot perform it. If you cannot name such a reason, continue the issue instead of inventing an approval step.
 
 ## Failure behavior
 

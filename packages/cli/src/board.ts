@@ -928,9 +928,9 @@ function humanFeed(page: BoardFeedPage): string[] {
   const lines = page.entries.length === 0
     ? ['The board feed is empty.']
     : page.entries.map(humanFeedEntry);
-  // The continuation token is printed rather than left implicit: a human paging
-  // back through the feed needs the same token the JSON form hands a program.
-  if (page.nextCursor !== null) lines.push('next: ' + page.nextCursor);
+  // The public CLI pages by explicit page number. Keep the core cursor internal:
+  // a human should be told to advance the interface they can actually invoke.
+  if (page.nextCursor !== null) lines.push('more: increment --page');
   return lines;
 }
 

@@ -16,7 +16,7 @@ const NEXT_PAGE = ISSUE_PAGE_NEXT;
 const PREVIOUS_PAGE = ISSUE_PAGE_PREVIOUS;
 import { DEFAULT_FEED_LIMIT, type BoardFeedPage, type BoardFeedRequest } from './api';
 import type { BoardIssue } from './model';
-import type { BoardAccessState, BoardOverview } from '../../packages/core/src/api';
+import type { BoardAccessState, BoardOverview, IssueCommentPage } from '../../packages/core/src/api';
 import type { BrowserBoardSession } from './api';
 
 /**
@@ -40,6 +40,22 @@ const allIssues = new Map<number, BoardIssue>();
 const session = {
   api: {
     accessState: (): BoardAccessState => ({ boardId: 'board-1', keyId: null, rootKeyId: 'root-1', capabilities: [], credentialRejection: null, storageRejected: false, canEdit: false }),
+    // The conversation is read one bounded page at a time (board issue 174), so
+    // the stub answers the same way for page 1 of a one-page thread: the issue's
+    // own fields plus that page's messages.
+    getIssueCommentPage: async (number: number, page: number): Promise<IssueCommentPage> => {
+      const found = allIssues.get(number);
+      if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
+      return {
+        schemaVersion: 2,
+        boardId: 'board-1',
+        issue: { ...found, messages: [] },
+        page,
+        pageCount: 1,
+        total: found.messages.length,
+        messages: found.messages,
+      };
+    },
     getIssue: async (number: number): Promise<BoardIssue> => {
       const found = allIssues.get(number);
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');

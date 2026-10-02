@@ -11,7 +11,7 @@ process.env.XDG_CONFIG_HOME = '/nonexistent-antonina-web-app-mount-config';
 import App from './App';
 import { DEFAULT_FEED_LIMIT, type BoardFeedEntry, type BoardFeedEntryKind, type BoardFeedPage, type BoardFeedRequest } from './api';
 import type { BoardIssue } from './model';
-import type { BoardOverview } from '../../packages/core/src/api';
+import type { BoardOverview, IssueCommentPage } from '../../packages/core/src/api';
 import type { BoardAccessState } from '../../packages/core/src/api';
 import type { BrowserBoardSession } from './api';
 
@@ -42,6 +42,22 @@ const session = {
     // The list is rendered from the overview's issue summaries, so a thread is
     // hydrated on open rather than carried in the list read. The stub answers
     // from the same issue bodies the fixtures are built from.
+    // The conversation is read one bounded page at a time (board issue 174), so
+    // the stub answers the same way for page 1 of a one-page thread: the issue's
+    // own fields plus that page's messages.
+    getIssueCommentPage: async (number: number, page: number): Promise<IssueCommentPage> => {
+      const found = allIssues.get(number);
+      if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
+      return {
+        schemaVersion: 2,
+        boardId: 'board-1',
+        issue: { ...found, messages: [] },
+        page,
+        pageCount: 1,
+        total: found.messages.length,
+        messages: found.messages,
+      };
+    },
     getIssue: async (number: number): Promise<BoardIssue> => {
       const found = allIssues.get(number);
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');

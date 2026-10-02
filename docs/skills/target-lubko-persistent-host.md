@@ -94,8 +94,7 @@ your work accordingly.
 
 ## How an orchestrator should use this target
 
-1. Ask the board for the target: `antonina board target list --kind
-   persistent-host`, or `target show ID` for one target's access facts,
+1. Ask the board for the target: `antonina board target list --kind persistent-host --page 1`, or `target show ID` for one target's access facts,
    persistence, garbage collection, limitations and guidance references.
 2. Check the target's `status`. If it is `unavailable`, stop: the selection
    refuses that target by name rather than routing around it.

@@ -82,7 +82,7 @@ test('board CLI emits deterministic JSON list output for a board-key holder', as
 
   const reader = client(server, { credential: initialized.credential });
   const capture = memoryIo();
-  const code = await runBoardCommand(['list', '--json'], { env: {}, home: TEST_HOME, io: capture.io, createClient: () => reader });
+  const code = await runBoardCommand(['list', '--page', '1', '--json'], { env: {}, home: TEST_HOME, io: capture.io, createClient: () => reader });
 
   assert.equal(code, 0);
   assert.equal(JSON.parse(capture.out[0])[0].title, 'First');
@@ -106,7 +106,7 @@ test('no board CLI command creates a missing board', async () => {
   const methods = [];
   const reader = client(server, { fetch: async (url, init = {}) => { methods.push(init.method); return server.fetch(url, init); } });
 
-  for (const command of [['list'], ['access'], ['queue', 'list'], ['create', 'Mine']]) {
+  for (const command of [['list', '--page', '1'], ['access'], ['queue', 'list', '--page', '1'], ['create', 'Mine']]) {
     const { code, err } = await run(command, { createClient: () => reader });
     assert.equal(code, 1, command.join(' '));
     assert.match(err[0], /^antonina board: /, command.join(' '));
@@ -121,12 +121,12 @@ test('every read command names initialization while the board is missing', async
   const missing = 'antonina board: Antonina board does not exist; run: antonina board initialize to create it';
 
   for (const command of [
-    ['list'],
-    ['list', '--json'],
+    ['list', '--page', '1'],
+    ['list', '--page', '1', '--json'],
     ['show', '1'],
-    ['queue', 'list'],
-    ['resource', 'list'],
-    ['collect', 'list', '--host', 'lubko://host-1'],
+    ['queue', 'list', '--page', '1'],
+    ['resource', 'list', '--page', '1'],
+    ['collect', 'list', '--page', '1', '--host', 'lubko://host-1'],
   ]) {
     const { code, err } = await run(command, { createClient: () => client(server) });
     assert.equal(code, 1, command.join(' '));
@@ -179,11 +179,11 @@ test('every read command names the board credential when access is not configure
     + 'save the shared board credential as $XDG_CONFIG_HOME/antonina/credential.json';
 
   for (const command of [
-    ['list'],
+    ['list', '--page', '1'],
     ['show', '1'],
-    ['queue', 'list'],
-    ['resource', 'list'],
-    ['collect', 'list', '--host', 'lubko://host-1'],
+    ['queue', 'list', '--page', '1'],
+    ['resource', 'list', '--page', '1'],
+    ['collect', 'list', '--page', '1', '--host', 'lubko://host-1'],
   ]) {
     const { code, err } = await run(command, { createClient: () => client(server) });
     assert.equal(code, 1, command.join(' '));
@@ -343,7 +343,7 @@ test('a board command takes its board credential and optional integrity anchor f
   // And the loader is what `runBoardCommand` itself consults: a malformed file
   // in that same directory stops the command, which an unread directory would not.
   const broken = configDirectory({ 'credential.json': 'not json' });
-  const { code, err } = await run(['list'], { env: broken.env, home: broken.home });
+  const { code, err } = await run(['list', '--page', '1'], { env: broken.env, home: broken.home });
   assert.equal(code, 1);
   assert.match(err[0], /credential\.json must contain valid JSON/);
 });
@@ -363,12 +363,12 @@ test('the config directory follows XDG_CONFIG_HOME and the home fallback', () =>
 
 test('a board command refuses a config file it cannot parse and names its path', async () => {
   const notJson = configDirectory({ 'trust.json': 'not json' });
-  const badJson = await run(['list'], { env: notJson.env, home: notJson.home });
+  const badJson = await run(['list', '--page', '1'], { env: notJson.env, home: notJson.home });
   assert.equal(badJson.code, 1);
   assert.match(badJson.err[0], /trust\.json must contain valid JSON/);
 
   const wrongShape = configDirectory({ 'credential.json': '{"schemaVersion":1}' });
-  const badShape = await run(['list'], { env: wrongShape.env, home: wrongShape.home });
+  const badShape = await run(['list', '--page', '1'], { env: wrongShape.env, home: wrongShape.home });
   assert.equal(badShape.code, 1);
   assert.match(badShape.err[0], /credential\.json: Antonina board credential is malformed/);
 
@@ -388,7 +388,7 @@ test('a board command has no identity when the config files are absent', async (
 
   // An unconfigured board is not an error at load time; it fails closed as soon
   // as a command actually needs the board, naming initialization.
-  const { code, err } = await run(['list'], { env: { XDG_CONFIG_HOME: TEST_HOME }, home: TEST_HOME, createClient: () => client(fakeSkrynia()) });
+  const { code, err } = await run(['list', '--page', '1'], { env: { XDG_CONFIG_HOME: TEST_HOME }, home: TEST_HOME, createClient: () => client(fakeSkrynia()) });
   assert.equal(code, 1);
   assert.match(err[0], /does not exist; run: antonina board initialize/);
 });
@@ -454,11 +454,11 @@ test('board CLI queue list prints the reordered order in human and JSON form', a
   const board = await queuedBoard();
   await run(['queue', 'reorder', '3', '1', '2'], { createClient: () => board.client });
 
-  const human = await run(['queue', 'list'], { createClient: () => board.client });
+  const human = await run(['queue', 'list', '--page', '1'], { createClient: () => board.client });
   assert.equal(human.code, 0);
   assert.deepEqual(human.out, ['#3 #1 #2']);
 
-  const json = await run(['queue', 'list', '--json'], { createClient: () => board.client });
+  const json = await run(['queue', 'list', '--page', '1', '--json'], { createClient: () => board.client });
   assert.equal(json.code, 0);
   assert.deepEqual(json.out, ['[3,1,2]']);
   assert.deepEqual(JSON.parse(json.out[0]), [3, 1, 2]);
@@ -562,7 +562,7 @@ test('board CLI queue reorder requires a credential and leaves the board alone',
 });
 
 
-test('collection reads default to page 1 and board issue pages follow queue priority', async () => {
+test('collection reads require an explicit page and board issue pages follow queue priority', async () => {
   const summaries = Array.from({ length: 55 }, (_, index) => ({
     number: index + 1,
     title: 'Issue ' + (index + 1),
@@ -579,7 +579,11 @@ test('collection reads default to page 1 and board issue pages follow queue prio
     getQueue: async () => queue,
   };
 
-  const first = await run(['list', '--json'], { createClient: () => reader });
+  const missing = await run(['list', '--json'], { createClient: () => reader });
+  assert.equal(missing.code, 1);
+  assert.match(missing.err[0], /--page is required/);
+
+  const first = await run(['list', '--page', '1', '--json'], { createClient: () => reader });
   assert.equal(first.code, 0);
   const firstPage = JSON.parse(first.out[0]);
   assert.equal(firstPage.length, 50);

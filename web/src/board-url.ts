@@ -10,7 +10,7 @@ import type { IssueFilter } from './ui-state';
  * rather than in path segments — a path route would 404 on reload, and a hash
  * route would hide the state from anything that reads the URL as text.
  *
- * Credential safety is structural, not a promise: the state is six
+ * Credential safety is structural, not a promise: the state is seven
  * allowlisted fields, the serializer can only ever emit keys in
  * `BOARD_URL_KEYS`, and the parser reads only those keys, so a board
  * credential, token or key cannot be carried into the URL by construction even
@@ -40,6 +40,13 @@ export const DEFAULT_ISSUE_PAGE = 1;
  */
 export const DEFAULT_COMMENT_PAGE = 1;
 
+/**
+ * The first page of the Resources list, for the same reason as the two above: a
+ * screen with pagination needs a default page, and page 1 is the page before
+ * pagination exists.
+ */
+export const DEFAULT_RESOURCE_PAGE = 1;
+
 export interface BoardUrlState {
   view: BoardView;
   /** The open issue whose thread is shown, or `undefined` for the list alone. */
@@ -54,6 +61,13 @@ export interface BoardUrlState {
    * issue on page 3 of the list leaves page 3 alone and vice versa.
    */
   commentPage: number;
+  /**
+   * The Resources-list page number, one-based. Independent of `page` for the same
+   * reason `commentPage` is: it pages a different screen, so paging Resources
+   * must not renumber the Issues list behind it and paging Issues must not
+   * renumber Resources.
+   */
+  resourcePage: number;
 }
 
 /** The board as it opens with no URL parameters at all. */
@@ -64,6 +78,7 @@ export const DEFAULT_BOARD_URL_STATE: BoardUrlState = {
   settingsOpen: false,
   page: DEFAULT_ISSUE_PAGE,
   commentPage: DEFAULT_COMMENT_PAGE,
+  resourcePage: DEFAULT_RESOURCE_PAGE,
 };
 
 /**
@@ -71,7 +86,7 @@ export const DEFAULT_BOARD_URL_STATE: BoardUrlState = {
  * the parser reads nothing outside it, which is what makes "no board secret in
  * the URL" a property of the module rather than of anyone's care.
  */
-export const BOARD_URL_KEYS = ['view', 'issue', 'filter', 'page', 'thread', 'settings'] as const;
+export const BOARD_URL_KEYS = ['view', 'issue', 'filter', 'page', 'thread', 'resources', 'settings'] as const;
 
 function isBoardView(value: string): value is BoardView {
   return (BOARD_VIEWS as readonly string[]).includes(value);
@@ -98,9 +113,9 @@ function positiveInteger(value: string | null): number | undefined {
  * Reads the board's UI state out of a query string.
  *
  * Every field degrades rather than fails. An unknown or missing `view` is the
- * Issues tab; an unknown `filter` is `open`; a `page` or a `thread` that is not
- * a positive integer is page 1; an `issue` that is not a positive integer selects
- * nothing.
+ * Issues tab; an unknown `filter` is `open`; a `page`, a `thread` or a
+ * `resources` that is not a positive integer is page 1; an `issue` that is not a
+ * positive integer selects nothing.
  * So a stale link, a truncated paste and a hand-edited URL all land on a usable
  * board view instead of a blank screen, and unknown parameters are ignored
  * rather than echoed back into the address bar.
@@ -117,6 +132,7 @@ export function parseBoardUrl(search: string): BoardUrlState {
     settingsOpen: settings === '1',
     page: positiveInteger(params.get('page')) ?? DEFAULT_ISSUE_PAGE,
     commentPage: positiveInteger(params.get('thread')) ?? DEFAULT_COMMENT_PAGE,
+    resourcePage: positiveInteger(params.get('resources')) ?? DEFAULT_RESOURCE_PAGE,
   };
 }
 
@@ -135,6 +151,7 @@ export function boardSearch(state: BoardUrlState): string {
   if (state.filter !== DEFAULT_ISSUE_FILTER) params.set('filter', state.filter);
   if (state.page !== DEFAULT_ISSUE_PAGE) params.set('page', String(state.page));
   if (state.commentPage !== DEFAULT_COMMENT_PAGE) params.set('thread', String(state.commentPage));
+  if (state.resourcePage !== DEFAULT_RESOURCE_PAGE) params.set('resources', String(state.resourcePage));
   if (state.settingsOpen) params.set('settings', '1');
   const query = params.toString();
   return query === '' ? '' : `?${query}`;
@@ -168,6 +185,7 @@ export function boardUrlFor(changes: Partial<BoardUrlState>, from: BoardUrlState
     settingsOpen: next.settingsOpen,
     page: next.page,
     commentPage: next.commentPage ?? DEFAULT_COMMENT_PAGE,
+    resourcePage: next.resourcePage ?? DEFAULT_RESOURCE_PAGE,
   };
 }
 
@@ -183,12 +201,13 @@ export function sameBoardUrl(left: BoardUrlState, right: BoardUrlState): boolean
     && left.filter === right.filter
     && left.settingsOpen === right.settingsOpen
     && left.page === right.page
-    && left.commentPage === right.commentPage;
+    && left.commentPage === right.commentPage
+    && left.resourcePage === right.resourcePage;
 }
 
 /** The Issues tab: a tab link clears the selected issue, because the list is the screen. */
 export function tabUrlState(view: BoardView, from: BoardUrlState): BoardUrlState {
-  return boardUrlFor({ view, selectedNumber: undefined, page: DEFAULT_ISSUE_PAGE, commentPage: DEFAULT_COMMENT_PAGE }, from);
+  return boardUrlFor({ view, selectedNumber: undefined, page: DEFAULT_ISSUE_PAGE, commentPage: DEFAULT_COMMENT_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE }, from);
 }
 
 /** An issue thread: opening one from any tab lands on the Issues tab with the issue selected. */
@@ -213,6 +232,7 @@ export function boardHomeState(from: BoardUrlState): BoardUrlState {
     settingsOpen: false,
     page: DEFAULT_ISSUE_PAGE,
     commentPage: DEFAULT_COMMENT_PAGE,
+    resourcePage: DEFAULT_RESOURCE_PAGE,
   }, from);
 }
 

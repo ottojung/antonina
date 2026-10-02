@@ -79,6 +79,29 @@ jobs:
           subdir: .
           builder: ghcr.io/ottojung/skrynia-builder:1.0.0-122-g9829feb
           token: ${{ secrets.SKRYNIA_TOKEN }}
+      - name: Verify live deployment
+        run: |
+          set -euo pipefail
+          # This is the deployment verdict that does not require board
+          # credentials: Skrynia must answer, and the public artifact must be
+          # the exact commit this workflow just published.
+          curl --fail --retry 5 --retry-delay 5 https://vau.place/_skrynia/health
+          deployed_commit=""
+          for attempt in $(seq 1 12); do
+            deployed_version="$(curl --fail --retry 2 --retry-delay 2 https://vau.place/a/antonina/version.json)"
+            deployed_commit="$(printf '%s' "$deployed_version" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).commit))')"
+            if [ "$deployed_commit" = "$GITHUB_SHA" ]; then
+              break
+            fi
+            echo "live deployment still names $deployed_commit; waiting for $GITHUB_SHA (attempt $attempt/12)"
+            sleep 5
+          done
+          if [ "$deployed_commit" != "$GITHUB_SHA" ]; then
+            echo "ERROR: live deployment names $deployed_commit but this workflow run is $GITHUB_SHA" >&2
+            exit 1
+          fi
+          printf '## Live deployment\n\nSkrynia is healthy and the live artifact is commit `%s`.\n\n' "$deployed_commit" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Provision Chrome and ChromeDriver
         # This is the same provisioning the `smoke-probe` job in ci.yml does,
         # and it is here for the same reason: the probe drives a real browser,
@@ -150,33 +173,13 @@ jobs:
           ANTONINA_BOARD_CREDENTIAL: ${{ secrets.ANTONINA_BOARD_CREDENTIAL }}
         run: |
           set -euo pipefail
-          # The deployment itself is testable without board credentials: the
-          # storage service must be healthy and the live artifact must identify
-          # itself as this exact workflow revision. These checks remain hard
-          # failures even when the authenticated board probe is unavailable.
-          curl --fail --retry 5 --retry-delay 5 https://vau.place/_skrynia/health
-          deployed_commit=""
-          for attempt in $(seq 1 12); do
-            deployed_version="$(curl --fail --retry 2 --retry-delay 2 https://vau.place/a/antonina/version.json)"
-            deployed_commit="$(printf '%s' "$deployed_version" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).commit))')"
-            if [ "$deployed_commit" = "$GITHUB_SHA" ]; then
-              break
-            fi
-            echo "live deployment still names $deployed_commit; waiting for $GITHUB_SHA (attempt $attempt/12)"
-            sleep 5
-          done
-          if [ "$deployed_commit" != "$GITHUB_SHA" ]; then
-            echo "ERROR: live deployment names $deployed_commit but this workflow run is $GITHUB_SHA" >&2
-            exit 1
-          fi
-
           # The remaining probe needs both secrets. Missing secrets are an
           # unavailable authenticated check, not a failed deployment. Say that
           # loudly in both the log and run summary, and keep the hard checks
           # above as the deployment verdict.
           if [ -z "${ANTONINA_BOARD_TRUST_ANCHOR:-}" ] || [ -z "${ANTONINA_BOARD_CREDENTIAL:-}" ]; then
             echo "::warning::authenticated board smoke skipped: ANTONINA_BOARD_TRUST_ANCHOR and/or ANTONINA_BOARD_CREDENTIAL is not configured"
-            printf '## Smoke test\n\n**DEPLOYMENT VERIFIED** — Skrynia is healthy and the live artifact is commit %s.\n\n**AUTHENTICATED BOARD SMOKE SKIPPED** — the repository does not currently provide both board smoke-test secrets.\n\n' "$deployed_commit" >> "$GITHUB_STEP_SUMMARY"
+            printf '## Smoke test\n\n**AUTHENTICATED BOARD SMOKE SKIPPED** — the repository does not currently provide both board smoke-test secrets. The live deployment was verified by the preceding step.\n\n' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 

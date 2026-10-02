@@ -81,7 +81,7 @@ test('board feed prints every recorded operation, newest first, and names the co
   const first = await run(['feed', '--limit', '1', '--page', '1'], reader);
   assert.equal(first.code, 0);
   assert.equal(first.out.length, 2);
-  assert.ok(first.out[1].startsWith('next: v1.'));
+  assert.equal(first.out[1], 'more: increment --page');
   const second = await run(['feed', '--limit', '1', '--page', '2'], reader);
   assert.equal(second.code, 0);
   // Numbered paging one entry at a time reproduces the first-page lines in order.

@@ -15,7 +15,17 @@ The orchestrator has four jobs:
 3. build the largest clearly safe and useful parallel frontier from the board queue;
 4. leave append-only board updates that make later passes able to continue safely.
 
-Do useful work and then return. Do not keep an invocation alive merely to wait for a long-running agent or external event. A later invocation should be able to reconstruct the state from the board and the durable artifacts named there.
+Do useful orchestration work and then return. Do not keep an invocation alive merely to wait for a long-running agent or external event. A later invocation should be able to reconstruct the state from the board and the durable artifacts named there.
+
+## Delegation boundary
+
+The orchestrator is a coordinator, never an implementation worker. It must not implement issue work itself.
+
+All substantive repository work must be delegated to Antonina agents. This includes source, test, documentation, configuration, migration, or generated-file edits; committing; merging or rebasing; cherry-picking; pushing repository refs; release integration; deployments; and substantial build/test/validation work. Independent review, verification, research, and integration are agent roles too: launch or steer an agent for them instead of doing them in the orchestrator process.
+
+The orchestrator may perform bounded coordination operations needed to delegate safely: inspect board and agent state; inspect repository metadata and small diffs read-only; fetch refs; inspect host resources; create or register worktrees/branches as agent reservations; write board comments; launch, steer, stop, or harvest Antonina agents; and close/reopen/reorder board issues when the durable evidence warrants it. These coordination actions must not become a back door for implementing the issue.
+
+Once a useful agent has been launched and its real ID/resources are durably recorded, do not remain alive to supervise it command-by-command or wait for it to finish. Continue only long enough to fill other clearly safe frontier slots and record coordination state, then return. A future invocation will reconcile the results.
 
 ## Board access
 
@@ -93,7 +103,7 @@ Do not manufacture work merely to stay busy.
 
 ## Actionability
 
-An issue is actionable when there is a concrete next action the orchestrator or one of its agents can perform now.
+An issue is actionable when there is a concrete next action an Antonina agent can perform now, or a bounded coordination action the orchestrator can perform to delegate or reconcile that work.
 
 Treat judgment already delegated by the issue as actionable work, not as a blocker. When an issue gives goals, constraints, examples, or a quality bar and asks the worker to choose, prefer, diversify, review, improve, or otherwise exercise judgment, make a reasonable choice within those bounds. A research or audit result should normally feed the next implementation or review step; do not invent a human approval gate, numerical quota, editorial target, or other decision the issue did not require.
 

@@ -9,6 +9,18 @@
 // updates a pull request, and never writes to a board. A disagreement is
 // reported as a disagreement; neither side is silently preferred.
 //
+// Declared non-goals, so coverage is not inferred from silence:
+//   - No rejected-action detection. "Rejected" is an administrative action
+//     refused by the provider; this tool performs no administrative actions,
+//     so there is nothing that can be rejected yet and no verdict for it.
+//   - No board write. The tool does not append anything to an Antonina issue.
+//   - The emitted line is a report, not a board-append payload. If a
+//     machine-readable payload is wanted for the "append the factual result to
+//     the same Antonina issue" half of the issue, that is a separate increment
+//     and is not implemented here.
+//   - No mirroring. This tool reads administrative state; it does not push,
+//     copy or sync anything.
+//
 // Usage:
 //   node scripts/reconcile-handoff.mjs <claims.json> [--remote <name>] [--repo <dir>]
 //
@@ -42,21 +54,32 @@ function git(repo, args, { allowFailure = false } = {}) {
     }
   } catch (err) {
     if (!allowFailure) throw err
-    return { ok: false, out: String(err.stdout ?? '').trim(), status: err.status ?? null }
+    // git reports transport failures (missing remote, auth, DNS) on stderr, so
+    // the error text must be captured or a failure reason is lost.
+    const stderrText = String(err.stderr ?? '').trim()
+    const stdoutText = String(err.stdout ?? '').trim()
+    return {
+      ok: false,
+      out: stdoutText || stderrText,
+      status: err.status ?? null,
+      stderr: stderrText,
+    }
   }
 }
 
 // The administrative state of one ref, read straight from the provider.
 // Absence is a value, not an error: a ref that is not there is a fact about
-// the admin side that the caller has to reconcile against.
+// the admin side that the caller has to reconcile against. A transport failure
+// is NOT absence and is reported separately, so an unreachable remote is never
+// restated as "this branch does not exist there".
 export function readAdminRef(repo, remote, ref) {
   const ls = git(repo, ['ls-remote', '--heads', remote, `refs/heads/${ref}`], {
     allowFailure: true,
   })
-  if (!ls.ok) return { ref, present: false, commit: null, error: ls.out }
+  if (!ls.ok) return { ref, reachable: false, present: false, commit: null, error: ls.out }
   const match = /^([0-9a-f]{40})\trefs\/heads\/(.+)$/.exec(ls.out)
-  if (!match) return { ref, present: false, commit: null }
-  return { ref, present: true, commit: match[1] }
+  if (!match) return { ref, reachable: true, present: false, commit: null, error: null }
+  return { ref, reachable: true, present: true, commit: match[1], error: null }
 }
 
 function isAncestor(repo, older, newer) {
@@ -102,6 +125,35 @@ export function reconcileClaim(claim, admin, repo) {
     verdict.verdict = 'claim-is-not-the-branch-head'
     verdict.why = `branch ${claim.branch} is at ${head.out}, the claim names ${claim.commit}`
     verdict.nextStep = 'resolve the local branch and the claim before publishing anything'
+    return verdict
+  }
+
+  if (admin.claimRef && admin.claimRef.reachable === false) {
+    verdict.verdict = 'admin-unreachable'
+    verdict.why = `${admin.claimRef.ref} could not be read from the administrative side: ${admin.claimRef.error || 'transport error'}`
+    verdict.nextStep =
+      'establish administrative reachability (credentials, network, provider) and re-run; absence is not concluded'
+    return verdict
+  }
+
+  // A published claim branch sitting at a different commit than the claim
+  // contradicts the claim about its own ref. It must never be reported as a
+  // clean `landed`.
+  if (admin.claimRef && admin.claimRef.present && admin.claimRef.commit !== claim.commit) {
+    verdict.verdict = 'claim-branch-diverged'
+    verdict.why = `${admin.claimRef.ref} exists on the administrative side at ${admin.claimRef.commit}, the claim names ${claim.commit}`
+    verdict.nextStep =
+      'the published claim branch and the claim disagree; reconcile the claim with the published ref before citing either'
+    return verdict
+  }
+
+  if (admin.reachable === false) {
+    // The read never succeeded. Nothing can be asserted about the
+    // administrative side, including that a ref is missing there.
+    verdict.verdict = 'admin-unreachable'
+    verdict.why = `${admin.ref} could not be read from the administrative side: ${admin.error || 'transport error'}`
+    verdict.nextStep =
+      'establish administrative reachability (credentials, network, provider) and re-run; absence is not concluded'
     return verdict
   }
 
@@ -166,6 +218,33 @@ export function reconcileClaim(claim, admin, repo) {
   return verdict
 }
 
+// Severity of a verdict, by the exit code it maps to. Higher is worse.
+// Stated once so the duplicate-claim pass can never mask a conflict that a
+// single-claim run already earned: a later pass may only raise severity.
+const SEVERITY_RANK = {
+  [EXIT_OK]: 0,
+  [EXIT_UNPUBLISHED]: 1,
+  [EXIT_UNEVALUABLE]: 2,
+  [EXIT_DISAGREE]: 3,
+}
+
+export function codeForVerdict(verdict) {
+  const byVerdict = {
+    landed: EXIT_OK,
+    'landed-and-superseded': EXIT_OK,
+    unpublished: EXIT_UNPUBLISHED,
+    unevaluable: EXIT_UNEVALUABLE,
+    'superseded-by-later-claim': EXIT_OK,
+    'claim-is-not-the-branch-head': EXIT_DISAGREE,
+    'target-ref-absent': EXIT_UNEVALUABLE,
+    'admin-unreachable': EXIT_UNEVALUABLE,
+    'claim-branch-diverged': EXIT_DISAGREE,
+    diverged: EXIT_DISAGREE,
+    'duplicate-claims-disagree': EXIT_DISAGREE,
+  }
+  return byVerdict[verdict] ?? EXIT_UNEVALUABLE
+}
+
 // Two claims against the same target at different commits. That is only a
 // disagreement when neither claim supersedes the other: if one claimed commit
 // is an ancestor of another, the older claim has been carried forward and the
@@ -198,10 +277,19 @@ export function reconcileDuplicateClaims(claims, results, repo) {
       for (const [olderCommit, newer] of superseded) {
         const r = results.find((x) => x.commit === olderCommit && x.targetBranch === target)
         if (!r) continue
-        r.verdict = 'superseded-by-later-claim'
-        r.why = `issue ${newer.issue} claims ${newer.commit}, which contains this claim's ${olderCommit}`
-        r.nextStep = `issue ${r.issue} may cite its commit only as history, not as current state`
+        // Severity is a maximum over the verdicts a claim earns, never a
+        // last-write-wins overwrite. A supersession fact is carried alongside
+        // whatever the claim already earned; it never masks a worse verdict.
+        const fact = `superseded by issue ${newer.issue} claiming ${newer.commit}, which contains this claim's ${olderCommit}`
         r.supersededBy = { issue: newer.issue ?? null, commit: newer.commit }
+        // Severity is a maximum over the verdicts a claim earns, never a
+        // last-write-wins overwrite. The supersession verdict names the record
+        // relationship; the verdict the single-claim pass already earned is
+        // retained and still counts towards the exit code.
+        r.retainedVerdict = r.verdict
+        r.verdict = 'superseded-by-later-claim'
+        r.why = `${fact}; separately, ${r.retainedVerdict}: ${r.why}`
+        r.nextStep = `issue ${r.issue} may cite its commit only as history, not as current state; and resolve the retained finding: ${r.retainedVerdict}`
       }
       continue
     }
@@ -209,8 +297,9 @@ export function reconcileDuplicateClaims(claims, results, repo) {
     duplicates.push({ target, claims: group.map((c) => ({ issue: c.issue, commit: c.commit })) })
     for (const r of results) {
       if (r.targetBranch === target) {
+        r.retainedVerdict = r.verdict
         r.verdict = 'duplicate-claims-disagree'
-        r.why = `${group.length} claims target ${target} at ${commits.size} different commits, none an ancestor of another`
+        r.why = `${group.length} claims target ${target} at ${commits.size} different commits, none an ancestor of another; separately, ${r.retainedVerdict}: ${r.why}`
         r.nextStep =
           'neither claim wins; one issue supersedes the other in the record before any publication'
       }
@@ -234,21 +323,13 @@ export function reconcileAll(claims, { repo, remote, refReader = readAdminRef })
 
 export function exitCodeFor(results) {
   let worst = EXIT_OK
-  const rank = { [EXIT_OK]: 0, [EXIT_UNPUBLISHED]: 1, [EXIT_UNEVALUABLE]: 2, [EXIT_DISAGREE]: 3 }
-  const byVerdict = {
-    landed: EXIT_OK,
-    'landed-and-superseded': EXIT_OK,
-    unpublished: EXIT_UNPUBLISHED,
-    unevaluable: EXIT_UNEVALUABLE,
-    'superseded-by-later-claim': EXIT_OK,
-    'claim-is-not-the-branch-head': EXIT_DISAGREE,
-    'target-ref-absent': EXIT_UNEVALUABLE,
-    diverged: EXIT_DISAGREE,
-    'duplicate-claims-disagree': EXIT_DISAGREE,
-  }
   for (const r of results) {
-    const code = byVerdict[r.verdict] ?? EXIT_UNEVALUABLE
-    if (rank[code] > rank[worst]) worst = code
+    // The maximum over every verdict a claim earned, including one retained
+    // from the single-claim pass when a later pass renamed it.
+    const codes = [r.verdict, r.retainedVerdict].filter(Boolean).map(codeForVerdict)
+    for (const code of codes) {
+      if (SEVERITY_RANK[code] > SEVERITY_RANK[worst]) worst = code
+    }
   }
   return worst
 }
@@ -296,7 +377,15 @@ function main(argv) {
   const { results, duplicates } = reconcileAll(claims, { repo: args.repo, remote: args.remote })
   for (const r of results) {
     process.stdout.write(
-      `${JSON.stringify({ issue: r.issue, verdict: r.verdict, why: r.why, nextStep: r.nextStep })}\n`,
+      `${JSON.stringify({
+        issue: r.issue,
+        verdict: r.verdict,
+        why: r.why,
+        nextStep: r.nextStep,
+        evidence: r.evidence ?? [],
+        ...(r.supersededBy ? { supersededBy: r.supersededBy } : {}),
+        ...(r.retainedVerdict ? { retainedVerdict: r.retainedVerdict } : {}),
+      })}\n`,
     )
   }
   if (duplicates.length > 0) {

@@ -106,6 +106,26 @@ export function logPath(agentId: string, options: StatePathsOptions = {}): strin
   return join(agentDir(agentId, options), 'output.log');
 }
 
+/**
+ * How many bytes of `output.log` already exist, which is the byte offset the
+ * next append-only write to it starts at. An absent log is zero bytes, not an
+ * error: a front that has never produced output has a log cursor of zero and a
+ * log that is created at that offset by its first write.
+ *
+ * This reads the real filesystem rather than the injected `StoreFs`, because the
+ * log is written by the backend process itself, never through the store, and no
+ * test-owned `fs` seam owns those bytes. That also means the value can be stale
+ * the instant it is returned; a caller uses it as a lower bound describing
+ * history, never as a claim that it has read anything.
+ */
+export function logSize(agentId: string, options: StatePathsOptions = {}): number {
+  try {
+    return nodeFs.statSync(logPath(agentId, options)).size;
+  } catch {
+    return 0;
+  }
+}
+
 export function readMeta(agentId: string, options: StatePathsOptions = {}): AgentMetadata | null {
   if (persistedAgentId(agentId) !== agentId) {
     throw new MetadataReadError('managed-agent id is malformed');

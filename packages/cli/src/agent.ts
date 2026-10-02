@@ -52,6 +52,7 @@ import {
   persistedControlField,
   persistedLifecycleState,
   persistedNativeSessionId,
+  persistedRunLogOffset,
   persistedTimestamp,
   persistedVariant,
   requiredPersistedAgentId,
@@ -66,6 +67,7 @@ import {
   agentsDir,
   createAgentDirectory,
   logPath,
+  logSize,
   readMeta,
   removeAgentDirectory,
   updateMeta,
@@ -745,9 +747,16 @@ function spawnRunner(
   child.unref();
 }
 
-async function followAttached(agentId: string, context: AgentCommandContext): Promise<number> {
+async function followAttached(
+  agentId: string,
+  context: AgentCommandContext,
+  startOffset: number,
+): Promise<number> {
   const path = logPath(agentId, paths(context));
-  let offset = 0;
+  // `startOffset` is where this invocation's output begins, so an attached run
+  // reports its own progress and not the accumulated transcript of every earlier
+  // run. `agent log` remains the command that reads that history.
+  let offset = startOffset;
   let terminalSince: number | null = null;
   while (true) {
     if (existsSync(path)) {
@@ -826,6 +835,9 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     recoverBusy?: boolean;
   } = {};
   const steer = parsed.flags.has('--steer');
+  // Observed before this command accepts anything, so it bounds the history it
+  // did not cause even on the paths that accept no new invocation of their own.
+  const historyLength = logSize(agentId, paths(context));
   await updateMeta(agentId, (meta) => {
     const lifecycle = persistedLifecycleState(meta);
     const active = activeRunnerFlag(meta);
@@ -940,7 +952,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     // else: a transaction that ends in `busy` records nothing at all, so a
     // rejected prompt cannot leave a cwd behind that no front ever ran in.
     if (runCwd !== null) meta.cwd = runCwd;
-    beginInvocation(meta, prompt, now, promptCount);
+    beginInvocation(meta, prompt, now, promptCount, { logOffset: logSize(agentId, paths(context)) });
     meta.active_runner = true;
     meta.runner_gen = generation;
     meta.runner_reservation = {
@@ -969,6 +981,15 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     if (current !== null) signalInvocation(current, 'SIGTERM');
   }
 
+  // A front this command accepted owns the cursor the runtime recorded for it.
+  // A `--steer` command owns no invocation of its own -- the runner begins the
+  // drained continuation, and sets its cursor at that moment -- so for it the
+  // boundary is the log as this command found it. A record with no usable cursor
+  // (written before cursors existed) falls back to that same observation, which
+  // is what the durable cursor would have been.
+  const accepted = decision.action === 'spawn' ? readMeta(agentId, paths(context)) : null;
+  const startOffset = persistedRunLogOffset(accepted ?? {}) ?? historyLength;
+
   if (parsed.flags.has('--detach')) {
     if (parsed.flags.has('--json')) {
       context.io.stdout(JSON.stringify({ id: agentId, state: 'running', detached: true }));
@@ -977,7 +998,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     }
     return EXIT_OK;
   }
-  return followAttached(agentId, context);
+  return followAttached(agentId, context, startOffset);
 }
 
 async function waitForRunnerGone(

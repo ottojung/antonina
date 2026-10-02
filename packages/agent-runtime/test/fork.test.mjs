@@ -111,6 +111,7 @@ function finishedMeta(agentId, overrides = {}) {
     exit_code: 7,
     exit_signal: null,
     error: 'boom',
+    run_log_offset: 4_096,
     ...overrides,
   };
   validateAgentMetadata(meta);
@@ -185,6 +186,10 @@ test('a fork carries the source work identity and takes a new identity of its ow
   assert.equal(clone.steer_seq, 0);
   assert.equal(clone.intent, null);
   assert.equal(clone.delete_pending, false);
+  // A byte cursor into a log the clone does not have: the clone writes its own
+  // `output.log` from zero, so it cannot start reading at the source's offset.
+  assert.equal(clone.run_log_offset, null);
+  assert.equal(readMeta('a1', { env: process.env }).run_log_offset, 4_096);
 
   // Both records are canonical, independently.
   validateAgentMetadata(readMeta('a1', { env: process.env }));

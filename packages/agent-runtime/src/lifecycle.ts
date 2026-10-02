@@ -93,7 +93,24 @@ export function setActiveRunner(meta: AgentMetadata, value: boolean): void {
   if (!value) meta.runner_reservation = null;
 }
 
-export function beginInvocation(meta: AgentMetadata, prompt: string, now: number, promptCount: number): void {
+export interface BeginInvocationOptions {
+  /**
+   * Byte offset into `output.log` at which this invocation's output begins,
+   * i.e. the length of the log at the instant this invocation is accepted. The
+   * caller passes it because only the caller knows which agent's log is meant;
+   * omitting it records no cursor and leaves any inherited one alone, which is
+   * what a caller that cannot observe the log must do rather than invent one.
+   */
+  logOffset?: number;
+}
+
+export function beginInvocation(
+  meta: AgentMetadata,
+  prompt: string,
+  now: number,
+  promptCount: number,
+  options: BeginInvocationOptions = {},
+): void {
   meta.state = 'running';
   meta.started_at = now;
   meta.last_activity_at = now;
@@ -118,6 +135,13 @@ export function beginInvocation(meta: AgentMetadata, prompt: string, now: number
   meta.pending_prompt = prompt;
   meta.last_prompt = prompt.slice(0, 500);
   meta.prompt_count = promptCount;
+  // Run scope: the bytes before this cursor belong to earlier invocations. It is
+  // recorded in the same write that accepts the prompt, so no reader can observe
+  // an accepted prompt whose cursor is missing.
+  const logOffset = options.logOffset;
+  if (typeof logOffset === 'number' && Number.isSafeInteger(logOffset) && logOffset >= 0) {
+    meta.run_log_offset = logOffset;
+  }
 }
 
 export function finalizeTerminal(
@@ -186,7 +210,11 @@ export function queueSteer(meta: AgentMetadata, prompt: string, now: number): bo
   return true;
 }
 
-export function popSteerIntoPending(meta: AgentMetadata, now: number): string | null {
+export function popSteerIntoPending(
+  meta: AgentMetadata,
+  now: number,
+  options: BeginInvocationOptions = {},
+): string | null {
   const count = nextPromptCount(meta);
   const sequence = steerSequence(meta);
   const queue = steerQueue(meta, sequence);
@@ -194,7 +222,7 @@ export function popSteerIntoPending(meta: AgentMetadata, now: number): string | 
   const item = queue.shift();
   if (!item) return null;
   meta.steer_queue = queue;
-  beginInvocation(meta, item.prompt, now, count);
+  beginInvocation(meta, item.prompt, now, count, options);
   return item.prompt;
 }
 

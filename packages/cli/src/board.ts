@@ -420,9 +420,17 @@ async function execute(
       const ordered = state === 'closed' ? summaries : issuePriorityOrder(summaries, await client.getQueue());
       return { mode: 'issues', value: pageSlice(ordered, pageNumber(pageOption.value)) };
     }
-    case 'show':
-      if (parsed.args.length !== 1) throw new AntoninaApiError('show requires NUMBER');
-      return { mode: 'issue', value: await client.getIssue(parsePositiveInteger(parsed.args[0], 'NUMBER')) };
+    case 'show': {
+      const pageOption = option(parsed.args, '--page');
+      if (pageOption.rest.length !== 1) throw new AntoninaApiError('show requires NUMBER');
+      return {
+        mode: 'issue',
+        value: await client.getIssuePage(
+          parsePositiveInteger(pageOption.rest[0], 'NUMBER'),
+          pageNumber(pageOption.value),
+        ),
+      };
+    }
     case 'create': {
       const bodyOption = option(parsed.args, '--body');
       if (bodyOption.rest.length !== 1) throw new AntoninaApiError('create requires TITLE');

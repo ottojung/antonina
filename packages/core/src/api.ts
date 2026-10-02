@@ -483,6 +483,18 @@ export class BoardApi {
   }
 
   /**
+   * Read one reverse-chronological comment page for an issue while preserving
+   * chronological order inside the page. Page 1 contains the newest comments.
+   * The issue description is returned on every page.
+   */
+  async getIssuePage(number: number, page: number): Promise<BoardIssue> {
+    const credential = await this.fastReadCredential();
+    const issue = await this.store.getIssuePage(credential, number, page, this.rememberedHead);
+    if (issue === null) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
+    return clone(issue);
+  }
+
+  /**
    * One page of the materialized chronological board feed, newest first.
    * V3 stores feed pages directly; reading the feed never reconstructs history.
    */

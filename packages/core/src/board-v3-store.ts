@@ -1440,24 +1440,34 @@ export class ShardedBoardStore {
     };
     if (!withMessages) return { snapshot, issue: issueFromCore(core, []) };
 
-    const pages = await Promise.all(snapshot.commentRefs.map(async (commentRef, index) => {
-      const pageStored = await this.requireJson<unknown>(credential.storageCapability, commentRef);
-      const pageValue = pageStored.value;
-      if (!isRecord(pageValue)
-          || pageValue.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
-          || pageValue.boardId !== meta.boardId
-          || pageValue.number !== snapshot.number
-          || pageValue.page !== index + 1
-          || !Array.isArray(pageValue.messages)) {
-        throw new ShardedBoardStoreError('Antonina comment page is malformed');
-      }
-      return clone(pageValue.messages as BoardMessage[]);
-    }));
+    const pages = await Promise.all(snapshot.commentRefs.map(
+      (commentRef, index) => this.readCommentPage(credential, meta, snapshot.number, commentRef, index + 1),
+    ));
     const messages = pages.flat();
     if (messages.length !== snapshot.messageCount) {
       throw new ShardedBoardStoreError('Antonina issue message count does not match its comment pages');
     }
     return { snapshot, issue: issueFromCore(core, messages) };
+  }
+
+  private async readCommentPage(
+    credential: BoardCredential,
+    meta: ShardedBoardMeta,
+    number: number,
+    commentRef: string,
+    page: number,
+  ): Promise<BoardMessage[]> {
+    const pageStored = await this.requireJson<unknown>(credential.storageCapability, commentRef);
+    const pageValue = pageStored.value;
+    if (!isRecord(pageValue)
+        || pageValue.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
+        || pageValue.boardId !== meta.boardId
+        || pageValue.number !== number
+        || pageValue.page !== page
+        || !Array.isArray(pageValue.messages)) {
+      throw new ShardedBoardStoreError('Antonina comment page is malformed');
+    }
+    return clone(pageValue.messages as BoardMessage[]);
   }
 
   /**
@@ -1473,11 +1483,12 @@ export class ShardedBoardStore {
     credential: BoardCredential,
     meta: ShardedBoardMeta,
     number: number,
+    withMessages = true,
   ): Promise<{ snapshot: IssueSnapshot; issue: BoardIssue } | null> {
     const directory = await this.readDirectoryPage(credential, meta, directoryPageNumber(number));
     const entry = directory?.entries.find((candidate) => candidate.number === number);
     if (entry === undefined) return null;
-    return this.readIssueSnapshot(credential, meta, entry.ref, true);
+    return this.readIssueSnapshot(credential, meta, entry.ref, withMessages);
   }
 
   private async readQueue(credential: BoardCredential, meta: ShardedBoardMeta): Promise<number[]> {
@@ -3237,6 +3248,43 @@ export class ShardedBoardStore {
     const { credential, meta } = await this.requirePointerForCredential(credentialValue);
     const resolved = await this.readIssueSnapshotByNumber(credential, meta, number);
     return resolved?.issue ?? null;
+  }
+
+  /**
+   * Read one logical issue page newest-first without hydrating the entire
+   * append-only comment history. Storage comment shards are oldest-first, so a
+   * logical page can straddle two physical shards.
+   */
+  async getIssuePage(
+    credentialValue: BoardCredential,
+    number: number,
+    page: number,
+  ): Promise<BoardIssue | null> {
+    const { credential, meta } = await this.requirePointerForCredential(credentialValue);
+    const resolved = await this.readIssueSnapshotByNumber(credential, meta, number, false);
+    if (resolved === null) return null;
+
+    const { snapshot, issue } = resolved;
+    const end = Math.max(0, snapshot.messageCount - (page - 1) * V3_COMMENT_PAGE_SIZE);
+    const start = Math.max(0, end - V3_COMMENT_PAGE_SIZE);
+    if (start >= end) return issue;
+
+    const firstPhysicalIndex = Math.floor(start / V3_COMMENT_PAGE_SIZE);
+    const lastPhysicalIndex = Math.floor((end - 1) / V3_COMMENT_PAGE_SIZE);
+    const physicalPages = await Promise.all(
+      snapshot.commentRefs
+        .slice(firstPhysicalIndex, lastPhysicalIndex + 1)
+        .map((commentRef, offset) => this.readCommentPage(
+          credential,
+          meta,
+          number,
+          commentRef,
+          firstPhysicalIndex + offset + 1,
+        )),
+    );
+    const physicalStart = firstPhysicalIndex * V3_COMMENT_PAGE_SIZE;
+    const messages = physicalPages.flat().slice(start - physicalStart, end - physicalStart);
+    return { ...issue, messages: clone(messages) };
   }
 
   private async readIssuePageFromMeta(

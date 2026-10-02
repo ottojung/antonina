@@ -400,6 +400,22 @@ export class SignedBoardStore {
     }
   }
 
+  async getIssuePage(
+    credentialValue: BoardCredential,
+    number: number,
+    page: number,
+    previouslyAcceptedHead?: string | null,
+  ): Promise<BoardIssue | null> {
+    const credential = await verifyBoardCredential(credentialValue);
+    await this.ensureMaterialized(credential, previouslyAcceptedHead);
+    try {
+      return await this.sharded.getIssuePage(credential, number, page);
+    } catch (error) {
+      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
+      throw error;
+    }
+  }
+
   async readIssuePage(
     credentialValue: BoardCredential,
     state: IssueState,

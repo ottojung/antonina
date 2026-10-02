@@ -152,10 +152,10 @@ const BOARD_SPECS: readonly CommandSpec[] = [
   }),
   withJson({
     path: ['show'],
-    summary: 'Show one board issue.',
-    values: ['--id'],
-    required: ['--id'],
-    normalize: (p) => ['show', p.values.get('--id')!, ...jsonArg(p)],
+    summary: 'Show one page of a board issue: description plus comments, newest page first.',
+    values: ['--id', '--page'],
+    required: ['--id', '--page'],
+    normalize: (p) => ['show', p.values.get('--id')!, '--page', p.values.get('--page')!, ...jsonArg(p)],
   }),
   withJson({
     path: ['create'],

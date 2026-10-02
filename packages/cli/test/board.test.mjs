@@ -89,6 +89,43 @@ test('board CLI emits deterministic JSON list output for a board-key holder', as
   assert.deepEqual(capture.err, []);
 });
 
+test('board show pages newest comments while retaining the issue description', async () => {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  const initialized = await owner.initialize();
+  await owner.createIssue('Paged', 'issue description');
+  for (let index = 1; index <= 55; index += 1) {
+    await owner.comment(1, 'worker', 'comment-' + String(index).padStart(2, '0'));
+  }
+
+  const reader = client(server, { credential: initialized.credential });
+  const first = await run(['show', '1', '--page', '1', '--json'], { createClient: () => reader });
+  assert.equal(first.code, 0, first.err.join('\n'));
+  const firstIssue = JSON.parse(first.out[0]);
+  assert.equal(firstIssue.body, 'issue description');
+  assert.equal(firstIssue.messages.length, 50);
+  assert.equal(firstIssue.messages[0].body, 'comment-06');
+  assert.equal(firstIssue.messages[49].body, 'comment-55');
+
+  const second = await run(['show', '1', '--page', '2', '--json'], { createClient: () => reader });
+  assert.equal(second.code, 0, second.err.join('\n'));
+  const secondIssue = JSON.parse(second.out[0]);
+  assert.equal(secondIssue.body, 'issue description');
+  assert.deepEqual(secondIssue.messages.map((message) => message.body), [
+    'comment-01',
+    'comment-02',
+    'comment-03',
+    'comment-04',
+    'comment-05',
+  ]);
+
+  const third = await run(['show', '1', '--page', '3', '--json'], { createClient: () => reader });
+  assert.equal(third.code, 0, third.err.join('\n'));
+  const thirdIssue = JSON.parse(third.out[0]);
+  assert.equal(thirdIssue.body, 'issue description');
+  assert.deepEqual(thirdIssue.messages, []);
+});
+
 test('board CLI requires author from flag or environment', async () => {
   const capture = memoryIo();
   const code = await runBoardCommand(['comment', '1', 'hello'], {
@@ -123,7 +160,7 @@ test('every read command names initialization while the board is missing', async
   for (const command of [
     ['list', '--page', '1'],
     ['list', '--page', '1', '--json'],
-    ['show', '1'],
+    ['show', '1', '--page', '1'],
     ['queue', 'list', '--page', '1'],
     ['resource', 'list', '--page', '1'],
     ['collect', 'list', '--page', '1', '--host', 'lubko://host-1'],
@@ -180,7 +217,7 @@ test('every read command names the board credential when access is not configure
 
   for (const command of [
     ['list', '--page', '1'],
-    ['show', '1'],
+    ['show', '1', '--page', '1'],
     ['queue', 'list', '--page', '1'],
     ['resource', 'list', '--page', '1'],
     ['collect', 'list', '--page', '1', '--host', 'lubko://host-1'],

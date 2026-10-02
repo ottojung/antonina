@@ -62,7 +62,7 @@ async function boardWithActivity() {
 
 test('board feed prints every recorded operation, newest first, and names the continuation', async () => {
   const reader = await boardWithActivity();
-  const { code, out, err } = await run(['feed'], reader);
+  const { code, out, err } = await run(['feed', '--page', '1'], reader);
 
   assert.equal(code, 0);
   assert.deepEqual(err, []);
@@ -78,20 +78,19 @@ test('board feed prints every recorded operation, newest first, and names the co
   // The whole feed fits the default page, so there is nothing to continue to.
   assert.equal(out.filter((line) => line.startsWith('next: ')).length, 0);
 
-  const first = await run(['feed', '--limit', '1'], reader);
+  const first = await run(['feed', '--limit', '1', '--page', '1'], reader);
   assert.equal(first.code, 0);
   assert.equal(first.out.length, 2);
   assert.ok(first.out[1].startsWith('next: v1.'));
-  // A token taken from the printed output is the token the next page takes.
-  const second = await run(['feed', '--limit', '1', '--cursor', first.out[1].slice('next: '.length)], reader);
+  const second = await run(['feed', '--limit', '1', '--page', '2'], reader);
   assert.equal(second.code, 0);
-  // Paging one entry at a time reproduces the single-page lines in order.
+  // Numbered paging one entry at a time reproduces the first-page lines in order.
   assert.deepEqual([first.out[0], second.out[0]], out.slice(0, 2));
 });
 
 test('board feed --json is the whole page, machine readable, and requires the board credential', async () => {
   const reader = await boardWithActivity();
-  const { code, out } = await run(['feed', '--json'], reader);
+  const { code, out } = await run(['feed', '--page', '1', '--json'], reader);
 
   assert.equal(code, 0);
   const page = JSON.parse(out[0]);
@@ -116,7 +115,7 @@ test('board feed --json is the whole page, machine readable, and requires the bo
   assert.equal(page.entries.filter((entry) => entry.at === comment.at).length, 5);
 });
 
-test('board feed pages with --cursor and --limit without loss or repeat', async () => {
+test('board feed numbered pages walk the feed without loss or repeat', async () => {
   const server = fakeSkrynia();
   const owner = client(server, { now: () => new Date('2026-09-25T00:00:00.000Z') });
   const initialized = await owner.initialize();
@@ -126,42 +125,49 @@ test('board feed pages with --cursor and --limit without loss or repeat', async 
   }
   const reader = client(server, { credential: initialized.credential });
 
-  const whole = await run(['feed', '--json', '--limit', '500'], reader);
+  const whole = await run(['feed', '--page', '1', '--json', '--limit', '500'], reader);
   const expected = JSON.parse(whole.out[0]).entries.map((entry) => entry.id);
 
   const walked = [];
-  let cursor = null;
-  for (let guard = 0; guard < 50; guard += 1) {
-    const argv = ['feed', '--json', '--limit', '3'];
-    if (cursor !== null) argv.push('--cursor', cursor);
-    const { code, out } = await run(argv, reader);
+  for (let pageNumber = 1; pageNumber < 50; pageNumber += 1) {
+    const { code, out } = await run(
+      ['feed', '--page', String(pageNumber), '--json', '--limit', '3'],
+      reader,
+    );
     assert.equal(code, 0);
     const page = JSON.parse(out[0]);
     walked.push(...page.entries.map((entry) => entry.id));
-    cursor = page.nextCursor;
-    if (cursor === null) break;
+    if (page.nextCursor === null) break;
   }
-  assert.equal(cursor, null);
   // Every board operation in this board shares one instant, so this walk is a
   // walk through a fully tied stream: it must still reproduce the projection.
   assert.deepEqual(walked, expected);
   assert.equal(new Set(walked).size, expected.length);
 });
 
-test('board feed refuses a nonsense limit or cursor rather than guessing', async () => {
+test('board feed requires a page and refuses nonsense paging values', async () => {
   const reader = await boardWithActivity();
-  const badLimit = await run(['feed', '--limit', 'zero'], reader);
+
+  const missingPage = await run(['feed'], reader);
+  assert.equal(missingPage.code, 1);
+  assert.match(missingPage.err[0], /--page is required/);
+
+  const badLimit = await run(['feed', '--page', '1', '--limit', 'zero'], reader);
   assert.equal(badLimit.code, 1);
   assert.match(badLimit.err[0], /--limit must be a positive integer/);
 
-  const badCursor = await run(['feed', '--cursor', 'not-a-cursor'], reader);
-  assert.equal(badCursor.code, 1);
-  assert.match(badCursor.err[0], /feed cursor is malformed/);
+  const badPage = await run(['feed', '--page', 'zero'], reader);
+  assert.equal(badPage.code, 1);
+  assert.match(badPage.err[0], /--page must be a positive integer/);
+
+  const cursor = await run(['feed', '--page', '1', '--cursor', 'legacy'], reader);
+  assert.equal(cursor.code, 1);
+  assert.match(cursor.err[0], /unexpected arguments for feed/);
 });
 
 test('board feed names initialization while the board is missing and creates nothing', async () => {
   const server = fakeSkrynia();
-  const { code, err } = await run(['feed'], client(server));
+  const { code, err } = await run(['feed', '--page', '1'], client(server));
   assert.equal(code, 1);
   assert.match(err[0], /^antonina board: Antonina board does not exist/);
   assert.equal(server.signed, null);
@@ -169,7 +175,7 @@ test('board feed names initialization while the board is missing and creates not
 
 
 
-test('board feed supports numbered pages while retaining cursor pagination', async () => {
+test('board feed numbered pages are the public view of the core cursor sequence', async () => {
   const reader = await boardWithActivity();
 
   const first = await run(['feed', '--json', '--limit', '2', '--page', '1'], reader);
@@ -181,10 +187,8 @@ test('board feed supports numbered pages while retaining cursor pagination', asy
   assert.equal(page1.entries.length, 2);
   assert.equal(page2.entries.length, 2);
 
-  const byCursor = await run(['feed', '--json', '--limit', '2', '--cursor', page1.nextCursor], reader);
-  assert.deepEqual(JSON.parse(byCursor.out[0]).entries, page2.entries);
-
-  const ambiguous = await run(['feed', '--page', '2', '--cursor', page1.nextCursor], reader);
-  assert.equal(ambiguous.code, 1);
-  assert.match(ambiguous.err[0], /--page cannot be combined with --cursor/);
+  const coreFirst = await reader.readFeed({ limit: 2, cursor: null });
+  const coreSecond = await reader.readFeed({ limit: 2, cursor: coreFirst.nextCursor });
+  assert.deepEqual(page1.entries, coreFirst.entries);
+  assert.deepEqual(page2.entries, coreSecond.entries);
 });

@@ -123,3 +123,29 @@ test('unknown options and duplicate scalar options are rejected', () => {
     (error) => error instanceof PublicCliUsageError && /--id was provided more than once/.test(error.message),
   );
 });
+
+
+test('collection commands accept --page and single-item reads do not', () => {
+  assert.deepEqual(run('board', ['list', '--page', '2']), ['list', '--page', '2']);
+  assert.deepEqual(run('board', ['queue', 'list', '--page', '3']), ['queue', 'list', '--page', '3']);
+  assert.deepEqual(run('board', ['feed', '--page', '4']), ['feed', '--page', '4']);
+  assert.deepEqual(
+    run('board', ['resource', 'list', '--host', 'marceline-dev', '--page', '2']),
+    ['resource', 'list', '--host', 'marceline-dev', '--page', '2'],
+  );
+  assert.deepEqual(run('board', ['target', 'list', '--page', '2']), ['target', 'list', '--page', '2']);
+  assert.deepEqual(
+    run('board', ['collect', 'list', '--host', 'marceline-dev', '--page', '2']),
+    ['collect', 'list', '--host', 'marceline-dev', '--page', '2'],
+  );
+  assert.deepEqual(run('agent', ['list', '--page', '2']), ['list', '--page', '2']);
+
+  assert.throws(
+    () => preparePublicCommand('board', ['show', '--id', '1', '--page', '2']),
+    (error) => error instanceof PublicCliUsageError && /unknown option --page/.test(error.message),
+  );
+  assert.throws(
+    () => preparePublicCommand('agent', ['status', '--id', 'a11d', '--page', '2']),
+    (error) => error instanceof PublicCliUsageError && /unknown option --page/.test(error.message),
+  );
+});

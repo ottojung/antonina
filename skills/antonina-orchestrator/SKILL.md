@@ -20,7 +20,17 @@ The orchestrator has four jobs:
 3. build the largest clearly safe and useful parallel frontier from the board queue;
 4. leave append-only board updates that make later passes able to continue safely.
 
-Do useful work and then return. Do not keep an invocation alive merely to wait for a long-running agent or external event. A later invocation should be able to reconstruct the state from the board and the durable artifacts named there.
+Do useful orchestration work and then return. Do not keep an invocation alive merely to wait for a long-running agent or external event. A later invocation should be able to reconstruct the state from the board and the durable artifacts named there.
+
+## Delegation boundary
+
+The orchestrator is a coordinator, never an implementation worker. It must not implement issue work itself.
+
+All substantive repository work must be delegated to Antonina agents. This includes source, test, documentation, configuration, migration, or generated-file edits; committing; merging or rebasing; cherry-picking; pushing repository refs; release integration; deployments; and substantial build/test/validation work. Independent review, verification, research, and integration are agent roles too: launch or steer an agent for them instead of doing them in the orchestrator process.
+
+The orchestrator may perform bounded coordination operations needed to delegate safely: inspect board and agent state; inspect repository metadata and small diffs read-only; fetch refs; inspect host resources; create or register worktrees/branches as agent reservations; write board comments; launch, steer, stop, or harvest Antonina agents; and close/reopen/reorder board issues when the durable evidence warrants it. These coordination actions must not become a back door for implementing the issue.
+
+Once a useful agent has been launched and its real ID/resources are durably recorded, do not remain alive to supervise it command-by-command or wait for it to finish. Continue only long enough to fill other clearly safe frontier slots and record coordination state, then return. A future invocation will reconcile the results.
 
 ## Board access
 
@@ -65,15 +75,22 @@ Closing an issue removes it from the queue. Reopening it appends it. Treat both 
 At the beginning of every pass:
 
 1. Verify board access.
-2. Read the queue.
-3. Inspect enough queued issues, in queue order, to classify ongoing work, ownership, blockers, and actionability.
-4. Reconcile any referenced agent, worktree, branch, pull request, job, or other durable artifact before trusting an old status comment.
-5. Build a portfolio of useful concurrent work rather than stopping after one issue.
+2. Read the queue plus compact agent/resource state.
+3. Inspect only enough queued state, in queue order, to identify the first clearly actionable, non-conflicting front.
+4. Claim and launch that front promptly; do not finish an exhaustive queue audit first.
+5. Continue scanning and launching additional independent fronts, reconciling only the durable artifacts needed for each scheduling decision.
+6. Build a portfolio of useful concurrent work rather than stopping after one issue.
+
+Use a **launch-early** policy. Full issue-history or repository investigation is not a prerequisite to delegation when a safe agent can perform that investigation itself. Large append-only issue histories are especially unsuitable as serial orchestrator work: prefer compact queue/list/feed/resource/agent state for scheduling, and delegate deep history reading, code archaeology, diagnosis, review, or research to an Antonina agent. Read a full issue record in the orchestrator only when its exact content is needed to avoid a concrete ownership, safety, or scope mistake.
+
+A live Antonina agent with a known issue/worktree is already reconciled enough for frontier accounting. Count it as occupied capacity and do not deep-read its issue, re-review its work, or supervise it before filling clearly safe empty slots. If an old handoff or stale reservation needs substantial investigation before it can resume, delegate that reconciliation to an agent (read-only when appropriate) instead of turning it into serial orchestrator work. Uncertainty about an issue's internals is a reason to launch a bounded reconnaissance/review agent when that can be done safely, not a reason to stall the whole frontier.
+
+When enough clearly independent actionable work exists and host resources permit it, aim to establish several concurrent fronts quickly; roughly five active Antonina agents is a useful operating target, not a quota. Fill obvious empty slots before doing deep harvest, review, or recovery work on already represented fronts. Do not delay the first launch merely to prove that all later slots are also safe.
 
 Selection proceeds in phases:
 
-1. **Recoverable ongoing work.** Reconcile and continue every issue whose existing work can usefully continue now: a live subordinate agent to inspect or steer, a handoff with a clear next step, a branch or pull request awaiting the next local action, or interrupted work whose durable state is recoverable.
-2. **Breadth scan.** Scan the queue from front to back. For each actionable unclaimed issue, ask whether it is clearly safe and useful to execute concurrently with the work already admitted into this pass. Admit it when the answer is yes; otherwise defer it and keep scanning.
+1. **Recoverable ongoing work.** Reconcile and continue every issue whose existing work can usefully continue now: a live subordinate agent to inspect or steer, a handoff with a clear next step, a branch or pull request awaiting the next local action, or interrupted work whose durable state is recoverable. Deep recovery work belongs to an agent; the orchestrator should establish ownership and launch/steer it.
+2. **Breadth scan.** Scan the queue from front to back. As soon as an actionable unclaimed issue is clearly safe and useful, claim and launch it before continuing the scan. For each later issue, ask whether it is clearly safe and useful to execute concurrently with the work already admitted into this pass. Admit it when the answer is yes; otherwise defer it and keep scanning.
 3. **Prefer obvious independence.** Issues from clearly unrelated projects or repositories should normally be admitted concurrently unless they share an explicit dependency, deployment target, mutable external resource, or other concrete conflict. Do not stop scanning merely because an earlier issue is already being worked on.
 4. **Be conservative within one project.** When two issues appear to belong to the same project, defer additional work unless there is positive evidence that the fronts are independent. The same repository is not proof of conflict: monorepos may contain independent packages, apps, services, or subsystems that can safely progress in separate worktrees.
 5. **Depth scan.** After establishing broad cross-project parallelism, revisit deferred same-project issues in queue order and admit additional work when independence is evident.
@@ -106,7 +123,7 @@ Do not manufacture work merely to stay busy.
 
 ## Actionability
 
-An issue is actionable when there is a concrete next action the orchestrator or one of its agents can perform now.
+An issue is actionable when there is a concrete next action an Antonina agent can perform now, or a bounded coordination action the orchestrator can perform to delegate or reconcile that work.
 
 Treat judgment already delegated by the issue as actionable work, not as a blocker. When an issue gives goals, constraints, examples, or a quality bar and asks the worker to choose, prefer, diversify, review, improve, or otherwise exercise judgment, make a reasonable choice within those bounds. A research or audit result should normally feed the next implementation or review step; do not invent a human approval gate, numerical quota, editorial target, or other decision the issue did not require.
 

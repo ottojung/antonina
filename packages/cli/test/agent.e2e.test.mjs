@@ -78,7 +78,7 @@ function selectExecRoot(prefix, parents = candidateParents(), probe = execProbe,
     if (outcome.ok) {
       const root = mkdtempSync(join(parent, prefix));
       t?.after(() => {
-        rmSync(root, { recursive: true, force: true });
+        rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
         pruneFixtureParent(t);
       });
       return root;
@@ -1717,7 +1717,13 @@ test('--cwd is refused while a front exists, and changes nothing', async (t) => 
   mkdirSync(elsewhere);
   assert.equal(run(['agent', 'new', '--id', 'f0e5', '--cwd', work], env).status, 0);
   assert.equal(run(['agent', 'run', '--id', 'f0e5', '--detach', '--prompt', 'slow'], env).status, 0);
-  const live = await waitFor(root, 'f0e5', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
+  const live = await waitFor(
+    root,
+    'f0e5',
+    (meta) => meta.state === 'running'
+      && typeof meta.pid === 'number'
+      && typeof meta.runner_pid === 'number',
+  );
   t.after(() => {
     try { process.kill(-live.pid, 'SIGKILL'); } catch {}
     try { process.kill(live.pid, 'SIGKILL'); } catch {}
@@ -1734,6 +1740,11 @@ test('--cwd is refused while a front exists, and changes nothing', async (t) => 
 
   assert.equal(run(['agent', 'stop', '--id', 'f0e5'], env).status, 0);
   await waitFor(root, 'f0e5', (meta) => meta.state === 'stopped');
+  assert.equal(
+    procStartTicks(live.runner_pid),
+    null,
+    'stop must not return while the detached runner can still write into agent state',
+  );
 });
 
 // run --cwd is a real option, validated exactly as `new --cwd` is: a path that
@@ -1749,3 +1760,24 @@ test('run refuses a --cwd that is not an existing directory', (t) => {
   assert.equal(readFileSync(metaPath(root, '9a17'), 'utf8'), before, 'a refused --cwd must write nothing');
 });
 
+
+
+test('agent list uses --page with --limit as the page size', (t) => {
+  const { work, env } = fixture(t);
+  for (const id of ['a001', 'a002', 'a003']) {
+    const created = run(['agent', 'new', '--id', id, '--cwd', work], env);
+    assert.equal(created.status, 0, created.stderr);
+  }
+
+  const all = run(['agent', 'list', '--json'], env);
+  assert.equal(all.status, 0, all.stderr);
+  assert.equal(JSON.parse(all.stdout).agents.length, 3);
+
+  const first = run(['agent', 'list', '--json', '--limit', '1', '--page', '1'], env);
+  const second = run(['agent', 'list', '--json', '--limit', '1', '--page', '2'], env);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(second.status, 0, second.stderr);
+  const firstId = JSON.parse(first.stdout).agents[0].id;
+  const secondId = JSON.parse(second.stdout).agents[0].id;
+  assert.notEqual(firstId, secondId);
+});

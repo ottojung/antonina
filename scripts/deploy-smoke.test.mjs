@@ -1116,8 +1116,8 @@ test('the shipped page script and the classifier agree on the fields, end to end
       children: [{
         tag: 'main',
         children: [
-          { tag: 'nav', class: 'main-nav', children: [{ tag: 'button', text: 'Issues' }, { tag: 'button', text: 'Feed' }] },
-          { tag: 'nav', class: 'filters', children: [{ tag: 'button', text: 'Open 1' }] },
+          { tag: 'nav', class: 'main-nav', children: [{ tag: 'a', href: '?view=issues', text: 'Issues' }, { tag: 'a', href: '?view=feed', text: 'Feed' }] },
+          { tag: 'nav', class: 'filters', children: [{ tag: 'a', href: '?filter=open', text: 'Open 1' }] },
           { tag: 'div', class: 'issue-row' },
           { tag: 'div', class: 'issue-row' },
         ],

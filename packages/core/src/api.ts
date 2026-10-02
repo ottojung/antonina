@@ -105,6 +105,19 @@ export {
 
 export class AntoninaApiError extends Error {}
 
+export const MAX_ISSUE_BODY_CHARACTERS = 1_000;
+export const MAX_COMMENT_BODY_CHARACTERS = 1_000;
+
+function characterCount(value: string): number {
+  return Array.from(value).length;
+}
+
+function requireMaximumCharacters(value: string, maximum: number, label: string): void {
+  if (characterCount(value) > maximum) {
+    throw new AntoninaApiError(`${label} must be at most ${maximum} characters`);
+  }
+}
+
 /**
  * The descriptive fields of a target operation, canonicalized and carried only
  * where the caller supplied them. A caller who omits a field does not write an
@@ -523,14 +536,16 @@ export class BoardApi {
 
   async createIssue(title: string, body = ''): Promise<BoardIssue> {
     const cleanTitle = title.trim();
+    const cleanBody = body.trim();
     if (!cleanTitle) throw new AntoninaApiError('Issue title is required');
+    requireMaximumCharacters(cleanBody, MAX_ISSUE_BODY_CHARACTERS, 'Issue body');
     let createdNumber = 0;
     const committed = await this.append(
       'issue.create',
       (state) => {
         createdNumber = state.board.nextIssueNumber;
         if (createdNumber >= MAX_SAFE_INTEGER) throw new AntoninaApiError('Antonina issue number space is exhausted');
-        return { number: createdNumber, title: cleanTitle, body: body.trim() };
+        return { number: createdNumber, title: cleanTitle, body: cleanBody };
       },
     );
     return clone(this.requireIssue(committed.state.board.issues, createdNumber));
@@ -720,6 +735,7 @@ export class BoardApi {
     const cleanBody = body.trim();
     if (!cleanAuthor) throw new AntoninaApiError('Message author is required');
     if (!cleanBody) throw new AntoninaApiError('Message body is required');
+    requireMaximumCharacters(cleanBody, MAX_COMMENT_BODY_CHARACTERS, 'Comment body');
     const committed = await this.append(
       'issue.comment',
       { number, author: cleanAuthor, body: cleanBody },

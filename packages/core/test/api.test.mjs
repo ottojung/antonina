@@ -454,3 +454,32 @@ test('a queue reorder survives the ETag conflict of a concurrent valid writer', 
   const issue = await root.getIssue(1);
   assert.equal(issue.messages.at(-1)?.body, 'racing');
 });
+
+
+test('new issue bodies and comments are limited to 1000 Unicode characters', async () => {
+  const server = fakeSkrynia();
+  const client = api(server);
+  await client.initialize();
+
+  const bodyAtLimit = '🙂'.repeat(1000);
+  const created = await client.createIssue('At the limit', bodyAtLimit);
+  assert.equal(Array.from(created.body).length, 1000);
+
+  const beforeRejectedIssue = server.signed.revision;
+  await assert.rejects(
+    () => client.createIssue('Too long', 'x'.repeat(1001)),
+    /Issue body must be at most 1000 characters/,
+  );
+  assert.equal(server.signed.revision, beforeRejectedIssue, 'a rejected issue body must not mutate storage');
+
+  const commentAtLimit = 'λ'.repeat(1000);
+  const commented = await client.comment(created.number, 'root', commentAtLimit);
+  assert.equal(Array.from(commented.messages.at(-1).body).length, 1000);
+
+  const beforeRejectedComment = server.signed.revision;
+  await assert.rejects(
+    () => client.comment(created.number, 'root', 'y'.repeat(1001)),
+    /Comment body must be at most 1000 characters/,
+  );
+  assert.equal(server.signed.revision, beforeRejectedComment, 'a rejected comment must not mutate storage');
+});

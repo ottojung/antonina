@@ -15,6 +15,7 @@ import {
   processPgrp,
   signalGroupChecked,
   signalIdentityChecked,
+  signalMarkedInvocationProcesses,
   splitProcStatFields,
 } from '../dist/packages/agent-runtime/src/process.js';
 
@@ -243,4 +244,39 @@ test('a non-positive or fractional pgid is never signalled as a process group', 
   const ok = recordingSignal();
   assert.equal(signalGroupChecked(identity, 4242, 'SIGTERM', { procRoot: root, signal: ok.send }), true);
   assert.deepEqual(ok.calls, [[-4242, 'SIGTERM']]);
+});
+
+
+test('invocation-marker sweep reaps detached descendants without touching other work', (t) => {
+  const iid = '1'.repeat(32);
+  const otherIid = '2'.repeat(32);
+  const root = withProc(t, {
+    // There is deliberately no surviving leader. These are descendants that
+    // may have been reparented or moved into their own process groups.
+    5001: {
+      stat: statLine({ ppid: 1, pgrp: 9001 }),
+      environ: `ANTONINA_AGENT_ID=ab12\0ANTONINA_INVOCATION_ID=${iid}\0`,
+    },
+    5002: {
+      stat: statLine({ ppid: 1, pgrp: 9002 }),
+      environ: `ANTONINA_AGENT_ID=ab12\0ANTONINA_INVOCATION_ID=${otherIid}\0`,
+    },
+    5003: {
+      stat: statLine({ ppid: 1, pgrp: 9003 }),
+      environ: `ANTONINA_AGENT_ID=ffff\0ANTONINA_INVOCATION_ID=${iid}\0`,
+    },
+    5004: {
+      stat: statLine({ ppid: 1, pgrp: 9004 }),
+      environ: 'OTHER=x\0',
+    },
+  });
+  const signal = recordingSignal();
+
+  assert.equal(signalMarkedInvocationProcesses(
+    'ab12',
+    iid,
+    'SIGKILL',
+    { procRoot: root, signal: signal.send },
+  ), 1);
+  assert.deepEqual(signal.calls, [[5001, 'SIGKILL']]);
 });

@@ -560,3 +560,41 @@ test('board CLI queue reorder requires a credential and leaves the board alone',
   assert.equal(err[0], 'antonina board: Antonina board exists; this client has no board credential; save the shared board credential as $XDG_CONFIG_HOME/antonina/credential.json');
   assert.equal(board.server.signed, stored);
 });
+
+
+test('collection reads default to page 1 and board issue pages follow queue priority', async () => {
+  const summaries = Array.from({ length: 55 }, (_, index) => ({
+    number: index + 1,
+    title: 'Issue ' + (index + 1),
+    state: 'open',
+    createdAt: STAMP,
+    updatedAt: STAMP,
+    closedAt: null,
+    messageCount: 0,
+    hasBody: false,
+  }));
+  const queue = Array.from({ length: 55 }, (_, index) => 55 - index);
+  const reader = {
+    listIssueSummaries: async () => summaries,
+    getQueue: async () => queue,
+  };
+
+  const first = await run(['list', '--json'], { createClient: () => reader });
+  assert.equal(first.code, 0);
+  const firstPage = JSON.parse(first.out[0]);
+  assert.equal(firstPage.length, 50);
+  assert.equal(firstPage[0].number, 55);
+  assert.equal(firstPage.at(-1).number, 6);
+
+  const second = await run(['list', '--page', '2', '--json'], { createClient: () => reader });
+  assert.equal(second.code, 0);
+  assert.deepEqual(JSON.parse(second.out[0]).map((issue) => issue.number), [5, 4, 3, 2, 1]);
+
+  const queueSecond = await run(['queue', 'list', '--page', '2', '--json'], { createClient: () => reader });
+  assert.equal(queueSecond.code, 0);
+  assert.deepEqual(JSON.parse(queueSecond.out[0]), [5, 4, 3, 2, 1]);
+
+  const badPage = await run(['list', '--page', '0'], { createClient: () => reader });
+  assert.equal(badPage.code, 1);
+  assert.match(badPage.err[0], /--page must be a positive integer/);
+});

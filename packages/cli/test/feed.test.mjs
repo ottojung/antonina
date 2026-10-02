@@ -167,3 +167,24 @@ test('board feed names initialization while the board is missing and creates not
   assert.equal(server.signed, null);
 });
 
+
+
+test('board feed supports numbered pages while retaining cursor pagination', async () => {
+  const reader = await boardWithActivity();
+
+  const first = await run(['feed', '--json', '--limit', '2', '--page', '1'], reader);
+  const second = await run(['feed', '--json', '--limit', '2', '--page', '2'], reader);
+  assert.equal(first.code, 0);
+  assert.equal(second.code, 0);
+  const page1 = JSON.parse(first.out[0]);
+  const page2 = JSON.parse(second.out[0]);
+  assert.equal(page1.entries.length, 2);
+  assert.equal(page2.entries.length, 2);
+
+  const byCursor = await run(['feed', '--json', '--limit', '2', '--cursor', page1.nextCursor], reader);
+  assert.deepEqual(JSON.parse(byCursor.out[0]).entries, page2.entries);
+
+  const ambiguous = await run(['feed', '--page', '2', '--cursor', page1.nextCursor], reader);
+  assert.equal(ambiguous.code, 1);
+  assert.match(ambiguous.err[0], /--page cannot be combined with --cursor/);
+});

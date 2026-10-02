@@ -78,7 +78,7 @@ function selectExecRoot(prefix, parents = candidateParents(), probe = execProbe,
     if (outcome.ok) {
       const root = mkdtempSync(join(parent, prefix));
       t?.after(() => {
-        rmSync(root, { recursive: true, force: true });
+        rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
         pruneFixtureParent(t);
       });
       return root;

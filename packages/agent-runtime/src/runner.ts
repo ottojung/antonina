@@ -382,9 +382,27 @@ async function finalizeInvocation(
     // record that reads, field for field, like a delivered one. So the note is
     // withheld only when a signal was actually delivered, and otherwise it says
     // what was measured: the runtime did not deliver one.
+    //
+    // Board 167, second half. That withholding keys on the delivered-signal fact
+    // and on nothing else. It used to also require `state === 'failed'`, which
+    // is not a fact about this invocation at all -- it is one term of the state
+    // mapping above, which honours the recorded intent -- so a refused `stop` or
+    // `kill` produced `state stopped` / `state killed` with `error null` while
+    // `backend_error.classification` said `unrecognized_backend_failure`: the
+    // runtime knew the backend died, the operator signal was never delivered,
+    // and the record claimed a clean operator stop and explained the failure
+    // nowhere. The same evidence, the same delivery fact, a different terminal
+    // state, and the reason disappeared with it.
+    //
+    // `code !== 0` and `signal === null` are kept: an invocation that exited
+    // cleanly, or that died on a signal, has no unexplained non-signal exit to
+    // account for, and a signal death is `death`'s subject above. What is left
+    // is exactly "this invocation ended with a non-zero exit that nothing
+    // explains, and no operator signal was delivered for it", which is the
+    // shape the note describes.
     const note = death !== null
       ? describeSignalDeath(death) ?? undefined
-      : state === 'failed' && code !== 0 && signal === null && !operatorSignalDelivered
+      : code !== 0 && signal === null && !operatorSignalDelivered
         ? describeBackendDeath(backendError, tailExcerpt, result.operatorSignalled) ?? undefined
         : undefined;
     finalizeTerminal(meta, state, Date.now() / 1000, code, signal, note);

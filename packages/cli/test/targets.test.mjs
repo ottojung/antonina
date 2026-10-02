@@ -68,13 +68,13 @@ test('the CLI registers and lists execution targets of different backends', asyn
   assert.equal((await run(ACTIONS, owner)).code, 0);
   assert.equal((await run(['target', 'add', 'github-actions', '--backend', 'github-actions', '--kind', 'ephemeral-environment'], owner)).code, 1);
 
-  const listed = await run(['target', 'list'], owner);
+  const listed = await run(['target', 'list', '--page', '1'], owner);
   assert.equal(listed.code, 0);
   assert.equal(listed.out[0].startsWith('github-actions [github-actions/ephemeral-environment] available'), true);
   assert.equal(listed.out[0].includes('no-host'), true);
   assert.equal(listed.out[1].startsWith('phoebe-dev [lubko/persistent-host] available'), true);
 
-  const filtered = await run(['target', 'list', '--backend', 'lubko', '--json'], owner);
+  const filtered = await run(['target', 'list', '--page', '1', '--backend', 'lubko', '--json'], owner);
   assert.deepEqual(JSON.parse(filtered.out[0]).map((target) => target.id), ['phoebe-dev']);
 
   const shown = await run(['target', 'show', 'phoebe-dev', '--json'], owner);
@@ -90,10 +90,10 @@ test('the CLI relates a registered resource to the target that owns its host', a
   assert.equal((await run(PHOEBE, owner)).code, 0);
   assert.equal((await run(['resource', 'add', '1', 'lubko://phoebe-dev', '/workspace/project-worktree'], owner)).code, 0);
 
-  const resources = await run(['resource', 'list', '--json'], owner);
+  const resources = await run(['resource', 'list', '--page', '1', '--json'], owner);
   assert.equal(JSON.parse(resources.out[0])[0].targetId, 'phoebe-dev');
 
-  const targets = await run(['target', 'list'], owner);
+  const targets = await run(['target', 'list', '--page', '1'], owner);
   assert.equal(targets.out[0].includes('resource /workspace/project-worktree -> #1'), true);
 });
 
@@ -172,7 +172,7 @@ test('the CLI records which target a job ran on', async () => {
   assert.equal(board.dispatches.length, 1, 'one dispatch record per job');
   assert.equal(board.dispatches[0].targetId, 'github-actions');
 
-  const human = await run(['target', 'list'], owner);
+  const human = await run(['target', 'list', '--page', '1'], owner);
   assert.equal(human.out[0].includes('dispatched #1'), true);
 
   assert.equal((await run(['dispatch', 'record', '99', '--target', 'phoebe-dev'], owner)).code, 1);
@@ -192,7 +192,7 @@ test('the target commands parse only the typed vocabulary', async () => {
     ['target', 'add', 'phoebe-dev', '--backend', 'lubko', '--kind', 'persistent-host', '--address', 'lubko://x', '--capability', 'teleport'],
     ['target', 'add', 'phoebe_dev', '--backend', 'lubko', '--kind', 'persistent-host', '--address', 'lubko://x'],
     ['target', 'set', 'phoebe-dev', '--status', 'sleeping'],
-    ['target', 'list', '--backend', 'ssh'],
+    ['target', 'list', '--page', '1', '--backend', 'ssh'],
     ['dispatch', 'select', '--capability', 'teleport'],
     ['target', 'list', 'extra'],
     ['target', 'nonsense'],
@@ -208,7 +208,7 @@ test('the target commands parse only the typed vocabulary', async () => {
 test('the new read commands name initialization while the board is missing', async () => {
   const server = fakeSkrynia();
   const missing = 'antonina board: Antonina board does not exist; run: antonina board initialize to create it';
-  for (const command of [['target', 'list'], ['target', 'show', 'phoebe-dev'], ['dispatch', 'select'], ['dispatch', 'record', '1']]) {
+  for (const command of [['target', 'list', '--page', '1'], ['target', 'show', 'phoebe-dev'], ['dispatch', 'select'], ['dispatch', 'record', '1']]) {
     const { code, err } = await run(command, client(server));
     assert.equal(code, 1, command.join(' '));
     assert.equal(err[0], missing, command.join(' '));
@@ -240,7 +240,7 @@ test('an empty catalog is reported as empty rather than as a failure', async () 
   const server = fakeSkrynia();
   const owner = client(server);
   await owner.initialize();
-  const empty = await run(['target', 'list'], owner);
+  const empty = await run(['target', 'list', '--page', '1'], owner);
   assert.equal(empty.out[0], 'No execution targets are registered.');
 
   const unroutable = await run(['dispatch', 'select'], owner);
@@ -384,7 +384,7 @@ test('the CLI states an unknown or inapplicable capacity rather than a number', 
   // therefore also pins that a `--telemetry` read resolves its paths from the
   // command context and not from `process.env`: on a host whose own daemon has
   // published a report, a context-blind read would find it and fail here.
-  const hosts = await run(['target', 'list', '--telemetry'], owner);
+  const hosts = await run(['target', 'list', '--page', '1', '--telemetry'], owner);
   assert.equal(hosts.code, 0);
   const phoebe = hosts.out.find((line) => line.startsWith('phoebe-dev ['));
   assert.match(phoebe, /telemetry unknown \(no host-local daemon report was readable on this machine\)/);
@@ -399,12 +399,12 @@ test('the CLI states an unknown or inapplicable capacity rather than a number', 
 
   // The JSON form carries the same answer, so a scheduler is not told the
   // flag was honoured in the human form and ignored here.
-  const json = await run(['target', 'list', '--telemetry', '--json'], owner);
+  const json = await run(['target', 'list', '--page', '1', '--telemetry', '--json'], owner);
   const parsed = JSON.parse(json.out[0]);
   assert.equal(Array.isArray(parsed.targets), true);
   assert.deepEqual(parsed.hosts, []);
 
   // Without the flag the catalog says nothing about live state at all.
-  const plain = await run(['target', 'list'], owner);
+  const plain = await run(['target', 'list', '--page', '1'], owner);
   assert.equal(plain.out.join('\n').includes('telemetry unknown'), false);
 });

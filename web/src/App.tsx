@@ -179,13 +179,21 @@ export default function App() {
   const selected = selectedIssue?.number === selectedNumber ? selectedIssue : undefined;
   useEffect(() => {
     // Only a board that has been read can say an issue is not there. Before the
-    // first read `visible` is empty, and clearing then would drop the issue a
-    // direct link named before the board had a chance to answer. A link to an
-    // issue the board does not hold is still cleared — once the read is in, and
+    // first read `ready.board.issues` is empty, and clearing then would drop the
+    // issue a direct link named before the board had a chance to answer. A link to
+    // an issue the board does not hold is still cleared — once the read is in, and
     // the URL is rewritten to the list, so a stale link lands on the board.
+    //
+    // Board issue 172: existence is asked of the WHOLE issue set, open and closed
+    // together, and never of `visible`. `visible` is the list under the current
+    // filter, and the filter is a list control, so asking it about issue identity
+    // made a bare `?issue=N` naming a closed issue clear itself — the default
+    // filter is `open`, so every closed issue was unopenable by its own link
+    // unless the link also carried `&filter=closed`. Identity belongs to the
+    // board; the filter only decides which rows the list draws.
     if (ready === undefined || selectedNumber === undefined) return;
-    if (!visible.some((issue) => issue.number === selectedNumber)) setSelectedNumber(undefined);
-  }, [ready, selectedNumber, visible]);
+    if (!ready.board.issues.some((issue) => issue.number === selectedNumber)) setSelectedNumber(undefined);
+  }, [ready, selectedNumber]);
   useEffect(() => {
     if (selectedNumber === undefined || ready === undefined
         || !ready.board.issues.some((issue) => issue.number === selectedNumber)) {

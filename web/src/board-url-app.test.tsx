@@ -258,6 +258,63 @@ describe('the board addressed by URL, mounted', () => {
     expect(screen.getByText('Body of issue 2')).toBeDefined();
   });
 
+  it('opens a CLOSED issue from a bare link, with no filter in the URL', async () => {
+    // Board issue 172. Issue 3 is closed and the default filter is `open`, so its
+    // row is not in the list this link draws — but the link names the issue, and
+    // the filter is a list control, not part of the issue's identity. Validating
+    // the parsed selection against the filtered list made every closed issue
+    // unopenable by its own bare link; the address bar was rewritten to `''` and
+    // the reader landed on a list that does not contain the issue they were sent
+    // to. A mounted app, not a parser test: `parseBoardUrl` was never wrong here.
+    const container = await openAt('/board?issue=3');
+    expect(await screen.findByRole('heading', { name: 'Issue 3' })).toBeDefined();
+    expect(screen.getByText('Body of issue 3')).toBeDefined();
+    // The address still names the issue, so a refresh reopens the same screen.
+    expect(search()).toBe('?issue=3');
+    expect(container.querySelector('.workspace')?.className).toContain('has-selection');
+    // And the filter still governs the LIST only: the closed row is still not
+    // drawn behind the conversation.
+    expect(drawnRows(container)).not.toContain(3);
+    expect(drawnRows(container)).toEqual([1, 2]);
+  });
+
+  it('opens a closed issue from a bare link and keeps it open across a reload', async () => {
+    // The bare link is the one a reader gets from a mention, a CI comment or a
+    // copied tab, so it has to survive the reload they press out of habit.
+    await openAt('/board?issue=3');
+    expect(await screen.findByRole('heading', { name: 'Issue 3' })).toBeDefined();
+
+    const reloaded = await reload();
+    expect(await screen.findByRole('heading', { name: 'Issue 3' })).toBeDefined();
+    expect(search()).toBe('?issue=3');
+    expect(reloaded.querySelector('.workspace')?.className).toContain('has-selection');
+  });
+
+  it('still opens a closed issue from the `?issue=N&filter=closed` link form', async () => {
+    // The pre-existing 139 behaviour, kept green: adding `filter=closed` was the
+    // workaround that made this work, and the fix must not regress it.
+    await openAt('/board?issue=3&filter=closed');
+    expect(await screen.findByRole('heading', { name: 'Issue 3' })).toBeDefined();
+    expect(search()).toBe('?issue=3&filter=closed');
+    expect(drawnRows(document.body)).toContain(3);
+  });
+
+  it('clears a bare link to an issue the board does not hold, and lands on the list', async () => {
+    // The other half of 172: making existence a question about the whole issue
+    // set must not turn every unknown number into a permanently open selection.
+    // "Sane" here means the same thing the `?issue=404&filter=all` case already
+    // meant — no thread, no error page, and the dead selector rewritten out of the
+    // address so a refresh does not repeat it — now expressed at the bare URL, so
+    // the rewrite lands on the default filter rather than the one the link named.
+    await openAt('/board?issue=404');
+    expect(await screen.findByRole('complementary', { name: 'Shared issue list' })).toBeDefined();
+    await waitFor(() => expect(search()).toBe(''));
+    expect(screen.queryByRole('heading', { name: 'Issue 404' })).toBeNull();
+    expect(screen.getByText('Choose an issue to join the conversation.')).toBeDefined();
+    // A stale number does not select a neighbour, or the first row by accident.
+    expect(drawnRows(document.body)).toEqual([1, 2]);
+  });
+
   it('links to an issue from the feed, with the issue route in the href', async () => {
     session.readFeed.mockResolvedValue({
       entries: [{ id: 'op-1', kind: 'comment-added', at: STAMP, position: 1, issueNumber: 2, title: 'Issue 2', state: 'open', messageId: null, author: 'Lubko', body: 'on it' }],

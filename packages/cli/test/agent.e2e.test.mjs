@@ -1614,3 +1614,24 @@ test('run refuses a --cwd that is not an existing directory', (t) => {
   assert.equal(readFileSync(metaPath(root, '9a17'), 'utf8'), before, 'a refused --cwd must write nothing');
 });
 
+
+
+test('agent list uses --page with --limit as the page size', (t) => {
+  const { work, env } = fixture(t);
+  for (const id of ['a001', 'a002', 'a003']) {
+    const created = run(['agent', 'new', '--id', id, '--cwd', work], env);
+    assert.equal(created.status, 0, created.stderr);
+  }
+
+  const all = run(['agent', 'list', '--json'], env);
+  assert.equal(all.status, 0, all.stderr);
+  assert.equal(JSON.parse(all.stdout).agents.length, 3);
+
+  const first = run(['agent', 'list', '--json', '--limit', '1', '--page', '1'], env);
+  const second = run(['agent', 'list', '--json', '--limit', '1', '--page', '2'], env);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(second.status, 0, second.stderr);
+  const firstId = JSON.parse(first.stdout).agents[0].id;
+  const secondId = JSON.parse(second.stdout).agents[0].id;
+  assert.notEqual(firstId, secondId);
+});

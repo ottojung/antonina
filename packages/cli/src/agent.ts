@@ -350,7 +350,10 @@ async function cmdFork(
 async function cmdList(args: string[], context: AgentCommandContext): Promise<number> {
   const parsed = parse(args, ['--json', '--running', '--finished', '--succeeded', '--failed', '--stopped', '--killed']);
   if (parsed.positionals.length !== 0) throw new UsageError('list: unexpected positional arguments');
-  const limit = parsed.values.has('--limit') ? positiveInteger(parsed.values.get('--limit'), '--limit') : null;
+  const pageSize = parsed.values.has('--limit')
+    ? positiveInteger(parsed.values.get('--limit'), '--limit')
+    : 50;
+  const page = parsed.values.has('--page') ? positiveInteger(parsed.values.get('--page'), '--page') : 1;
   const entries: Array<{ agentId: string; meta: AgentMetadata; state: string; summary: ReturnType<typeof summary> }> = [];
   for (const agentId of agentIds(context)) {
     const meta = await reconcileAgent(agentId, context);
@@ -360,7 +363,8 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
     entries.push({ agentId, meta, state, summary: summary(meta) });
   }
   entries.sort((left, right) => right.summary.created_at - left.summary.created_at);
-  const selected = limit === null ? entries : entries.slice(0, limit);
+  const start = (page - 1) * pageSize;
+  const selected = Number.isSafeInteger(start) ? entries.slice(start, start + pageSize) : [];
   if (parsed.flags.has('--json')) {
     context.io.stdout(stableJson({
       agents: selected.map(({ agentId, state, summary: item }) => listEntryJson(agentId, state, item)),

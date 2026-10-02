@@ -62,6 +62,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--limit': 'Maximum number of records.',
   '--limitation': 'Operational caveat; may be repeated.',
   '--lines': 'Number of log lines.',
+  '--page': '1-based page number.',
   '--path': 'Absolute resource path.',
   '--prompt': 'Prompt text.',
   '--running': 'Show running agents only.',
@@ -124,8 +125,9 @@ const BOARD_SPECS: readonly CommandSpec[] = [
   }),
   withJson({
     path: ['queue', 'list'],
-    summary: 'Print the shared issue queue.',
-    normalize: (p) => ['queue', 'list', ...jsonArg(p)],
+    summary: 'Print one page of the shared issue queue.',
+    values: ['--page'],
+    normalize: (p) => ['queue', 'list', ...valueArgs(p, ['--page']), ...jsonArg(p)],
   }),
   withJson({
     path: ['queue', 'reorder'],
@@ -136,15 +138,15 @@ const BOARD_SPECS: readonly CommandSpec[] = [
   }),
   withJson({
     path: ['feed'],
-    summary: 'Read the board activity feed.',
-    values: ['--limit', '--cursor'],
-    normalize: (p) => ['feed', ...valueArgs(p, ['--limit', '--cursor']), ...jsonArg(p)],
+    summary: 'Read one page of the board activity feed.',
+    values: ['--limit', '--cursor', '--page'],
+    normalize: (p) => ['feed', ...valueArgs(p, ['--limit', '--cursor', '--page']), ...jsonArg(p)],
   }),
   withJson({
     path: ['list'],
-    summary: 'List board issues.',
-    values: ['--state'],
-    normalize: (p) => ['list', ...valueArgs(p, ['--state']), ...jsonArg(p)],
+    summary: 'List one page of board issues, highest-priority open issues first.',
+    values: ['--state', '--page'],
+    normalize: (p) => ['list', ...valueArgs(p, ['--state', '--page']), ...jsonArg(p)],
   }),
   withJson({
     path: ['show'],
@@ -194,9 +196,9 @@ const BOARD_SPECS: readonly CommandSpec[] = [
   }),
   withJson({
     path: ['resource', 'list'],
-    summary: 'List registered board resources.',
-    values: ['--host', '--issue'],
-    normalize: (p) => ['resource', 'list', ...valueArgs(p, ['--host', '--issue']), ...jsonArg(p)],
+    summary: 'List one page of registered board resources.',
+    values: ['--host', '--issue', '--page'],
+    normalize: (p) => ['resource', 'list', ...valueArgs(p, ['--host', '--issue', '--page']), ...jsonArg(p)],
   }),
   ...(['add', 'remove'] as const).map((subcommand): CommandSpec => withJson({
     path: ['resource', subcommand],
@@ -214,9 +216,9 @@ const BOARD_SPECS: readonly CommandSpec[] = [
   })),
   withJson({
     path: ['target', 'list'],
-    summary: 'List execution targets.',
-    values: ['--backend', '--kind'],
-    normalize: (p) => ['target', 'list', ...valueArgs(p, ['--backend', '--kind']), ...jsonArg(p)],
+    summary: 'List one page of execution targets.',
+    values: ['--backend', '--kind', '--page'],
+    normalize: (p) => ['target', 'list', ...valueArgs(p, ['--backend', '--kind', '--page']), ...jsonArg(p)],
   }),
   withJson({
     path: ['target', 'show'],
@@ -297,10 +299,14 @@ const BOARD_SPECS: readonly CommandSpec[] = [
   }),
   withJson({
     path: ['collect', 'list'],
-    summary: 'List collectible resources on one host.',
-    values: ['--host'],
+    summary: 'List one page of collectible resources on one host.',
+    values: ['--host', '--page'],
     required: ['--host'],
-    normalize: (p) => ['collect', 'list', '--host', p.values.get('--host')!, ...jsonArg(p)],
+    normalize: (p) => [
+      'collect', 'list', '--host', p.values.get('--host')!,
+      ...valueArgs(p, ['--page']),
+      ...jsonArg(p),
+    ],
   }),
   withJson({
     path: ['collect', 'delete'],
@@ -332,12 +338,12 @@ const AGENT_SPECS: readonly CommandSpec[] = [
   },
   {
     path: ['list'],
-    summary: 'List managed agents.',
-    values: ['--limit'],
+    summary: 'List one page of managed agents.',
+    values: ['--limit', '--page'],
     flags: ['--json', '--running', '--finished', '--succeeded', '--failed', '--stopped', '--killed'],
     normalize: (p) => [
       'list',
-      ...valueArgs(p, ['--limit']),
+      ...valueArgs(p, ['--limit', '--page']),
       ...flagArgs(p, ['--json', '--running', '--finished', '--succeeded', '--failed', '--stopped', '--killed']),
     ],
   },

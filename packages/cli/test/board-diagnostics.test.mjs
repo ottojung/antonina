@@ -78,7 +78,7 @@ const malformedField = new BoardIncompatibilityError({
  * two back into one generic line would not otherwise fail anything.
  */
 test('a board read failure reaches the operator as the specific reason', async () => {
-  const tooOld = await run(['list'], readUnreadableBoard);
+  const tooOld = await run(['list', '--page', '1'], readUnreadableBoard);
   assert.equal(tooOld.code, 1);
   assert.match(
     tooOld.err.join('\n'),
@@ -87,7 +87,7 @@ test('a board read failure reaches the operator as the specific reason', async (
   assert.match(tooOld.err.join('\n'), new RegExp(`to version ${CURRENT_PERSISTED_BOARD_VERSION};`));
   assert.doesNotMatch(tooOld.err.join('\n'), /incompatible or malformed/);
 
-  const tooNew = await run(['list'], readFutureBoard);
+  const tooNew = await run(['list', '--page', '1'], readFutureBoard);
   assert.equal(tooNew.code, 1);
   assert.match(
     tooNew.err.join('\n'),
@@ -96,7 +96,7 @@ test('a board read failure reaches the operator as the specific reason', async (
   assert.match(tooNew.err.join('\n'), new RegExp(`writes version ${CURRENT_PERSISTED_BOARD_VERSION}\\.`));
   assert.doesNotMatch(tooNew.err.join('\n'), /incompatible or malformed/);
 
-  const field = await run(['list'], () => Promise.reject(malformedField));
+  const field = await run(['list', '--page', '1'], () => Promise.reject(malformedField));
   assert.equal(field.code, 1);
   assert.match(field.err.join('\n'), /board execution target at index 1 has a malformed field backend/);
   assert.match(field.err.join('\n'), /expected one of lubko, github-actions/);
@@ -108,7 +108,7 @@ test('a board read failure reaches the operator as the specific reason', async (
 });
 
 test('a board read failure is reported on stderr and not on stdout', async () => {
-  const { out, err } = await run(['list', '--json'], readUnreadableBoard);
+  const { out, err } = await run(['list', '--page', '1', '--json'], readUnreadableBoard);
   assert.deepEqual(out, [], 'a failed JSON read must not print a partial payload');
   assert.match(err.join('\n'), new RegExp(`no migration from persisted board format version ${UNREADABLE_BOARD_SCHEMA_VERSION}`));
 });

@@ -1484,6 +1484,141 @@ test('e. a signal-killed agent is reported as an external kill through status', 
   assert.equal(body.backend_error.signal_name, 'SIGKILL');
   assert.ok(['observed', 'unavailable'].includes(body.backend_error.oom_evidence));
   assertFixtureInvoked(handle, 'die-by-signal');
+
+  // ---------------------------------------------------------------- BOARD 166
+  // The runtime wrote a death note into `meta.error` and no surface showed it.
+  // Two things are asserted here, and only because both are separately
+  // falsifiable.
+  //
+  // First, that the note reached the machine surface at all: `body.last_error` is
+  // present and non-null. A status document with no such key satisfies every
+  // other assertion in this test.
+  assert.ok('last_error' in body, 'agent status --json must carry a `last_error` key');
+  assert.equal(
+    typeof body.last_error,
+    'string',
+    `recorded note was not surfaced: ${JSON.stringify(body.last_error)}`,
+  );
+  // Second, that it is the note the runtime actually recorded, unmodified. The
+  // comparison is against the durable record, not against a re-derivation of it:
+  // this proves the display passed the runtime's own sentence through rather
+  // than showing something plausible in its place.
+  const recorded = JSON.parse(readFileSync(metaPath(root, 'ca94'), 'utf8'));
+  assert.equal(typeof recorded.error, 'string', 'this death recorded no note, so there is nothing to surface');
+  assert.equal(body.last_error, recorded.error);
+  // And it is the sentence `describeSignalDeath` writes for a signal death, in
+  // either of its two shapes: counters observed, or no counters exposed.
+  assert.match(
+    body.last_error,
+    /^killed by SIGKILL \(signal 9\); (?:cgroup memory\.events rose by oom \d+ and oom_kill \d+|the kernel exposed no cgroup OOM counters)/,
+  );
+
+  // The human surface carries the same note, on the same record. The label is
+  // `last error:` and not `error:` because `finalizeTerminal` never clears
+  // `meta.error` -- the staleness case is pinned by the test below -- and an
+  // `error:` line under `exit code:` would read as this run's cause.
+  const human = run(['agent', 'status', '--id', 'ca94'], env);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /^last error: killed by SIGKILL \(signal 9\); /m);
+
+  // The negative case, which the positive cases cannot supply on their own: an
+  // agent that ended cleanly has no note recorded, and the human surface must
+  // then be silent about it rather than printing a placeholder. A status that
+  // always printed a `last error:` line would satisfy every assertion above.
+  assert.equal(run(['agent', 'new', '--id', 'ca96', '--cwd', work], env).status, 0);
+  const clean = run(['agent', 'run', '--id', 'ca96', '--detach', '--prompt', 'ok'], env);
+  assert.equal(clean.status, 0, clean.stderr);
+  await waitFor(root, 'ca96', (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
+  const cleanHuman = run(['agent', 'status', '--id', 'ca96'], env);
+  assert.equal(cleanHuman.status, 0, cleanHuman.stderr);
+  assert.doesNotMatch(cleanHuman.stdout, /^last error:/m);
+  const cleanJson = run(['agent', 'status', '--id', 'ca96', '--json'], env);
+  assert.equal(cleanJson.status, 0, cleanJson.stderr);
+  assert.equal(JSON.parse(cleanJson.stdout).last_error, null);
+  // `cwd:` and the rest of the surface are untouched by this change: a clean
+  // agent still reports the directory its front ran in.
+  assert.match(cleanHuman.stdout, /^cwd: {8}/m);
+});
+
+// ------------------------------------------------------------------ BOARD 166
+// The staleness case the fresh-agent negative case above cannot reach.
+//
+// `finalizeTerminal` writes `meta.error` only when it is given a note, and a
+// clean exit is given none, so the note from a failed run is still in the record
+// after a later successful run on the same agent. Surfacing the note made that
+// visible for the first time. This pins the answer this issue chose (option
+// (iii): display the recorded note and say plainly that it is a *last* note, not
+// this run's), against the two answers it rejected: clearing `meta.error` would
+// make a state record less than it does today, and suppressing the line for
+// non-`failed` states would hide a note the runtime genuinely recorded.
+//
+// What makes this falsifiable: a fresh agent id has `meta.error === null` from
+// creation, so an implementation that printed the last known note forever, or one
+// that cleared it, both pass every other case in this file. Only one agent that
+// fails and then succeeds can tell them apart.
+test('a note from an earlier failed run is never presented as this run\'s error', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', 'ca97', '--cwd', work], env).status, 0);
+
+  // Run one: killed from outside, so the runtime records a note.
+  const failed = run(['agent', 'run', '--id', 'ca97', '--detach', '--prompt', 'die-by-signal'], env);
+  assert.equal(failed.status, 0, failed.stderr);
+  const firstFailure = await waitFor(
+    root,
+    'ca97',
+    (meta) => meta.state === 'failed' && meta.active_runner === false,
+    30_000,
+  );
+  const staleNote = firstFailure.error;
+  assert.equal(typeof staleNote, 'string', 'the first run recorded no note to go stale');
+  assert.match(staleNote, /^killed by SIGKILL \(signal 9\); /);
+  const firstStatus = JSON.parse(run(['agent', 'status', '--id', 'ca97', '--json'], env).stdout);
+  assert.equal(firstStatus.last_error, staleNote, 'the first run\'s note must be displayed while it is the current one');
+
+  // Run two, on the same agent, to success. A clean exit records no note, so
+  // nothing on the runtime's side clears the first run's.
+  const succeeded = run(['agent', 'run', '--id', 'ca97', '--detach', '--prompt', 'ok'], env);
+  assert.equal(succeeded.status, 0, succeeded.stderr);
+  await waitFor(root, 'ca97', (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
+
+  // The record itself is unchanged by the second run: the note is still there.
+  // Asserted so the assertions below cannot be satisfied by something that
+  // quietly dropped it -- the runtime did not clear it, and this change did not
+  // make it clear it.
+  const afterSuccess = JSON.parse(readFileSync(metaPath(root, 'ca97'), 'utf8'));
+  assert.equal(afterSuccess.error, staleNote, 'the runtime cleared the earlier note');
+
+  // What the second status shows. The run succeeded...
+  const second = run(['agent', 'status', '--id', 'ca97', '--json'], env);
+  assert.equal(second.status, 0, second.stderr);
+  const body = JSON.parse(second.stdout);
+  assert.equal(body.state, 'succeeded');
+  assert.equal(body.exit_code, 0);
+  assert.equal(body.exit_signal, null);
+  // ...so nothing on the surface may present the earlier note as this run's
+  // cause. The key is `last_error`, not `error`: a consumer reading `error`
+  // beside `exit_code: 0` would be told the successful run failed.
+  assert.ok(!('error' in body), 'the status document must not offer the earlier note as `error`');
+  // The earlier note is genuinely no longer displayable, and the display says
+  // so rather than quoting it. The reason is the allowlist working, not a bug:
+  // the successful run replaced `meta.backend_error`, so the note no longer
+  // matches a sentence derived from *this* record's own backend record, and a
+  // note that cannot be re-derived from the record it sits in is not one this
+  // display will quote. Before this change nothing was shown at all here; the
+  // withheld marker is the honest report of "a note is recorded and the display
+  // declines to quote it", and it says nothing about which run wrote it.
+  assert.equal(body.last_error, 'a note is recorded but is not displayable here');
+
+  // The human surface makes the same distinction in words, and the outcome
+  // fields it prints are the successful ones.
+  const human = run(['agent', 'status', '--id', 'ca97'], env);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /^state: {6}succeeded$/m);
+  assert.match(human.stdout, /^exit code: {2}0$/m);
+  assert.doesNotMatch(human.stdout, /^error:/m, 'the earlier note was labelled as this run\'s error');
+  assert.doesNotMatch(human.stdout, /^last error: killed by SIGKILL/m);
+  assert.match(human.stdout, /^last error: a note is recorded but is not displayable here$/m);
 });
 
 // ------------------------------------------------------------------ BOARD 122

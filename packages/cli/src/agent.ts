@@ -7,7 +7,12 @@ import {
 } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { configuredModelAvailable, discoverSessionId, sanitizeBackendError } from '../../agent-runtime/src/backend.js';
+import {
+  configuredModelAvailable,
+  describeSignalDeath,
+  discoverSessionId,
+  sanitizeBackendError,
+} from '../../agent-runtime/src/backend.js';
 import {
   beginInvocation,
   beginStopLike,
@@ -404,6 +409,150 @@ function hostCapacityJson(capacity: HostCapacity): Record<string, unknown> {
   };
 }
 
+/**
+ * Board issue 166: the recorded death note (`meta.error`) is surfaced here.
+ *
+ * This is a visibility change only. Nothing in the runtime's recording is
+ * altered: which states carry a note, and which note, is decided entirely by
+ * `finalizeTerminal`'s callers in `packages/agent-runtime`, which this file does
+ * not touch. Issue 167 is a separate question about *which* states record a
+ * note, and nothing below answers it.
+ *
+ * ## Why the note cannot simply be printed
+ *
+ * `meta.error` is free text, and `sanitizeBackendError` — the discipline this
+ * change is required to follow — cannot be applied to it: that function accepts
+ * a structured `BackendError` record and returns `null` for anything that is
+ * not one, so handing it a string would yield `null` unconditionally and the
+ * note would never appear. The note needs its own sanitiser, and it needs one
+ * with the same shape as the existing one: validate, and substitute a neutral
+ * description for anything not positively known to be safe. Never scrub by
+ * removing suspicious substrings.
+ *
+ * The reason this is an allowlist rather than a pattern is that on this head the
+ * note is not guaranteed to be operator-safe. The producers are not all in one
+ * file: on this head `finalizeTerminal` receives a note from seven call sites in
+ * `packages/agent-runtime/src/runner.ts` and one in
+ * `packages/agent-runtime/src/lifecycle.ts` (see the enumeration below). Two of
+ * the eight are free text, and one of those — the `spawn(...)` failure path,
+ * which records `String(error)` — can carry whatever Node put in the spawn
+ * error, including the resolved absolute path of the backend executable. A
+ * denylist cannot be shown not to leak a credential; an allowlist of exactly the
+ * sentences this repository itself writes can.
+ *
+ * A note is displayed only when it is *byte-identical* to one of:
+ *
+ *   - the fixed literals passed to `finalizeTerminal` on this head, each of which
+ *     is a constant in its own source file and contains no interpolation, so
+ *     equality is proof rather than a guess. Six of the eight note-passing call
+ *     sites write such a literal, and `DISPLAYABLE_AGENT_ERRORS` below carries
+ *     all six: four from `runner.ts` and two more, one of them from
+ *     `lifecycle.ts`, which is why that file is named here rather than only
+ *     `runner.ts`;
+ *   - `describeSignalDeath(sanitizeBackendError(meta.backend_error))`, which is
+ *     the sentence the runtime itself generates for a signal death from bounded
+ *     integers and an OS signal name, and which already went through
+ *     `sanitizeBackendError`'s field-by-field validation.
+ *
+ * The complete enumeration of the eight note-passing call sites on this head,
+ * found by grepping `finalizeTerminal` across the `packages` sources and then
+ * reading each site:
+ *
+ *   | site | note | displayed? |
+ *   | --- | --- | --- |
+ *   | `runner.ts:244` `releaseUnrecordedSpawn` | fixed literal | yes |
+ *   | `runner.ts:313` `finalizeInvocation` | `describeSignalDeath(death)` | via the derivation branch |
+ *   | `runner.ts:347` `buildAgentCommand` threw | `error.message` | no — free text |
+ *   | `runner.ts:354` no underlying session | fixed literal | yes |
+ *   | `runner.ts:387` `spawn(...)` threw | `String(error)` | no — can carry the resolved executable path |
+ *   | `runner.ts:396` no pid | fixed literal | yes |
+ *   | `runner.ts:423` no `/proc` identity | fixed literal | yes |
+ *   | `lifecycle.ts:250` `reconcileDeadMeta` | fixed literal | yes |
+ *
+ * The two `finalizeTerminal` call sites that pass *no* note
+ * (`packages/cli/src/agent.ts`, the `stop` and `kill` paths) are not producers
+ * and appear nowhere above.
+ *
+ * Anything else is reported as withheld. That is deliberately visible rather
+ * than silent: an operator who sees "a note is recorded but is not displayable"
+ * learns that the record exists and that the display declines to quote it, which
+ * is the honest report. A note from a producer added later will not be quoted
+ * until it is added to `DISPLAYABLE_AGENT_ERRORS` here — the cost of that
+ * conservatism is deliberate and is recorded on the issue.
+ */
+const DISPLAYABLE_AGENT_ERRORS: readonly string[] = [
+  // runner.ts: the spawn identity could not be persisted, so the process was
+  // killed and never recorded.
+  'could not persist the spawned OpenCode process identity; the process was killed and never recorded',
+  // runner.ts: a continuation was requested with no underlying session.
+  'cannot continue: underlying session not available',
+  // runner.ts: the backend process produced no pid.
+  'OpenCode process had no pid',
+  // runner.ts: /proc identity could not be established for a live process.
+  'could not establish canonical OpenCode process identity',
+  // lifecycle.ts: `reconcileDeadMeta` found a `running` record whose process is
+  // gone with no captured exit status. Reached from `agent status` and
+  // `agent list`, so it is an ordinary sight, not a corner case.
+  'runner/model process disappeared without a captured exit status',
+];
+
+/**
+ * What `agent status` says in place of a recorded note it will not quote.
+ *
+ * Named rather than empty so that "no note was recorded" and "a note was
+ * recorded and withheld" stay distinguishable in both output forms.
+ */
+export const AGENT_ERROR_WITHHELD = 'a note is recorded but is not displayable here';
+
+/**
+ * The note to display for a managed agent, or `null` when there is nothing to
+ * display.
+ *
+ * `null` means no note was recorded. A note that was recorded but is not
+ * displayable returns {@link AGENT_ERROR_WITHHELD} instead, so that "nothing was
+ * recorded" and "something was recorded and the display declines to quote it"
+ * stay distinguishable in both output forms.
+ *
+ * ## Freshness: this function is deliberately state-blind
+ *
+ * `finalizeTerminal` writes `meta.error` conditionally and never clears it
+ * (`packages/agent-runtime/src/lifecycle.ts`, `if (note) meta.error = note;`),
+ * and a clean exit passes no note. So the note belongs to *a* run, not
+ * necessarily to the run the current state describes: an agent that failed once
+ * and then succeeded still carries the first run's note. Both surfaces say so
+ * where they print it -- the JSON key is `last_error`, the human line reads
+ * `last error:` -- rather than gating on the state, because:
+ *
+ *  - gating the display on `failed` would hide a note the runtime genuinely
+ *    recorded, and would bake the "which states carry a meaningful note"
+ *    question -- a recording policy, and board issue 167's, not this issue's --
+ *    into a display function;
+ *  - clearing `meta.error` when no note is passed would make a state record less
+ *    than it does today, which is exactly what a visibility change must not do.
+ *
+ * Both of those were available and both were rejected on those grounds. What this
+ * function does is state-blind on purpose: it answers "what did the runtime last
+ * record?", never "why did this run end?".
+ *
+ * One consequence, observed rather than assumed. A later run *replaces*
+ * `meta.backend_error` (`finalizeInvocation` assigns it on every terminal run),
+ * so a note inherited from an earlier run stops matching a sentence derived from
+ * the record it now sits in and falls through to {@link AGENT_ERROR_WITHHELD}.
+ * That is the allowlist working, and it is the truthful answer: the note really
+ * is no longer derivable, and the marker discloses nothing about which run wrote
+ * it. It is also why the surfaces must not call the value `error` -- under
+ * `exit code: 0` that word would be a false statement about the current run,
+ * and the note beside it is not even quotable.
+ */
+export function displayableAgentError(meta: AgentMetadata): string | null {
+  const note = meta.error;
+  if (typeof note !== 'string' || note.length === 0) return null;
+  if (DISPLAYABLE_AGENT_ERRORS.includes(note)) return note;
+  const derived = describeSignalDeath(sanitizeBackendError(meta.backend_error));
+  if (derived !== null && derived === note) return note;
+  return AGENT_ERROR_WITHHELD;
+}
+
 function statusJson(
   agentId: string,
   meta: AgentMetadata,
@@ -431,6 +580,12 @@ function statusJson(
     last_activity_at: item.last_activity_at,
     exit_code: meta.exit_code,
     exit_signal: meta.exit_signal,
+    // The note the runtime last recorded, if it is displayable. Named
+    // `last_error`, not `error`, because `meta.error` is never cleared: on an
+    // agent that failed once and then succeeded, this is the *earlier* run's
+    // note, and a key called `error` beside `exit_code: 0` would read as the
+    // current run's cause. See `displayableAgentError`.
+    last_error: displayableAgentError(meta),
     prompts: item.prompts,
     steers_pending: steers.length,
     next_steer: steers.length > 0 ? steers[0]!.prompt.split('\n', 1)[0] : null,
@@ -470,6 +625,16 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
     context.io.stdout(`started:    ${shown(status.started_at)}`);
     context.io.stdout(`finished:   ${shown(status.finished_at)}`);
     context.io.stdout(`exit code:  ${shown(status.exit_code)}`);
+    // The note the runtime last recorded, next to the exit code. Only printed
+    // when there is one, so a run that never recorded a note is unchanged, and
+    // only ever the sanitised form -- see `displayableAgentError`. Labelled
+    // `last error` rather than `error` because the runtime never clears
+    // `meta.error`: on an agent that failed and then succeeded, this line is
+    // the earlier failure's note, and calling it `error` under `exit code: 0`
+    // would state it was this run's cause.
+    if (status.last_error !== null) {
+      context.io.stdout(`last error: ${String(status.last_error)}`);
+    }
     // Host memory as reported by the kernel, so a pass can see the state a
     // death happened in rather than inferring it from an empty log.
     const capacity = status.host_capacity as Record<string, unknown>;

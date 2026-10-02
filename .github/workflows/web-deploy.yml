@@ -155,8 +155,16 @@ jobs:
           # itself as this exact workflow revision. These checks remain hard
           # failures even when the authenticated board probe is unavailable.
           curl --fail --retry 5 --retry-delay 5 https://vau.place/_skrynia/health
-          deployed_version="$(curl --fail --retry 5 --retry-delay 5 https://vau.place/a/antonina/version.json)"
-          deployed_commit="$(printf '%s' "$deployed_version" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).commit))')"
+          deployed_commit=""
+          for attempt in $(seq 1 12); do
+            deployed_version="$(curl --fail --retry 2 --retry-delay 2 https://vau.place/a/antonina/version.json)"
+            deployed_commit="$(printf '%s' "$deployed_version" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).commit))')"
+            if [ "$deployed_commit" = "$GITHUB_SHA" ]; then
+              break
+            fi
+            echo "live deployment still names $deployed_commit; waiting for $GITHUB_SHA (attempt $attempt/12)"
+            sleep 5
+          done
           if [ "$deployed_commit" != "$GITHUB_SHA" ]; then
             echo "ERROR: live deployment names $deployed_commit but this workflow run is $GITHUB_SHA" >&2
             exit 1

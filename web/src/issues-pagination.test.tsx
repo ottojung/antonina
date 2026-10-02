@@ -11,7 +11,7 @@ process.env.XDG_CONFIG_HOME = '/nonexistent-antonina-web-pagination-config';
 import App, { IssuePagination } from './App';
 import { DEFAULT_FEED_LIMIT, type BoardFeedPage, type BoardFeedRequest } from './api';
 import type { BoardIssue } from './model';
-import type { BoardOverview } from '../../packages/core/src/api';
+import type { BoardOverview, IssueCommentPage } from '../../packages/core/src/api';
 import type { BoardAccessState } from '../../packages/core/src/api';
 import type { BrowserBoardSession } from './api';
 import {
@@ -88,6 +88,23 @@ function withQueue(queue: number[]): void {
 const session = {
   api: {
     accessState: (): BoardAccessState => ({ boardId: 'board-1', keyId: null, rootKeyId: 'root-1', capabilities: [], credentialRejection: null, storageRejected: false, canEdit: true }),
+    // Board issue 174 moved the shell's thread read to the bounded page read, so
+    // the stub answers that too. It is page 1 of a one-page thread for every
+    // fixture here; this file is about the Issues list, not about paging a
+    // conversation, which `issue-conversation-pagination.test.tsx` covers.
+    getIssueCommentPage: async (number: number, page: number): Promise<IssueCommentPage> => {
+      const found = board.find((each) => each.number === number);
+      if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
+      return {
+        schemaVersion: 2,
+        boardId: 'board-1',
+        issue: { ...found, messages: [] },
+        page,
+        pageCount: 1,
+        total: found.messages.length,
+        messages: found.messages,
+      };
+    },
     getIssue: async (number: number): Promise<BoardIssue> => {
       const found = board.find((each) => each.number === number);
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');

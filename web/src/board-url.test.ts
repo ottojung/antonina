@@ -9,6 +9,7 @@ import {
   BOARD_VIEWS,
   ISSUE_FILTERS,
   DEFAULT_BOARD_URL_STATE,
+  DEFAULT_COMMENT_PAGE,
   DEFAULT_ISSUE_PAGE,
   boardHref,
   boardHomeState,
@@ -25,7 +26,7 @@ import {
   type BoardUrlState,
 } from './board-url';
 
-const READY: BoardUrlState = { view: 'issues', selectedNumber: 7, filter: 'all', settingsOpen: false, page: 2 };
+const READY: BoardUrlState = { view: 'issues', selectedNumber: 7, filter: 'all', settingsOpen: false, page: 2, commentPage: DEFAULT_COMMENT_PAGE };
 
 function fakeHistory() {
   const calls: { mode: 'push' | 'replace'; url: string }[] = [];
@@ -48,11 +49,15 @@ describe('parsing the board URL', () => {
     expect(parseBoardUrl('?issue=139')).toEqual({ ...DEFAULT_BOARD_URL_STATE, selectedNumber: 139 });
     expect(parseBoardUrl('?filter=closed')).toEqual({ ...DEFAULT_BOARD_URL_STATE, filter: 'closed' });
     expect(parseBoardUrl('?page=4')).toEqual({ ...DEFAULT_BOARD_URL_STATE, page: 4 });
+    expect(parseBoardUrl('?thread=4')).toEqual({ ...DEFAULT_BOARD_URL_STATE, commentPage: 4 });
     expect(parseBoardUrl('?settings=1')).toEqual({ ...DEFAULT_BOARD_URL_STATE, settingsOpen: true });
   });
 
   it('reads a whole screen at once', () => {
     expect(parseBoardUrl('?view=issues&issue=7&filter=all&page=2&settings=1')).toEqual({ ...READY, settingsOpen: true });
+    // The list page and the conversation page are separate fields, so a link can
+    // name both: an issue opened from page 4 of the list, reading page 2 of it.
+    expect(parseBoardUrl('?issue=7&filter=all&page=4&thread=2')).toEqual({ ...READY, page: 4, commentPage: 2 });
   });
 
   it('accepts a search string with or without its leading question mark', () => {
@@ -73,6 +78,7 @@ describe('parsing the board URL', () => {
   it('degrades anything that is not a positive integer to the first page', () => {
     for (const value of ['0', '-1', '2.5', '1e3', ' 2', 'two', '', 'NaN']) {
       expect(parseBoardUrl(`?page=${encodeURIComponent(value)}`).page).toBe(DEFAULT_ISSUE_PAGE);
+      expect(parseBoardUrl(`?thread=${encodeURIComponent(value)}`).commentPage).toBe(DEFAULT_COMMENT_PAGE);
     }
   });
 
@@ -108,6 +114,7 @@ describe('writing the board URL', () => {
     expect(boardSearch(READY)).toBe('?issue=7&filter=all&page=2');
     expect(boardSearch({ ...DEFAULT_BOARD_URL_STATE, view: 'targets' })).toBe('?view=targets');
     expect(boardSearch({ ...DEFAULT_BOARD_URL_STATE, settingsOpen: true })).toBe('?settings=1');
+    expect(boardSearch({ ...READY, commentPage: 3 })).toBe('?issue=7&filter=all&page=2&thread=3');
   });
 
   it('round-trips every state it can write', () => {
@@ -118,6 +125,7 @@ describe('writing the board URL', () => {
       { ...DEFAULT_BOARD_URL_STATE, view: 'feed', settingsOpen: true },
       { ...DEFAULT_BOARD_URL_STATE, filter: 'closed', page: 7 },
       { ...DEFAULT_BOARD_URL_STATE, selectedNumber: 139 },
+      { ...DEFAULT_BOARD_URL_STATE, selectedNumber: 139, commentPage: 5 },
     ];
     for (const state of states) expect(parseBoardUrl(boardSearch(state))).toEqual(state);
   });
@@ -158,16 +166,28 @@ describe('navigating between states', () => {
       filter: 'all',
       settingsOpen: false,
       page: DEFAULT_ISSUE_PAGE,
+      commentPage: DEFAULT_COMMENT_PAGE,
     });
   });
 
+  it('opens an issue on the first page of its conversation', () => {
+    // Paging one issue's thread says nothing about another issue's thread, so
+    // opening an issue resets the conversation page and leaves the list page
+    // alone: the two paginate different screens.
+    const deep = { ...READY, page: 4, commentPage: 3 };
+    const opened = issueUrlState(8, deep);
+    expect(opened.commentPage).toBe(DEFAULT_COMMENT_PAGE);
+    expect(opened.page).toBe(4);
+  });
+
   it('goes home to the Issues tab with nothing selected', () => {
-    expect(boardHomeState(READY)).toEqual({ view: 'issues', selectedNumber: undefined, filter: 'open', settingsOpen: false, page: DEFAULT_ISSUE_PAGE });
+    expect(boardHomeState(READY)).toEqual({ view: 'issues', selectedNumber: undefined, filter: 'open', settingsOpen: false, page: DEFAULT_ISSUE_PAGE, commentPage: DEFAULT_COMMENT_PAGE });
   });
 
   it('tells two states apart only by what they show', () => {
     expect(sameBoardUrl(READY, { ...READY })).toBe(true);
     expect(sameBoardUrl(READY, { ...READY, page: 3 })).toBe(false);
+    expect(sameBoardUrl(READY, { ...READY, commentPage: 3 })).toBe(false);
     expect(sameBoardUrl(READY, { ...READY, settingsOpen: true })).toBe(false);
   });
 });

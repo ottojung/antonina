@@ -278,6 +278,12 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .state-action.closed { border-color: #c7c9c4; color: #4e514b; }
 .read-only-label { flex: none; padding: 7px 10px; border-radius: 999px; background: #ece9df; color: #685c40; font-size: .76rem; font-weight: 750; }
 .messages { flex: 1; padding: 10px clamp(26px, 5vw, 68px) 32px; }
+/* The conversation's own page position and its empty page: both are states of a
+   paged thread, so they sit inside the conversation section rather than in the
+   issues pane the list's pagination lives in. */
+.comment-page-position { max-width: 800px; margin: 18px 0 0; color: var(--muted); font-size: .82rem; }
+.conversation-page-empty { max-width: 800px; margin: 18px 0; color: var(--muted); font-style: italic; }
+.messages .issue-pagination { max-width: 800px; padding: 14px 0 0; border-bottom: none; border-top: 1px solid var(--line); }
 .message { max-width: 800px; padding: 23px 0; border-bottom: 1px solid var(--line); }
 .message-meta { display: flex; align-items: center; gap: 11px; }
 .avatar { display: grid; place-items: center; width: 34px; height: 34px; flex: none; border-radius: 50%; background: #dfe7df; color: var(--green-dark); font-size: .8rem; font-weight: 800; }

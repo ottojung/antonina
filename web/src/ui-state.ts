@@ -361,6 +361,62 @@ export const ISSUE_PAGE_PREVIOUS = 'Previous page';
 export const ISSUE_PAGE_NEXT = 'Next page';
 
 /**
+ * How many comments one page of a conversation holds.
+ *
+ * 50 for the same reason `ISSUE_PAGE_SIZE` is 50, and it is the number the
+ * board's comment shards already use, so a page in the browser is exactly one
+ * shard on the wire and the two cannot drift into a page that straddles two.
+ */
+export const COMMENT_PAGE_SIZE = 50;
+
+/**
+ * The conversation's paging, as the same model the Issues list uses.
+ *
+ * These are the helpers above applied to a message count rather than an issue
+ * count, with the comment page size. They are not a second implementation: the
+ * count, the clamp, the range line and the "is there more than one page"
+ * question are all answered by `issuePageCount`, `clampIssuePage`,
+ * `issuePageRange` and `hasIssuePages`, so the Issues list and an issue's
+ * conversation cannot disagree about what a page number means or what happens
+ * to one that no longer exists.
+ */
+export function commentPageCount(total: number, pageSize = COMMENT_PAGE_SIZE): number {
+  return issuePageCount(total, pageSize);
+}
+
+/**
+ * The page a conversation may actually be showing, given the page that was asked
+ * for. Out of range moves down onto the last existing page, exactly as
+ * `clampIssuePage` does for the list, so a post that made the thread longer and
+ * a delete that made it shorter are both the same event to a reader: the list
+ * got longer or shorter.
+ */
+export function clampCommentPage(page: number, total: number, pageSize = COMMENT_PAGE_SIZE): number {
+  return clampIssuePage(page, total, pageSize);
+}
+
+/** Which comments are on screen out of how many the thread holds. */
+export function commentPageRange(total: number, page: number, pageSize = COMMENT_PAGE_SIZE): string {
+  return issuePageRange(total, page, pageSize);
+}
+
+/** Whether the conversation is long enough to be worth paging at all. */
+export function hasCommentPages(total: number, pageSize = COMMENT_PAGE_SIZE): boolean {
+  return hasIssuePages(total, pageSize);
+}
+
+/** The page after a post, which is where a newly written comment lands. */
+export function lastCommentPage(total: number, pageSize = COMMENT_PAGE_SIZE): number {
+  return commentPageCount(total, pageSize);
+}
+
+/** What a conversation's Previous/Next control announces itself as paging. */
+export const COMMENT_PAGES_LABEL = 'Issue conversation pages';
+
+/** What the Issues list's own Previous/Next control announces itself as paging. */
+export const ISSUE_LIST_PAGES_LABEL = 'Issue list pages';
+
+/**
  * Moves one queued issue to another slot, returning the whole reordered queue.
  * A commit is only accepted when it names every open issue exactly once, so a
  * move sends the entire list, never the pair it swapped. `null` means the board

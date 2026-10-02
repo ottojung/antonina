@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const STAT_MIN_FIELDS = 20;
@@ -123,6 +123,44 @@ export function envHasAgentMarker(pid: number, agentId: string, procRoot = '/pro
 
 export function envHasInvocationMarker(pid: number, invocationId: string, procRoot = '/proc'): boolean {
   return envHasEntry(pid, `ANTONINA_INVOCATION_ID=${invocationId}`, procRoot);
+}
+
+/**
+ * Signal every process that still carries this exact invocation's environment
+ * markers.
+ *
+ * Managed backends may launch shells or tools in their own process groups. If
+ * the backend leader is killed externally (for example by the cgroup OOM
+ * killer), those descendants can survive, be reparented to pid 1, and escape
+ * the recorded pgid. The agent id alone is intentionally insufficient: an
+ * agent can have multiple invocations over its lifetime, while invocation ids
+ * are unique to one backend spawn.
+ */
+export function signalMarkedInvocationProcesses(
+  agentId: string,
+  invocationId: string,
+  signal: NodeJS.Signals | number,
+  options: ProcessProbeOptions = {},
+): number {
+  const procRoot = options.procRoot ?? '/proc';
+  const sender = options.signal ?? process.kill;
+  let entries: string[];
+  try {
+    entries = readdirSync(procRoot);
+  } catch {
+    return 0;
+  }
+
+  let signalled = 0;
+  for (const entry of entries) {
+    if (!/^[1-9][0-9]*$/.test(entry)) continue;
+    const pid = Number(entry);
+    if (!Number.isSafeInteger(pid)) continue;
+    if (!envHasAgentMarker(pid, agentId, procRoot)) continue;
+    if (!envHasInvocationMarker(pid, invocationId, procRoot)) continue;
+    if (trySignal(sender, pid, signal)) signalled += 1;
+  }
+  return signalled;
 }
 
 export function normalizeAgentId(raw: unknown): string | null {

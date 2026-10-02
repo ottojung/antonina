@@ -38,7 +38,7 @@ import {
   runnerReservationState,
   type AgentMetadata,
 } from './metadata.js';
-import { procStartTicks } from './process.js';
+import { procStartTicks, signalMarkedInvocationProcesses } from './process.js';
 import {
   logPath,
   readMeta,
@@ -457,6 +457,11 @@ async function runInvocation(
       }
       result = await resultPromise;
     }
+
+    // The backend leader may be gone while commands it launched survive in
+    // different process groups. Reap by the unique inherited invocation
+    // markers before retrying or finalizing this invocation.
+    signalMarkedInvocationProcesses(agentId, invocationId, 'SIGKILL');
 
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);

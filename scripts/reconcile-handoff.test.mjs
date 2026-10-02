@@ -1,5 +1,5 @@
-import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, mkdirSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -20,6 +20,21 @@ const {
 
 function run(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
+}
+
+// The CLI deliberately exits nonzero for anything that is not clean, so run it
+// without throwing and hand back stdout and the exit code for assertion.
+function runCli(args, opts) {
+  const res = spawnSync(process.execPath, [join(import.meta.dirname, 'reconcile-handoff.mjs'), ...args], {
+    encoding: 'utf8',
+    env: { ...process.env },
+    ...opts,
+  })
+  return { status: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? '' }
+}
+
+function firstLine(stdout) {
+  return JSON.parse(stdout.trim().split('\n')[0])
 }
 
 // A local file remote stands in for the GitHub administrative side. It is
@@ -220,5 +235,135 @@ test('an absent target ref is a fact, and is not created', (t) => {
   ])
   assert.equal(results[0].verdict, 'target-ref-absent')
   assert.equal(readAdminRef(f.work, 'origin', 'release/does-not-exist').present, false)
+  // The read succeeded; absence is a fact about the admin side.
+  assert.equal(readAdminRef(f.work, 'origin', 'release/does-not-exist').reachable, true)
   assert.equal(exitCodeFor(results), EXIT_UNEVALUABLE)
+})
+
+// Correction 1: an unreachable remote is a transport failure, never absence.
+test('an unreachable administrative side is never reported as an absent ref', (t) => {
+  const f = fixture()
+  fixtureWork = f.work
+  t.after(f.cleanup)
+  const claimed = commitOn(f.work, 'work', 'feature/u')
+  // Break reachability by pointing the remote at a path that does not exist.
+  run(f.work, ['remote', 'set-url', 'origin', join(f.root, 'nonexistent.git')])
+
+  const admin = readAdminRef(f.work, 'origin', 'main')
+  assert.equal(admin.reachable, false)
+  assert.equal(admin.present, false)
+
+  const { results } = check([
+    { issue: 43, branch: 'feature/u', commit: claimed, targetBranch: 'main' },
+  ])
+  assert.equal(results[0].verdict, 'admin-unreachable')
+  assert.notEqual(results[0].verdict, 'target-ref-absent')
+  assert.match(results[0].why, /could not be read from the administrative side/)
+  assert.ok(results[0].why.length > 'could not be read from the administrative side: '.length)
+  assert.equal(exitCodeFor(results), EXIT_UNEVALUABLE)
+
+  // The same, through the CLI, so the git error reaches the emitted line.
+  const claimsPath = join(f.root, 'claims.json')
+  writeFileSync(
+    claimsPath,
+    JSON.stringify([{ issue: 43, branch: 'feature/u', commit: claimed, targetBranch: 'main' }]),
+  )
+  const cli = runCli([claimsPath, '--repo', f.work])
+  const line = firstLine(cli.stdout)
+  assert.equal(line.verdict, 'admin-unreachable')
+  assert.notEqual(line.verdict, 'target-ref-absent')
+  assert.match(line.why, /nonexistent/)
+  assert.equal(cli.status, EXIT_UNEVALUABLE)
+})
+
+// Correction 2: supersession must not downgrade a worse single-claim verdict.
+test('supersession does not downgrade a claim that is not its branch head', (t) => {
+  const f = fixture()
+  fixtureWork = f.work
+  t.after(f.cleanup)
+  run(f.work, ['checkout', '--quiet', '-B', 'main'])
+  run(f.work, ['commit', '--quiet', '--allow-empty', '-m', 'base bump'])
+  run(f.work, ['push', '--quiet', 'origin', 'main:refs/heads/main'])
+  commitOn(f.work, 'work', 'feature/a')
+  // The local branch has a commit the claim does not name.
+  const stale = run(f.work, ['rev-parse', 'feature/a^'])
+  // A later claim that carries the older one forward.
+  const newer = commitOn(f.work, 'carried forward', 'feature/b')
+
+  const alone = check([{ issue: 43, branch: 'feature/a', commit: stale, targetBranch: 'main' }])
+  assert.equal(alone.results[0].verdict, 'claim-is-not-the-branch-head')
+  const aloneExit = exitCodeFor(alone.results)
+
+  const paired = check([
+    { issue: 43, branch: 'feature/a', commit: stale, targetBranch: 'main' },
+    { issue: 44, branch: 'feature/b', commit: newer, targetBranch: 'main' },
+  ])
+  const first = paired.results.find((r) => r.issue === 43)
+  assert.equal(first.verdict, 'superseded-by-later-claim')
+  // The worse single-claim finding is retained and still counted.
+  assert.equal(first.retainedVerdict, 'claim-is-not-the-branch-head')
+  assert.deepEqual(first.supersededBy, { issue: 44, commit: newer })
+  assert.match(first.why, /superseded by issue 44/)
+  assert.match(first.why, /branch feature\/a is at/)
+  // Adding an unrelated claim must never lower the exit code.
+  assert.ok(
+    exitCodeFor(paired.results) >= aloneExit,
+    `paired exit ${exitCodeFor(paired.results)} must not be below alone exit ${aloneExit}`,
+  )
+  assert.equal(exitCodeFor(paired.results), EXIT_DISAGREE)
+})
+
+// Correction 3: a published claim branch at a different commit contradicts the
+// claim and must not be reported as `landed`.
+test('a claim branch published at a different commit is not reported as landed', (t) => {
+  const f = fixture()
+  fixtureWork = f.work
+  t.after(f.cleanup)
+  const claimed = commitOn(f.work, 'work', 'feature/x')
+  run(f.work, ['push', '--quiet', 'origin', 'feature/x:refs/heads/main'])
+  // The administrative claim branch is published at something else, while the
+  // local feature/x branch still stands at the claimed commit.
+  run(f.work, ['checkout', '--quiet', '-B', 'admin-only', claimed])
+  run(f.work, ['commit', '--quiet', '--allow-empty', '-m', 'other admin work'])
+  const otherHead = run(f.work, ['rev-parse', 'HEAD'])
+  run(f.work, ['push', '--quiet', 'origin', 'admin-only:refs/heads/feature/x'])
+  run(f.work, ['checkout', '--quiet', 'feature/x'])
+  assert.notEqual(otherHead, claimed)
+
+  const { results } = check([
+    { issue: 43, branch: 'feature/x', commit: claimed, targetBranch: 'main' },
+  ])
+  assert.notEqual(results[0].verdict, 'landed')
+  assert.equal(results[0].verdict, 'claim-branch-diverged')
+  assert.equal(results[0].adminClaimBranchCommit, otherHead)
+  assert.match(results[0].nextStep, /disagree/)
+  assert.equal(exitCodeFor(results), EXIT_DISAGREE)
+})
+
+// Correction 4: the computed divergence evidence must reach the operator.
+test('divergence evidence is emitted, not just computed', (t) => {
+  const f = fixture()
+  fixtureWork = f.work
+  t.after(f.cleanup)
+  const shared = run(f.work, ['rev-parse', 'HEAD'])
+  run(f.work, ['checkout', '--quiet', '-B', 'main'])
+  run(f.work, ['commit', '--quiet', '--allow-empty', '-m', 'admin side'])
+  run(f.work, ['push', '--quiet', 'origin', 'main:refs/heads/main'])
+  run(f.work, ['checkout', '--quiet', '-B', 'feature/x', shared])
+  run(f.work, ['commit', '--quiet', '--allow-empty', '-m', 'local side'])
+  const localClaim = run(f.work, ['rev-parse', 'HEAD'])
+  run(f.work, ['push', '--quiet', 'origin', 'feature/x:refs/heads/feature/x'])
+
+  const claimsPath = join(f.root, 'claims.json')
+  writeFileSync(
+    claimsPath,
+    JSON.stringify([{ issue: 43, branch: 'feature/x', commit: localClaim, targetBranch: 'main' }]),
+  )
+  const cli = runCli([claimsPath, '--repo', f.work])
+  const line = firstLine(cli.stdout)
+  assert.equal(line.verdict, 'diverged')
+  assert.equal(cli.status, EXIT_DISAGREE)
+  assert.equal(line.evidence.length, 2)
+  assert.match(line.evidence.join('\n'), /claim-only commits: 1/)
+  assert.match(line.evidence.join('\n'), /admin-only commits: 1/)
 })

@@ -8,6 +8,7 @@ process.env.XDG_STATE_HOME = '/nonexistent-antonina-web-feed-state';
 process.env.XDG_CONFIG_HOME = '/nonexistent-antonina-web-feed-config';
 
 import { generateSigningKey } from '../../packages/core/src/canonical';
+import { BOARD_CREDENTIAL_STORAGE_KEY } from '../../packages/core/src/credential';
 import {
   BOARD_SCHEMA_VERSION,
   parseBoard,
@@ -15,6 +16,7 @@ import {
 } from '../../packages/core/src/model';
 import {
   boardReadFailure,
+  browserStorage,
   BrowserBoardSession,
   BoardTrustRequiredError,
   createBrowserBoardApi,
@@ -200,6 +202,21 @@ describe('browser board session', () => {
     expect(storage.get('antonina:board-v2:accepted-head')).toBe(before.initialized.state.head);
     expect((await reader.api.verifyCredential()).canEdit).toBe(true);
     expect(reader.api.hasWriteAccess()).toBe(true);
+  });
+
+  it('persists the board credential through the production browser-storage boundary', async () => {
+    window.localStorage.clear();
+    try {
+      const server = fakeSkrynia();
+      const owner = session(server, browserStorage());
+      const initialized = await owner.initialize();
+
+      expect(window.localStorage.getItem(BOARD_CREDENTIAL_STORAGE_KEY))
+        .toBe(serializeBoardCredential(initialized.credential));
+      expect(owner.hasCredential()).toBe(true);
+    } finally {
+      window.localStorage.clear();
+    }
   });
 
   it('holds a stored credential without claiming edit access before reading the board', async () => {

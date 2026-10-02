@@ -58,7 +58,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--json': 'Emit JSON.',
   '--killed': 'Show killed agents only.',
   '--kind': 'Execution-target kind.',
-  '--limit': 'Maximum number of records.',
+  '--limit': 'Page size for commands that support it.',
   '--limitation': 'Operational caveat; may be repeated.',
   '--lines': 'Number of log lines.',
   '--page': '1-based page number.',

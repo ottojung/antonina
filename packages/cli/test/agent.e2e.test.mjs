@@ -1627,12 +1627,16 @@ test('run refuses a --cwd that is not an existing directory', (t) => {
 
 
 
-test('agent list uses --page with --limit as the page size', (t) => {
+test('agent list requires --page and uses --limit as the page size', (t) => {
   const { work, env } = fixture(t);
   for (const id of ['a001', 'a002', 'a003']) {
     const created = run(['agent', 'new', '--id', id, '--cwd', work], env);
     assert.equal(created.status, 0, created.stderr);
   }
+
+  const missing = run(['agent', 'list', '--json'], env);
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /--page is required/);
 
   const all = run(['agent', 'list', '--page', '1', '--json'], env);
   assert.equal(all.status, 0, all.stderr);

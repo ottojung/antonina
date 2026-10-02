@@ -290,14 +290,19 @@ describe('the feed tab in the app shell', () => {
   it('is a top-level tab beside Issues and Resources', () => {
     // The tab list grew a fourth entry for the target overview, so the pinned list
     // names all four rather than the three that existed when the feed landed.
-    expect(app).toMatch(/const TABS: readonly View\[\] = \['issues', 'resources', 'feed', 'targets'\]/);
-    expect(app).toMatch(/TABS\.map\(\(item\) => <button key=\{item\}/);
+    expect(app).toMatch(/const TABS: readonly View\[\] = BOARD_VIEWS/);
+    // A tab is a link with its own address, not only a click handler, so it can
+    // be copied and opened in a new tab. Board issue 139.
+    expect(app).toMatch(/TABS\.map\(\(item\) => <a key=\{item\} role="button"/);
   });
 
   it('renders the feed container for that tab and nowhere else', () => {
     expect(app).toMatch(/<FeedView readFeed=\{session\.readFeed\}/);
     expect(app.match(/<FeedView /g)).toHaveLength(1);
-    expect(app).toMatch(/type View = 'issues' \| 'resources' \| 'feed' \| 'targets'/);
+    // `View` is the route module's own view vocabulary, so a tab the URL can
+    // name and a tab the nav renders are the same list by construction.
+    expect(app).toMatch(/type View = BoardView;/);
+    expect(app).toMatch(/from '\.\/board-url'/);
   });
 
   it('opens the feed through the shared reader, so the prop is the only read path', () => {

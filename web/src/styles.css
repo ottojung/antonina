@@ -38,14 +38,14 @@ h1, h2, h3, p { overflow-wrap: anywhere; }
    single-column phone layout wants. */
 .app-shell { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 .topbar { height: 72px; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; border-bottom: 1px solid var(--line); background: rgba(250, 251, 248, .96); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(14px); }
-.brand { display: flex; align-items: center; gap: 11px; border: 0; border-radius: 8px; background: none; color: var(--ink); padding: 3px; }
+.brand { text-decoration: none; display: flex; align-items: center; gap: 11px; border: 0; border-radius: 8px; background: none; color: var(--ink); padding: 3px; }
 .brand-mark { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 9px; color: #fff; background: var(--green); font-size: 1.1rem; font-weight: 800; }
 .brand > span:last-child { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.2; }
 .brand strong { font-size: 1.05rem; letter-spacing: -.01em; }
 .brand small { color: var(--muted); font-size: .72rem; margin-top: 2px; }
 .main-nav { display: flex; gap: 4px; padding: 4px; border-radius: 10px; background: #ecefe9; }
-.main-nav button { border: 0; border-radius: 7px; background: transparent; color: var(--muted); padding: 8px 14px; text-transform: capitalize; font-weight: 750; }
-.main-nav button.active { background: #fff; color: var(--green-dark); box-shadow: 0 1px 3px rgba(39,48,39,.12); }
+.main-nav a { text-decoration: none; border: 0; border-radius: 7px; background: transparent; color: var(--muted); padding: 8px 14px; text-transform: capitalize; font-weight: 750; }
+.main-nav a.active { background: #fff; color: var(--green-dark); box-shadow: 0 1px 3px rgba(39,48,39,.12); }
 .top-actions { display: flex; align-items: center; gap: 8px; }
 .quiet { border: 1px solid transparent; border-radius: 8px; background: transparent; color: #51544d; padding: 8px 11px; }
 .quiet:hover { color: var(--ink); background: #edf0e9; border-color: var(--line); }
@@ -129,7 +129,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .feed-kind-issue-reopened { background: #f5ead8; color: #76532f; }
 .feed-kind-issue-deleted { background: #e8e6e4; color: #5c5751; }
 .feed-detail { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.feed-issue { border: 0; background: transparent; color: var(--green); padding: 0; font-weight: 750; text-align: left; overflow-wrap: anywhere; }
+.feed-issue { border: 0; background: transparent; color: var(--green); padding: 0; font-weight: 750; text-align: left; overflow-wrap: anywhere; text-decoration: none; }
 .feed-summary { color: var(--ink); font-size: .88rem; overflow-wrap: anywhere; }
 .feed-at { flex: none; color: var(--muted); font-size: .75rem; white-space: nowrap; }
 .feed-caveat { margin: 16px 0 0; padding: 11px 13px; border: 1px solid #e2c4b2; border-radius: 9px; background: var(--orange-soft); color: #765c4c; font-size: .8rem; line-height: 1.5; }
@@ -214,12 +214,15 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .access-callout p { margin: 4px 0 0; color: #765c4c; font-size: .8rem; line-height: 1.45; }
 .access-callout button { flex: none; padding: 8px 11px; font-size: .8rem; }
 .filters { display: flex; gap: 4px; margin: 0 24px 20px; padding: 4px; border-radius: 10px; background: #ecefe9; }
-.filters button { display: flex; align-items: center; justify-content: center; gap: 6px; flex: 1; border: 0; border-radius: 7px; background: transparent; color: #60645c; padding: 8px; font-size: .81rem; font-weight: 750; }
-.filters button span { display: grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; background: rgba(82, 89, 78, .1); font-size: .7rem; }
-.filters button:hover { color: var(--ink); }
-.filters button.active { background: #fff; color: var(--green-dark); box-shadow: 0 1px 3px rgba(39, 48, 39, .12); }
+.filters a { text-decoration: none; display: flex; align-items: center; justify-content: center; gap: 6px; flex: 1; border: 0; border-radius: 7px; background: transparent; color: #60645c; padding: 8px; font-size: .81rem; font-weight: 750; }
+.filters a span { display: grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; background: rgba(82, 89, 78, .1); font-size: .7rem; }
+.filters a:hover { color: var(--ink); }
+.filters a.active { background: #fff; color: var(--green-dark); box-shadow: 0 1px 3px rgba(39, 48, 39, .12); }
 
 .issue-list { border-top: 1px solid var(--line); }
+.issue-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 24px; border-bottom: 1px solid var(--line); }
+.issue-pagination button:disabled { opacity: .5; cursor: default; }
+.issue-page-range { margin: 0; color: var(--muted); font-size: .78rem; font-weight: 700; }
 .issue-row { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
 .issue-row:hover { background: #f0f3ed; }
 .issue-row.selected { background: #dcebe1; box-shadow: inset 4px 0 var(--green); }

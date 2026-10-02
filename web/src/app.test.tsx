@@ -122,6 +122,10 @@ async function mountApp(): Promise<HTMLElement> {
 
 beforeEach(() => {
   window.localStorage.clear();
+  // Board issue 139: the shell reads its screen out of the query string, so a
+  // URL one test navigated to would otherwise be the screen the next one
+  // mounted. Each test starts from the board's own opening URL.
+  window.history.replaceState(null, '', '/board');
   allIssues.clear();
   session.readOverview.mockReset();
   session.readFeed.mockReset();
@@ -142,7 +146,13 @@ describe('the board app, mounted', () => {
 
     expect(await screen.findByRole('navigation', { name: 'Main navigation' })).toBeDefined();
     const nav = screen.getByRole('navigation', { name: 'Main navigation' });
-    expect(Array.from(nav.querySelectorAll('button')).map((button) => button.textContent)).toEqual(['issues', 'resources', 'feed', 'targets']);
+    // The nav is real links: a tab's `href` is its own stable address.
+    expect(Array.from(nav.querySelectorAll('a')).map((link) => [link.textContent, link.getAttribute('href')])).toEqual([
+      ['issues', '/board'],
+      ['resources', '/board?view=resources'],
+      ['feed', '/board?view=feed'],
+      ['targets', '/board?view=targets'],
+    ]);
     // The verified read, not a fixture: the issue the board reported is on
     // screen, the closed one is behind the Open filter, and the access pill
     // says what this browser may do.

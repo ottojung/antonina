@@ -25,6 +25,9 @@ import {
   type BoardIssue,
   type BoardMessage,
   type BoardResource,
+  type BoardReview,
+  REVIEW_VERDICTS,
+  type ReviewVerdict,
   type IssueState,
 } from './model.js';
 import {
@@ -32,6 +35,7 @@ import {
   applyBoardMutation,
   parseUnsignedBoardOperation,
   unMigratedBoardReport,
+  type BoardOperationKind,
   type BoardOperationPayload,
   type BoardTrustAnchor,
   type SignedBoardOperation,
@@ -338,6 +342,15 @@ interface IssueCore {
   state: IssueState;
   createdAt: string;
   updatedAt: string;
+  /**
+   * The issue's recorded review verdict, stored inside the issue core rather
+   * than beside it because it is part of the issue's identity for every reader:
+   * an issue snapshot that dropped it would hand a later mutation an issue with
+   * no blocker on it, and the completion gate in `applyBoardMutation` reads
+   * exactly this field. A materialization that loses a blocker is a bypass, not a
+   * compaction. Absent means no review has been recorded.
+   */
+  review?: BoardReview;
 }
 
 /**
@@ -374,6 +387,13 @@ export interface IssueListSummary {
   closedAt: string | null;
   messageCount: number;
   hasBody: boolean;
+  /**
+   * The recorded review verdict, carried on the list projection for the same
+   * reason it is carried in the issue core: the write path builds its working
+   * issue from this summary, so a summary without the verdict would silently
+   * clear a blocker the next mutation then applied.
+   */
+  review?: BoardReview;
 }
 
 /**
@@ -645,8 +665,22 @@ function parseMeta(value: unknown): ShardedBoardMeta {
 }
 
 
+/**
+ * Whether an operation rewrites the issue it names, so its shard has to be
+ * materialized again.
+ *
+ * A recorded review verdict is stored on the issue, so `review.record` belongs
+ * here even though its name does not start with `issue.`: without it the verdict
+ * would apply to the in-memory board, be dropped before the shard was written,
+ * and be gone by the next read -- which would leave `issue.close` gating on a
+ * field the storage layer had already thrown away.
+ */
+function touchesIssue(kind: BoardOperationKind): boolean {
+  return kind.startsWith('issue.') || kind === 'review.record';
+}
+
 function coreOf(issue: BoardIssue): IssueCore {
-  return {
+  const core: IssueCore = {
     number: issue.number,
     title: issue.title,
     body: issue.body,
@@ -654,10 +688,12 @@ function coreOf(issue: BoardIssue): IssueCore {
     createdAt: issue.createdAt,
     updatedAt: issue.updatedAt,
   };
+  if (issue.review !== undefined) core.review = clone(issue.review);
+  return core;
 }
 
 function issueFromCore(core: IssueCore, messages: BoardMessage[]): BoardIssue {
-  return {
+  const issue: BoardIssue = {
     number: core.number,
     title: core.title,
     body: core.body,
@@ -665,6 +701,37 @@ function issueFromCore(core: IssueCore, messages: BoardMessage[]): BoardIssue {
     createdAt: core.createdAt,
     updatedAt: core.updatedAt,
     messages,
+  };
+  if (core.review !== undefined) issue.review = clone(core.review);
+  return issue;
+}
+
+/**
+ * A stored review verdict read back off a shard, or a refusal naming it.
+ *
+ * This is the store's own reader rather than the model's `isReview`, because a
+ * shard is not a board: it is read field by field against what it must contain,
+ * and a shard whose verdict is not one of the two named values is a store that
+ * has been written by something this build does not understand. It would fail
+ * later at the board parse with a less specific message, and a blocker that
+ * failed to load must never be read as "no blocker", so it is refused here.
+ */
+function parseStoredReview(value: unknown): BoardReview {
+  if (!isRecord(value)
+      || typeof value.commit !== 'string'
+      || typeof value.verdict !== 'string'
+      || !(REVIEW_VERDICTS as readonly string[]).includes(value.verdict)
+      || typeof value.reviewer !== 'string'
+      || typeof value.rationale !== 'string'
+      || typeof value.recordedAt !== 'string') {
+    throw new ShardedBoardStoreError('Antonina stored review verdict is malformed');
+  }
+  return {
+    commit: value.commit,
+    verdict: value.verdict as ReviewVerdict,
+    reviewer: value.reviewer,
+    rationale: value.rationale,
+    recordedAt: value.recordedAt,
   };
 }
 
@@ -755,6 +822,7 @@ function orderedSummaries(
     closedAt: issue.state === 'closed' ? (closedAt.get(issue.number) ?? issue.updatedAt) : null,
     messageCount: messageCounts?.get(issue.number) ?? issue.messages.length,
     hasBody: issue.body.length > 0,
+    ...(issue.review === undefined ? {} : { review: clone(issue.review) }),
   }));
 }
 
@@ -769,6 +837,7 @@ function issueFromSummary(summary: IssueListSummary): BoardIssue {
     createdAt: summary.createdAt,
     updatedAt: summary.updatedAt,
     messages: [],
+    ...(summary.review === undefined ? {} : { review: clone(summary.review) }),
   };
 }
 
@@ -1479,6 +1548,9 @@ export class ShardedBoardStore {
       state: coreValue.state,
       createdAt: coreValue.createdAt,
       updatedAt: coreValue.updatedAt,
+      ...(coreValue.review === undefined || coreValue.review === null
+        ? {}
+        : { review: parseStoredReview(coreValue.review) }),
     };
     if (core.number !== (value.number as number)) {
       throw new ShardedBoardStoreError('Antonina issue snapshot number mismatch');
@@ -2687,6 +2759,7 @@ export class ShardedBoardStore {
         createdAt: issue.createdAt,
         updatedAt: issue.updatedAt,
         messages: issue.messages,
+        review: issue.review ?? null,
       })),
       bundle.state.board.issues.map((issue) => ({
         number: issue.number,
@@ -2696,6 +2769,7 @@ export class ShardedBoardStore {
         createdAt: issue.createdAt,
         updatedAt: issue.updatedAt,
         messages: issue.messages,
+        review: issue.review ?? null,
       })),
     );
     same('queue', intended.queue, bundle.state.queue);
@@ -2894,7 +2968,7 @@ export class ShardedBoardStore {
       // The compact path starts from list summaries. Only issue mutations that
       // actually need the issue body/messages hydrate that one issue, and only
       // the directory page containing the touched issue is read.
-      if (compact && beforeIssueNumber !== null && request.kind.startsWith('issue.')) {
+      if (compact && beforeIssueNumber !== null && touchesIssue(request.kind)) {
         const pageNumber = directoryPageNumber(beforeIssueNumber);
         const directory = await this.readDirectoryPage(credential, bundle.meta, pageNumber);
         if (directory !== null) bundle.directoryPages.set(pageNumber, directory);
@@ -2979,7 +3053,7 @@ export class ShardedBoardStore {
       // otherwise force a full hydration on every write.
       const superseded: string[] = [];
       const nextDirectoryRefs = [...bundle.meta.directoryRefs];
-      const issueMutation = request.kind.startsWith('issue.');
+      const issueMutation = touchesIssue(request.kind);
       if (issueMutation && beforeIssueNumber !== null) {
         const directoryPage = directoryPageNumber(beforeIssueNumber);
         // Read the page the mutation is about to rewrite, so the entries below

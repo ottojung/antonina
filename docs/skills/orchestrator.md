@@ -247,6 +247,8 @@ Do not equate "agent stopped", "tests passed", "PR opened", or "code written" wi
 
 Derive the completion predicate from the issue plus the target repository's instructions. It normally includes the requested result, required validation, required review/integration state, and absence of unresolved blockers.
 
+Record a review verdict on the board when a review of the issue's work has concluded, with `antonina board review --id NUMBER --verdict request-changes|approve --rationale TEXT [--commit SHA] [--reviewer NAME]`. The verdict names the exact commit it is about, because it is what a later read compares against. A `request-changes` verdict is a blocker: it stops the issue from being closed, and the refusal names the blocker. It can only be cleared by an approval naming a different commit, since a fix is a new commit and a re-reading of the same one is not a fix. An issue with no recorded verdict is not blocked, which is a different statement from being approved.
+
 Before closing an issue:
 
 1. reconcile the claimed result with objective repository/execution state;
@@ -282,6 +284,7 @@ antonina board comment --id NUMBER --body BODY --author NAME
 
 # issue lifecycle
 antonina board create --title TITLE --body BODY
+antonina board review --id NUMBER --verdict VERDICT --rationale TEXT --commit SHA
 antonina board close --id NUMBER
 antonina board reopen --id NUMBER
 

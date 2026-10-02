@@ -174,6 +174,45 @@ export interface BoardMessage {
   createdAt: string;
 }
 
+/**
+ * The two things a review of a branch can conclude.
+ *
+ * A closed vocabulary, because "how did the review go" is a question about typed
+ * membership and not about reading prose. `request-changes` is the verdict that
+ * carries a blocker: docs/skills/review.md reserves it for a finding that must
+ * be fixed before approval, and docs/skills/itinerary-antonina.md makes "no
+ * unresolved review blocker remains" part of the completion predicate. Recording
+ * that verdict on the board is what lets the predicate be enforced rather than
+ * merely asserted.
+ */
+export const REVIEW_VERDICTS = ['request-changes', 'approve'] as const;
+export type ReviewVerdict = (typeof REVIEW_VERDICTS)[number];
+
+export function parseReviewVerdict(value: string): ReviewVerdict {
+  if (!(REVIEW_VERDICTS as readonly string[]).includes(value)) {
+    throw new Error('Unknown Antonina review verdict: ' + value);
+  }
+  return value as ReviewVerdict;
+}
+
+/**
+ * One review verdict about one exact commit.
+ *
+ * `commit` is what makes the record a blocker rather than an opinion. A verdict
+ * is about a particular tree: re-reviewing a different commit is how a fix clears
+ * a block, so an approval of the very commit a review refused is not a
+ * re-review at all, and {@link reviewBlocksCompletion} refuses to read it as
+ * one.
+ */
+export interface BoardReview {
+  /** The exact commit the review was about, or empty when no commit was named. */
+  commit: string;
+  verdict: ReviewVerdict;
+  reviewer: string;
+  rationale: string;
+  recordedAt: string;
+}
+
 export interface BoardIssue {
   number: number;
   title: string;
@@ -182,6 +221,60 @@ export interface BoardIssue {
   createdAt: string;
   updatedAt: string;
   messages: BoardMessage[];
+  /**
+   * The newest recorded review verdict about this issue's work, or absent when
+   * no review has been recorded.
+   *
+   * Optional rather than a collection so that every board signed before this
+   * field existed still parses and replays: the operation log is append-only,
+   * and a record that could not hold its own history would be a field that can
+   * only be written once. Only the newest verdict is kept, because the question
+   * the board is asked is whether the work as it stands is cleared, and the
+   * superseded verdicts are already in the issue's own append-only thread.
+   */
+  review?: BoardReview;
+}
+
+/**
+ * Whether a recorded review verdict still blocks this issue's completion, and
+ * if so why, or `null` when nothing blocks it.
+ *
+ * This is the completion predicate docs/skills/itinerary-antonina.md states in
+ * prose -- "no unresolved review blocker remains" -- as a function the board can
+ * be asked, rather than a sentence an orchestrator is trusted to have read. Only
+ * a `request-changes` verdict blocks; an `approve` and an absent review both
+ * return `null`, so an issue that was never reviewed is not blocked by the
+ * absence of a review, which is a different statement from being approved.
+ */
+export function reviewBlocksCompletion(issue: Pick<BoardIssue, 'number' | 'review'>): string | null {
+  const review = issue.review;
+  if (review === undefined || review.verdict !== 'request-changes') return null;
+  const about = review.commit === '' ? 'no named commit' : `commit ${review.commit}`;
+  return `issue ${issue.number} carries an unresolved review blocker recorded by ${review.reviewer} against ${about}: ${review.rationale}`;
+}
+
+/**
+ * Whether a new verdict may be recorded over the one the issue carries.
+ *
+ * The rule is narrow on purpose, because the history this repository documents
+ * is a recommend-no-merge finding being overridden rather than acted on. So:
+ *
+ * - recording a verdict over no verdict, or a second blocked verdict, is always
+ *   allowed -- a re-review that still finds a blocker is ordinary review work;
+ * - an approval is allowed only when it names a different commit than the block
+ *   it would clear, because a fix is a new commit and a re-reading of the same
+ *   commit is not a fix;
+ * - a blocked verdict never overwrites an approval's commit claim, which would
+ *   be the same override in the other direction.
+ *
+ * Returns `null` when the record is allowed, and the reason it is refused
+ * otherwise, so the caller reports the refusal instead of dropping it.
+ */
+export function reviewMayReplace(current: BoardReview | undefined, next: BoardReview): string | null {
+  if (current === undefined) return null;
+  if (next.verdict !== 'approve') return null;
+  if (next.commit !== current.commit) return null;
+  return `an approval cannot clear the review blocker recorded against commit ${next.commit === '' ? '(no named commit)' : next.commit}; re-review the commit that carries the fix`;
 }
 
 export interface BoardResource {
@@ -383,9 +476,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+/**
+ * Every key of `value` is required or explicitly optional, and nothing else is.
+ *
+ * The optional list exists so a signed board written before a field existed
+ * still parses: this board is append-only and versioned, and a shape that
+ * tightened would make every board it had already written unreadable.
+ */
+function hasExactKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+  optional: readonly string[] = [],
+): boolean {
   const actualKeys = Object.keys(value);
-  return actualKeys.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+  const known = [...keys, ...optional];
+  return keys.every((key) => Object.hasOwn(value, key))
+    && actualKeys.every((key) => known.includes(key));
 }
 
 function isText(value: unknown): value is string {
@@ -409,9 +515,19 @@ function isMessage(value: unknown): value is BoardMessage {
     && isTimestamp(value.createdAt);
 }
 
+function isReview(value: unknown): value is BoardReview {
+  return isRecord(value)
+    && hasExactKeys(value, ['commit', 'verdict', 'reviewer', 'rationale', 'recordedAt'])
+    && typeof value.commit === 'string'
+    && (REVIEW_VERDICTS as readonly string[]).includes(value.verdict as string)
+    && isText(value.reviewer)
+    && isText(value.rationale)
+    && isTimestamp(value.recordedAt);
+}
+
 function isIssue(value: unknown): value is BoardIssue {
   return isRecord(value)
-    && hasExactKeys(value, ['number', 'title', 'body', 'state', 'createdAt', 'updatedAt', 'messages'])
+    && hasExactKeys(value, ['number', 'title', 'body', 'state', 'createdAt', 'updatedAt', 'messages'], ['review'])
     && isPositiveSafeInteger(value.number)
     && isText(value.title)
     && typeof value.body === 'string'
@@ -419,7 +535,8 @@ function isIssue(value: unknown): value is BoardIssue {
     && isTimestamp(value.createdAt)
     && isTimestamp(value.updatedAt)
     && Array.isArray(value.messages)
-    && value.messages.every(isMessage);
+    && value.messages.every(isMessage)
+    && (value.review === undefined || isReview(value.review));
 }
 
 function isValidHost(host: string): boolean {
@@ -797,12 +914,37 @@ function messageElementDefect(issue: BoardIssue, index: number, value: unknown):
   return { ...detail, kind: 'element', subject: where, field: detail.field };
 }
 
+/** {@link isReview}, explained. Consulted only after {@link isReview} has refused. */
+function reviewDefect(value: unknown, where: string): BoardDefect | null {
+  const keys = ['commit', 'verdict', 'reviewer', 'rationale', 'recordedAt'];
+  if (!isRecord(value)) return notARecordDefect(where, value);
+  if (!hasExactKeys(value, keys)) return keySetDefect(where, keys, value);
+  return firstDefect(where, [
+    { field: 'commit', expected: 'a string, empty when no commit was named', ok: typeof value.commit === 'string', value: value.commit },
+    {
+      field: 'verdict',
+      expected: `the string ${REVIEW_VERDICTS.map((v) => `"${v}"`).join(' or ')}`,
+      ok: typeof value.verdict === 'string' && (REVIEW_VERDICTS as readonly string[]).includes(value.verdict),
+      value: value.verdict,
+    },
+    { field: 'reviewer', expected: 'a non-empty string', ok: isText(value.reviewer), value: value.reviewer },
+    { field: 'rationale', expected: 'a non-empty string', ok: isText(value.rationale), value: value.rationale },
+    {
+      field: 'recordedAt',
+      expected: 'a parseable timestamp string',
+      ok: isTimestamp(value.recordedAt),
+      value: value.recordedAt,
+    },
+  ]);
+}
+
 /** {@link isIssue}, explained. Consulted only after {@link isIssue} has refused. */
 function issueDefect(value: unknown, index: number): BoardDefect {
   const where = `board issue at index ${index}`;
+  const issueKeys = ['number', 'title', 'body', 'state', 'createdAt', 'updatedAt', 'messages'];
   if (!isRecord(value)) return { ...notARecordDefect(where, value), kind: 'element', field: '' };
-  if (!hasExactKeys(value, ['number', 'title', 'body', 'state', 'createdAt', 'updatedAt', 'messages'])) {
-    return { ...keySetDefect(where, ['number', 'title', 'body', 'state', 'createdAt', 'updatedAt', 'messages'], value), kind: 'element' };
+  if (!hasExactKeys(value, issueKeys, ['review'])) {
+    return { ...keySetDefect(where, issueKeys, value), kind: 'element' };
   }
   const field = firstDefect(where, [
     {
@@ -839,6 +981,10 @@ function issueDefect(value: unknown, index: number): BoardDefect {
     },
   ]);
   if (field !== null) return { ...field, kind: 'element' };
+  if (value.review !== undefined) {
+    const detail = reviewDefect(value.review, `board issue ${value.number as number} review`);
+    if (detail !== null) return { ...detail, kind: 'element' };
+  }
   const messages = value.messages as unknown[];
   for (let position = 0; position < messages.length; position += 1) {
     const message = messages[position];

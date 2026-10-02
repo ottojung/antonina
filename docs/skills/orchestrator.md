@@ -23,10 +23,14 @@ Use JSON output for orchestration decisions.
 
 ```sh
 antonina board access --json
-antonina board queue list --json
-antonina board list --state open --json
+antonina board queue list --page 1 --json
+antonina board list --state open --page 1 --json
 antonina board show --id NUMBER --json
 ```
+
+Collection reads never choose a page implicitly. The following commands require a 1-based `--page N`: `board queue list`, `board list`, `board feed`, `board resource list`, `board target list`, `board collect list`, and `agent list`. Page 1 is the start of each collection; for issues it contains the highest-priority open issues first. The default page size is 50. `board feed --limit N` and `agent list --limit N` change their page size without making `--page` optional.
+
+When a pass needs more than the first page, increment the page number explicitly until enough state has been read or an empty page is reached. If the pass mutates queue membership or order while scanning — for example by closing, reopening, creating, or reordering issues — restart any priority-sensitive scan at page 1 before making further scheduling decisions. Single-record reads such as `board show --id NUMBER`, `board target show --id ID`, and `agent status --id ID` are deliberately unpaginated and return the whole record.
 
 The board trust anchor and credential come from Antonina's config directory. Never print, copy into comments, or otherwise expose credentials, private keys, tokens, or other secrets.
 
@@ -165,7 +169,7 @@ Inspect existing subordinate agents before spawning replacements. Continue or st
 When Antonina's managed agent runtime is appropriate, use the CLI:
 
 ```sh
-antonina agent list
+antonina agent list --page 1
 antonina agent status --id ID
 antonina agent log --id ID
 antonina agent run --id ID --cwd /absolute/worktree --prompt '...' --detach
@@ -237,8 +241,8 @@ Never put secrets in issue bodies, comments, branch names, logs quoted into comm
 ```sh
 # inspect
 antonina board access --json
-antonina board queue list --json
-antonina board list --state open --json
+antonina board queue list --page 1 --json
+antonina board list --state open --page 1 --json
 antonina board show --id NUMBER --json
 
 # append coordination state
@@ -254,7 +258,7 @@ antonina board reopen --id NUMBER
 antonina board queue reorder --id N1 --id N2 --id N3
 
 # durable resource dependencies
-antonina board resource list --issue NUMBER
+antonina board resource list --issue NUMBER --page 1
 antonina board resource add --issue NUMBER --host HOST --path PATH
 antonina board resource remove --issue NUMBER --host HOST --path PATH
 ```

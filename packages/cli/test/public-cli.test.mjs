@@ -151,7 +151,7 @@ test('collection commands require --page and single-item reads do not accept it'
   ]) {
     assert.throws(
       () => preparePublicCommand(namespace, argv),
-      (error) => error instanceof PublicCliUsageError && /required option --page/.test(error.message),
+      (error) => error instanceof PublicCliUsageError && /--page is required/.test(error.message),
       namespace + ' ' + argv.join(' '),
     );
   }

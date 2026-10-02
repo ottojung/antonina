@@ -4,6 +4,10 @@ Use this skill when scheduled or agentic work creates, uses, or hands off a dura
 
 Resource registration is dependency and liveness metadata, not exclusive ownership or a lock. Multiple open Antonina issues may depend on one resource. Every number in these commands is an **Antonina BOARD issue number**, never a GitHub issue number.
 
+## Paging contract
+
+Resource and collection listings require an explicit 1-based `--page`. Use `--page 1` for the first page and increment only when more entries are needed. There is no implicit first page.
+
 ## Garbage collection semantics
 
 No collection pass runs on a cadence, and nothing schedules a collection pass. The only thing that can remove a host resource is a human running `antonina board collect delete` with `--confirm`; the collector is deliberately opaque to agents in the sense that an agent never triggers it, so never plan around cadence or timing that does not exist, and do not assume a path is safe because no one has come for it yet.
@@ -17,7 +21,7 @@ A path is collectible only when it is registered on that host and no open Antoni
 ## Commands
 
 ```sh
-antonina board resource list [--host HOST] [--issue NUMBER]
+antonina board resource list --page PAGE [--host HOST] [--issue NUMBER]
 antonina board resource add --issue ISSUE --host HOST --path PATH
 antonina board resource remove --issue ISSUE --host HOST --path PATH
 ```
@@ -29,7 +33,7 @@ antonina board resource remove --issue ISSUE --host HOST --path PATH
 Two commands answer "may this path go?", and only one of them can make it go.
 
 ```sh
-antonina board collect list --host lubko://phoebe-dev
+antonina board collect list --host lubko://phoebe-dev --page 1
 antonina board collect delete --host lubko://phoebe-dev --path /workspace/project-worktree [--confirm]
 ```
 
@@ -69,9 +73,9 @@ Deletion additionally requires managed collection roots, configured as a `:`-sep
 For example, hand off `/workspace/project-worktree` from Antonina board issue `412` to open follow-up issue `419`:
 
 ```sh
-antonina board resource list --issue 412
+antonina board resource list --issue 412 --page 1
 antonina board resource add --issue 419 --host lubko://phoebe-dev --path /workspace/project-worktree
-antonina board resource list --issue 419
+antonina board resource list --issue 419 --page 1
 antonina board resource remove --issue 412 --host lubko://phoebe-dev --path /workspace/project-worktree
 ```
 

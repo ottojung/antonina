@@ -270,11 +270,6 @@ async function finalizeInvocation(
     const intent = persistedControlField(meta, 'intent');
     const stopReason = persistedControlField(meta, 'stop_reason');
     if (intent.malformed || stopReason.malformed) return;
-    // The backend leader may be gone while commands it launched survive in
-    // different process groups. Reap by the unique inherited invocation
-    // markers before classifying/retrying/finalizing this invocation.
-    signalMarkedInvocationProcesses(agentId, invocationId, 'SIGKILL');
-
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);
     // Every operator intent that ends an invocation does so because *this*
@@ -462,6 +457,11 @@ async function runInvocation(
       }
       result = await resultPromise;
     }
+
+    // The backend leader may be gone while commands it launched survive in
+    // different process groups. Reap by the unique inherited invocation
+    // markers before retrying or finalizing this invocation.
+    signalMarkedInvocationProcesses(agentId, invocationId, 'SIGKILL');
 
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);

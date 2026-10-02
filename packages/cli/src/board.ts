@@ -19,6 +19,7 @@ import {
 } from '../../core/src/credential.js';
 import { canonicalJson, type CanonicalValue } from '../../core/src/canonical.js';
 import {
+  DEFAULT_FEED_LIMIT,
   type BoardFeedEntry,
   type BoardFeedPage,
   type BoardFeedRequest,
@@ -79,6 +80,7 @@ import {
 export const BOARD_BASE_URL_ENV = 'ANTONINA_BOARD_URL';
 export const BOARD_HEAD_ENV = 'ANTONINA_BOARD_HEAD';
 export const BOARD_AUTHOR_ENV = 'ANTONINA_BOARD_AUTHOR';
+const DEFAULT_COLLECTION_PAGE_SIZE = 50;
 // `ANTONINA_COLLECT_ROOTS`, the managed collection roots the `collect` commands
 // are configured from. It is named here, in the one block where an operator
 // looks for every environment name, but it is not declared or re-exported here:
@@ -153,6 +155,40 @@ function parsePositiveInteger(raw: string | undefined, name: string): number {
   const value = Number(raw);
   if (!Number.isSafeInteger(value)) throw new AntoninaApiError(name + ' must be a positive integer');
   return value;
+}
+
+function pageNumber(raw: string | undefined): number {
+  return raw === undefined ? 1 : parsePositiveInteger(raw, '--page');
+}
+
+function pageSlice<T>(values: readonly T[], page: number, pageSize = DEFAULT_COLLECTION_PAGE_SIZE): T[] {
+  const start = (page - 1) * pageSize;
+  if (!Number.isSafeInteger(start)) return [];
+  return values.slice(start, start + pageSize);
+}
+
+function issuePriorityOrder(summaries: readonly IssueListSummary[], queue: readonly number[]): IssueListSummary[] {
+  const priority = new Map(queue.map((number, index) => [number, index]));
+  return [...summaries].sort((left, right) => {
+    if (left.state !== right.state) return left.state === 'open' ? -1 : 1;
+    if (left.state === 'open') {
+      const leftPriority = priority.get(left.number) ?? Number.MAX_SAFE_INTEGER;
+      const rightPriority = priority.get(right.number) ?? Number.MAX_SAFE_INTEGER;
+      if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+    }
+    return left.number - right.number;
+  });
+}
+
+async function readNumberedFeedPage(client: BoardApi, page: number, limit: number): Promise<BoardFeedPage> {
+  let current = await client.readFeed({ limit, cursor: null });
+  for (let number = 1; number < page; number += 1) {
+    if (current.nextCursor === null) {
+      return { entries: [], nextCursor: null, total: current.total, limit: current.limit };
+    }
+    current = await client.readFeed({ limit, cursor: current.nextCursor });
+  }
+  return current;
 }
 
 function removeJsonFlag(argv: string[]): { json: boolean; argv: string[] } {
@@ -347,8 +383,12 @@ async function execute(
     case 'queue': {
       const [subcommand, ...args] = parsed.args;
       if (subcommand === 'list') {
-        if (args.length !== 0) throw new AntoninaApiError('queue list takes no arguments');
-        return { mode: 'queue', value: await client.getQueue() };
+        const pageOption = option(args, '--page');
+        if (pageOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for queue list');
+        return {
+          mode: 'queue',
+          value: pageSlice(await client.getQueue(), pageNumber(pageOption.value)),
+        };
       }
       if (subcommand === 'reorder') {
         if (args.length === 0) throw new AntoninaApiError('queue reorder requires issue numbers');
@@ -359,26 +399,33 @@ async function execute(
     case 'feed': {
       const limitOption = option(parsed.args, '--limit');
       const cursorOption = option(limitOption.rest, '--cursor');
-      if (cursorOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for feed');
-      const request: BoardFeedRequest = cursorOption.value === null && limitOption.value === undefined
+      const pageOption = option(cursorOption.rest, '--page');
+      if (pageOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for feed');
+      if (cursorOption.value !== undefined && pageOption.value !== undefined) {
+        throw new AntoninaApiError('--page cannot be combined with --cursor');
+      }
+      const limit = limitOption.value === undefined
+        ? DEFAULT_FEED_LIMIT
+        : parsePositiveInteger(limitOption.value, '--limit');
+      if (pageOption.value !== undefined) {
+        return { mode: 'feed', value: await readNumberedFeedPage(client, pageNumber(pageOption.value), limit) };
+      }
+      const request: BoardFeedRequest = cursorOption.value === undefined && limitOption.value === undefined
         ? {}
-        : {
-          ...(limitOption.value === undefined ? {} : { limit: parsePositiveInteger(limitOption.value, '--limit') }),
-          cursor: cursorOption.value ?? null,
-        };
+        : { limit, cursor: cursorOption.value ?? null };
       return { mode: 'feed', value: await client.readFeed(request) };
     }
     case 'list': {
       const stateOption = option(parsed.args, '--state');
-      if (stateOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for list');
+      const pageOption = option(stateOption.rest, '--page');
+      if (pageOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for list');
       const state = stateOption.value ?? 'all';
       if (!['open', 'closed', 'all'].includes(state)) {
         throw new AntoninaApiError('--state must be open, closed, or all');
       }
-      return {
-        mode: 'issues',
-        value: await client.listIssueSummaries(state === 'all' ? undefined : state as IssueState),
-      };
+      const summaries = await client.listIssueSummaries(state === 'all' ? undefined : state as IssueState);
+      const ordered = state === 'closed' ? summaries : issuePriorityOrder(summaries, await client.getQueue());
+      return { mode: 'issues', value: pageSlice(ordered, pageNumber(pageOption.value)) };
     }
     case 'show':
       if (parsed.args.length !== 1) throw new AntoninaApiError('show requires NUMBER');
@@ -438,11 +485,15 @@ async function execute(
       if (subcommand === 'list') {
         const hostOption = option(args, '--host');
         const issueOption = option(hostOption.rest, '--issue');
-        if (issueOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for resource list');
+        const pageOption = option(issueOption.rest, '--page');
+        if (pageOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for resource list');
         const issueNumber = issueOption.value === undefined
           ? undefined
           : parsePositiveInteger(issueOption.value, '--issue');
-        return { mode: 'resources', value: await client.listResources(hostOption.value, issueNumber) };
+        return {
+          mode: 'resources',
+          value: pageSlice(await client.listResources(hostOption.value, issueNumber), pageNumber(pageOption.value)),
+        };
       }
       if (subcommand === 'add' || subcommand === 'remove') {
         if (args.length !== 3) {
@@ -462,17 +513,18 @@ async function execute(
       if (subcommand === 'list') {
         const backendOption = option(args, '--backend');
         const kindOption = option(backendOption.rest, '--kind');
-        const telemetryFlag = flag(kindOption.rest, '--telemetry');
+        const pageOption = option(kindOption.rest, '--page');
+        const telemetryFlag = flag(pageOption.rest, '--telemetry');
         if (telemetryFlag.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for target list');
         // Both filters are parsed before they are applied, so an unknown value
         // is refused whether or not any target happens to match it.
         const backend = backendOption.value === undefined ? null : parseExecutionTargetBackend(backendOption.value);
         const kind = kindOption.value === undefined ? null : parseExecutionTargetKind(kindOption.value);
-        const targets = await client.listTargets();
+        const targets = (await client.listTargets()).filter((target) =>
+          (backend === null || target.backend === backend) && (kind === null || target.kind === kind));
         return {
           mode: 'targets',
-          value: targets.filter((target) =>
-            (backend === null || target.backend === backend) && (kind === null || target.kind === kind)),
+          value: pageSlice(targets, pageNumber(pageOption.value)),
           hosts: telemetryFlag.value ? await client.daemonHosts(localHostReports(context), { nowMs: Date.now() }) : null,
         };
       }
@@ -637,11 +689,10 @@ async function execute(
       const [subcommand, ...args] = parsed.args;
       if (subcommand === 'list') {
         const hostOption = option(args, '--host');
-        if (hostOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for collect list');
-        return {
-          mode: 'collect-list',
-          value: (await collectList(client, requireArg(hostOption.value, 'collect list --host'))).value,
-        };
+        const pageOption = option(hostOption.rest, '--page');
+        if (pageOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for collect list');
+        const entries = (await collectList(client, requireArg(hostOption.value, 'collect list --host'))).value;
+        return { mode: 'collect-list', value: pageSlice(entries, pageNumber(pageOption.value)) };
       }
       if (subcommand === 'delete') {
         const hostOption = option(args, '--host');

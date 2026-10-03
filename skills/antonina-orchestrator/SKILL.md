@@ -222,6 +222,10 @@ Maximize useful parallel progress across the board. The generic orchestrator has
 
 Never encode project-, repository-, issue-, branch-, theorem-, or domain-specific quotas or requirements in this generic skill. Read such constraints from the issue's recent comments, registered resources, and the project's own AGENTS.md or other project documentation, and apply them only to that work.
 
+Before deciding ownership or concurrency for an issue, perform a **project-policy preflight**: read the issue body and at least its most recent comment page, identify the relevant project/worktree from registered resources, and read the nearest project AGENTS.md plus any project orchestration document it directly points to. The absence of a quota, fence, or workflow rule from this generic skill is never evidence that the project has no such local rule. If a recent board comment conflicts with current project documentation, record the discrepancy and follow the current project-owned instruction unless a newer explicit user instruction overrides it.
+
+Every pass has a **frontier-first phase** before deep archaeology. Inspect the live-agent set and enough of the queue prefix to identify independent actionable work. For each candidate, understand the issue well enough to define a non-overlapping packet — including reading its recent comments — but do not spend most of the pass reconstructing deep history while clearly safe useful fronts remain unowned. Once a packet is clear, delegate deep branch archaeology, proof search, review, or implementation to that worker and continue filling the frontier.
+
 For each orchestration pass:
 
 1. Harvest terminal agents and incorporate their durable results before deciding what is still open.

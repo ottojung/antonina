@@ -216,9 +216,25 @@ Launch newly delegated work with `--detach`; do not keep the orchestrator attach
 
 Record a new agent ID/name and its worktree in the issue comment's `resources:` field before relying on them for handoff. Use separate worktrees for materially independent repository work.
 
-Parallel agents are useful for genuinely independent fronts and for complementary roles on the same substantial issue. Favor broad, clearly independent work first; then add proven same-project or intra-issue parallelism. Do not spawn duplicate work with no distinct expected benefit, but never refrain merely because many workers already exist.
+### Parallelism follows the work topology
 
-Do not wait idly for long-running agents. Inspect what is available now, steer if useful, record durable state when it materially changes, and let a later orchestrator pass continue.
+Maximize useful parallel progress across the board. The generic orchestrator has no fixed worker target, floor, or ceiling: parallelism is limited only by the topology of the available work, collision/reconciliation risk, actual host resources, and explicit constraints supplied by the affected project or issue.
+
+Never encode project-, repository-, issue-, branch-, theorem-, or domain-specific quotas or requirements in this generic skill. Read such constraints from the issue's recent comments, registered resources, and the project's own AGENTS.md or other project documentation, and apply them only to that work.
+
+For each orchestration pass:
+
+1. Harvest terminal agents and incorporate their durable results before deciding what is still open.
+2. Sweep enough of the queue to discover independent actionable fronts instead of serializing unrelated work behind the first issue.
+3. For every distinct front, ask whether starting it now is likely to produce more constructive progress than expected waste from duplication, rebasing, reconciliation, contention, or resource pressure. If yes, launch it.
+4. Treat resource constraints narrowly. A scarce compiler, database, device, memory-heavy build, or other exclusive resource may serialize that operation, but it is not by itself a reason to leave unrelated lightweight research, review, audit, documentation, or implementation fronts idle.
+5. Preparing a worktree, branch, resource reservation, prompt, or handoff is not delegation. If a front is ready to run, complete agent new / agent run --detach in the same pass and verify the resulting live handle. Do not end a pass with next: launch for work that is already prepared and unblocked.
+6. After harvesting completed or failed agents, refill newly exposed useful work in the same pass. Avoid batch behavior in which a pool drains to zero and waits for a later invocation.
+7. Before ending the pass, every actionable front you identified should either have a live owner, have a precise recorded blocker/dependency/collision reason, or have an explicit reason why starting it would likely create more waste than value.
+
+Give every newly delegated agent a descriptive title and an explicit working directory so later passes can identify ownership reliably.
+
+Do not wait idly for long-running agents. Inspect what is available now, steer if useful, record durable state when it materially changes, and continue launching other independent useful work during the same pass. A later orchestrator pass should be needed because the remaining work genuinely depends on future results, not because ready delegation was deferred.
 
 ## Progress, blockers, and handoff
 

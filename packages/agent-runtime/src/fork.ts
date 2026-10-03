@@ -196,6 +196,12 @@ export function forkMetaSnapshot(
   clone.intent = null;
   clone.stop_reason = null;
   clone.delete_pending = false;
+  // A run cursor is a byte offset into the agent's own `output.log`, and a fork
+  // writes a fresh log for the clone rather than copying the source's. Inheriting
+  // the source's offset would point the clone's first run past the end of its own
+  // log and print nothing until that file grew beyond a byte count that belongs
+  // to another agent's history.
+  clone.run_log_offset = null;
   clone.agent_version = AGENT_META_VERSION;
   validateAgentMetadata(clone);
   return clone;

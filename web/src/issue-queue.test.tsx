@@ -28,8 +28,11 @@ import {
 } from './ui-state';
 
 const timestamp = '2026-09-25T12:00:00.000Z';
-function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue {
-  return { number, title: `Issue ${number}`, body: '', state, createdAt: timestamp, updatedAt: timestamp, messages: [] };
+// `closedAt` is carried the way the app's summaries carry it (`null` for an
+// open issue), because `visibleIssues` orders with core's closed-issue key and
+// that key requires the field: a fixture without it is a shape no caller sends.
+function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue & { closedAt: string | null } {
+  return { number, title: `Issue ${number}`, body: '', state, createdAt: timestamp, updatedAt: timestamp, closedAt: state === 'closed' ? timestamp : null, messages: [] };
 }
 const issues = [issue(1), issue(2), issue(3)];
 const queue = [3, 1, 2];

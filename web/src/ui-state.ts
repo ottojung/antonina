@@ -5,6 +5,7 @@ import type {
   BoardFeedPage,
   BoardFeedRequest,
   BoardOverview,
+  ClosedIssueOrderKey,
   FeedRead,
   IssueListSummary,
 } from './api';
@@ -277,8 +278,14 @@ export function openQueueOrder<T extends Pick<BoardIssue, 'number' | 'state'>>(i
  * re-derived for the flat summary list the browser holds. It is applied to the
  * whole filtered list, before `issuePage` slices it, so the order is global and
  * pages are windows onto it rather than independently sorted pages.
+ *
+ * The key is required, not optional: every row here is an `IssueListSummary`,
+ * which carries `closedAt` as `string | null`, so an absent closing time is
+ * spelled `null` and core's comparator is what resolves it to `updatedAt`.
+ * Declaring `closedAt?` here would let a caller pass a shape the board never
+ * produces, and would silently order such rows by `undefined` instead.
  */
-export function closedIssueOrder<T extends Pick<BoardIssue, 'number' | 'state' | 'updatedAt'> & { closedAt?: string | null }>(issues: readonly T[]): number[] {
+export function closedIssueOrder<T extends ClosedIssueOrderKey & Pick<BoardIssue, 'state'>>(issues: readonly T[]): number[] {
   const closed = issues.filter((issue) => issue.state === 'closed');
   return closed
     .slice()
@@ -291,7 +298,7 @@ export function closedIssueOrder<T extends Pick<BoardIssue, 'number' | 'state' |
  * unqueued tail, and `all` is the queue first with the closed tail after it, so
  * the open work a reader came for is always at the top in priority order.
  */
-export function visibleIssues<T extends Pick<BoardIssue, 'number' | 'state' | 'updatedAt'> & { closedAt?: string | null }>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
+export function visibleIssues<T extends ClosedIssueOrderKey & Pick<BoardIssue, 'state'>>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
   const byNumber = new Map(issues.map((issue) => [issue.number, issue]));
   const open = openQueueOrder(issues, queue).map((number) => byNumber.get(number)!);
   if (filter === 'open') return open;

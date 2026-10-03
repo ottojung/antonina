@@ -56,8 +56,15 @@ import {
 } from './ui-state';
 
 const timestamp = '2026-09-24T12:00:00.000Z';
-function issue(number: number, state: 'open' | 'closed', updatedAt = timestamp): BoardIssue {
-  return { number, title: `Issue ${number}`, body: '', state, createdAt: updatedAt, updatedAt, messages: [] };
+/**
+ * The shape the app really passes to `visibleIssues`: an `IssueListSummary`,
+ * which always carries `closedAt` as `string | null`, derived exactly as
+ * `summarizeIssue` derives it. A bare `BoardIssue` is not what any caller hands
+ * the list helpers, so a fixture shaped like one would pin a contract the board
+ * never offers.
+ */
+function issue(number: number, state: 'open' | 'closed', updatedAt = timestamp): BoardIssue & { closedAt: string | null } {
+  return { number, title: `Issue ${number}`, body: '', state, createdAt: updatedAt, updatedAt, closedAt: state === 'closed' ? updatedAt : null, messages: [] };
 }
 function state(overrides: Partial<VerifiedBoardState> = {}): VerifiedBoardState {
   return {

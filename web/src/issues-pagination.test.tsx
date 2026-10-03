@@ -28,8 +28,10 @@ import {
 
 const STAMP = '2026-09-27T12:00:00.000Z';
 
-function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue {
-  return { number, title: `Issue ${number}`, body: `Body of issue ${number}`, state, createdAt: STAMP, updatedAt: STAMP, messages: [] };
+// `closedAt` is present because the app's summaries always carry it, and
+// `visibleIssues` sorts with core's closed-issue key, which requires it.
+function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue & { closedAt: string | null } {
+  return { number, title: `Issue ${number}`, body: `Body of issue ${number}`, state, createdAt: STAMP, updatedAt: STAMP, closedAt: state === 'closed' ? STAMP : null, messages: [] };
 }
 
 /** A board of `open` open issues numbered 1..open, plus `closed` closed ones after them. */

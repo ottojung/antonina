@@ -8,6 +8,8 @@ import {
 import { resolve } from 'node:path';
 
 import {
+  backendStoreEnv,
+  claimBackendStore,
   configuredModelAvailable,
   describeSignalDeath,
   discoverSessionId,
@@ -274,6 +276,11 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
   const meta = idleMeta(agentId, cwd, parsed.values.get('--title') ?? null);
   try {
     writeMeta(agentId, meta, paths(context));
+    // Board issue 159: claim this agent's own backend session store at birth, so
+    // it is a separate SQLite writer from every other front. Inside the same
+    // protected region as the record: a directory left behind with a record but
+    // no store claim is an agent that silently keeps writing the shared file.
+    claimBackendStore(agentId, paths(context));
   } catch (error) {
     removeAgentDirectory(agentId, paths(context));
     throw error;
@@ -937,7 +944,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     } else if (persistedLifecycleState(meta) === 'idle' && meta.prompt_count === 0) {
       mode = 'new';
     } else {
-      const recoveredSession = discoverSessionId(agentId, context.env);
+      const recoveredSession = discoverSessionId(agentId, context.env, backendStoreEnv(agentId, paths(context)));
       if (recoveredSession === null) {
         mode = 'new';
       } else {

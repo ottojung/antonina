@@ -5,6 +5,7 @@ import { constants } from 'node:os';
 
 import {
   backendRetryDelay,
+  backendStoreEnv,
   buildAgentCommand,
   classifyBackendFailure,
   classifySignalDeath,
@@ -415,7 +416,7 @@ async function finalizeInvocation(
 async function rememberFreshSession(agentId: string, options: RunnerOptions): Promise<void> {
   const meta = readMeta(agentId, options);
   if (meta === null || persistedNativeSessionId(meta) !== null) return;
-  const sessionId = discoverSessionId(agentId, options.env);
+  const sessionId = discoverSessionId(agentId, options.env, backendStoreEnv(agentId, options));
   if (sessionId === null) return;
   await updateMeta(agentId, (current) => {
     if (current.native_session_id === null) {
@@ -434,7 +435,7 @@ async function runInvocation(
   if (meta === null) return false;
   let command: string[] | null;
   try {
-    command = buildAgentCommand(meta, prompt, isContinue, options.env);
+    command = buildAgentCommand(meta, prompt, isContinue, options.env, backendStoreEnv(agentId, options));
   } catch (error) {
     // A durable record the backend cannot be launched from -- an undeclared
     // working directory, a malformed one -- is a failed invocation with a
@@ -470,6 +471,10 @@ async function runInvocation(
       ANTONINA_INVOCATION_ID: invocationId,
       ANTONINA_PROMPT: prompt,
       NO_COLOR: '1',
+      // Board issue 159. Last, so an explicit scope always beats whatever the
+      // operator's ambient environment happens to carry, and scoped to this
+      // agent's own store sidecar, which a fork inherits from its source.
+      ...backendStoreEnv(agentId, options),
     };
     let child: ChildProcess;
     try {

@@ -112,6 +112,13 @@ exit 70
 `, { mode: 0o755 });
   writeFileSync(opencode, `#!/bin/sh
 printf '%s %s\\n' "$0" "$*" >>'${invocations}'
+# Board issue 159: every invocation also records the store it was pointed at, as
+# "<argv0>|<OPENCODE_DB>", so a test can assert which SQLite file each seam read
+# or wrote. The literal unset means the seam passed no store at all and the
+# backend fell back to the operator's ambient one.
+if [ -n "$ANTONINA_STORE_PROBE" ]; then
+  printf '%s|%s\\n' "$1" "\${OPENCODE_DB-unset}" >>"$ANTONINA_STORE_PROBE"
+fi
 case "$1" in
   models)
     echo "opencode/space-bunny-free"
@@ -171,6 +178,7 @@ esac
     // suite would read the operator's real ~/.config/antonina.
     XDG_CONFIG_HOME: join(root, 'config'),
     ANTONINA_TEST_CALLS: join(root, 'opencode-calls.log'),
+    ANTONINA_STORE_PROBE: join(root, 'store-probe.log'),
     [OPENCODE_BIN_ENV]: opencode,
     // The pre-launch capacity guard is exercised on its own, in the cases
     // below. Pinning the threshold to 0 here keeps every other case in this
@@ -194,6 +202,7 @@ esac
   // Discard the controls' own records; only test-time invocations are asserted.
   rmSync(escapes, { force: true });
   rmSync(invocations, { force: true });
+  rmSync(join(root, 'store-probe.log'), { force: true });
   t.after(() => {
     assert.deepEqual(
       pathEscapes({ escapes }),
@@ -750,6 +759,60 @@ test('prompt recovers an existing OpenCode session when durable session id was l
   assertFixtureInvoked(handle, 'recovered');
 });
 
+
+// Board issue 159, review F2: the CLI's own session-recovery seam -- the
+// `discoverSessionId` call in `cmdRun`, reached when a record has prompts but no
+// durable `native_session_id`. It is the one store seam that cannot be observed
+// from `packages/agent-runtime/test/backend-store-scope.test.mjs`, because
+// reaching it means the CLI is about to spawn a detached runner. It is driven
+// here through the shipped executable instead, and the fixture records the store
+// each invocation was handed.
+//
+// The regression this pins is silent: drop the store scope from that call and the
+// recovery reads the shared ambient file, while the runner it then spawns writes
+// the agent's private one. The recovered id would be an unrelated session from
+// the shared store, and nothing -- no log line, no exit code, no other test --
+// would say so.
+test('the CLI session recovery seam reads this agent\'s own store', async (t) => {
+  const { root, work, env } = fixture(t);
+  const probe = env.ANTONINA_STORE_PROBE;
+  const store = join(root, 'state', 'antonina', 'agents', 'a11d', 'backend', 'opencode.db');
+
+  assert.equal(run(['agent', 'new', '--id', 'a11d', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'a11d', '--detach', '--prompt', 'first'], env).status, 0);
+  await waitFor(root, 'a11d', (meta) => meta.state === 'succeeded' && meta.active_runner === false);
+  rmSync(probe, { force: true });
+
+  // Lose the durable session id, which is what sends the next prompt down the
+  // recovery path rather than straight to `mode: 'continue'`.
+  const path = metaPath(root, 'a11d');
+  const meta = JSON.parse(readFileSync(path, 'utf8'));
+  meta.native_session_id = null;
+  writeFileSync(path, JSON.stringify(meta));
+
+  assert.equal(run(['agent', 'run', '--id', 'a11d', '--detach', '--prompt', 'recovered'], env).status, 0);
+  const done = await waitFor(
+    root,
+    'a11d',
+    (value) => value.state === 'succeeded' && value.prompt_count === 2 && value.active_runner === false,
+  );
+  assert.equal(done.native_session_id, 'ses_fake');
+
+  const lines = readFileSync(probe, 'utf8').split('\n').filter(Boolean).map((line) => {
+    const split = line.lastIndexOf('|');
+    return { argv0: line.slice(0, split), db: line.slice(split + 1) };
+  });
+  const recoveries = lines.filter((line) => line.argv0 === 'session');
+  assert.equal(recoveries.length >= 1, true, 'the recovery seam never discovered a session');
+  for (const line of recoveries) {
+    assert.equal(line.db, store, 'the CLI recovery seam read a store other than this agent\'s own');
+  }
+  // And the runner it spawned wrote the same file, so the recovered id came from
+  // the store the invocation actually continues.
+  const runs = lines.filter((line) => line.argv0 === 'run');
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].db, store);
+});
 
 test('agent ids canonicalize at every CLI boundary and preserve exit-code distinctions', (t) => {
   const { root, work, env } = fixture(t);

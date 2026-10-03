@@ -118,6 +118,12 @@ test('schema v4 rejects old versions, missing fields and unknown fields', () => 
   const old = { ...base, agent_version: 3 };
   assert.throws(() => validateAgentMetadata(old), /unsupported managed-agent metadata version/);
 
+  // Board 159 deliberately does not add a field here. This loop is the guard
+  // that says so: every field `idleMeta` writes is required, so adding one to
+  // the record means loosening this loop too -- which is exactly the moment to
+  // notice that the binary already installed on the host rejects records with
+  // an extra field and can neither read nor rewrite them. Store identity lives
+  // in a sidecar under the agent's own directory instead.
   for (const key of Object.keys(base)) {
     // `run_log_offset` is the one field a record is allowed to omit: it was
     // added after records already existed on disk, and a record written before

@@ -8,7 +8,12 @@
  * durable per-agent object that carries meaning: `output.log` is an append-only
  * transcript of a run, `.lock` is an ephemeral lock record, and everything else
  * about an agent (its process, its runner, its prompts) is encoded as fields
- * inside that one record. So a fork is the making of a second record.
+ * inside that one record. (Board 159 added a second, non-authoritative file:
+ * `<backend>/store-owner`, which names the external OpenCode session store this
+ * agent reads and writes. It is not part of the record's meaning -- a missing
+ * one means "the operator's ambient store" -- and it is copied rather than
+ * derived, so a clone shares its source's store.) So a fork is the making of a
+ * second record.
  *
  * Two rules make that a snapshot rather than a link.
  *
@@ -72,6 +77,7 @@ import {
   validateAgentMetadata,
   type AgentMetadata,
 } from './metadata.js';
+import { inheritBackendStore } from './backend.js';
 import { persistedAgentId } from './process.js';
 import {
   createAgentDirectory,
@@ -202,6 +208,14 @@ export function forkMetaSnapshot(
   // log and print nothing until that file grew beyond a byte count that belongs
   // to another agent's history.
   clone.run_log_offset = null;
+  // The clone's backend session store sidecar is copied from the source by
+  // `forkAgent`, not derived from the clone's own id, and that is deliberate: a
+  // clone continues the source's session (see the `native_session_id` note
+  // above), so a clone that derived its own store would resume an id its own
+  // store does not contain -- the exact failure board 159 is about, one level
+  // down. A legacy source has no sidecar at all, and a legacy clone therefore
+  // gets none: both keep using the ambient store, which is where that source's
+  // session is.
   clone.agent_version = AGENT_META_VERSION;
   validateAgentMetadata(clone);
   return clone;
@@ -252,6 +266,11 @@ export function forkAgent(
     // a failure here is as much a failed fork as a failure to write it.
     const meta = forkMetaSnapshot(source, newAgentId, now);
     writeMeta(newAgentId, meta, options);
+    // Board issue 159: the clone continues the source's backend session, so it
+    // must point at the source's store sidecar. Inside the protected region for
+    // the same reason `writeMeta` is: a copy that failed half way would leave a
+    // clone resolving a session its store does not contain.
+    inheritBackendStore(sourceAgentId, newAgentId, options);
     return meta;
   } catch (error) {
     // A half-created agent is worse than none: remove what this call made and

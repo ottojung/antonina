@@ -1,10 +1,12 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { constants } from 'node:os';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 import { DEFAULT_VARIANT, persistedNativeSessionId, persistedVariant, requiredAgentCwd, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
+import { persistedAgentId } from './process.js';
+import { agentDir, type StatePathsOptions } from './store.js';
 
 export const AGENT_MODEL = 'opencode/space-bunny-free';
 export const OPENCODE_TITLE_PREFIX = 'antonina-';
@@ -331,11 +333,141 @@ function parseSessionRows(value: unknown): SessionRow[] | null {
   return rows;
 }
 
+/**
+ * Board issue 159: the per-process backend store override.
+ *
+ * The external OpenCode backend keeps every managed front's sessions in one
+ * SQLite file. Under enough concurrent writers that file's write lock times
+ * out and the backend exits with `Failed to execute statement`, which is what
+ * killed six fronts on 2026-10-02. The backend honours `OPENCODE_DB` per
+ * process, and it is the *only* file the three Antonina spawn seams touch --
+ * `auth.json`, `account.json`, config and plugins are read from the backend's
+ * data directory and stay shared and working, which is why this is an
+ * `OPENCODE_DB` change and deliberately not a per-agent data directory.
+ *
+ * `null` means "no private store": the caller leaves `OPENCODE_DB` unset and the
+ * backend uses the operator's ambient store. That is the meaning of an agent
+ * with no `store-owner` sidecar, i.e. every agent created before this existed.
+ */
+export const OPENCODE_DB_ENV = 'OPENCODE_DB';
+
+/** Directory, relative to the owning agent's directory, that holds its store. */
+const BACKEND_STORE_SUBDIR = 'backend';
+const BACKEND_STORE_FILENAME = 'opencode.db';
+const BACKEND_STORE_OWNER_FILENAME = 'store-owner';
+
+/**
+ * Where the store-owner sidecar lives, inside the *reading* agent's own
+ * directory.
+ *
+ * Board 159, corrected: the owning agent id is deliberately not a field of
+ * `meta.json`. `meta.json` has a closed `TOP_LEVEL_FIELDS` schema, and the
+ * binary installed on the host rejects any record that does not match it
+ * exactly. A record carrying an extra field would therefore be unreadable by
+ * the installed binary -- every command, including `stop`, `kill` and
+ * `delete`, would fail closed forever, because the old binary can neither read
+ * nor rewrite the record. That is the availability class of fault this issue
+ * exists to remove, re-introduced on the rollback path. A sidecar keeps
+ * `meta.json` byte-identical to what every existing runtime writes, in both
+ * directions, and leaves the closed schema exactly as strict as it was.
+ */
+export function backendStoreOwnerPath(agentId: string, options: StatePathsOptions = {}): string {
+  return join(agentDir(agentId, options), BACKEND_STORE_SUBDIR, BACKEND_STORE_OWNER_FILENAME);
+}
+
+/**
+ * The agent id that owns `agentId`'s backend session store, or `null` when there
+ * is no sidecar and the store is therefore the operator's ambient one.
+ *
+ * The value is validated with `persistedAgentId`, exactly as a record field
+ * would be: an agent id is a lowercase hex string, never a path, so a sidecar
+ * cannot redirect one agent's store onto another's files and cannot escape the
+ * state root. A present-but-malformed sidecar throws rather than falling back to
+ * the ambient store, because silently falling back is how a private store turns
+ * back into a shared writer -- the fault board 159 exists to remove.
+ */
+export function readBackendStoreOwner(agentId: string, options: StatePathsOptions = {}): string | null {
+  let raw: string;
+  try {
+    raw = readFileSync(backendStoreOwnerPath(agentId, options), 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+  const value = raw.trim();
+  if (persistedAgentId(value) === null) {
+    throw new Error(`backend store owner sidecar for agent ${agentId} is malformed: ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+function writeBackendStoreOwner(agentId: string, ownerAgentId: string, options: StatePathsOptions = {}): void {
+  mkdirSync(join(agentDir(agentId, options), BACKEND_STORE_SUBDIR), { recursive: true });
+  writeFileSync(backendStoreOwnerPath(agentId, options), `${ownerAgentId}\n`, { mode: 0o600 });
+}
+
+/**
+ * Claim this agent's own backend session store. Called once, where the agent
+ * record is created: an agent with a store is one whose store was claimed at
+ * birth, and an agent without one is one that predates board 159 -- whose
+ * recorded session exists only in the ambient store, so it must keep using it.
+ */
+export function claimBackendStore(agentId: string, options: StatePathsOptions = {}): void {
+  writeBackendStoreOwner(agentId, agentId, options);
+}
+
+/**
+ * Copy the source's store-owner sidecar to a fresh clone, so the clone continues
+ * the session the source's store holds. A source with no sidecar has nothing to
+ * copy and the clone gets none: both stay on the ambient store.
+ */
+export function inheritBackendStore(sourceAgentId: string, newAgentId: string, options: StatePathsOptions = {}): void {
+  const owner = readBackendStoreOwner(sourceAgentId, options);
+  if (owner === null) return;
+  writeBackendStoreOwner(newAgentId, owner, options);
+}
+
+/**
+ * The absolute path of the private store `ownerAgentId` uses, creating the
+ * containing directory if it is not there yet. Absolute, because the backend
+ * treats a relative `OPENCODE_DB` as relative to its own data directory and
+ * would put several agents' stores in one shared place.
+ *
+ * The directory is created here rather than at claim time so that a store
+ * directory removed out from under a live agent converges on the next
+ * invocation instead of failing.
+ */
+export function backendStorePath(ownerAgentId: string, options: StatePathsOptions = {}): string {
+  const directory = join(agentDir(ownerAgentId, options), BACKEND_STORE_SUBDIR);
+  mkdirSync(directory, { recursive: true });
+  return join(directory, BACKEND_STORE_FILENAME);
+}
+
+/**
+ * The environment fragment that points an invocation at its own agent's store,
+ * or `{}` when the agent names none.
+ *
+ * The identity in the sidecar is an agent id, never a path, so this is the one
+ * place that knows where a store lives. Resolving it against the same
+ * `StatePathsOptions` the record itself was read with is what keeps the store
+ * under the same `XDG_STATE_HOME` as the sidecar: moving that home moves both,
+ * and nothing on disk has to be rewritten.
+ */
+export function backendStoreEnv(
+  agentId: string,
+  options: StatePathsOptions = {},
+): Record<string, string> {
+  const owner = readBackendStoreOwner(agentId, options);
+  if (owner === null) return {};
+  return { [OPENCODE_DB_ENV]: backendStorePath(owner, options) };
+}
+
 export function discoverSessionId(
   agentId: string,
   env: Record<string, string | undefined> = process.env,
+  storeEnv: Record<string, string> = {},
 ): string | null {
-  const childEnv = { ...process.env, ...env };
+  const childEnv = { ...process.env, ...env, ...storeEnv };
   const result = spawnSync(
     resolveOpencode(childEnv),
     ['session', 'list', '--format', 'json', '--max-count', String(SESSION_LIST_MAX_COUNT)],
@@ -361,10 +493,37 @@ export function discoverSessionId(
   return matches[0]?.id ?? null;
 }
 
+/**
+ * The model preflight probe's store: an in-memory database, which the backend
+ * accepts verbatim for `OPENCODE_DB`.
+ *
+ * `opencode models` lists configured models and reads no session state, so a
+ * durable store would be pure cost: it would make every `agent run` open a
+ * second file for nothing. More to the point, the probe has no agent in hand
+ * and so no private store to name, and leaving it ambient means one more writer
+ * on the contended shared file per run -- the exact writer class that produced
+ * the fault. `:memory:` removes the file, the lock and the wait.
+ *
+ * The probe's store is always `:memory:`, and that deliberately overrides an
+ * ambient or caller-supplied `OPENCODE_DB` -- the assignment below is merged
+ * last, so an operator who pinned the backend store does not get that store
+ * here. Deliberate, not an oversight: `opencode models` reads no session state,
+ * so honouring the pinned store would buy nothing and cost one more writer on
+ * the contended file. Board issue 159, review F3.
+ */
+export const THROWAWAY_STORE_DB = ':memory:';
+
 export function configuredModelAvailable(
   env: Record<string, string | undefined> = process.env,
 ): boolean | null {
-  const childEnv = { ...process.env, ...env };
+  const childEnv = {
+    ...process.env,
+    ...env,
+    // Last, deliberately: `OPENCODE_DB` is a per-invocation override at every
+    // Antonina spawn seam, and this seam is the one with the least to gain
+    // from a durable store.
+    [OPENCODE_DB_ENV]: THROWAWAY_STORE_DB,
+  };
   const result = spawnSync(resolveOpencode(childEnv), ['models'], {
     encoding: 'utf8',
     timeout: MODEL_LIST_TIMEOUT_MS,
@@ -380,6 +539,7 @@ export function buildAgentCommand(
   prompt: string,
   isContinue: boolean,
   env: Record<string, string | undefined> = process.env,
+  storeEnv: Record<string, string> = {},
 ): string[] | null {
   const agentId = requiredPersistedAgentId(meta);
   const cwd = requiredAgentCwd(meta);
@@ -387,7 +547,9 @@ export function buildAgentCommand(
   const executable = resolveOpencode(env);
   if (isContinue) {
     const recorded = persistedNativeSessionId(meta);
-    const sessionId = recorded ?? discoverSessionId(agentId, env);
+    // Discovery must read the same store the invocation will write, or it
+    // looks for this agent's session in a file the invocation never opens.
+    const sessionId = recorded ?? discoverSessionId(agentId, env, storeEnv);
     if (sessionId === null) return null;
     return [
       executable, 'run', '--auto',

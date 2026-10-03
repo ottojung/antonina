@@ -1,0 +1,11 @@
+#!/bin/sh
+set -u
+interval="${ANTONINA_ORCHESTRATOR_INTERVAL_SECONDS:-60}"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/antonina"
+mkdir -p "$state_dir"
+while :; do
+  if ! pgrep -f 'opencode-openclaw.*antonina-orchestrator/SKILL.md' >/dev/null 2>&1; then
+    "$HOME/.local/bin/antonina-orchestrator-turn" >>"$state_dir/orchestrator-turn.log" 2>&1 || true
+  fi
+  sleep "$interval"
+done

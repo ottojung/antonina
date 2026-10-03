@@ -583,11 +583,12 @@ function writeIssueListPagesCallSites(body) {
     const braceStart = head.lastIndexOf('{');
     const equalsStart = head.lastIndexOf('=');
     assert.notEqual(braceStart, -1, 'writeIssueListPages is called without a destructuring binding');
+    const braceEnd = body.lastIndexOf('}', at);
     assert.ok(
-      equalsStart > braceStart,
+      equalsStart > braceEnd,
       'the destructuring binding of a writeIssueListPages call must be its own statement',
     );
-    const bound = body.slice(braceStart + 1, equalsStart)
+    const bound = body.slice(braceStart + 1, braceEnd)
       .split(',')
       .map((entry) => entry.replace(/\s+/g, ' ').trim())
       .filter((entry) => entry !== '');

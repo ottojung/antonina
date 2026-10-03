@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, fstatSync, openSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, statSync } from 'node:fs';
 import { constants } from 'node:os';
 
 import {
@@ -29,12 +29,13 @@ import {
   stopLikeOrMalformed,
 } from './lifecycle.js';
 import {
+  LAUNCH_DIRECTORY_MISSING,
   activeRunnerFlag,
   deletePendingFlag,
   pendingPrompt,
   persistedControlField,
   persistedNativeSessionId,
-  requiredAgentCwd,
+  persistedAgentCwd,
   runnerGeneration,
   runnerReservationMode,
   runnerReservationState,
@@ -51,6 +52,8 @@ import {
 
 const CONTROL_POLL_MS = 200;
 const CONTROL_GRACE_MS = 10_000;
+
+
 
 export interface RunnerOptions extends StatePathsOptions {
   env?: Record<string, string | undefined>;
@@ -224,11 +227,21 @@ async function recordSpawned(
   pid: number,
   startTicks: number | null,
   invocationId: string,
+  launchCwd: string,
   options: RunnerOptions,
 ): Promise<boolean> {
   let accepted = false;
   await updateMeta(agentId, (meta) => {
     if (deletePendingFlag(meta) !== false || stopLikeOrMalformed(meta)) return;
+    // Board issue 178: the observation is written here, in the same durable
+    // write that publishes the spawned process identity, and nowhere earlier.
+    // Everything that can precede a spawn -- accepting the prompt, queueing a
+    // steer, refusing to continue, refusing to launch into a directory that is
+    // gone -- reaches this point without a child, so this write is the first
+    // and only moment at which a value here can be true. A value is therefore
+    // never a directory some front was merely going to enter, which is what
+    // `agent status`'s `ran in:` claims and what it must not claim.
+    meta.invocation_cwd = launchCwd;
     meta.pid = pid;
     meta.pgid = pid;
     meta.start_time = startTicks;
@@ -432,6 +445,12 @@ async function runInvocation(
 ): Promise<boolean> {
   const meta = readMeta(agentId, options);
   if (meta === null) return false;
+  // Board issue 178: resolved once, from this one snapshot of the record, and
+  // then used for both `--dir` and `spawn({cwd})`. These used to be two reads
+  // in two files with nothing forcing them to agree. It is the declaration
+  // (`cwd`) and never the observation (`invocation_cwd`): the observation is
+  // written below, from this same `launchCwd`, and only once a child exists.
+  const launchCwd = persistedAgentCwd(meta);
   let command: string[] | null;
   try {
     command = buildAgentCommand(meta, prompt, isContinue, options.env);
@@ -456,6 +475,27 @@ async function runInvocation(
   }
   if (!await claimPendingPrompt(agentId, prompt, options)) return false;
 
+  // A directory that no longer exists produces no pid and no spawn error, and
+  // the recorded reason would otherwise be `OpenCode process had no pid` with
+  // exit 127 -- a note that does not name the real cause at all. This is the
+  // launch-time half of the check the CLI also performs at acceptance: a
+  // directory can disappear in between, and an accepted prompt must still end
+  // with a named reason.
+  if (launchCwd === null || !statSync(launchCwd, { throwIfNoEntry: false })?.isDirectory()) {
+    await updateMeta(agentId, (current) => {
+      finalizeTerminal(
+        current,
+        'failed',
+        Date.now() / 1000,
+        null,
+        null,
+        `${LAUNCH_DIRECTORY_MISSING}: ${launchCwd ?? 'undeclared'}`,
+      );
+      setActiveRunner(current, false);
+    }, options);
+    return false;
+  }
+
   let attempt = 0;
   while (true) {
     const invocationId = randomBytes(16).toString('hex');
@@ -474,7 +514,7 @@ async function runInvocation(
     let child: ChildProcess;
     try {
       child = spawn(command[0]!, command.slice(1), {
-        cwd: requiredAgentCwd(meta),
+        cwd: launchCwd,
         env,
         detached: true,
         stdio: ['ignore', fd, fd],
@@ -509,6 +549,21 @@ async function runInvocation(
         // The backend finished before /proc identity could be captured. There
         // is no live process left to control, so finalize the observed result
         // without persisting a partial identity.
+        //
+        // The observation is still recorded, because the child *was* spawned
+        // and did run in `launchCwd`; only its process identity went
+        // unrecorded. `recordSpawned` is the normal home for that write and is
+        // unreachable here, so this is the one other place a front can be
+        // shown to have run somewhere. Leaving it out would make `ran in:`
+        // wrong in the opposite direction -- "never ran" for a front that ran.
+        await updateMeta(agentId, (current) => {
+          // The same ownership guard `recordSpawned` and
+          // `releaseUnrecordedSpawn` apply: a stop-like record means some other
+          // actor already decided how this invocation ends, and a runner that
+          // has lost the record must not add a durable write to it.
+          if (deletePendingFlag(current) !== false || stopLikeOrMalformed(current)) return;
+          current.invocation_cwd = launchCwd;
+        }, options);
         result = quick.value;
       } else {
         // A still-running process without durable identity cannot safely be
@@ -533,7 +588,7 @@ async function runInvocation(
     } else {
       let accepted: boolean;
       try {
-        accepted = await recordSpawned(agentId, pid, startTicks, invocationId, options);
+        accepted = await recordSpawned(agentId, pid, startTicks, invocationId, launchCwd, options);
       } catch (error) {
         try { process.kill(-pid, 'SIGKILL'); } catch {}
         await resultPromise.catch(() => undefined);

@@ -51,6 +51,59 @@ const TOP_LEVEL_FIELDS = [
   'agent_version',
 ] as const;
 
+/**
+ * Optional byte cursor into `output.log`: the offset at which the output of the
+ * currently accepted invocation begins. It is validated when present and allowed
+ * to be absent, exactly like `BACKEND_SIGNAL_FIELDS`, because a record written
+ * before this field existed has no run-scoped cursor and must still be a
+ * canonical record. `null` and absence both mean "no invocation has been
+ * accepted yet", not a malformed record.
+ */
+const RUN_LOG_CURSOR_FIELD = 'run_log_offset';
+
+/**
+ * Optional, top-level *observation* fields. Validated when present, tolerated
+ * when absent, exactly like {@link BACKEND_SIGNAL_FIELDS} below.
+ *
+ * `invocation_cwd` records where an invocation was actually launched, so
+ * `status` can report an observation rather than a declaration. It is not
+ * lifecycle authority, and that is a claim about the code rather than about the
+ * name: nothing that accepts, refuses, orders or owns work reads it. The
+ * launch directory is resolved from `cwd` alone, by
+ * {@link requiredAgentCwd}, and `invocation_cwd` is written by the runner only
+ * after a child has actually been spawned. Launching from the declaration and
+ * writing the observation at the spawn are what keep this field an observation
+ * in the strict sense -- a value here is always a directory some front really
+ * ran in, never a directory somebody intended one to run in.
+ *
+ * That strictness is what makes the tolerated absence defensible under intent
+ * record `5081437296412058`. The record requires version 4 records to
+ * "explicitly contain every lifecycle authority field" and forbids answering
+ * a schema change with a dual-read path; an observation field is neither an
+ * authority field nor a second way to decide anything, so admitting records
+ * written before it existed carries no interpretive risk. The record is
+ * written with the field present (`null`) on every new record, so the
+ * tolerated absence only ever applies to a pre-existing on-disk population,
+ * and it reads as "nothing observed" -- never as a value synthesised from the
+ * declaration.
+ *
+ * `run_log_offset` (board issue 177) sits in the same set and on the same
+ * footing: it is a cursor into the run's own log, written when the prompt is
+ * accepted, and nothing about accepting, refusing, ordering or owning work reads
+ * it. It was carried in separately by 177 and merged here into one list, so
+ * there is a single statement of which top-level keys may be absent rather than
+ * two that each claim to be the whole set.
+ *
+ * Exported so the closed-schema test can read the exemptions from here instead
+ * of restating them: a test that lists them itself drifts, and a drifted
+ * exemption list turns the "missing field is rejected" loop into a loop that
+ * quietly stops rejecting.
+ */
+export const OPTIONAL_TOP_LEVEL_FIELDS = [
+  'invocation_cwd',
+  RUN_LOG_CURSOR_FIELD,
+] as const;
+
 const BACKEND_ERROR_FIELDS = [
   'classification',
   'provider',
@@ -81,16 +134,6 @@ const BACKEND_SIGNAL_FIELDS = [
 ] as const;
 
 const SIGNAL_DEATH_CLASSIFICATION = 'external_signal_kill';
-
-/**
- * Optional byte cursor into `output.log`: the offset at which the output of the
- * currently accepted invocation begins. It is validated when present and allowed
- * to be absent, exactly like `BACKEND_SIGNAL_FIELDS`, because a record written
- * before this field existed has no run-scoped cursor and must still be a
- * canonical record. `null` and absence both mean "no invocation has been
- * accepted yet", not a malformed record.
- */
-const RUN_LOG_CURSOR_FIELD = 'run_log_offset';
 
 export class MalformedPendingPromptMetadataError extends Error {
   constructor() {
@@ -225,7 +268,7 @@ function canonicalSteerQueue(value: unknown, sequence: number): boolean {
 }
 
 export function validateAgentMetadata(meta: AgentMetadata): void {
-  if (!exactKeysWithOptional(meta, TOP_LEVEL_FIELDS, [RUN_LOG_CURSOR_FIELD])) {
+  if (!exactKeysWithOptional(meta, TOP_LEVEL_FIELDS, OPTIONAL_TOP_LEVEL_FIELDS)) {
     throw new MalformedAgentMetadataError('managed-agent metadata fields are not canonical');
   }
   if (meta.agent_version !== AGENT_META_VERSION) {
@@ -236,6 +279,7 @@ export function validateAgentMetadata(meta: AgentMetadata): void {
   if (persistedTimestamp(meta.last_activity_at) === null) throw new MalformedAgentMetadataError('managed-agent last_activity_at is malformed');
   if (persistedLifecycleState(meta) === null) throw new MalformedAgentMetadataError('managed-agent state is malformed');
   persistedAgentCwd(meta);
+  persistedInvocationCwd(meta);
   if (!nullableString(meta.title, true)) throw new MalformedAgentMetadataError('managed-agent title is malformed');
   persistedVariant(meta);
   persistedNativeSessionId(meta);
@@ -317,6 +361,15 @@ export function persistedRunLogOffset(meta: AgentMetadata): number | null {
   if (value === null) return null;
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
+
+/**
+ * The fixed-literal prefix of the note an invocation records when the directory
+ * it was launched in is not an existing directory (board issue 178). Exported
+ * so `agent status`'s display allowlist can match it deliberately instead of
+ * withholding it as free text, and kept here rather than in `runner.ts` so the
+ * CLI's display allowlist does not have to import the runner's module graph.
+ */
+export const LAUNCH_DIRECTORY_MISSING = 'cannot launch: working directory does not exist';
 
 export function persistedLifecycleState(meta: AgentMetadata): PersistedAgentState | null {
   if (!hasOwn(meta, 'state')) return null;
@@ -435,13 +488,59 @@ export function persistedAgentCwd(meta: AgentMetadata): string | null {
 }
 
 /**
- * The same field for the paths that must launch a backend: a null cwd is not
- * silently replaced by anything, it refuses the launch, because the backend is
- * invoked with `--dir` and there is no honest value to give it.
+ * The single definition of "where does the next invocation launch", for every
+ * caller. Board issue 178: the launch directory used to be read twice, once by
+ * the command builder for `--dir` and once by the runner for `spawn({cwd})`,
+ * with nothing forcing the two reads to agree; one function consumed by both is
+ * what makes the report-vs-record invariant hold.
+ *
+ * It reads the declaration (`cwd`), never the observation
+ * (`invocation_cwd`). That is not a simplification. Launching from the
+ * declaration is what keeps the observation an observation: `agent run --cwd P`
+ * writes `cwd` in the same durable transaction that accepts the prompt, so the
+ * declaration is authoritative from the moment the prompt is accepted, and
+ * `invocation_cwd` is written later and only by the runner, once a child has
+ * actually been spawned. An invocation that is accepted and then never launches
+ * leaves the record's observation naming the directory the *previous* invocation
+ * ran in, which is the truth, rather than naming one nobody ever entered.
+ *
+ * A null declaration is not silently replaced by anything: the launch is
+ * refused rather than inheriting the invoking shell's directory.
  */
 export function requiredAgentCwd(meta: AgentMetadata): string {
   const value = persistedAgentCwd(meta);
   if (value === null) throw new MalformedAgentMetadataError('managed-agent cwd is undeclared');
+  return value;
+}
+
+/**
+ * The directory the current or most recent invocation was *launched in*, or
+ * `null` when no invocation has ever been launched.
+ *
+ * Absent is a real, canonical state, not a malformed record: every record
+ * written before board issue 178 has no such field, and the product does not
+ * maintain a dual-read compatibility path or synthesise a legacy default. What
+ * it does instead is treat absence as "nothing observed", which is the truthful
+ * reading of a record that predates the observation. A present-but-wrong value
+ * is still rejected, and `null` is still a legitimate present value.
+ *
+ * This is deliberately *not* a second declaration, and the two are written by
+ * different actors at different times. `cwd` is what the operator declared, and
+ * the accepting command writes it in the same durable transaction that accepts
+ * the prompt. `invocation_cwd` is written by the runner, in the same durable
+ * transaction that publishes the spawned process identity, so a value here is
+ * always a directory a real front was actually launched in. On a record that has
+ * run they usually agree; where they can disagree is an invocation that was
+ * accepted and never launched, or a record that has never run at all, and then
+ * this field is the one that is null.
+ */
+export function persistedInvocationCwd(meta: AgentMetadata): string | null {
+  if (!hasOwn(meta, 'invocation_cwd')) return null;
+  const value = meta.invocation_cwd;
+  if (value === null) return null;
+  if (typeof value !== 'string' || value.length === 0 || !isAbsolute(value)) {
+    throw new MalformedAgentMetadataError('managed-agent invocation_cwd is malformed');
+  }
   return value;
 }
 
@@ -468,6 +567,7 @@ export function idleMeta(agentId: string, cwd: string | null, title: string | nu
     last_activity_at: now,
     state: 'idle',
     cwd,
+    invocation_cwd: null,
     title,
     variant: DEFAULT_VARIANT,
     native_session_id: null,

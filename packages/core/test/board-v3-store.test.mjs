@@ -668,3 +668,68 @@ test('a shard carrying outstanding blocks this build cannot compare is refused, 
     );
   }
 });
+
+// Review 44a02 mutation M7: `issueFromSummary` is claimed to be off the write
+// path. It is not. `readMutationBundle` builds the working board from the list
+// projection, and an unrelated compact mutation (a comment on another issue)
+// rewrites the projection for every issue from that working board. So the two
+// lines below are the only thing standing between an untouched issue's stored
+// review verdict and a projection that has silently dropped it -- which is a
+// clear issue at the completion gate, on an issue nobody touched. Dropping them
+// left all 275 core tests green.
+test('a compact mutation of one issue keeps every other issue review verdict in the projection', async () => {
+  const server = fakeSkrynia();
+  const store = deterministicStore(server);
+  const initialized = await store.initialize();
+  const created = await store.appendFast(initialized.credential, {
+    kind: 'issue.create',
+    payload: { number: 1, title: 'Blocked', body: '' },
+  });
+  await store.appendFast(initialized.credential, {
+    kind: 'issue.create',
+    payload: { number: 2, title: 'Unrelated', body: '' },
+  }, created.state.head);
+  await store.appendFast(initialized.credential, {
+    kind: 'review.record',
+    payload: {
+      number: 1,
+      commit: 'a'.repeat(40),
+      verdict: 'request-changes',
+      reviewer: 'independent',
+      rationale: 'recommend no merge',
+    },
+  });
+
+  // A reader that has never seen the write must see the block in both places the
+  // completion gate can read it, before any mutation at all.
+  const reader = deterministicStore(server);
+  assert.deepEqual((await reader.getIssue(initialized.credential, 1)).outstandingBlocks, ['a'.repeat(40)]);
+  const pageBefore = await reader.readIssuePage(initialized.credential, 'open', 1);
+  assert.deepEqual(
+    pageBefore.entries.find((entry) => entry.number === 1).outstandingBlocks,
+    ['a'.repeat(40)],
+    'precondition: the projection carries the block',
+  );
+
+  // A mutation that touches only issue 2. Issue 1 is not named by the operation.
+  await store.appendFast(initialized.credential, {
+    kind: 'issue.comment',
+    payload: { number: 2, author: 'front', body: 'unrelated' },
+  });
+
+  const after = deterministicStore(server);
+  assert.deepEqual(
+    (await after.getIssue(initialized.credential, 1)).outstandingBlocks,
+    ['a'.repeat(40)],
+    "an untouched issue's outstanding blocks survive a mutation of another issue",
+  );
+  assert.equal((await after.getIssue(initialized.credential, 1)).review.verdict, 'request-changes');
+  const pageAfter = await after.readIssuePage(initialized.credential, 'open', 1);
+  const entry = pageAfter.entries.find((candidate) => candidate.number === 1);
+  assert.deepEqual(
+    entry.outstandingBlocks,
+    ['a'.repeat(40)],
+    "an untouched issue's block survives in the projection the next mutation rebuilds from",
+  );
+  assert.equal(entry.review.verdict, 'request-changes');
+});

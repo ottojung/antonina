@@ -79,14 +79,41 @@ test('the traced make target comes from a run step, not from a comment', (t) => 
   // instead of `build` would have emptied the input set rather than kept it. The
   // count is the traced bundle inputs this revision actually has, so adding a
   // `web/**` or `packages/core/src/**` source file is expected to move it and
-  // this number with it. 42 is this revision: 36 before, plus the four web
+  // this number with it. 44 is this revision: 36 before, plus the four web
   // sources board issues 139 and 140 added — `board-url.ts`, `board-url.test.ts`,
   // `board-url-app.test.tsx` and `issues-pagination.test.tsx` — plus
   // `resources-pagination.test.tsx` (board issue 171) and
   // `issue-conversation-pagination.test.tsx` (board issue 174). The assertion
   // stays the exact number on purpose, so the next added source file moves it
   // again rather than the check quietly widening into a wildcard.
-  assert.match(result.stdout, /traced bundle inputs: 42/);
+  //
+  // Board 180 adds TWO traced bundle inputs, so this revision is 44, not 43.
+  // Measured, not assumed: the checker reports 42 on the line as it stood at
+  // `8600cd41` and 44 here, and the two names the difference adds are exactly
+  //
+  //   - web/src/issue-activity-order.test.tsx   (this board's regression test)
+  //   - packages/core/src/board-store.ts        (newly traced, see below)
+  //
+  // The second is a real consequence rather than an accident, and it is worth
+  // stating because it is easy to mistake for a miscount. Until now the web suite
+  // never reached `board-store.ts` through a path the checker can trace: it is
+  // listed under "read by the deploy build but cannot change the bundle". The
+  // board 180 test drives a real `ShardedBoardStore` over a fake Skrynia and feeds
+  // its `readOverview` output straight into the web's own `visibleIssues`, which
+  // means the web bundle now genuinely imports it -- so the checker is right to
+  // trace it, and the paths filter is right to cover it via `packages/core/**`.
+  // An earlier draft of this comment predicted 43 by counting only the new test
+  // file, and `npm test` caught it as a `test:workflow` failure.
+  //
+  // SEQUENCING NOTE for board 179, whose own landing will move this again.
+  // Board 179 branched from `1d432b54`, before board 171 took 42, so its added
+  // `closed-issue-order.test.tsx` is also a 43, and its committed assertion of 43
+  // will be wrong by construction once it lands on a line that is already at 44.
+  // After 180 lands, the true count is 45 and 179's landing must move the literal
+  // to 45, attributing 43 to 171 and 174, 44 to 180's two inputs, and 45 to
+  // 179's `closed-issue-order.test.tsx`. Do not resolve that by widening the
+  // assertion to a range.
+  assert.match(result.stdout, /traced bundle inputs: 44/);
 });
 
 test('a bare filename include is traced as the file it names', (t) => {

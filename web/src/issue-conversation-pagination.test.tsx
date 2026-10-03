@@ -12,6 +12,9 @@ import App from './App';
 import { DEFAULT_FEED_LIMIT, type BoardFeedPage, type BoardFeedRequest } from './api';
 import type { BoardIssue } from './model';
 import type { BoardAccessState, BoardOverview, IssueCommentPage } from '../../packages/core/src/api';
+// Board issue 180's All Issues key, so this fixture mirrors what core's store
+// writes: the newest comment's time, or null when the issue has no comments.
+import { newestCommentAt } from '../../packages/core/src/api';
 import type { BrowserBoardSession } from './api';
 import {
   COMMENT_PAGE_SIZE,
@@ -71,6 +74,7 @@ function overview(): BoardOverview {
       updatedAt: each.updatedAt,
       closedAt: null,
       messageCount: each.messages.length,
+      lastActivityAt: newestCommentAt(each.messages),
       hasBody: each.body.length > 0,
     })),
     resources: [],

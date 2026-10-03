@@ -354,6 +354,20 @@ interface IssueSnapshot {
   issue: IssueCore;
   closedAt: string | null;
   messageCount: number;
+  /**
+   * The `createdAt` of the most recent comment, or null when the issue has never
+   * been commented on. Denormalized here for the same reason `messageCount` is:
+   * the list pages are written from a hydration that may not hold every comment
+   * shard, so the newest comment's time has to travel with the snapshot rather
+   * than be re-read per issue.
+   *
+   * Absent -- `undefined`, and not `null` -- on shards written before this field
+   * existed. Absence is a third state on purpose: `null` is the recorded claim
+   * "never commented", while absence is the claim "this store does not know", and
+   * collapsing the two on read turns every pre-existing board's real activity
+   * into a durable false `null` at the first write.
+   */
+  lastActivityAt: string | null | undefined;
   commentRefs: string[];
 }
 
@@ -373,7 +387,64 @@ export interface IssueListSummary {
   updatedAt: string;
   closedAt: string | null;
   messageCount: number;
+  /**
+   * The `createdAt` of the most recent comment, or null when the issue has never
+   * been commented on. This is the raw half of the activity key; the rule that
+   * turns it into a sort key -- and that makes an issue which has never been
+   * commented on fall back to its creation time -- is
+   * `issueLastActivityOf`, so that rule exists once and is testable on its own.
+   *
+   * Null rather than defaulted here so "never commented" stays distinguishable
+   * from "commented at the moment it was created".
+   *
+   * The field is absent, not `null`, when it is not known -- because the shard it
+   * was read from predates it. Absence is never written over: a summary whose
+   * activity time this store could not determine is rewritten without the key, so
+   * an unknown value stays unknown across a write instead of being frozen into a
+   * `null` that every later read then takes as authoritative. Every reader of
+   * this field goes through `issueLastActivityOf`, whose `??` treats unknown and
+   * never-commented identically for sorting, which is the documented
+   * creation-time fallback.
+   */
+  lastActivityAt?: string | null;
   hasBody: boolean;
+}
+
+/**
+ * An issue's last activity time: the timestamp of its most recent comment, or
+ * its creation time when it has never been commented on.
+ *
+ * The fallback is `createdAt` and deliberately not `updatedAt`. `updatedAt` moves
+ * on a title or body edit and on close, so keying activity on it would sort by
+ * editing and by closing time, neither of which is what "last activity" means.
+ *
+ * Tolerates a missing `lastActivityAt` (a summary carried by a caller, or a
+ * shard written before the field existed, that never saw it) by falling back to
+ * creation time, which is the same answer the fallback would give either way. The
+ * fallback is what an unknown value must sort by: absence is not a value, so it
+ * must not be allowed to masquerade as a recorded one.
+ */
+export function issueLastActivityOf(summary: Pick<IssueListSummary, 'createdAt' | 'lastActivityAt'>): string {
+  return summary.lastActivityAt ?? summary.createdAt;
+}
+
+/**
+ * Most recently active first, for the All Issues view.
+ *
+ * A tie on activity time breaks by higher issue number first, which is the same
+ * tie-break the closed-issue order uses so the two orders do not disagree about
+ * two issues that were last touched in the same instant.
+ *
+ * Total and deterministic, including for issues with no recorded activity at all:
+ * they all key on `createdAt`, and a shared `createdAt` is broken by the unique
+ * issue number, so two rows with no activity hold their relative order between
+ * reads and across page boundaries rather than depending on input order.
+ */
+export function compareIssueActivity(
+  left: Pick<IssueListSummary, 'number' | 'createdAt' | 'lastActivityAt'>,
+  right: Pick<IssueListSummary, 'number' | 'createdAt' | 'lastActivityAt'>,
+): number {
+  return issueLastActivityOf(right).localeCompare(issueLastActivityOf(left)) || right.number - left.number;
 }
 
 /**
@@ -479,6 +550,19 @@ interface StateBundle {
   issueRefs: Map<number, string>;
   issueSnapshots: Map<number, IssueSnapshot>;
   messageCounts: Map<number, number>;
+  /**
+   * Recorded activity times, with entries only for issues whose activity this
+   * store actually knows. A missing entry is not `null`: it means the field was
+   * absent where it was read, and it stays missing rather than being invented.
+   */
+  lastActivity: Map<number, string | null>;
+  /**
+   * Whether `state.board`'s issues carry their comment threads. False on the
+   * mutation fast path, where only the touched issue is hydrated; a writer must
+   * not read an activity time off an empty thread there, because an empty thread
+   * there means "not read", not "no comments".
+   */
+  threadsHydrated: boolean;
   closedAt: Map<number, string>;
   directoryPages: Map<number, DirectoryPage>;
 }
@@ -520,6 +604,24 @@ function requireText(value: unknown, name: string): string {
     throw new ShardedBoardStoreError(`Antonina v3 ${name} is malformed`);
   }
   return value;
+}
+
+/**
+ * A nullable timestamp that keeps absence distinguishable from a recorded null.
+ *
+ * `undefined` means the object was written before the field existed, which is a
+ * board this revision can still read: it becomes "not known here", and
+ * `issueLastActivityOf` then falls back to the issue's creation time.
+ * Rejecting it instead would make this revision unable to open boards it created
+ * itself a revision earlier. Returning `undefined` rather than folding it into
+ * `null` is the whole point: a recorded `null` is a claim the board has already
+ * made and must be honoured, and folding absence into it would let an old shard
+ * forge that claim the moment the board is written again.
+ */
+function optionalTimestamp(value: unknown, name: string): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  return requireText(value, name);
 }
 
 function canonicalTimestampAtOrAfter(value: string, floor: string): string {
@@ -732,6 +834,8 @@ function orderedSummaries(
   closedAt: Map<number, string>,
   issueState: IssueState,
   messageCounts?: Map<number, number>,
+  lastActivity?: Map<number, string | null>,
+  threadsHydrated = true,
 ): IssueListSummary[] {
   const byNumber = new Map(state.board.issues.map((issue) => [issue.number, issue]));
   const ordered = issueState === 'open'
@@ -746,16 +850,68 @@ function orderedSummaries(
             .localeCompare(closedAt.get(left.number) ?? left.updatedAt);
           return time || right.number - left.number;
         });
-  return ordered.map((issue) => ({
-    number: issue.number,
-    title: issue.title,
-    state: issue.state,
-    createdAt: issue.createdAt,
-    updatedAt: issue.updatedAt,
-    closedAt: issue.state === 'closed' ? (closedAt.get(issue.number) ?? issue.updatedAt) : null,
-    messageCount: messageCounts?.get(issue.number) ?? issue.messages.length,
-    hasBody: issue.body.length > 0,
-  }));
+  return ordered.map((issue) => {
+    const lastActivityAt = knownLastActivity(lastActivity, issue, threadsHydrated);
+    return {
+      number: issue.number,
+      title: issue.title,
+      state: issue.state,
+      createdAt: issue.createdAt,
+      updatedAt: issue.updatedAt,
+      closedAt: issue.state === 'closed' ? (closedAt.get(issue.number) ?? issue.updatedAt) : null,
+      messageCount: messageCounts?.get(issue.number) ?? issue.messages.length,
+      // The key is omitted rather than set to a placeholder when the activity
+      // time is unknown: an absent key is a shape the reader already tolerates,
+      // whereas a placeholder would be a claim.
+      ...(lastActivityAt === undefined ? {} : { lastActivityAt }),
+      hasBody: issue.body.length > 0,
+    };
+  });
+}
+
+/**
+ * The `createdAt` of the newest message in a thread, or null when it is empty.
+ *
+ * The maximum is taken over the whole thread rather than read off the last
+ * message: nothing validates that operation timestamps ascend, so append order is
+ * not a guarantee about chronological order, and "most recent comment" has to mean
+ * the newest comment. Threads are bounded by the shard page size, so this stays
+ * cheap.
+ */
+export function newestCommentAt(messages: readonly { createdAt: string }[]): string | null {
+  let newest: string | null = null;
+  for (const message of messages) {
+    if (newest === null || message.createdAt.localeCompare(newest) > 0) newest = message.createdAt;
+  }
+  return newest;
+}
+
+function newestCommentOf(issue: Pick<BoardIssue, 'messages'>): string | null {
+  return newestCommentAt(issue.messages);
+}
+
+/**
+ * The caller's recorded activity time when it has one, and the thread's own
+ * newest comment only when the thread was actually read.
+ *
+ * Tested with `has` rather than `??` because a recorded `null` is meaningful --
+ * it is "this issue has never been commented on" -- and `??` would discard it and
+ * re-derive from a thread the fast path never hydrated.
+ *
+ * `undefined` is the answer when neither holds: the map has no entry because the
+ * shard predates the field, and the thread was not hydrated either. It is not a
+ * claim, so nothing writes it into storage (the key is dropped) and the reader
+ * falls back to creation time. Answering `null` here instead would write "never
+ * commented" over a real comment the store simply had not read.
+ */
+function knownLastActivity(
+  lastActivity: Map<number, string | null> | undefined,
+  issue: BoardIssue,
+  threadsHydrated = true,
+): string | null | undefined {
+  if (lastActivity !== undefined && lastActivity.has(issue.number)) return lastActivity.get(issue.number)!;
+  if (!threadsHydrated) return undefined;
+  return newestCommentOf(issue);
 }
 
 function issueFromSummary(summary: IssueListSummary): BoardIssue {
@@ -1490,6 +1646,7 @@ export class ShardedBoardStore {
       issue: core,
       closedAt: value.closedAt,
       messageCount: requireSafeCount(value.messageCount, 'message count'),
+      lastActivityAt: optionalTimestamp(value.lastActivityAt, 'last activity timestamp'),
       commentRefs: value.commentRefs.map((entry) => requireText(entry, 'comment reference')),
     };
     if (!withMessages) return { snapshot, issue: issueFromCore(core, []) };
@@ -1598,11 +1755,19 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     }
     const issueSnapshots = new Map<number, IssueSnapshot>();
     const messageCounts = new Map<number, number>();
+    const lastActivity = new Map<number, string | null>();
     const closedAt = new Map<number, string>();
     const issues = await Promise.all([...issueRefs.entries()].map(async ([number, ref]) => {
       const result = await this.readIssueSnapshot(credential, meta, ref, true);
       issueSnapshots.set(number, result.snapshot);
       messageCounts.set(number, result.snapshot.messageCount);
+      // Absent stays absent. This shard predates the field, so the bundle simply
+      // does not know the answer yet; the hydrated thread below is what recovers
+      // it, and recording a `null` here instead would make a board that has been
+      // commented on claim it never was, on every later read, from then on.
+      if (result.snapshot.lastActivityAt !== undefined) {
+        lastActivity.set(number, result.snapshot.lastActivityAt);
+      }
       if (result.snapshot.closedAt !== null) closedAt.set(number, result.snapshot.closedAt);
       return result.issue;
     }));
@@ -1633,6 +1798,8 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       issueRefs,
       issueSnapshots,
       messageCounts,
+      lastActivity,
+      threadsHydrated: true,
       closedAt,
       directoryPages,
     };
@@ -1657,8 +1824,17 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     ];
     const closedAt = new Map<number, string>();
     const messageCounts = new Map<number, number>();
+    const lastActivity = new Map<number, string | null>();
     for (const summary of summaries) {
       messageCounts.set(summary.number, summary.messageCount);
+      // Same rule as the hydrating read above, and it matters more here: these
+      // summaries come from list pages whose threads are not read, so a summary
+      // with no field is unknown rather than never-commented. Leaving the entry
+      // out keeps it unknown through the write, so a later hydrating read can
+      // still recover the real time from the thread.
+      if (summary.lastActivityAt !== undefined) {
+        lastActivity.set(summary.number, summary.lastActivityAt);
+      }
       if (summary.closedAt !== null) closedAt.set(summary.number, summary.closedAt);
     }
     const issues = summaries.map(issueFromSummary).sort((left, right) => left.number - right.number);
@@ -1682,6 +1858,8 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       issueRefs: new Map(),
       issueSnapshots: new Map(),
       messageCounts,
+      lastActivity,
+      threadsHydrated: false,
       closedAt,
       directoryPages: new Map(),
     };
@@ -1728,6 +1906,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       issue: coreOf(issue),
       closedAt,
       messageCount: issue.messages.length,
+      lastActivityAt: newestCommentOf(issue),
       commentRefs,
     };
     return { ref: await this.writeShard(credential.storageCapability, snapshot), superseded };
@@ -1772,15 +1951,25 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     previousRefs: string[],
     messageCounts?: Map<number, number>,
     previousMessageCounts?: Map<number, number>,
+    lastActivity?: Map<number, string | null>,
+    previousLastActivity?: Map<number, string | null>,
+    threadsHydrated = true,
   ): Promise<{ refs: string[]; superseded: string[] }> {
     const nextPages = paginate(
-      orderedSummaries(state, closedAt, issueState, messageCounts),
+      orderedSummaries(state, closedAt, issueState, messageCounts, lastActivity, threadsHydrated),
       V3_ISSUE_PAGE_SIZE,
     );
     const previousPages = previousState === null || previousClosedAt === null
       ? []
       : paginate(
-          orderedSummaries(previousState, previousClosedAt, issueState, previousMessageCounts),
+          orderedSummaries(
+            previousState,
+            previousClosedAt,
+            issueState,
+            previousMessageCounts,
+            previousLastActivity,
+            threadsHydrated,
+          ),
           V3_ISSUE_PAGE_SIZE,
         );
     const refs: string[] = [];
@@ -2068,6 +2257,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         issue: coreOf(issue),
         closedAt: closedAt.get(issue.number) ?? null,
         messageCount: issue.messages.length,
+        lastActivityAt: newestCommentOf(issue),
         commentRefs,
       };
       const issueRef = await this.writeShard(credential.storageCapability, snapshot);
@@ -2454,6 +2644,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         issue: coreOf(issue),
         closedAt: logical.closedAt.get(issue.number) ?? null,
         messageCount: issue.messages.length,
+        lastActivityAt: newestCommentOf(issue),
         commentRefs,
       };
       const ref = await this.writeShard(credential.storageCapability, snapshot);
@@ -2987,10 +3178,16 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         nextClosedAt.delete(beforeIssueNumber);
       }
       const nextMessageCounts = new Map(bundle.messageCounts);
+      const nextLastActivity = new Map(bundle.lastActivity);
       if (request.kind === 'issue.delete' && beforeIssueNumber !== null) {
         nextMessageCounts.delete(beforeIssueNumber);
+        nextLastActivity.delete(beforeIssueNumber);
       } else if (request.kind.startsWith('issue.') && beforeIssueNumber !== null && afterIssue !== undefined) {
         nextMessageCounts.set(beforeIssueNumber, afterIssue.messages.length);
+        // A comment appended by this mutation is new activity, and an issue that
+        // has just been created has none yet, so both are read off the mutated
+        // thread rather than left at the pre-mutation value.
+        nextLastActivity.set(beforeIssueNumber, newestCommentOf(afterIssue));
       }
 
       // The refs this mutation stops pinning. Collected as the writer goes
@@ -3097,6 +3294,9 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         bundle.meta.openPageRefs,
         nextMessageCounts,
         bundle.messageCounts,
+        nextLastActivity,
+        bundle.lastActivity,
+        bundle.threadsHydrated,
       );
       const closed = await this.writeIssueListPages(
         credential,
@@ -3109,6 +3309,9 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         bundle.meta.closedPageRefs,
         nextMessageCounts,
         bundle.messageCounts,
+        nextLastActivity,
+        bundle.lastActivity,
+        bundle.threadsHydrated,
       );
       superseded.push(...open.superseded, ...closed.superseded);
       const openPageRefs = open.refs;

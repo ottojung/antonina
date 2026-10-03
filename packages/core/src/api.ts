@@ -1,4 +1,5 @@
 import type { BoardOverview, IssueCommentPage, IssueListSummary } from './board-v3-store.js';
+import { newestCommentAt } from './board-v3-store.js';
 import {
   ANTONINA_NAMESPACE,
   BoardDeletedError,
@@ -437,6 +438,7 @@ export class BoardApi {
               updatedAt: issue.updatedAt,
               closedAt: issue.state === 'closed' ? issue.updatedAt : null,
               messageCount: issue.messages.length,
+              lastActivityAt: newestCommentAt(issue.messages),
               hasBody: issue.body.length > 0,
             }))
             .sort((left, right) => left.number - right.number);
@@ -930,6 +932,7 @@ export type {
   IssueListPage,
   IssueListSummary,
 } from './board-v3-store.js';
+export { compareIssueActivity, issueLastActivityOf, newestCommentAt } from './board-v3-store.js';
 export {
   EXECUTION_TARGET_ACCESS_METHODS,
   EXECUTION_TARGET_BACKENDS,

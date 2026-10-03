@@ -8,9 +8,19 @@ import type {
   FeedRead,
   IssueListSummary,
 } from './api';
+import { compareIssueActivity, newestCommentAt } from './api';
 import type { BoardIssue, BoardResource, VerifiedBoardState } from './model';
 
 export type IssueFilter = 'open' | 'closed' | 'all';
+
+/**
+ * What the issue order needs to see: identity and state for the queue and closed
+ * orders, plus the two fields the activity order keys on. Widening this bound is
+ * the whole of the All Issues change -- `openQueueOrder` and `closedIssueOrder`
+ * still constrain themselves to identity and state, so they keep working on
+ * callers that hold no timestamps at all.
+ */
+type ActivitySortable = Pick<BoardIssue, 'number' | 'state'> & Pick<IssueListSummary, 'createdAt' | 'lastActivityAt'>;
 
 /**
  * A loaded board carries its shared priority order beside it. There is no
@@ -143,6 +153,7 @@ function summarizeIssue(issue: BoardIssue): IssueListSummary {
     updatedAt: issue.updatedAt,
     closedAt: issue.state === 'closed' ? issue.updatedAt : null,
     messageCount: issue.messages.length,
+    lastActivityAt: newestCommentAt(issue.messages),
     hasBody: issue.body.length > 0,
   };
 }
@@ -275,16 +286,33 @@ export function closedIssueOrder<T extends Pick<BoardIssue, 'number' | 'state'>>
 }
 
 /**
- * The issues a filter shows. `open` is the shared queue, `closed` is the
- * unqueued tail, and `all` is the queue first with the closed tail after it, so
- * the open work a reader came for is always at the top in priority order.
+ * Every issue, most recently active first.
+ *
+ * This is the All Issues order, and it is the only place an issue's timestamps
+ * decide its position. `open` keeps the shared queue and `closed` keeps its own
+ * stable order, both of which the board commits to; All Issues is the view a
+ * reader opens to ask "what moved recently", and answering that by issue number,
+ * by creation order or by closing time answers a different question.
+ *
+ * Open and closed issues interleave here. That is the point: an issue that was
+ * just commented on is the most recent activity on the board whether or not it
+ * has been closed.
  */
-export function visibleIssues<T extends Pick<BoardIssue, 'number' | 'state'>>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
+export function activityIssueOrder<T extends ActivitySortable>(issues: readonly T[]): T[] {
+  return [...issues].sort(compareIssueActivity);
+}
+
+/**
+ * The issues a filter shows. `open` is the shared queue, `closed` is the
+ * unqueued tail, and `all` is every issue by last activity.
+ */
+export function visibleIssues<T extends ActivitySortable>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
+  if (filter === 'all') return activityIssueOrder(issues);
   const byNumber = new Map(issues.map((issue) => [issue.number, issue]));
   const open = openQueueOrder(issues, queue).map((number) => byNumber.get(number)!);
   if (filter === 'open') return open;
   const closed = closedIssueOrder(issues).map((number) => byNumber.get(number)!);
-  return filter === 'closed' ? closed : [...open, ...closed];
+  return closed;
 }
 
 /**
@@ -332,7 +360,9 @@ export function clampIssuePage(page: number, total: number, pageSize = ISSUE_PAG
  * The one page of an already-ordered list, clamped the same way. Pagination is a
  * slice of the semantic order `visibleIssues` produced and never a second sort:
  * open issues stay in the board's queue order, closed issues keep their stable
- * order, and `all` is still open-first. Only the window onto that order moves.
+ * order, and `all` keeps the last-activity order `visibleIssues` produced --
+ * issues with no recorded activity falling back to their creation time. Only the
+ * window onto that order moves.
  */
 export function issuePage<T>(items: readonly T[], page: number, pageSize = ISSUE_PAGE_SIZE): T[] {
   const index = clampIssuePage(page, items.length, pageSize);

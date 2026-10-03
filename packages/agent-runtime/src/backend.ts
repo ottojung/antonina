@@ -3,7 +3,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { constants } from 'node:os';
 import { isAbsolute } from 'node:path';
 
-import { DEFAULT_VARIANT, persistedNativeSessionId, persistedVariant, requiredInvocationCwd, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
+import { DEFAULT_VARIANT, persistedNativeSessionId, persistedVariant, requiredAgentCwd, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
 
 export const AGENT_MODEL = 'opencode/space-bunny-free';
@@ -413,7 +413,9 @@ export function buildAgentCommand(
   // Board issue 178: the launch directory is resolved by one function in
   // `metadata.ts` and consumed here and in `runner.ts`, so `--dir` and the
   // `spawn({cwd})` this process is launched with cannot name different places.
-  const cwd = requiredInvocationCwd(meta);
+  // It resolves the declaration, not the observation: `invocation_cwd` records
+  // where a front actually ran and must never decide where one runs.
+  const cwd = requiredAgentCwd(meta);
   const variant = persistedVariant(meta) || DEFAULT_VARIANT;
   const executable = resolveOpencode(env);
   if (isContinue) {

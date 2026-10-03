@@ -46,7 +46,6 @@ import {
   LAUNCH_DIRECTORY_MISSING,
   TERMINAL_STATES,
   activeRunnerFlag,
-  effectiveInvocationCwd,
   deletePendingFlag,
   idleMeta,
   nextPromptCount,
@@ -848,7 +847,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     throw new Error('run: the configured backend cannot run an invocation in a different working directory');
   }
   if (runCwd === null) {
-    const launchCwd = effectiveInvocationCwd(observed);
+    const launchCwd = persistedAgentCwd(observed);
     if (launchCwd === null) {
       // The operator has no directory to give. There is still no honest value to
       // launch the backend with, and inheriting the invoking shell's directory is
@@ -880,10 +879,16 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   // with the prompt's acceptance. A transaction that ends in `busy` records
   // nothing at all, so a rejected prompt cannot leave a directory behind that no
   // front ever ran in.
+  //
+  // It writes the declaration and nothing else. Board issue 178: writing
+  // `invocation_cwd` here too is what let an accepted-then-never-launched
+  // invocation leave a record permanently naming a directory no front was ever
+  // in, including in a terminal state, and what let a fork report the source's
+  // last launch directory as the clone's own. The observation is written by the
+  // runner, once a child exists; nothing reachable from this command writes it.
   const acceptCwd = (meta: AgentMetadata): void => {
     if (runCwd === null) return;
     meta.cwd = runCwd;
-    meta.invocation_cwd = runCwd;
   };
   await updateMeta(agentId, (meta) => {
     const lifecycle = persistedLifecycleState(meta);
@@ -999,10 +1004,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     const generation = currentGeneration + 1;
     const now = Date.now() / 1000;
     acceptCwd(meta);
-    // `undefined` rather than `null` when no `--cwd` was named: this invocation
-    // then inherits the directory it is continuing, instead of erasing the
-    // observation of where the previous invocation ran.
-    beginInvocation(meta, prompt, now, promptCount, runCwd ?? undefined);
+    beginInvocation(meta, prompt, now, promptCount);
     meta.active_runner = true;
     meta.runner_gen = generation;
     meta.runner_reservation = {

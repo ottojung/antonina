@@ -94,21 +94,21 @@ export function setActiveRunner(meta: AgentMetadata, value: boolean): void {
 }
 
 /**
- * `invocationCwd` is the directory this invocation is being launched in, when
- * the accepting command named one. It is `undefined` on the paths that accept a
- * prompt without naming a directory -- a steer popped into pending, which
- * inherits the invocation it replaces -- and `null` when there is provably
- * nothing to inherit and nothing to name. Writing it here rather than at each
- * acceptance site is what keeps the two paths from diverging.
+ * Accepting a prompt is a statement about work, not about a location.
+ * `beginInvocation` deliberately takes no directory: the launch directory is
+ * the declaration `cwd`, which the accepting command has already written in the
+ * same durable transaction as this call, and `invocation_cwd` is not touched
+ * here at all. It is written by the runner, once a child exists (board issue
+ * 178). A function that accepted a directory and wrote it as part of acceptance
+ * is exactly the pre-launch write that let `agent status` name a directory a
+ * front was never in.
  */
 export function beginInvocation(
   meta: AgentMetadata,
   prompt: string,
   now: number,
   promptCount: number,
-  invocationCwd?: string | null,
 ): void {
-  if (invocationCwd !== undefined) meta.invocation_cwd = invocationCwd;
   meta.state = 'running';
   meta.started_at = now;
   meta.last_activity_at = now;

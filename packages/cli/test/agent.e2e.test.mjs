@@ -2066,7 +2066,98 @@ test('a recorded working directory that no longer exists is refused by name', (t
   assert.equal(meta.prompt_count, 0, 'a refused launch must not accept the prompt');
 });
 
+// (13) The false report this issue exists to remove, as a permanent guard on the
+// accepting side. A relocating steer is accepted while the front is live: the
+// transaction writes the declaration, because the invocation it queues is
+// *supposed* to run there. The invocation is then stopped before it ever
+// launches. `status` and `agent list` must still report the directory the last
+// real launch used.
+//
+// On the fixed behaviour this was the executed case from the review: the record
+// went terminal naming a directory no front was ever in, because
+// `invocation_cwd` was written by the accepting transaction rather than at the
+// spawn. `cwd` moving here is correct and is the other half of the contract --
+// `--cwd` names this invocation and also becomes the declared default -- so this
+// case asserts the two fields moving independently, which is what makes the
+// distinction between them real rather than a naming convention.
+test('an accepted invocation that never launches does not move the observed directory', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  const doomed = join(root, 'never-entered-worktree');
+  mkdirSync(doomed);
+  assert.equal(run(['agent', 'new', '--id', 'b0ad', '--cwd', work], env).status, 0);
 
+  // One real launch, so there is a real observation for the relocation to falsify.
+  assert.equal(run(['agent', 'run', '--id', 'b0ad', '--detach', '--prompt', 'slow'], env).status, 0);
+  const live = await waitFor(
+    root,
+    'b0ad',
+    (meta) => meta.state === 'running' && typeof meta.pid === 'number' && typeof meta.runner_pid === 'number',
+  );
+  // No belt-and-braces kill: `stop --json` is required to converge and reap both
+  // the invocation and its runner, and this case asserts that it does.
+
+  // The relocating steer is accepted on a live front, and rewrites the
+  // declaration immediately, in the transaction that accepts the prompt.
+  const steered = run(
+    ['agent', 'run', '--id', 'b0ad', '--steer', '--cwd', doomed, '--detach', '--prompt', 'never'],
+    env,
+  );
+  assert.equal(steered.status, 0, steered.stderr);
+  const queued = JSON.parse(readFileSync(metaPath(root, 'b0ad'), 'utf8'));
+  assert.equal(queued.cwd, doomed, 'the steer declares the directory for the invocation it queues');
+  assert.equal(
+    queued.invocation_cwd,
+    work,
+    'and nothing has been launched there yet, so the observation must not have moved',
+  );
+
+  // Stop before the queued invocation can be drained. `stop` converges, so by
+  // the time it returns no invocation and no runner of this agent is alive.
+  const stopped = run(['agent', 'stop', '--id', 'b0ad', '--json'], env);
+  assert.equal(stopped.status, 0, `${stopped.stdout}${stopped.stderr}`);
+  assert.equal(JSON.parse(stopped.stdout).state, 'stopped');
+  assert.equal(
+    procStartTicks(live.runner_pid),
+    null,
+    'stop --json must not report success while the runner can still write agent state',
+  );
+  const done = await waitFor(root, 'b0ad', (meta) => meta.state === 'stopped' && meta.active_runner === false);
+
+  // The declaration moved; the observation did not. On the unfixed head these
+  // two were the same field and this assertion read `doomed`.
+  assert.equal(done.cwd, doomed);
+  assert.equal(
+    done.invocation_cwd,
+    work,
+    'a terminal record must name the last directory a front actually ran in, not the one it was going to enter',
+  );
+  assert.equal(done.prompt_count, 2, 'the steer was accepted, so this is an accepted-then-never-launched prompt');
+
+  const status = run(['agent', 'status', '--id', 'b0ad', '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  const parsed = JSON.parse(status.stdout);
+  assert.equal(parsed.cwd, doomed);
+  assert.equal(parsed.invocation_cwd, work);
+  assert.match(run(['agent', 'status', '--id', 'b0ad'], env).stdout, new RegExp(`^ran in:\\s+${work}$`, 'm'));
+
+  // And the corroboration that no invocation was ever launched in `doomed`:
+  // the backend's own argv never names it.
+  const calls = fixtureInvocations(env);
+  assert.ok(calls.length > 0, 'the fixture backend was invoked at least once');
+  for (const call of calls) {
+    assert.ok(
+      call.includes(`--dir ${work}`),
+      `the backend must only ever have been invoked in the directory it really ran in; saw ${JSON.stringify(call)}`,
+    );
+  }
+  assert.equal(
+    calls.filter((call) => call.includes(doomed)).length,
+    0,
+    'no invocation may have been launched in the directory the queued steer named',
+  );
+  assertFixtureInvoked(handle, 'slow');
+});
 
 test('agent list requires --page and uses --limit as the page size', (t) => {
   const { work, env } = fixture(t);

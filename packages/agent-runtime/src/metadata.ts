@@ -55,14 +55,27 @@ const TOP_LEVEL_FIELDS = [
  * Optional, top-level *observation* fields. Validated when present, tolerated
  * when absent, exactly like {@link BACKEND_SIGNAL_FIELDS} below.
  *
- * These are not lifecycle authority fields and nothing about accepting,
- * refusing, ordering or owning work reads them: `invocation_cwd` records where
- * an invocation was launched so `status` can report an observation rather than
- * a declaration. Intent record `5081437296412058` requires version 4 records to
- * "explicitly contain every lifecycle authority field"; this field is not one,
- * and adding it as a required field would have forced a version bump, which
- * that same record forbids answering with a dual-read path. See the note on
- * {@link effectiveInvocationCwd} for the full argument.
+ * `invocation_cwd` records where an invocation was actually launched, so
+ * `status` can report an observation rather than a declaration. It is not
+ * lifecycle authority, and that is a claim about the code rather than about the
+ * name: nothing that accepts, refuses, orders or owns work reads it. The
+ * launch directory is resolved from `cwd` alone, by
+ * {@link requiredAgentCwd}, and `invocation_cwd` is written by the runner only
+ * after a child has actually been spawned. Launching from the declaration and
+ * writing the observation at the spawn are what keep this field an observation
+ * in the strict sense -- a value here is always a directory some front really
+ * ran in, never a directory somebody intended one to run in.
+ *
+ * That strictness is what makes the tolerated absence defensible under intent
+ * record `5081437296412058`. The record requires version 4 records to
+ * "explicitly contain every lifecycle authority field" and forbids answering
+ * a schema change with a dual-read path; an observation field is neither an
+ * authority field nor a second way to decide anything, so admitting records
+ * written before it existed carries no interpretive risk. The record is
+ * written with the field present (`null`) on every new record, so the
+ * tolerated absence only ever applies to a pre-existing on-disk population,
+ * and it reads as "nothing observed" -- never as a value synthesised from the
+ * declaration.
  */
 const OPTIONAL_TOP_LEVEL_FIELDS = [
   'invocation_cwd',
@@ -242,7 +255,7 @@ export function validateAgentMetadata(meta: AgentMetadata): void {
   if (persistedTimestamp(meta.created_at) === null) throw new MalformedAgentMetadataError('managed-agent created_at is malformed');
   if (persistedTimestamp(meta.last_activity_at) === null) throw new MalformedAgentMetadataError('managed-agent last_activity_at is malformed');
   if (persistedLifecycleState(meta) === null) throw new MalformedAgentMetadataError('managed-agent state is malformed');
-persistedAgentCwd(meta);
+  persistedAgentCwd(meta);
   persistedInvocationCwd(meta);
   if (!nullableString(meta.title, true)) throw new MalformedAgentMetadataError('managed-agent title is malformed');
   persistedVariant(meta);
@@ -437,9 +450,24 @@ export function persistedAgentCwd(meta: AgentMetadata): string | null {
 }
 
 /**
- * The same field for the paths that must launch a backend: a null cwd is not
- * silently replaced by anything, it refuses the launch, because the backend is
- * invoked with `--dir` and there is no honest value to give it.
+ * The single definition of "where does the next invocation launch", for every
+ * caller. Board issue 178: the launch directory used to be read twice, once by
+ * the command builder for `--dir` and once by the runner for `spawn({cwd})`,
+ * with nothing forcing the two reads to agree; one function consumed by both is
+ * what makes the report-vs-record invariant hold.
+ *
+ * It reads the declaration (`cwd`), never the observation
+ * (`invocation_cwd`). That is not a simplification. Launching from the
+ * declaration is what keeps the observation an observation: `agent run --cwd P`
+ * writes `cwd` in the same durable transaction that accepts the prompt, so the
+ * declaration is authoritative from the moment the prompt is accepted, and
+ * `invocation_cwd` is written later and only by the runner, once a child has
+ * actually been spawned. An invocation that is accepted and then never launches
+ * leaves the record's observation naming the directory the *previous* invocation
+ * ran in, which is the truth, rather than naming one nobody ever entered.
+ *
+ * A null declaration is not silently replaced by anything: the launch is
+ * refused rather than inheriting the invoking shell's directory.
  */
 export function requiredAgentCwd(meta: AgentMetadata): string {
   const value = persistedAgentCwd(meta);
@@ -449,8 +477,7 @@ export function requiredAgentCwd(meta: AgentMetadata): string {
 
 /**
  * The directory the current or most recent invocation was *launched in*, or
- * `null` when no invocation has ever been launched (or none has yet reached the
- * point of launching).
+ * `null` when no invocation has ever been launched.
  *
  * Absent is a real, canonical state, not a malformed record: every record
  * written before board issue 178 has no such field, and the product does not
@@ -459,13 +486,15 @@ export function requiredAgentCwd(meta: AgentMetadata): string {
  * reading of a record that predates the observation. A present-but-wrong value
  * is still rejected, and `null` is still a legitimate present value.
  *
- * This is deliberately *not* a second declaration. `cwd` is what the operator
- * declared as the default for invocations that name no directory of their own;
- * this field is where an invocation actually launched. Under the contract in
- * force, `agent run --cwd P` writes both in the same durable write that accepts
- * the prompt, so on a record that has run they agree; where they can disagree is
- * a record that has never been launched, and then this field is the only one of
- * the two that is null.
+ * This is deliberately *not* a second declaration, and the two are written by
+ * different actors at different times. `cwd` is what the operator declared, and
+ * the accepting command writes it in the same durable transaction that accepts
+ * the prompt. `invocation_cwd` is written by the runner, in the same durable
+ * transaction that publishes the spawned process identity, so a value here is
+ * always a directory a real front was actually launched in. On a record that has
+ * run they usually agree; where they can disagree is an invocation that was
+ * accepted and never launched, or a record that has never run at all, and then
+ * this field is the one that is null.
  */
 export function persistedInvocationCwd(meta: AgentMetadata): string | null {
   if (!hasOwn(meta, 'invocation_cwd')) return null;
@@ -474,34 +503,6 @@ export function persistedInvocationCwd(meta: AgentMetadata): string | null {
   if (typeof value !== 'string' || value.length === 0 || !isAbsolute(value)) {
     throw new MalformedAgentMetadataError('managed-agent invocation_cwd is malformed');
   }
-  return value;
-}
-
-/**
- * The single definition of "where does the next invocation launch", for every
- * caller. Board issue 178: the launch directory used to be read twice, once by
- * the command builder for `--dir` and once by the runner for `spawn({cwd})`,
- * with nothing forcing the two reads to agree; a single function consumed by
- * both is what makes the report-vs-record invariant hold.
- *
- * An observed invocation directory wins over the declaration, because it is the
- * answer to a later question: a steer that relocates live work names a
- * directory for the invocation it queues, and an invocation queued before the
- * operator thought to name one inherits the directory it is replacing. `null`
- * means there is nothing honest to launch with, and the launch is refused rather
- * than silently inheriting the invoking shell's directory.
- */
-export function effectiveInvocationCwd(meta: AgentMetadata): string | null {
-  return persistedInvocationCwd(meta) ?? persistedAgentCwd(meta);
-}
-
-/**
- * The same function for the paths that must launch a backend: a null effective
- * directory is not silently replaced by anything, it refuses the launch.
- */
-export function requiredInvocationCwd(meta: AgentMetadata): string {
-  const value = effectiveInvocationCwd(meta);
-  if (value === null) throw new MalformedAgentMetadataError('managed-agent cwd is undeclared');
   return value;
 }
 

@@ -1394,9 +1394,19 @@ export class ShardedBoardStore {
     const ref = await shardRef(value);
     // Recorded so the reclamation can tell a ref that this commit *replaced* from
     // one it re-established. Content addressing makes that distinction necessary
-    // rather than tidy: an issue edited A -> B -> A writes A's ref again, so a ref
-    // recorded as superseded two generations ago is pinned by the current
-    // generation again, and deleting it would break the board. Subtracting the
+    // rather than tidy: closing an issue and reopening it puts the queue back to
+    // the content it had, and a QueueSnapshot is only its numbers and carries no
+    // timestamp, so that rewrite is byte-identical and content addressing hands
+    // back the very ref the close superseded. A ref recorded as superseded two
+    // generations ago is then written again, is pinned by the current generation
+    // again, and deleting it on the recorded list alone would break the board.
+    // The re-establishing case is that content-identical rewrite -- the queue
+    // shard's close/reopen, and equally a queue reorder A -> B -> A -- and NOT an
+    // issue body edited A -> B -> A: an IssueSnapshot embeds issue.updatedAt,
+    // which advances on every edit, so that round trip gets a different ref and
+    // re-establishes nothing. (Measured; see test/board-v3-storage.test.mjs "a
+    // shard re-established by content addressing is not reclaimed".)
+    // Subtracting the
     // refs written by this commit is exact and free -- a superseded ref that this
     // generation pins must have been re-written here, because a ref this
     // generation merely carried forward was already pinned by the previous one

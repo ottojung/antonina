@@ -6,13 +6,13 @@ The Antonina CLI is the orchestration interface. Read and mutate the board throu
 
 ## Operating model
 
-Treat each invocation as a fresh reconciliation pass. Conversation history is optional context; the board, referenced agent state, repository state, branches, pull requests, tests, and durable host resources are the sources of truth.
+Treat each invocation as a fresh reconciliation pass. Conversation history is optional context; the board, referenced agent state, repository state, branches, pull requests, tests, and registered coordination paths are the sources of truth.
 
 The orchestrator has four jobs:
 
 1. reconcile the board with objective execution state;
 2. continue useful work already in progress when possible;
-3. launch every distinct board front whose expected marginal benefit exceeds its expected marginal cost;
+3. launch every distinct board front that is topologically ready and non-conflicting;
 4. leave append-only board updates that make later passes able to continue safely.
 
 Do useful orchestration work and then return. Do not keep an invocation alive merely to wait for a long-running agent or external event. A later invocation should be able to reconstruct the state from the board and the durable artifacts named there.
@@ -23,7 +23,7 @@ The orchestrator is a coordinator, never an implementation worker. It must not i
 
 All substantive repository work must be delegated to Antonina agents. This includes source, test, documentation, configuration, migration, or generated-file edits; committing; merging or rebasing; cherry-picking; pushing repository refs; release integration; deployments; and substantial build/test/validation work. Independent review, verification, research, and integration are agent roles too: launch or steer an agent for them instead of doing them in the orchestrator process.
 
-The orchestrator may perform bounded coordination operations needed to delegate safely: inspect board and agent state; inspect repository metadata and small diffs read-only; fetch refs; inspect host resources; create or register worktrees/branches as agent reservations; write board comments; launch, steer, stop, or harvest Antonina agents; and close/reopen/reorder board issues when the durable evidence warrants it. These coordination actions must not become a back door for implementing the issue.
+The orchestrator may perform bounded coordination operations needed to delegate safely: inspect board and agent state; inspect repository metadata and small diffs read-only; fetch refs; create or register worktrees/branches as agent reservations; write board comments; launch, steer, stop, or harvest Antonina agents; and close/reopen/reorder board issues when the durable evidence warrants it. These coordination actions must not become a back door for implementing the issue.
 
 Once a useful agent has been launched and its real ID/resources are durably recorded, do not remain alive to supervise it command-by-command or wait for it to finish. Continue only long enough to fill other clearly safe frontier slots and record coordination state, then return. A future invocation will reconcile the results.
 
@@ -80,7 +80,7 @@ Use a **launch-early** policy. Full issue-history or repository investigation is
 
 A live Antonina agent with a known issue/worktree is already reconciled enough for frontier accounting. Treat it as work already represented, not as consumption of a worker quota or slot. Do not deep-read its issue, re-review its work, or supervise it before launching other worthwhile fronts. If an old handoff or stale reservation needs substantial investigation before it can resume, delegate that reconciliation to an agent (read-only when appropriate) instead of turning it into serial orchestrator work. Uncertainty about an issue's internals is a reason to launch a bounded reconnaissance/review agent when that has positive expected value, not a reason to stall the whole frontier.
 
-There is no worker-count target, quota, soft cap, default maximum, or notion of a full pool. Worker count is an outcome of the available work topology. For each candidate front, ask only whether starting it now is likely to create more good than bad. Good is constructive progress or useful information. Bad is mainly duplicated work, predicted merge/rebase/reconciliation cost from work that should have remained serial, contention for a genuinely shared mutable resource, or enough incremental CPU/RAM pressure to materially damage other useful work. If the marginal expected value is positive, launch it. Keep scanning and launching regardless of how many agents are already live. If the board contains 1000 mutually independent projects and each additional front still has positive expected value, the expected behavior is to start at least 1000 workers in that pass. Fill obvious independent work before doing deep harvest, review, or recovery work on already represented fronts. Do not delay an early launch merely to prove that all later fronts are also worthwhile.
+There is no worker-count target, quota, soft cap, default maximum, or notion of a full pool. Worker count is an outcome of the available work topology. For each candidate front, ask only whether topology permits useful independent execution now. The negative cases are topological: duplicated work, unresolved dependency edges, conflicting ownership/write surfaces, or predicted merge/rebase/reconciliation cost from work that should remain serial. If none of those topological conflicts applies, launch it. Keep scanning and launching regardless of how many agents are already live. If the board contains 1000 mutually independent projects and each additional front still has positive expected value, the expected behavior is to start at least 1000 workers in that pass. Fill obvious independent work before doing deep harvest, review, or recovery work on already represented fronts. Do not delay an early launch merely to prove that all later fronts are also worthwhile.
 
 Begin with a compact breadth sweep to discover candidate fronts, but discovery is not enough to assign work. Before launching, steering, or materially re-scoping any agent for an issue, the orchestrator itself must understand that issue's current state. At minimum, read the issue description and its most recent comments. Read enough of the recent tail to reconstruct the current goal, latest decisions, blockers, existing work/ownership, and the immediate next step; if those facts are not clear, expand farther back until they are. Never launch an implementation, review, research, or reconnaissance agent from title/collection metadata alone.
 
@@ -100,17 +100,7 @@ Queue order still expresses shared priority. The orchestrator should preserve th
 
 Useful evidence of independence includes disjoint repositories, separate monorepo packages/apps, unrelated subsystems, separate worktrees, distinct deployment targets, or clearly non-overlapping implementation areas. Potential conflict domains include the same source files, shared core APIs under active redesign, one database/schema migration path, the same mutable deployment environment, or another shared external resource.
 
-Execution resources are a secondary cost in the marginal-value decision, not a pool-size limit. Inspect CPU/load, active fan-out, cgroup limits, and recent OOM evidence when they are relevant, but do not translate utilization into a fixed worker cap or require idle headroom before starting ordinary work. The question is whether this additional front is likely to impose enough contention or failure risk to outweigh its expected progress. Separate worktrees remove topology conflicts but not CPU/RAM contention; account for that cost without treating resource sharing as an automatic veto.
-
-Memory pressure is evaluated incrementally and by composition, not from raw utilization alone. On a cgroup-limited host, `memory.current` near `memory.max` is not by itself evidence that another worker is harmful: file/page cache and reclaimable slab may account for most of that number and can be reclaimed under pressure. Inspect `memory.stat` when memory matters, especially anonymous working-set memory, file cache, reclaimable versus unreclaimable slab/kernel memory, plus active process RSS. Treat large file cache or `slab_reclaimable` as weak evidence against launching; do not count it like committed anonymous RAM. Stronger evidence of real pressure includes rapidly growing anonymous/unreclaimable memory, memory-pressure/PSI stalls when available, new `memory.events` OOM/OOM-kill activity, thrashing, or observed degradation/failure of useful work.
-
-Do not reserve a fixed per-worker memory budget or serialize work merely because current cgroup usage is numerically high. Avoid or delay a particular additional front only when there is concrete reason to expect that front's incremental memory demand will create more harm than progress. Prefer bounding the expensive operation inside a worker over suppressing the worker itself.
-
-Do not classify Lean itself as a heavy workload or impose a static host-usage gate such as “do not start Lean above 8 GiB/14 GiB of usage.” A normal warm incremental Lean/Lake build should reuse dependency artifacts and is expected to have a modest working set. If a Lean front unexpectedly starts rebuilding a large dependency tree such as Mathlib or fans out into many `lean` processes, treat that as a cache/build-setup fault first: stop or bound the runaway rebuild and repair the cache arrangement instead of teaching later agents that ordinary Lean requires that memory budget. Lake build traces can encode absolute source paths; copying a `.lake/build` or dependency build tree from one absolute worktree root to another is not a valid warm-cache strategy unless the cache mechanism is explicitly relocation-safe. Separately, an individual Lean elaboration can become pathological because of a particular proof computation (for example an expensive `by decide`); diagnose and isolate that theorem/tactic from observed per-process growth rather than refusing all Lean work based on ambient host memory.
-
-Do not serialize heavy validation/build/mutation fronts by default. Parallelize them when the topology permits and their incremental resource cost is still worth the expected progress. If a front is killed under resource pressure, an OOM event advances, or runaway subprocess fan-out appears, diagnose and bound the offending operation; do not infer a host-wide worker limit from that event. Prefer sequential or explicitly bounded gate/test concurrency inside the specific delegated front when that improves the benefit/cost tradeoff. Resource pressure can make a particular launch negative-value, but it is evidence to reason from, not a global serialization mode.
-
-Apply resource controls to expensive operations, not indiscriminately to the existence or count of agents. A heavy or potentially heavy front does not reduce an abstract number of available slots. Continue launching any other front whose expected marginal value is positive, including low-memory research/review, UI/documentation work, ordinary implementation, or additional heavy work when the host can profitably overlap it. If a candidate's resource cost is uncertain, a bounded reconnaissance/implementation agent can classify it without beginning the expensive phase.
+Runtime capacity is entirely outside orchestration. Do not inspect it, estimate it, or use it in launch decisions. A topologically valid front is launched; execution behavior belongs to workers and the runtime layer.
 
 Development can often proceed concurrently even when integration must later serialize. Separate branches or worktrees may be safe to implement in parallel and then merge into a shared release branch one at a time.
 
@@ -213,19 +203,23 @@ Record a new agent ID/name and its worktree in the issue comment's `resources:` 
 
 ### Parallelism follows the work topology
 
-Maximize useful parallel progress across the board. The generic orchestrator has no fixed worker target, floor, or ceiling: parallelism is limited only by the topology of the available work, collision/reconciliation risk, actual host resources, and explicit constraints supplied by the affected project or issue.
+Maximize useful parallel progress across the board. The generic orchestrator is a **topology-only scheduler**. Its decision procedure is based only on the topology of the available work: dependencies, ownership, write-surface overlap, branch/worktree collisions, reconciliation structure, and explicit project/issue workflow constraints. It has no fixed worker target, floor, or ceiling.
 
 Never encode project-, repository-, issue-, branch-, theorem-, or domain-specific quotas or requirements in this generic skill. Read such constraints from the issue's recent comments, registered resources, and the project's own AGENTS.md or other project documentation, and apply them only to that work.
+
+Before deciding ownership or concurrency for an issue, perform a **project-policy preflight**: read the issue body and at least its most recent comment page, identify the relevant project/worktree from registered resources, and read the nearest project AGENTS.md plus any project orchestration document it directly points to. The absence of a quota, fence, or workflow rule from this generic skill is never evidence that the project has no such local rule. If a recent board comment conflicts with current project documentation, record the discrepancy and follow the current project-owned instruction unless a newer explicit user instruction overrides it.
+
+Every pass has a **frontier-first phase** before deep archaeology. Inspect the live-agent set and enough of the queue prefix to identify independent actionable work. For each candidate, understand the issue well enough to define a non-overlapping packet — including reading its recent comments — but do not spend most of the pass reconstructing deep history while clearly safe useful fronts remain unowned. Once a packet is clear, delegate deep branch archaeology, proof search, review, or implementation to that worker and continue filling the frontier.
 
 For each orchestration pass:
 
 1. Harvest terminal agents and incorporate their durable results before deciding what is still open.
 2. Sweep enough of the queue to discover independent actionable fronts instead of serializing unrelated work behind the first issue.
-3. For every distinct front, ask whether starting it now is likely to produce more constructive progress than expected waste from duplication, rebasing, reconciliation, contention, or resource pressure. If yes, launch it.
-4. Treat resource constraints narrowly. A scarce compiler, database, device, memory-heavy build, or other exclusive resource may serialize that operation, but it is not by itself a reason to leave unrelated lightweight research, review, audit, documentation, or implementation fronts idle.
-5. Preparing a worktree, branch, resource reservation, prompt, or handoff is not delegation. If a front is ready to run, complete agent new / agent run --detach in the same pass and verify the resulting live handle. Do not end a pass with next: launch for work that is already prepared and unblocked.
+3. For every distinct front, ask only whether topology permits useful independent execution now: is it unblocked, sufficiently understood, non-duplicative, and isolated from conflicting ownership/write surfaces? If yes, launch it.
+4. Ignore runtime capacity completely. Topology alone determines whether a front is launchable.
+5. Preparing a worktree, branch, registered path, prompt, or handoff is not delegation. If a front is ready to run, complete agent new / agent run --detach in the same pass and verify the resulting live handle. Do not end a pass with next: launch for work that is already prepared and unblocked.
 6. After harvesting completed or failed agents, refill newly exposed useful work in the same pass. Avoid batch behavior in which a pool drains to zero and waits for a later invocation.
-7. Before ending the pass, every actionable front you identified should either have a live owner, have a precise recorded blocker/dependency/collision reason, or have an explicit reason why starting it would likely create more waste than value.
+7. Before ending the pass, every actionable front you identified should either have a live owner or have a precise recorded topological blocker/dependency/collision reason.
 
 Give every newly delegated agent a descriptive title and an explicit working directory so later passes can identify ownership reliably.
 
@@ -249,13 +243,13 @@ A blocked issue stays open. Name the blocker precisely and, when possible, the e
 
 Do not create a follow-up issue for work that is merely the unfinished remainder of the current issue. Create a new issue only when it is a distinct durable task that deserves independent priority, lifecycle, or ownership.
 
-## Durable host resources
+## Durable coordination paths
 
-When work depends on a durable host path, follow [resources.md](resources.md).
+When work depends on a durable host path, follow [resources.md](resources.md). Treat registered paths only as coordination/ownership metadata: they may reveal topology such as shared write surfaces or handoff dependencies, but they are never capacity or load signals.
 
-Register and verify the dependency before relying on the path for handoff. When moving a resource dependency to a follow-up issue, add and verify the new dependency before removing the old one or closing the old issue.
+Register and verify the dependency before relying on the path for handoff. When moving a path dependency to a follow-up issue, add and verify the new dependency before removing the old one or closing the old issue.
 
-Never perform resource collection merely as part of routine orchestration.
+Never inspect or infer host capacity from the resource registry, and never perform resource collection merely as part of routine orchestration.
 
 ## Completion
 

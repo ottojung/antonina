@@ -280,3 +280,129 @@ test('invocation-marker sweep reaps detached descendants without touching other 
   ), 1);
   assert.deepEqual(signal.calls, [[5001, 'SIGKILL']]);
 });
+
+// Board issue 159. `kill(2)` against a process group whose only member is a
+// zombie returns success on Linux while delivering nothing: the signal is
+// discarded and the zombie is reaped unchanged. Measured on this host, a
+// zombie that is its own process-group leader -- the shape `runner.ts` records,
+// `meta.pgid = pid` from a `detached` spawn -- answers `kill(-pgid, SIGKILL)`
+// and `kill(-pgid, 0)` with success, and stays in state `Z` afterwards. A
+// runtime that reported delivery from the success of the `kill` would therefore
+// record `operatorSignalDelivered: true` for an invocation that was already
+// dead, and classify a host SIGKILL as an operator-requested stop with a null
+// `backend_error`.
+//
+// What already prevents it is `identityMatches`, and specifically its
+// environment-marker check: a zombie has no `mm`, so `/proc/<zombie>/environ`
+// is present but unreadable (`EACCES` on this host), the marker probe fails, and
+// the refusal happens *before* any `kill`. The start-time check does not help --
+// `/proc/<zombie>/stat` still resolves, so a zombie's identity start ticks still
+// agree, which is exactly why the marker check is load-bearing.
+//
+// `withUnreadableEnviron` models that unreadable-but-present environ with a
+// directory, the closest portable stand-in for a permission-denied read
+// (`envHasEntry` treats every throw as "no such marker").
+function withUnreadableEnviron(t, entries) {
+  const root = join('/tmp', `antonina-zombie-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  mkdirSync(root, { recursive: true });
+  for (const [pid, entry] of Object.entries(entries)) {
+    const dir = join(root, pid);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'stat'), entry.stat);
+    // A directory where a file is expected: present, and not readable as a file.
+    mkdirSync(join(dir, 'environ'), { recursive: true });
+  }
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+test('a zombie whose start ticks still agree is not reported as signalled', (t) => {
+  const iid = '3'.repeat(32);
+  // State `Z`, and the start ticks still resolve to the recorded identity -- the
+  // exact shape that makes this a live-looking dead process.
+  const root = withUnreadableEnviron(t, {
+    4242: { stat: statLine({ state: 'Z', pgrp: 4242, start: 1234 }) },
+  });
+  const identity = { pid: 4242, startTicks: 1234, agentId: 'ab12', invocationId: iid };
+  // The sender succeeds. That is the whole point: if this runtime trusted the
+  // result of the `kill`, it would report delivery for a process that is dead.
+  const send = recordingSignal(true);
+
+  assert.equal(processIsZombie(4242, root), true);
+  assert.equal(signalGroupChecked(identity, 4242, 'SIGKILL', { procRoot: root, signal: send.send }), false);
+  assert.equal(signalIdentityChecked(identity, 'SIGKILL', { procRoot: root, signal: send.send }), false);
+  assert.equal(isIdentityAlive(identity, { procRoot: root, signal: send.send }), false);
+  // Not merely a false return value: the dangerous group signal is never
+  // attempted, so no `kill(-pgid, ...)` can succeed against the zombie.
+  assert.deepEqual(send.calls, []);
+});
+
+test('an already-reaped invocation is not reported as signalled', (t) => {
+  // Distinct from the zombie: `/proc/<pid>` is gone entirely, so the identity
+  // fails on the start-time check instead of the marker check. Both must refuse.
+  const root = withUnreadableEnviron(t, {});
+  const identity = { pid: 4242, startTicks: 1234, agentId: 'ab12', invocationId: '4'.repeat(32) };
+  const send = recordingSignal(true);
+
+  assert.equal(signalGroupChecked(identity, 4242, 'SIGKILL', { procRoot: root, signal: send.send }), false);
+  assert.deepEqual(send.calls, []);
+});
+
+test('the zombie `Z` state alone does not withhold the signal: the marker check is what does', (t) => {
+  // This is the non-vacuity anchor for the two tests above. If a future change
+  // "fixed" the zombie problem by trusting `kill(2)`, or by short-circuiting on
+  // the state character, this case is what shows the guard is gone: with the
+  // markers still readable the runtime signals the group, because `stat` state
+  // is not consulted by `identityMatches` at all. Refusing on `Z` would be
+  // over-tightening and would break the ordinary death race, where a real
+  // invocation is on its way out and a legitimate operator signal still lands.
+  const iid = '5'.repeat(32);
+  const root = withProc(t, {
+    4242: {
+      stat: statLine({ state: 'Z', pgrp: 4242, start: 1234 }),
+      environ: `ANTONINA_AGENT_ID=ab12\0ANTONINA_INVOCATION_ID=${iid}\0`,
+    },
+  });
+  const identity = { pid: 4242, startTicks: 1234, agentId: 'ab12', invocationId: iid };
+  const send = recordingSignal(true);
+
+  assert.equal(processIsZombie(4242, root), true);
+  assert.equal(signalGroupChecked(identity, 4242, 'SIGKILL', { procRoot: root, signal: send.send }), true);
+  assert.deepEqual(send.calls, [[-4242, 'SIGKILL']]);
+});
+
+test('a live invocation leader in its own process group is still genuinely signalled', (t) => {
+  // The complement of the zombie cases, and the guard against over-correcting
+  // them into a runtime that never signals anything. A live leader with readable
+  // markers that is a member of the targeted group must report delivery.
+  const iid = '6'.repeat(32);
+  const root = withProc(t, {
+    4242: {
+      stat: statLine({ state: 'S', pgrp: 4242, start: 1234 }),
+      environ: `ANTONINA_AGENT_ID=ab12\0ANTONINA_INVOCATION_ID=${iid}\0`,
+    },
+  });
+  const identity = { pid: 4242, startTicks: 1234, agentId: 'ab12', invocationId: iid };
+  const send = recordingSignal(true);
+
+  assert.equal(processIsZombie(4242, root), false);
+  assert.equal(signalGroupChecked(identity, 4242, 'SIGTERM', { procRoot: root, signal: send.send }), true);
+  assert.deepEqual(send.calls, [[-4242, 'SIGTERM']]);
+});
+
+test('a live leader whose environ is unreadable is refused, not signalled blind', (t) => {
+  // The same unreadable-environ shape as the zombie case, but on a process that
+  // is alive. It must refuse identically: the runtime cannot distinguish "alive
+  // but unreadable" from "dead but unreadable", and reporting delivery on the
+  // `kill` alone would be wrong for both.
+  const iid = '7'.repeat(32);
+  const root = withUnreadableEnviron(t, {
+    4242: { stat: statLine({ state: 'S', pgrp: 4242, start: 1234 }) },
+  });
+  const identity = { pid: 4242, startTicks: 1234, agentId: 'ab12', invocationId: iid };
+  const send = recordingSignal(true);
+
+  assert.equal(processIsZombie(4242, root), false);
+  assert.equal(signalGroupChecked(identity, 4242, 'SIGKILL', { procRoot: root, signal: send.send }), false);
+  assert.deepEqual(send.calls, []);
+});

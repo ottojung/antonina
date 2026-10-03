@@ -10,7 +10,6 @@ process.env.XDG_CONFIG_HOME = '/nonexistent-antonina-closed-order-config';
 
 import App from './App';
 import { DEFAULT_FEED_LIMIT, type BoardFeedPage, type BoardFeedRequest } from './api';
-import { compareClosedIssues } from './api';
 import type { BoardIssue } from './model';
 import type { BoardOverview, IssueCommentPage, IssueListSummary } from '../../packages/core/src/api';
 import type { BoardAccessState } from '../../packages/core/src/api';
@@ -222,12 +221,31 @@ describe('closed issue ordering by closing time', () => {
   });
 
   it('is the comparator core orders the materialized closed pages with', () => {
-    const summaries = nonMonotonicClosed(6);
-    const byComparator = summaries.slice().sort(compareClosedIssues).map((each) => each.number);
+    // This order used to be computed by sorting the fixture with
+    // `compareClosedIssues` -- the function under test -- and comparing the
+    // result against `visibleIssues`, which calls that same comparator. Expected
+    // and actual then came from one implementation, so the assertion held for
+    // every comparator, correct or reversed. The fixture is spelled out here and
+    // the order is written down beside it instead, so the claim is a fact about
+    // these rows rather than a restatement of the sort.
+    //
+    // Read the order off the `closedAt` column: newest first, and the two rows
+    // closed at 11:00 tie, so the higher issue number comes first. The list is
+    // non-monotonic in both columns -- descending issue number would give
+    // 23,17,12,9,4 and ascending would give 4,9,12,17,23 -- so neither can pass.
+    const summaries = [
+      { ...closedSummary(17, 60), closedAt: '2026-09-27T11:00:00.000Z' },
+      { ...closedSummary(4, 150), closedAt: '2026-09-27T09:30:00.000Z' },
+      { ...closedSummary(23, 75), closedAt: '2026-09-27T10:45:00.000Z' },
+      { ...closedSummary(9, 0), closedAt: '2026-09-27T12:00:00.000Z' },
+      { ...closedSummary(12, 60), closedAt: '2026-09-27T11:00:00.000Z' },
+    ];
+    const EXPECTED_ORDER = [9, 17, 12, 23, 4];
 
-    expect(byComparator).toEqual(visibleIssues(summaries, [], 'closed').map((each) => each.number));
-    // And it is not the ascending-number order the view used to show.
-    expect(byComparator).not.toEqual(summaries.map((each) => each.number).sort((left, right) => left - right));
+    expect(visibleIssues(summaries, [], 'closed').map((each) => each.number)).toEqual(EXPECTED_ORDER);
+    // And it is neither of the two orders a plain issue-number sort would give.
+    expect(EXPECTED_ORDER).not.toEqual([4, 9, 12, 17, 23]);
+    expect(EXPECTED_ORDER).not.toEqual([23, 17, 12, 9, 4]);
   });
 
   it('leaves open-issue ordering exactly as the shared queue has it', () => {
@@ -289,15 +307,27 @@ describe('the Closed view draws that order', () => {
     board = summaries.map(boardIssueFor);
 
     const container = await mountClosedView();
-    const expected = visibleIssues(summaries, [], 'closed').map((each) => each.number);
 
-    expect(drawnRows(container)).toEqual(expected.slice(0, ISSUE_PAGE_SIZE));
+    // Written out rather than read back off `visibleIssues`: this test used to
+    // derive its expectation from the function under test, so it stayed green
+    // under both a reversed core comparator and a call site that did not sort at
+    // all. These are the 60 issue numbers of the fixture in the order its
+    // `closedAt` values demand -- `nonMonotonicClosed(60)` closes issue
+    // `441 + ((rank * 53) mod 60)` at `7 * (rank + 1)` minutes before the stamp,
+    // so the closing order is by ascending rank, i.e. by ascending
+    // `(number - 441) * 17 mod 60`.
+    const EXPECTED_ORDER = [441, 494, 487, 480, 473, 466, 459, 452, 445, 498, 491, 484, 477, 470, 463, 456, 449, 442, 495, 488, 481, 474, 467, 460, 453, 446, 499, 492, 485, 478, 471, 464, 457, 450, 443, 496, 489, 482, 475, 468, 461, 454, 447, 500, 493, 486, 479, 472, 465, 458, 451, 444, 497, 490, 483, 476, 469, 462, 455, 448];
+    // The fixture's own most recent closure is issue 441, not its highest number.
+    expect(EXPECTED_ORDER[0]).toBe(441);
+    expect(EXPECTED_ORDER.at(-1)).toBe(448);
+
+    expect(drawnRows(container)).toEqual(EXPECTED_ORDER.slice(0, ISSUE_PAGE_SIZE));
 
     await goNext();
-    expect(drawnRows(container)).toEqual(expected.slice(ISSUE_PAGE_SIZE));
+    expect(drawnRows(container)).toEqual(EXPECTED_ORDER.slice(ISSUE_PAGE_SIZE));
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: ISSUE_PAGE_PREVIOUS })); });
-    expect(drawnRows(container)).toEqual(expected.slice(0, ISSUE_PAGE_SIZE));
+    expect(drawnRows(container)).toEqual(EXPECTED_ORDER.slice(0, ISSUE_PAGE_SIZE));
   });
 
   it('is not the ascending-issue-number order the view used to draw', async () => {

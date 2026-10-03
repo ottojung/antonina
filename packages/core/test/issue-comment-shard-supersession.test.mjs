@@ -418,23 +418,37 @@ test('an A->B->A edit does not re-establish a ref, and the sweep still leaves th
   // issue readable and every comment ref the published snapshot names present.
   const { server, store, initialized, advance } = await boardWithComments(1);
 
-  const firstEditRef = liveIssueRef(server, initialized.credential);
-  await store.appendFast(initialized.credential, {
+  const edit = (body) => store.appendFast(initialized.credential, {
     kind: 'issue.edit',
-    payload: { number: 1, title: null, body: 'BBB' },
+    payload: { number: 1, title: null, body },
   });
-  await store.appendFast(initialized.credential, {
-    kind: 'issue.edit',
-    payload: { number: 1, title: null, body: 'AAA' },
-  });
+  const bodyOf = (ref) => server.objects.get(storageKeyOf(initialized.credential, ref)).value.issue.body;
 
   // The premise this case is NOT built on, asserted so it cannot be assumed:
-  // the body came back to 'AAA' and the ref did not.
-  const secondEditRef = liveIssueRef(server, initialized.credential);
-  assert.equal(server.objects.get(storageKeyOf(initialized.credential, secondEditRef)).value.issue.body, 'AAA',
-    'the edit round-tripped the body');
-  assert.notEqual(secondEditRef, firstEditRef,
-    'but the snapshot embeds issue.updatedAt, so the round trip did NOT re-establish the first ref');
+  // an 'AAA' snapshot, then a full round trip back to 'AAA', and the ref differs.
+  //
+  // Both ends of the comparison must BE 'AAA'. Comparing the round-tripped
+  // snapshot against the pre-edit one would assert nothing about
+  // re-establishment: that snapshot's body is the fixture's initial
+  // 'the description', so the refs differ on content alone and the assertion
+  // would still hold if the snapshot carried no timestamp at all.
+  await edit('BBB');
+  await edit('AAA');
+  const firstAaaRef = liveIssueRef(server, initialized.credential);
+  assert.equal(bodyOf(firstAaaRef), 'AAA', 'the first cycle left an AAA snapshot');
+
+  // The clock has to move for the second AAA to be a separate snapshot: the ref
+  // is the digest of bytes that embed `issue.updatedAt`, and two commits in the
+  // same millisecond stamp the same value. Without this, the premise below would
+  // be trivially true for the wrong reason (a repeat, not a round trip).
+  advance(1_000);
+  await edit('BBB');
+  await edit('AAA');
+
+  const secondAaaRef = liveIssueRef(server, initialized.credential);
+  assert.equal(bodyOf(secondAaaRef), 'AAA', 'the edit round-tripped the body to AAA again');
+  assert.notEqual(secondAaaRef, firstAaaRef,
+    'but the snapshot embeds issue.updatedAt, so the round trip did NOT re-establish the first AAA ref');
 
   advance(ONE_WINDOW_MS);
   await store.appendFast(initialized.credential, comment('trigger the sweep'));

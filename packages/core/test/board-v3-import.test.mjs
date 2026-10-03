@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { SignedBoardStore } from '../dist/board-store.js';
 import { fakeSkrynia } from './fake-skrynia.mjs';
@@ -371,4 +373,78 @@ async function closureOf(server, credential, meta) {
     }
   }
   return [...refs];
+}
+
+test('the import path binds no replaced-ref set it would only be able to discard', () => {
+  // `materializeLogical` used to destructure `superseded` off both
+  // `writeIssueListPages` results and drop them with `void`, under a comment
+  // saying they were "returned only so the caller can assert they are empty".
+  // The caller asserted nothing. A discarded value next to a comment that
+  // promises a check is the defect; the discarded value itself cannot matter,
+  // which the behavioural test below states as the reason.
+  //
+  // So this is a source-shape test, deliberately: the repair removes a
+  // guarantee of behaviour rather than changing behaviour, and no behavioural
+  // assertion can distinguish the two shapes. It is scoped to this one function
+  // because the file has other `void` uses that are honest.
+  const body = materializeLogicalSource();
+  assert.equal(
+    /void\s*\[/.test(body),
+    false,
+    'materializeLogical discards a value with `void`; if it means it, assert it, and if it does not, stop binding it',
+  );
+  assert.equal(
+    /superseded\s*[}:]/.test(body),
+    false,
+    'materializeLogical binds the replaced-ref set, which it has no way to use: the import has no previous generation to replace',
+  );
+  assert.equal(
+    /assert they are empty/.test(body),
+    false,
+    'materializeLogical promises in prose that the caller asserts the replaced set is empty, which no caller does',
+  );
+});
+
+test('the import replaces nothing, so the replaced set it discards is empty by construction', async () => {
+  await withLegacyBoard(async ({ server, store, credential }) => {
+    server.clearRequests();
+    await store.importBoard(credential, { confirm: true });
+
+    // Both calls pass `null, null, []` for previous state, previous closed-at
+    // and previous refs, so `writeIssueListPages` has no previous page to diff
+    // and no previous ref to replace: it cannot report anything, whatever the
+    // board looks like. The meta says so.
+    const pointer = pointerOf(server);
+    const meta = server.objects.get(await keyOf(server, credential, pointer.metaRef)).value;
+    assert.deepEqual(meta.supersededRefs, [], 'the first writer replaces nothing');
+    // And nothing was reclaimed, for the same reason: the sweep belongs to the
+    // generations after the import.
+    assert.equal(
+      server.requests.filter((entry) => entry.method === 'DELETE').length,
+      0,
+      'the import issued a DELETE, so it did reclaim something it had no generation to replace',
+    );
+  });
+});
+
+/**
+ * The body of `materializeLogical`, read out of the source.
+ *
+ * The store is only imported here for its behaviour above; this reaches past it
+ * to the text, which is the point of the first test and the reason it is
+ * written against `packages/core/src` rather than `dist`.
+ */
+function materializeLogicalSource() {
+  const file = join(
+    dirname(fileURLToPath(import.meta.url)),
+    '..',
+    'src',
+    'board-v3-store.ts',
+  );
+  const text = readFileSync(file, 'utf8');
+  const start = text.indexOf('private async materializeLogical(');
+  assert.notEqual(start, -1, 'materializeLogical is not in board-v3-store.ts');
+  const end = text.indexOf('\n  private ', start + 1);
+  assert.notEqual(end, -1, 'materializeLogical is not followed by another member');
+  return text.slice(start, end);
 }

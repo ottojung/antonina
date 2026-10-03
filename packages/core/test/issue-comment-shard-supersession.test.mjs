@@ -167,6 +167,14 @@ function liveSnapshot(server, credential) {
   return snapshot.value;
 }
 
+/** The PUBLISHED issue snapshot's own ref, i.e. what the directory names for it. */
+function liveIssueRef(server, credential) {
+  const meta = liveMeta(server);
+  const directory = meta.directoryRefs.find((ref) => ref !== null);
+  const page = server.objects.get(storageKeyOf(credential, directory)).value;
+  return page.entries.find((candidate) => candidate.number === 1).ref;
+}
+
 const comment = (body) => ({ kind: 'issue.comment', payload: { number: 1, author: 'tester', body } });
 
 test('superseding a comment shard writes a new ref and leaves the old shard in place', async () => {
@@ -390,14 +398,27 @@ test('an interrupted commit leaves commentRefs naming only resolvable shards', a
   assert.equal(overview.issues.length, 1);
 });
 
-test('an A->B->A edit does not let the sweep delete a ref the live snapshot pins', async () => {
-  // Content addressing makes re-establishment real, not theoretical: editing a
-  // body A -> B -> A writes A's ref again, so a ref recorded as superseded is
-  // pinned by the current generation again. Deleting on the recorded list alone
-  // would destroy a live shard, and the paged read would 404 on the issue's own
-  // snapshot -- which is the same failure the residual describes, one level up.
+test('an A->B->A edit does not re-establish a ref, and the sweep still leaves the read whole', async () => {
+  // MEASURED, and the measurement is the point of keeping this case. An earlier
+  // version of this comment claimed that editing a body A -> B -> A "writes A's
+  // ref again", and inferred from that a re-establishment the sweep had to
+  // survive. That inference is false for an ISSUE SNAPSHOT, and the assertions
+  // here do not establish it: with `if (pinnedAgain.has(ref)) continue;` removed
+  // from `reclaimOutsideWindow`, this test still passes.
+  //
+  // The reason is measured below rather than argued. An `IssueSnapshot` embeds
+  // `issue.updatedAt`, which advances on every edit, so the second 'AAA' is not
+  // the first 'AAA' byte-for-byte and content addressing gives it a different
+  // ref. Nothing is re-established, so there is no re-established ref for the
+  // sweep to get wrong. The `pinnedAgain` guard's witness is the NEXT test, whose
+  // close/reopen really does return the queue shard to identical content.
+  //
+  // What this case does establish, and what would regress if the sweep overran a
+  // live generation: an edit storm followed by a reclaiming sweep leaves the
+  // issue readable and every comment ref the published snapshot names present.
   const { server, store, initialized, advance } = await boardWithComments(1);
 
+  const firstEditRef = liveIssueRef(server, initialized.credential);
   await store.appendFast(initialized.credential, {
     kind: 'issue.edit',
     payload: { number: 1, title: null, body: 'BBB' },
@@ -407,13 +428,21 @@ test('an A->B->A edit does not let the sweep delete a ref the live snapshot pins
     payload: { number: 1, title: null, body: 'AAA' },
   });
 
+  // The premise this case is NOT built on, asserted so it cannot be assumed:
+  // the body came back to 'AAA' and the ref did not.
+  const secondEditRef = liveIssueRef(server, initialized.credential);
+  assert.equal(server.objects.get(storageKeyOf(initialized.credential, secondEditRef)).value.issue.body, 'AAA',
+    'the edit round-tripped the body');
+  assert.notEqual(secondEditRef, firstEditRef,
+    'but the snapshot embeds issue.updatedAt, so the round trip did NOT re-establish the first ref');
+
   advance(ONE_WINDOW_MS);
   await store.appendFast(initialized.credential, comment('trigger the sweep'));
 
   assert.ok(store.sweepReport().reclaimed > 0, 'the sweep ran and reclaimed');
   const live = liveSnapshot(server, initialized.credential);
   const page = await store.readIssueCommentPage(initialized.credential, 1, 1);
-  assert.equal(page.issue.body, 'AAA', 'the re-established snapshot ref survived the sweep');
+  assert.equal(page.issue.body, 'AAA', 'the live snapshot survived the sweep');
   assert.equal(page.messages.length, 2);
   assert.equal(page.total, 2);
   assert.equal(live.messageCount, 2);

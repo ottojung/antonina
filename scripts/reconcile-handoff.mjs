@@ -30,7 +30,8 @@
 //   3  unresolved disagreement; a human decision is required before any write
 //   4  a claim is complete locally but absent from the administrative state;
 //      publication is possible on this host but is not authorised by this tool
-//   5  at least one claim could not be evaluated (unknown commit, missing ref)
+//   5  at least one claim could not be evaluated (unknown commit, missing ref,
+//      or an administrative ref whose presence could not be read)
 
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
@@ -42,22 +43,50 @@ export const EXIT_DISAGREE = 3
 export const EXIT_UNPUBLISHED = 4
 export const EXIT_UNEVALUABLE = 5
 
+// Credential-bearing git text is never allowed to leave this process.
+//
+// When a remote URL embeds a credential and git has no helper to answer, git
+// prints the URL *including the userinfo* to stderr, e.g.
+//   fatal: could not read Password for 'https://<token>@github.com': ...
+// Git redacts userinfo on some other messages but not on this one, so a
+// redaction cannot be assumed from git. Every captured byte is scrubbed here,
+// before it can reach a verdict, the emitted line, a report or an exit path.
+//
+// Precedent: packages/agent-runtime/src/backend.ts sanitizeBackendError,
+// packages/core/src/board-diagnostics.ts (which refuses to echo
+// credential-shaped strings at all).
+export function redactCredentials(text) {
+  let out = String(text ?? '')
+  // URL userinfo: scheme://userinfo@host -> scheme://<redacted>@host
+  out = out.replace(/:\/\/[^/@\s]+@/g, '://<redacted>@')
+  // A bare credential-shaped token that survived URL handling, e.g. a token
+  // echoed on a line with no surrounding URL. GitHub PATs, classic and fine
+  // grained; GitLab and Bitbucket personal access tokens.
+  out = out.replace(/\b(gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,})\b/g, '<redacted>')
+  out = out.replace(/\b(glpat-[A-Za-z0-9_-]{16,})\b/g, '<redacted>')
+  return out
+}
+
 function git(repo, args, { allowFailure = false } = {}) {
   try {
     return {
       ok: true,
-      out: execFileSync('git', args, {
-        cwd: repo,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }).trim(),
+      out: redactCredentials(
+        execFileSync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }).trim(),
+      ),
     }
   } catch (err) {
     if (!allowFailure) throw err
     // git reports transport failures (missing remote, auth, DNS) on stderr, so
-    // the error text must be captured or a failure reason is lost.
-    const stderrText = String(err.stderr ?? '').trim()
-    const stdoutText = String(err.stdout ?? '').trim()
+    // the error text must be captured or a failure reason is lost. It is
+    // redacted on the way in: the diagnostic is still there, the credential is
+    // not.
+    const stderrText = redactCredentials(String(err.stderr ?? '').trim())
+    const stdoutText = redactCredentials(String(err.stdout ?? '').trim())
     return {
       ok: false,
       out: stdoutText || stderrText,
@@ -72,14 +101,43 @@ function git(repo, args, { allowFailure = false } = {}) {
 // the admin side that the caller has to reconcile against. A transport failure
 // is NOT absence and is reported separately, so an unreachable remote is never
 // restated as "this branch does not exist there".
+//
+// Three outcomes, all distinguished:
+//   reachable:false              -> the read failed; nothing is known.
+//   reachable:true, present:false -> the read succeeded and reported no such ref.
+//   reachable:true, present:true, unparseable:true
+//                                 -> the read succeeded and printed something
+//                                    that is not a sha1 ref line, so the ref's
+//                                    existence is unknown. Reporting this as
+//                                    absence would restate an unreadable line as
+//                                    "does not exist there", the same falsehood
+//                                    a transport failure used to produce. A
+//                                    sha256-object-format remote prints 64-hex
+//                                    ref lines that this sha1 reader cannot parse.
 export function readAdminRef(repo, remote, ref) {
   const ls = git(repo, ['ls-remote', '--heads', remote, `refs/heads/${ref}`], {
     allowFailure: true,
   })
-  if (!ls.ok) return { ref, reachable: false, present: false, commit: null, error: ls.out }
+  if (!ls.ok) {
+    return { ref, reachable: false, present: false, unparseable: false, commit: null, error: ls.out }
+  }
   const match = /^([0-9a-f]{40})\trefs\/heads\/(.+)$/.exec(ls.out)
-  if (!match) return { ref, reachable: true, present: false, commit: null, error: null }
-  return { ref, reachable: true, present: true, commit: match[1], error: null }
+  if (match) {
+    return { ref, reachable: true, present: true, unparseable: false, commit: match[1], error: null }
+  }
+  if (ls.out.length === 0) {
+    // The read succeeded and reported no matching ref: absence, a fact.
+    return { ref, reachable: true, present: false, unparseable: false, commit: null, error: null }
+  }
+  // Something was printed and it was not a ref line. Its existence is unknown.
+  return {
+    ref,
+    reachable: true,
+    present: false,
+    unparseable: true,
+    commit: null,
+    error: `ls-remote returned a line this reader could not parse: ${ls.out}`,
+  }
 }
 
 function isAncestor(repo, older, newer) {
@@ -128,9 +186,19 @@ export function reconcileClaim(claim, admin, repo) {
     return verdict
   }
 
+  if (admin.claimRef && admin.claimRef.unparseable === true) {
+    // The claim ref may exist on the administrative side; the output naming it
+    // could not be parsed. Absence is not concluded.
+    verdict.verdict = 'admin-ref-unreadable'
+    verdict.why = `${admin.claimRef.ref} could not be read from the administrative side: ${redactCredentials(admin.claimRef.error) || 'unparseable ls-remote output'}`
+    verdict.nextStep =
+      're-run against an administrative side whose ref names this reader can parse (sha1 object format); absence is not concluded'
+    return verdict
+  }
+
   if (admin.claimRef && admin.claimRef.reachable === false) {
     verdict.verdict = 'admin-unreachable'
-    verdict.why = `${admin.claimRef.ref} could not be read from the administrative side: ${admin.claimRef.error || 'transport error'}`
+    verdict.why = `${admin.claimRef.ref} could not be read from the administrative side: ${redactCredentials(admin.claimRef.error) || 'transport error'}`
     verdict.nextStep =
       'establish administrative reachability (credentials, network, provider) and re-run; absence is not concluded'
     return verdict
@@ -147,11 +215,23 @@ export function reconcileClaim(claim, admin, repo) {
     return verdict
   }
 
-  if (admin.reachable === false) {
-    // The read never succeeded. Nothing can be asserted about the
-    // administrative side, including that a ref is missing there.
+  if (admin.unparseable === true) {
+    // The read succeeded but printed something this reader cannot parse, so
+    // whether the target ref exists is unknown. Absence is not concluded.
+    verdict.verdict = 'admin-ref-unreadable'
+    verdict.why = `${admin.ref} could not be read from the administrative side: ${redactCredentials(admin.error) || 'unparseable ls-remote output'}`
+    verdict.nextStep =
+      're-run against an administrative side whose ref names this reader can parse (sha1 object format); absence is not concluded'
+    return verdict
+  }
+
+  if (admin.reachable !== true) {
+    // The read never succeeded, or the reader did not state that it did.
+    // Nothing can be asserted about the administrative side, including that a
+    // ref is missing there. Fail closed: an unknown reachability is not a
+    // successful read.
     verdict.verdict = 'admin-unreachable'
-    verdict.why = `${admin.ref} could not be read from the administrative side: ${admin.error || 'transport error'}`
+    verdict.why = `${admin.ref} could not be read from the administrative side: ${redactCredentials(admin.error) || 'transport error'}`
     verdict.nextStep =
       'establish administrative reachability (credentials, network, provider) and re-run; absence is not concluded'
     return verdict
@@ -238,6 +318,7 @@ export function codeForVerdict(verdict) {
     'claim-is-not-the-branch-head': EXIT_DISAGREE,
     'target-ref-absent': EXIT_UNEVALUABLE,
     'admin-unreachable': EXIT_UNEVALUABLE,
+    'admin-ref-unreadable': EXIT_UNEVALUABLE,
     'claim-branch-diverged': EXIT_DISAGREE,
     diverged: EXIT_DISAGREE,
     'duplicate-claims-disagree': EXIT_DISAGREE,

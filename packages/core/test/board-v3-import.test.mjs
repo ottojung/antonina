@@ -445,6 +445,25 @@ test('the import reaches the replaced set only through a previous ref it passes 
   // cannot matter. (1), (2) and the body of `writeIssueListPages` are unchanged
   // across the repair, which is exactly why (3) is the discriminating half and
   // why this asserts the chain rather than the whole file's text.
+  //
+  // Verified in both directions on 2026-10-03, with this file and only this
+  // file varying against each side's `board-v3-store.ts`:
+  //   - src at cc5a5873: exit 0 (9 tests).
+  //   - src at 44cb0351 (the parent of 272dabfd): exit 1, failing on the two
+  //     shape tests -- `void [` in `materializeLogical`, and
+  //     `refs: openPageRefs, superseded: openSuperseded` at import call site 1.
+  //   - mutant A, import call site 1 passed `state` instead of `null` as
+  //     previousState: exit 1 on the `null, null, []` assertion, with the
+  //     comment above untouched.
+  //   - mutant B, `writeIssueListPages` also pushed the ref it had just written
+  //     (a second superseded source): exit 1 on the push-site count.
+  // The mutants matter because a source-shape test is otherwise only a change
+  // detector for the parent commit: they show the assertions read the arguments
+  // and the writer, not the diff or the prose comment.
+  //
+  // And the discrimination does not depend on the tests added after 272dabfd:
+  // 272dabfd's own test file against 44cb0351's source is already exit 1, on
+  // the `void [` assertion.
   const importBody = materializeLogicalSource();
   const calls = writeIssueListPagesCallSites(importBody);
   assert.equal(

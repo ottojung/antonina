@@ -27,6 +27,7 @@ import {
   type BoardResource,
   type BoardReview,
   REVIEW_VERDICTS,
+  isReviewCommitId,
   type ReviewVerdict,
   type IssueState,
 } from './model.js';
@@ -351,6 +352,14 @@ interface IssueCore {
    * compaction. Absent means no review has been recorded.
    */
   review?: BoardReview;
+  /**
+   * The commits an outstanding `request-changes` named, carried for the same
+   * reason and with the same consequence if it were dropped: the refusal rule
+   * in `applyBoardMutation` reads it, so an issue snapshot or list projection
+   * that lost it would let an approval of a blocked commit be stored. Absent
+   * means no block is outstanding.
+   */
+  outstandingBlocks?: string[];
 }
 
 /**
@@ -428,6 +437,11 @@ export interface IssueListSummary {
    * clear a blocker the next mutation then applied.
    */
   review?: BoardReview;
+  /**
+   * The outstanding blocked commits, on the projection for the same reason the
+   * verdict is: the write path rebuilds its working issue from this summary.
+   */
+  outstandingBlocks?: string[];
 }
 
 /**
@@ -791,6 +805,7 @@ function coreOf(issue: BoardIssue): IssueCore {
     updatedAt: issue.updatedAt,
   };
   if (issue.review !== undefined) core.review = clone(issue.review);
+  if (issue.outstandingBlocks !== undefined) core.outstandingBlocks = [...issue.outstandingBlocks];
   return core;
 }
 
@@ -805,6 +820,7 @@ function issueFromCore(core: IssueCore, messages: BoardMessage[]): BoardIssue {
     messages,
   };
   if (core.review !== undefined) issue.review = clone(core.review);
+  if (core.outstandingBlocks !== undefined) issue.outstandingBlocks = [...core.outstandingBlocks];
   return issue;
 }
 
@@ -820,7 +836,7 @@ function issueFromCore(core: IssueCore, messages: BoardMessage[]): BoardIssue {
  */
 function parseStoredReview(value: unknown): BoardReview {
   if (!isRecord(value)
-      || typeof value.commit !== 'string'
+      || !isReviewCommitId(value.commit)
       || typeof value.verdict !== 'string'
       || !(REVIEW_VERDICTS as readonly string[]).includes(value.verdict)
       || typeof value.reviewer !== 'string'
@@ -835,6 +851,21 @@ function parseStoredReview(value: unknown): BoardReview {
     rationale: value.rationale,
     recordedAt: value.recordedAt,
   };
+}
+
+/**
+ * The stored outstanding blocked commits, read against the same closed shape
+ * the board model requires. A shard carrying a commit id this build cannot
+ * compare would make the refusal rule compare it against nothing, so it is
+ * refused rather than read as an empty list of blocks -- an empty list here is
+ * a statement that no blocker is outstanding, and it must not be manufactured
+ * out of a value that failed to load.
+ */
+function parseStoredOutstandingBlocks(value: unknown): string[] {
+  if (!Array.isArray(value) || !value.every(isReviewCommitId) || new Set(value).size !== value.length) {
+    throw new ShardedBoardStoreError('Antonina stored outstanding review blocks are malformed');
+  }
+  return [...(value as string[])];
 }
 
 function directoryPageNumber(issueNumber: number): number {
@@ -933,6 +964,7 @@ function orderedSummaries(
       ...(lastActivityAt === undefined ? {} : { lastActivityAt }),
       hasBody: issue.body.length > 0,
       ...(issue.review === undefined ? {} : { review: clone(issue.review) }),
+      ...(issue.outstandingBlocks === undefined ? {} : { outstandingBlocks: [...issue.outstandingBlocks] }),
     };
   });
 }
@@ -994,6 +1026,7 @@ function issueFromSummary(summary: IssueListSummary): BoardIssue {
     updatedAt: summary.updatedAt,
     messages: [],
     ...(summary.review === undefined ? {} : { review: clone(summary.review) }),
+    ...(summary.outstandingBlocks === undefined ? {} : { outstandingBlocks: [...summary.outstandingBlocks] }),
   };
 }
 
@@ -1707,6 +1740,9 @@ export class ShardedBoardStore {
       ...(coreValue.review === undefined || coreValue.review === null
         ? {}
         : { review: parseStoredReview(coreValue.review) }),
+      ...(coreValue.outstandingBlocks === undefined || coreValue.outstandingBlocks === null
+        ? {}
+        : { outstandingBlocks: parseStoredOutstandingBlocks(coreValue.outstandingBlocks) }),
     };
     if (core.number !== (value.number as number)) {
       throw new ShardedBoardStoreError('Antonina issue snapshot number mismatch');
@@ -2971,6 +3007,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         updatedAt: issue.updatedAt,
         messages: issue.messages,
         review: issue.review ?? null,
+        outstandingBlocks: issue.outstandingBlocks ?? null,
       })),
       bundle.state.board.issues.map((issue) => ({
         number: issue.number,
@@ -2981,6 +3018,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         updatedAt: issue.updatedAt,
         messages: issue.messages,
         review: issue.review ?? null,
+        outstandingBlocks: issue.outstandingBlocks ?? null,
       })),
     );
     same('queue', intended.queue, bundle.state.queue);
@@ -3697,12 +3735,28 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         || !Array.isArray(value.entries)) {
       throw new ShardedBoardStoreError('Antonina issue list page is malformed');
     }
+    // The page's entries carry the review verdict and the outstanding blocks, so
+    // they are read through the same refusing readers the issue core uses. A
+    // projection is what the write path rebuilds its working issue from, and a
+    // verdict this build cannot parse would otherwise reach the completion gate
+    // as a string that is not `request-changes`, which is the read that turns a
+    // blocker into a clear issue.
+    const entries = value.entries.map((entry) => {
+      if (!isRecord(entry)) throw new ShardedBoardStoreError('Antonina issue list page entry is malformed');
+      return {
+        ...(clone(entry) as unknown as IssueListSummary),
+        ...(entry.review === undefined || entry.review === null ? {} : { review: parseStoredReview(entry.review) }),
+        ...(entry.outstandingBlocks === undefined || entry.outstandingBlocks === null
+          ? {}
+          : { outstandingBlocks: parseStoredOutstandingBlocks(entry.outstandingBlocks) }),
+      };
+    });
     // The stored page carries no revision: a field that differs on every
     // mutation would make the page's ref differ too, and then no list page a
     // mutation did not touch could ever be shared. The revision reported to a
     // caller is the meta's, which is the same revision for every shard of the
     // generation the page belongs to.
-    return { ...(clone(value) as unknown as IssueListPage), revision: meta.revision };
+    return { ...(clone(value) as unknown as IssueListPage), entries, revision: meta.revision };
   }
 
   async readIssuePage(

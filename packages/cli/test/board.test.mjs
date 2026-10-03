@@ -647,7 +647,7 @@ test('board review records a verdict and the blocked close is refused and report
   const issue = await owner.createIssue('Kawun handoff', 'branch-to-PR handoff and review lifecycle');
 
   const recorded = await run(['review', String(issue.number), '--verdict', 'request-changes',
-    '--commit', 'aaaaaaa', '--reviewer', 'independent',
+    '--commit', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '--reviewer', 'independent',
     '--rationale', 'Error: recommend no merge'], { createClient: () => owner });
   assert.equal(recorded.code, 0, recorded.err.join('\n'));
   assert.match(recorded.out[0], /Review #1 request-changes by independent about aaaaaaa/);
@@ -656,7 +656,7 @@ test('board review records a verdict and the blocked close is refused and report
   // blocker rather than a generic failure.
   const closed = await run(['close', String(issue.number)], { createClient: () => owner });
   assert.equal(closed.code, 1);
-  assert.match(closed.err.join('\n'), /unresolved review blocker recorded by independent against commit aaaaaaa/);
+  assert.match(closed.err.join('\n'), /unresolved review blocker recorded by independent against commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
   assert.equal((await owner.getIssue(issue.number)).state, 'open');
 
   // And the human form of `show` says the same thing without being asked.
@@ -671,15 +671,15 @@ test('board review refuses the same-commit override and accepts the fixed commit
   const owner = client(server);
   await owner.initialize();
   const issue = await owner.createIssue('Override attempt');
-  await run(['review', String(issue.number), '--verdict', 'request-changes', '--commit', 'aaaaaaa',
+  await run(['review', String(issue.number), '--verdict', 'request-changes', '--commit', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     '--reviewer', 'independent', '--rationale', 'recommend no merge'], { createClient: () => owner });
 
-  const override = await run(['review', String(issue.number), '--verdict', 'approve', '--commit', 'aaaaaaa',
+  const override = await run(['review', String(issue.number), '--verdict', 'approve', '--commit', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     '--reviewer', 'front', '--rationale', 'proceed anyway'], { createClient: () => owner });
   assert.equal(override.code, 1);
   assert.match(override.err.join('\n'), /an approval cannot clear the review blocker/);
 
-  const approval = await run(['review', String(issue.number), '--verdict', 'approve', '--commit', 'bbbbbbb',
+  const approval = await run(['review', String(issue.number), '--verdict', 'approve', '--commit', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
     '--reviewer', 'independent', '--rationale', 'blocker addressed'], { createClient: () => owner });
   assert.equal(approval.code, 0, approval.err.join('\n'));
   const closed = await run(['close', String(issue.number)], { createClient: () => owner });

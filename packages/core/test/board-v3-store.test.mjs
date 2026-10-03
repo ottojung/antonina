@@ -441,3 +441,78 @@ test('commenting rewrites only the affected issue-list page plus snapshot leaves
   );
   assert.equal(pointerWrites.length, 1);
 });
+
+// Required fix 4 of /workspace/BOARD44-REVIEW-2600.md: the store's own fail-closed
+// read of a stored verdict had no test at all -- mutation M5 turned that reader
+// into a fail-open one and the whole suite stayed green. The shard below is
+// written by this build, then its stored verdict is replaced with a value this
+// build does not name, exactly as a shard written by something else would look.
+test('a shard carrying a verdict this build does not name is refused, not read as no review', async () => {
+  const server = fakeSkrynia();
+  const store = deterministicStore(server);
+  const initialized = await store.initialize();
+  const created = await store.appendFast(initialized.credential, {
+    kind: 'issue.create',
+    payload: { number: 1, title: 'Reviewed', body: '' },
+  });
+  await store.appendFast(initialized.credential, {
+    kind: 'review.record',
+    payload: {
+      number: 1,
+      commit: 'a'.repeat(40),
+      verdict: 'request-changes',
+      reviewer: 'independent',
+      rationale: 'recommend no merge',
+    },
+  }, created.state.head);
+
+  const before = await store.getIssue(initialized.credential, 1);
+  assert.equal(before.review.verdict, 'request-changes');
+
+  // Overwrite the stored issue snapshot in place, the way another writer of the
+  // same object would: the ref still names this content's digest, which is what
+  // makes the read path's refusal the only thing standing between an unknown
+  // verdict and a clear issue.
+  // Both places the verdict is materialized -- the issue snapshot and the
+  // list projection -- are overwritten, because a reader is entitled to serve
+  // either and a reader that served only the intact one would be reading a
+  // clear issue off a shard that does not say so.
+  const carrying = [...server.objects.entries()].filter(([, entry]) =>
+    entry.value?.issue?.review?.verdict === 'request-changes'
+    || (entry.value?.entries ?? []).some((summary) => summary?.review?.verdict === 'request-changes'));
+  assert.ok(carrying.length >= 2, 'the verdict must be materialized in both the snapshot and the projection');
+  for (const [key, entry] of carrying) {
+    const withUnknownVerdict = entry.value.issue !== undefined
+      ? { ...entry.value, issue: { ...entry.value.issue, review: { ...entry.value.issue.review, verdict: 'recommend-no-merge' } } }
+      : {
+        ...entry.value,
+        entries: entry.value.entries.map((summary) => ({
+          ...summary,
+          review: { ...summary.review, verdict: 'recommend-no-merge' },
+        })),
+      };
+    const response = await server.fetch(`https://example.invalid/_skrynia/store/antonina/${key}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Skrynia-Capability': server.capabilityOf(key) },
+      body: JSON.stringify(withUnknownVerdict),
+    });
+    assert.equal(response.status, 200, 'the contract double must model anonymous overwrite');
+    assert.equal(
+      (server.objects.get(key).value.issue ?? server.objects.get(key).value.entries[0]).review.verdict,
+      'recommend-no-merge',
+    );
+  }
+
+  // A reader that has never seen the write -- a restart, or a second client --
+  // refuses. It does not fall back to "this issue carries no review", which is
+  // the read that would let a blocked handoff be declared complete.
+  const reader = deterministicStore(server);
+  await assert.rejects(
+    () => reader.getIssue(initialized.credential, 1),
+    /stored review verdict is malformed/,
+  );
+  await assert.rejects(
+    () => reader.readIssuePage(initialized.credential, 'open', 1),
+    /stored review verdict is malformed/,
+  );
+});

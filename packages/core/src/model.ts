@@ -196,6 +196,44 @@ export function parseReviewVerdict(value: string): ReviewVerdict {
 }
 
 /**
+ * A full, lowercase hex object id, or nothing.
+ *
+ * The commit a review names is the only thing that makes the comparison in
+ * {@link reviewMayReplace} mean anything, and a partial or differently cased
+ * spelling of one commit is a *different string* from the same commit. So the
+ * shape is not "some string that looks like a commit": it is either the whole
+ * 40-character lowercase digest or the empty string. `git rev-parse --short`
+ * output and a hand-typed digest in the wrong case are refused as malformed
+ * rather than stored as some other commit's id, which is what previously let
+ * the very same commit be "re-approved" through an abbreviation.
+ */
+export const REVIEW_COMMIT_PATTERN = /^[0-9a-f]{40}$/;
+
+/** Whether `value` is a commit id this board is willing to compare. */
+export function isReviewCommitId(value: unknown): value is string {
+  return typeof value === 'string' && (value === '' || REVIEW_COMMIT_PATTERN.test(value));
+}
+
+/**
+ * The canonical form of a supplied commit id: surrounding whitespace removed,
+ * and nothing else changed.
+ *
+ * Case is deliberately *not* folded: a digest written `AAAA...` is refused
+ * rather than silently repaired, because a reader who cannot be trusted to
+ * reproduce a digest exactly is not a reader whose commit ids should be
+ * compared against a review blocker's. Refusing at the door is the only shape
+ * in which a case-folded id cannot later read as "a different commit".
+ */
+export function canonicalReviewCommit(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('Antonina review commit is not a string');
+  const trimmed = value.trim();
+  if (!isReviewCommitId(trimmed)) {
+    throw new Error('Antonina review commit must be a full 40-character lowercase hex object id or empty: ' + JSON.stringify(value));
+  }
+  return trimmed;
+}
+
+/**
  * One review verdict about one exact commit.
  *
  * `commit` is what makes the record a blocker rather than an opinion. A verdict
@@ -233,6 +271,25 @@ export interface BoardIssue {
    * superseded verdicts are already in the issue's own append-only thread.
    */
   review?: BoardReview;
+  /**
+   * The commits a `request-changes` verdict named that no approval has yet
+   * cleared, so that the newest verdict is not the only thing that decides
+   * whether an approval is legitimate.
+   *
+   * Keeping only the newest verdict made the override rule order-dependent: an
+   * `approve` about one commit followed by a re-block about another commit left
+   * the first blocked commit with nothing on the board to stop a later approval
+   * of it, and any four-operation ordering could launder a block out from under
+   * the rule. A commit named here can never be the commit of an approval,
+   * whatever verdicts were recorded since, and an entry is removed only by an
+   * approval that names that same commit -- which is refused while it is here.
+   * So the set only ever grows, which is the right direction for a record whose
+   * whole purpose is to refuse.
+   *
+   * Optional and append-only, like `review`: a board signed before the field
+   * existed still parses and replays.
+   */
+  outstandingBlocks?: string[];
 }
 
 /**
@@ -254,27 +311,65 @@ export function reviewBlocksCompletion(issue: Pick<BoardIssue, 'number' | 'revie
 }
 
 /**
- * Whether a new verdict may be recorded over the one the issue carries.
+ * Whether a new verdict may be recorded over the ones the issue carries.
  *
  * The rule is narrow on purpose, because the history this repository documents
  * is a recommend-no-merge finding being overridden rather than acted on. So:
  *
  * - recording a verdict over no verdict, or a second blocked verdict, is always
  *   allowed -- a re-review that still finds a blocker is ordinary review work;
- * - an approval is allowed only when it names a different commit than the block
- *   it would clear, because a fix is a new commit and a re-reading of the same
- *   commit is not a fix;
- * - a blocked verdict never overwrites an approval's commit claim, which would
- *   be the same override in the other direction.
+ * - an approval is allowed only when it names a commit that no
+ *   `request-changes` on this issue has named, because a fix is a new commit
+ *   and a re-reading of a commit somebody asked for changes to is not a fix;
+ * - the comparison is against every outstanding block on the issue rather than
+ *   against the verdict that happens to be newest, so no ordering of four
+ *   operations lands an approval on a commit a `request-changes` named;
+ * - an approval that names no commit clears nothing, so it is refused while any
+ *   block is outstanding rather than becoming the newest verdict and reading as
+ *   a clearance.
  *
  * Returns `null` when the record is allowed, and the reason it is refused
  * otherwise, so the caller reports the refusal instead of dropping it.
  */
-export function reviewMayReplace(current: BoardReview | undefined, next: BoardReview): string | null {
-  if (current === undefined) return null;
+export function reviewMayReplace(
+  issue: Pick<BoardIssue, 'review' | 'outstandingBlocks'>,
+  next: BoardReview,
+): string | null {
   if (next.verdict !== 'approve') return null;
-  if (next.commit !== current.commit) return null;
-  return `an approval cannot clear the review blocker recorded against commit ${next.commit === '' ? '(no named commit)' : next.commit}; re-review the commit that carries the fix`;
+  const outstanding = issue.outstandingBlocks ?? [];
+  if (outstanding.length === 0) return null;
+  const named = canonicalReviewCommit(next.commit);
+  if (named === '') {
+    return 'an approval that names no commit clears no review blocker; name the commit the fix is on so the outstanding blocker can be compared against it';
+  }
+  if (outstanding.includes(named)) {
+    return `an approval cannot clear the review blocker recorded against commit ${named}; re-review the commit that carries the fix`;
+  }
+  return null;
+}
+
+/**
+ * The issue's outstanding blocked commits after `next` is recorded.
+ *
+ * A block adds its commit; an approval removes exactly the commit it names,
+ * which can only ever be one the previous state did not hold. Everything else
+ * is carried forward unchanged, which is what makes the record order-independent.
+ */
+export function outstandingBlocksAfter(
+  issue: Pick<BoardIssue, 'outstandingBlocks'>,
+  next: BoardReview,
+): string[] {
+  const outstanding = issue.outstandingBlocks ?? [];
+  if (next.verdict !== 'request-changes') {
+    // An approval clears the entry it names. It also clears an unnamed entry,
+    // which is the shape fix 3 in /workspace/BOARD44-REVIEW-2600.md decides
+    // explicitly: a block that named no commit is cleared by the first approval
+    // that names one, because that approval is the review that finally looked
+    // at a tree.
+    return outstanding.filter((commit) => commit !== next.commit && !(commit === '' && next.commit !== ''));
+  }
+  const commit = canonicalReviewCommit(next.commit);
+  return outstanding.includes(commit) ? [...outstanding] : [...outstanding, commit];
 }
 
 export interface BoardResource {
@@ -518,16 +613,26 @@ function isMessage(value: unknown): value is BoardMessage {
 function isReview(value: unknown): value is BoardReview {
   return isRecord(value)
     && hasExactKeys(value, ['commit', 'verdict', 'reviewer', 'rationale', 'recordedAt'])
-    && typeof value.commit === 'string'
+    && isReviewCommitId(value.commit)
     && (REVIEW_VERDICTS as readonly string[]).includes(value.verdict as string)
     && isText(value.reviewer)
     && isText(value.rationale)
     && isTimestamp(value.recordedAt);
 }
 
+function isOutstandingBlocks(value: unknown): value is string[] {
+  return Array.isArray(value)
+    && value.every(isReviewCommitId)
+    && new Set(value).size === value.length;
+}
+
 function isIssue(value: unknown): value is BoardIssue {
   return isRecord(value)
-    && hasExactKeys(value, ['number', 'title', 'body', 'state', 'createdAt', 'updatedAt', 'messages'], ['review'])
+    && hasExactKeys(
+      value,
+      ['number', 'title', 'body', 'state', 'createdAt', 'updatedAt', 'messages'],
+      ['review', 'outstandingBlocks'],
+    )
     && isPositiveSafeInteger(value.number)
     && isText(value.title)
     && typeof value.body === 'string'
@@ -536,7 +641,8 @@ function isIssue(value: unknown): value is BoardIssue {
     && isTimestamp(value.updatedAt)
     && Array.isArray(value.messages)
     && value.messages.every(isMessage)
-    && (value.review === undefined || isReview(value.review));
+    && (value.review === undefined || isReview(value.review))
+    && (value.outstandingBlocks === undefined || isOutstandingBlocks(value.outstandingBlocks));
 }
 
 function isValidHost(host: string): boolean {
@@ -920,7 +1026,12 @@ function reviewDefect(value: unknown, where: string): BoardDefect | null {
   if (!isRecord(value)) return notARecordDefect(where, value);
   if (!hasExactKeys(value, keys)) return keySetDefect(where, keys, value);
   return firstDefect(where, [
-    { field: 'commit', expected: 'a string, empty when no commit was named', ok: typeof value.commit === 'string', value: value.commit },
+    {
+      field: 'commit',
+      expected: 'a full 40-character lowercase hex object id, or empty when no commit was named',
+      ok: isReviewCommitId(value.commit),
+      value: value.commit,
+    },
     {
       field: 'verdict',
       expected: `the string ${REVIEW_VERDICTS.map((v) => `"${v}"`).join(' or ')}`,
@@ -943,7 +1054,7 @@ function issueDefect(value: unknown, index: number): BoardDefect {
   const where = `board issue at index ${index}`;
   const issueKeys = ['number', 'title', 'body', 'state', 'createdAt', 'updatedAt', 'messages'];
   if (!isRecord(value)) return { ...notARecordDefect(where, value), kind: 'element', field: '' };
-  if (!hasExactKeys(value, issueKeys, ['review'])) {
+  if (!hasExactKeys(value, issueKeys, ['review', 'outstandingBlocks'])) {
     return { ...keySetDefect(where, issueKeys, value), kind: 'element' };
   }
   const field = firstDefect(where, [
@@ -983,6 +1094,15 @@ function issueDefect(value: unknown, index: number): BoardDefect {
   if (field !== null) return { ...field, kind: 'element' };
   if (value.review !== undefined) {
     const detail = reviewDefect(value.review, `board issue ${value.number as number} review`);
+    if (detail !== null) return { ...detail, kind: 'element' };
+  }
+  if (value.outstandingBlocks !== undefined) {
+    const detail = firstDefect(where, [{
+      field: 'outstandingBlocks',
+      expected: 'an array of full lowercase hex commit ids or empty strings, without repeats',
+      ok: isOutstandingBlocks(value.outstandingBlocks),
+      value: value.outstandingBlocks,
+    }]);
     if (detail !== null) return { ...detail, kind: 'element' };
   }
   const messages = value.messages as unknown[];

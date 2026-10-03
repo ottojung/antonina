@@ -1544,6 +1544,122 @@ test('new refuses a --cwd the configured backend cannot place an invocation in',
   assert.equal(run(['agent', 'new', '--id', 'f004', '--json'], noCwd).status, 0);
 });
 
+// ------------------------------------------------ 178 residuals (R1 and R2)
+// The two latent residuals the RF1/RF2 review named rather than waved through.
+// Both are the same defect the gates above were added to remove -- `--cwd`
+// regaining backend-dependent meaning through a route that does not consult
+// `backendCapabilities` -- and both are latent only because the single
+// configured backend reports the capability and the test override can only
+// withdraw it. Latent is exactly how a divergence between entry points hides,
+// so both are driven through the compiled CLI with the capability withdrawn.
+
+test('R1: a directory declared while capable is not launched after the capability is withdrawn', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  const noCwd = { ...env, ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: '1' };
+  // Declared while the backend could honour it. Nothing about this record is
+  // unusual: it is an ordinary `new --cwd`, and the whole point of R1 is that
+  // its ordinariness is what gets the directory launched.
+  assert.equal(run(['agent', 'new', '--id', 'd010', '--cwd', work, '--json'], env).status, 0);
+
+  // No `--cwd` on this invocation, so the flag-shaped gate never fired. Before
+  // the fix this exited 0, handed the backend `--dir <work>`, and recorded the
+  // launch: a declared directory launched by a CLI that had just been told it
+  // could not run an invocation in a named directory.
+  const ungated = run(['agent', 'run', '--id', 'd010', '--detach', '--prompt', 'inherited-declaration'], noCwd);
+  assert.equal(ungated.status, 1, `expected a capability refusal, got: ${ungated.stdout}${ungated.stderr}`);
+  assert.match(ungated.stderr, /run: the configured backend cannot run an invocation in a different working directory/);
+  const untouched = JSON.parse(readFileSync(metaPath(root, 'd010'), 'utf8'));
+  assert.equal(untouched.prompt_count, 0, 'the refused run must not accept the prompt');
+  assert.equal(untouched.pending_prompt, null, 'and must not leave one accepted for a later runner');
+  assert.equal(untouched.cwd, work, 'and must not disturb the declaration it was refused for');
+  assert.deepEqual(
+    fixtureInvocations(env).filter((line) => line.includes('inherited-declaration')),
+    [],
+    'no invocation may have been launched in the declared directory',
+  );
+  assertFixtureInvoked(handle, undefined);
+
+  // Same on `--steer`, which is the entry point that relocates a live
+  // invocation: the gate must be ahead of the preemption, so the front is left
+  // running with an unchanged pid and the steer is not queued. The front here is
+  // this test's own fixture front, in this test's own state root, and it is
+  // reaped in `t.after` from the pid in its own meta -- no agent belonging to
+  // any other front on this host is signalled.
+  assert.equal(run(['agent', 'new', '--id', 'd011', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'd011', '--detach', '--prompt', 'slow'], env).status, 0);
+  const live = await waitFor(root, 'd011', (meta) => meta.state === 'running' && typeof meta.pid === 'number', 30_000);
+  t.after(() => {
+    try { process.kill(-live.pid, 'SIGKILL'); } catch {}
+    try { process.kill(live.pid, 'SIGKILL'); } catch {}
+  });
+  const steered = run(['agent', 'run', '--id', 'd011', '--steer', '--detach', '--prompt', 'steered'], noCwd);
+  assert.equal(steered.status, 1, `expected a capability refusal, got: ${steered.stdout}${steered.stderr}`);
+  assert.match(steered.stderr, /run: the configured backend cannot run an invocation/);
+  const held = JSON.parse(readFileSync(metaPath(root, 'd011'), 'utf8'));
+  assert.equal(held.prompt_count, 1, 'the refused steer must not have been queued');
+  assert.deepEqual(held.steer_queue ?? [], [], 'and must not have left a queued steer behind');
+  assert.equal(held.pid, live.pid, 'the live front must not have been terminated by the refusal');
+  assertFixtureInvoked(handle, 'slow');
+
+  // Positive controls, so the gate cannot be satisfied by refusing every run.
+  // With no override the same launch proceeds and reports the declared
+  // directory; and an agent that declared nothing has nothing for the backend
+  // to be unable to honour, so it still fails on its own "no declared working
+  // directory" rule rather than on the capability.
+  assert.equal(run(['agent', 'run', '--id', 'd010', '--detach', '--prompt', 'capable'], env).status, 0);
+  const done = await waitFor(root, 'd010', (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
+  assert.equal(done.invocation_cwd, work, 'the launch must have happened in the declared directory');
+  assert.equal(run(['agent', 'new', '--id', 'd012', '--json'], noCwd).status, 0);
+  const nowhere = run(['agent', 'run', '--id', 'd012', '--detach', '--prompt', 'nowhere'], noCwd);
+  assert.equal(nowhere.status, 1, nowhere.stdout);
+  assert.match(
+    nowhere.stderr,
+    /no declared working directory/,
+    'an agent with no declared directory must still be refused for that reason',
+  );
+});
+
+test('R2: new --fork refuses to inherit a declared directory the backend cannot place', (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  const noCwd = { ...env, ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: '1' };
+  // `--fork` refuses `--cwd` by name, so this is not a second spelling of the
+  // flag and not a second meaning for it. It is a route to a *declaration* that
+  // never consulted the capability: before the fix the clone recorded the
+  // source's directory verbatim and exited 0, which is what made R1 reachable
+  // today and not only once a second backend exists.
+  assert.equal(run(['agent', 'new', '--id', 'd020', '--cwd', work, '--json'], env).status, 0);
+  const forked = run(['agent', 'new', '--id', 'd021', '--fork', 'd020', '--json'], noCwd);
+  assert.equal(forked.status, 1, `expected a capability refusal, got: ${forked.stdout}${forked.stderr}`);
+  assert.match(
+    forked.stderr,
+    /new --fork: the configured backend cannot run an invocation in a different working directory/,
+  );
+  assert.equal(
+    existsSync(join(root, 'state', 'antonina', 'agents', 'd021')),
+    false,
+    'a refused fork must not leave a half-created clone behind',
+  );
+
+  // Parity with the three gates that already existed: with the capability
+  // intact the same fork is accepted and inherits the source's directory, so
+  // the gate is about the capability and not about forking.
+  const capable = run(['agent', 'new', '--id', 'd022', '--fork', 'd020', '--json'], env);
+  assert.equal(capable.status, 0, capable.stderr);
+  assert.equal(JSON.parse(capable.stdout).cwd, work);
+  assert.equal(JSON.parse(readFileSync(metaPath(root, 'd022'), 'utf8')).cwd, work);
+
+  // And a source that declared nothing inherits nothing, so there is nothing
+  // for the backend to be unable to honour: the fork is accepted under the
+  // override. Without this, the gate would be satisfied by refusing every fork.
+  assert.equal(run(['agent', 'new', '--id', 'd023', '--json'], env).status, 0);
+  const undeclared = run(['agent', 'new', '--id', 'd024', '--fork', 'd023', '--json'], noCwd);
+  assert.equal(undeclared.status, 0, undeclared.stderr);
+  assert.equal(JSON.parse(undeclared.stdout).cwd, null);
+  assertFixtureInvoked(handle, undefined);
+});
+
 test('every entry point refuses an empty --cwd instead of inheriting the shell directory', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;

@@ -362,6 +362,24 @@ async function cmdFork(
   if (sourceId === agentId) throw new UsageError('new: --fork source and --id must be different agents');
   if (parsed.values.has('--cwd')) throw new UsageError('new: --cwd cannot be combined with --fork');
   if (parsed.values.has('--title')) throw new UsageError('new: --title cannot be combined with --fork');
+  // Board issue 178, residual R2: `--fork` refuses `--cwd` above, but it does
+  // not thereby declare nothing -- it *inherits* the source's declared
+  // directory verbatim, and `forkMetaSnapshot` keeps it. That is a route to a
+  // declaration that never consulted `backendCapabilities`, so `new --fork`
+  // accepted a directory that a non-forking `new` refuses by name, and the
+  // clone was then launchable with the capability withdrawn. The check is the
+  // same predicate `cmdNew` and `cmdRun` use, on the value the clone is about
+  // to record, and it is above `forkAgent`, so nothing is written on refusal.
+  //
+  // The source is read here, and read only. `forkAgent` reads it again inside
+  // its own all-or-nothing region and reports a missing source as
+  // `NotFoundError`, exactly as before; a source that is not readable is left
+  // to that path rather than being diagnosed differently here, because
+  // "cannot fork: no managed agent" is the operator's answer in both readings.
+  const source = readMeta(sourceId, paths(context));
+  if (source !== null && persistedAgentCwd(source) !== null && !backendCapabilities(context.env).invocation_cwd) {
+    throw new Error('new --fork: the configured backend cannot run an invocation in a different working directory');
+  }
   let meta: AgentMetadata;
   try {
     meta = forkAgent(sourceId, agentId, paths(context));
@@ -873,15 +891,33 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   // on whether the agent happened to be busy was not one flag, it was two, and
   // the busy case also refused the prompt the operator asked for.
   const runCwd = parsed.values.has('--cwd') ? declaredCwd(parsed.values.get('--cwd')!, 'run') : null;
+  // The directory this invocation will actually launch in: the one named on
+  // this command if there is one, otherwise the agent's declared default. It is
+  // computed here, once, because it is the value the backend is about to be
+  // handed, and the gate below has to be about that value rather than about the
+  // flag: the flag is not the only route by which a directory reaches a
+  // launch.
+  const launchCwd = runCwd ?? persistedAgentCwd(observed);
   // Backend agnosticism, represented as data: a backend that cannot launch an
   // invocation in a named directory refuses here, by name, before any write --
   // never by running the invocation somewhere else and reporting the declared
   // directory as if it had honoured it.
-  if (runCwd !== null && !backendCapabilities(context.env).invocation_cwd) {
+  //
+  // Board issue 178, residual R1: the predicate is on `launchCwd`, not on
+  // `runCwd !== null`. Conditioning it on the flag meant a directory declared
+  // earlier, while the backend could honour it, was launched ungated on every
+  // later run that named no directory of its own -- the backend was handed
+  // `--dir <declared>` by a CLI that had just been told it could not run an
+  // invocation in a named directory. That is the same defect the flag-shaped
+  // gate was added to remove, reached through durable state instead of argv, so
+  // the public abstraction would still have changed meaning with the configured
+  // backend. Every branch below is covered: fresh spawn, steer onto a live
+  // front, steer onto a reservation, and busy-recovery, because the gate is
+  // above `updateMeta` and writes nothing before it fires.
+  if (launchCwd !== null && !backendCapabilities(context.env).invocation_cwd) {
     throw new Error('run: the configured backend cannot run an invocation in a different working directory');
   }
   if (runCwd === null) {
-    const launchCwd = persistedAgentCwd(observed);
     if (launchCwd === null) {
       // The operator has no directory to give. There is still no honest value to
       // launch the backend with, and inheriting the invoking shell's directory is

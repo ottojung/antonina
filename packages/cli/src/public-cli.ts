@@ -41,7 +41,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--clear-limitations': 'Retract the target\'s caveats.',
   '--confirm': 'Confirm the destructive operation.',
   '--credential': 'Print only the initialized credential.',
-  '--cwd': 'Directory THIS invocation runs in. Accepted on every run, including one with --steer; also becomes the agent\'s declared default for later runs. Never inherited from the invoking shell. A backend that cannot honour it refuses the run by name rather than running somewhere else.',
+  '--cwd': 'Directory THIS invocation runs in. Accepted on every run, including one with --steer; also becomes the agent\'s declared default for later runs. Never inherited from the invoking shell. A backend that cannot honour a named directory refuses by name, at new, at run, at --steer, and at new --fork (which inherits the source\'s declared directory), rather than running somewhere else: including for a directory the agent declared earlier, so a run that names no --cwd of its own is refused too.',
   '--days': 'Retention age in days, measured from the later of the agent\'s finished_at and its own created_at. A fork created today from a session that finished three months ago is therefore kept for the full window from today; measuring from finished_at alone would let a sweep delete that clone, which is the last copy of that history once the source is gone.',
   '--description': 'Human-readable description.',
   '--detach': 'Return after starting background work.',

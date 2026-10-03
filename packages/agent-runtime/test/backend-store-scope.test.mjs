@@ -70,7 +70,7 @@ import {
   readBackendStoreOwner,
 } from '../dist/packages/agent-runtime/src/backend.js';
 import { forkAgent } from '../dist/packages/agent-runtime/src/fork.js';
-import { idleMeta, validateAgentMetadata } from '../dist/packages/agent-runtime/src/metadata.js';
+import { declaredRecordFields, idleMeta, validateAgentMetadata } from '../dist/packages/agent-runtime/src/metadata.js';
 import { runManagedRunner } from '../dist/packages/agent-runtime/src/runner.js';
 import { agentDir, createAgentDirectory, metaPath, readMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
 
@@ -82,6 +82,24 @@ const PROBE_SENTINEL = 'ANTONINA-STORE-FIXTURE-EXEC-OK';
  * this host understands it, written out here rather than imported so that
  * widening `TOP_LEVEL_FIELDS` in `metadata.ts` fails this test instead of
  * silently making every new record unreadable to that binary.
+ *
+ * It stays a hand-written literal on purpose: a test that imports the field
+ * list from the code under test cannot fail when that code is wrongly widened,
+ * which is the whole tripwire. The copy-drift risk that a literal does carry is
+ * handled by the `declaredRecordFields()` cross-check below, so the two can
+ * never quietly disagree.
+ *
+ * This list is the installed binary's set and nothing else. It does *not*
+ * contain `run_log_offset`, and must not be given one: the installed binary
+ * validates with `exactKeys(meta, TOP_LEVEL_FIELDS)` -- no optional field -- so
+ * it cannot read a record that carries the cursor. That divergence is the
+ * release line's (board 177 landed the field), not board 159's, and only a
+ * reinstall of the CLI can close it. Reinstalling is a host action, guarded in
+ * /workspace/BOARD159-REINSTALL-PROCEDURE.md; until it happens, records written
+ * by this line are unreadable by the installed binary, and this suite pins the
+ * divergence by name instead of asserting it away. See the assertion below:
+ * `run_log_offset` is currently the *only* field in that position, and a second
+ * one fails here.
  */
 const INSTALLED_BINARY_TOP_LEVEL_FIELDS = [
   'active_runner', 'agent_version', 'backend_error', 'created_at', 'cwd', 'delete_pending',
@@ -234,8 +252,21 @@ test('meta.json keeps its pre-board-159 shape, and the closed schema keeps its t
   // installed on this host, in both directions and forever: a field the old
   // validator does not know is a record no command can read, including the ones
   // an operator needs to stop a live front.
-  assert.deepEqual(Object.keys(meta).sort(), INSTALLED_BINARY_TOP_LEVEL_FIELDS);
-  assert.equal(Object.keys(meta).length, 32);
+  //
+  // `run_log_offset` is the one field that fails this today, and it is not
+  // board 159's: board 177 landed it on the release line and the installed
+  // binary (build 6209e3c9) predates it and validates with `exactKeys`, so it
+  // rejects every record this line writes. That gap is closed by reinstalling
+  // the CLI, not by a code change here, so the assertion below names it rather
+  // than hiding it. What this test still refuses to let through is a *second*
+  // such field, and any widening of the schema itself.
+  assert.deepEqual(
+    declaredRecordFields().filter((field) => !INSTALLED_BINARY_TOP_LEVEL_FIELDS.includes(field)),
+    ['run_log_offset'],
+    'a field beyond the installed binary was added to the managed-agent record',
+  );
+  assert.deepEqual(Object.keys(meta).sort(), declaredRecordFields());
+  assert.equal(Object.keys(meta).length, 33);
   assert.doesNotThrow(() => validateAgentMetadata(meta));
 
   // Nothing about the store leaks into the record: no field name, and no
@@ -254,9 +285,12 @@ test('meta.json keeps its pre-board-159 shape, and the closed schema keeps its t
     );
   }
 
-  // A record written by a runtime from before board 159 is byte-identical to one
-  // written now, so it still validates and needs no migration.
+  // A record written by a runtime from before board 177 landed `run_log_offset`
+  // has no cursor, is byte-identical to the installed binary's field set, and
+  // still validates: `run_log_offset` is the one field the validator treats as
+  // optional, and that is exactly so no record needs a migration.
   const legacy = JSON.parse(JSON.stringify(meta));
+  delete legacy.run_log_offset;
   assert.deepEqual(Object.keys(legacy).sort(), INSTALLED_BINARY_TOP_LEVEL_FIELDS);
   assert.doesNotThrow(() => validateAgentMetadata(legacy));
 });

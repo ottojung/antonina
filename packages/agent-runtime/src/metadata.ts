@@ -92,6 +92,29 @@ const SIGNAL_DEATH_CLASSIFICATION = 'external_signal_kill';
  */
 const RUN_LOG_CURSOR_FIELD = 'run_log_offset';
 
+/**
+ * Every field a record written by this runtime carries, as one sorted list.
+ *
+ * Exported so a test can hold its independently-written expectation for the
+ * record's key set against the schema's single source, instead of hand-copying
+ * `TOP_LEVEL_FIELDS` and letting the copy drift. Board 159's regression suite
+ * carried a copy taken before `run_log_offset` existed and so reported a
+ * *correct* record as a field-set mismatch.
+ *
+ * This is a cross-check, not a replacement: the test's own literal stays
+ * independently written, because a test that derives its expectation from the
+ * code under test cannot fail when that code is wrongly widened. What this
+ * export removes is the *silent* failure mode, where the two disagree and
+ * nobody is watching.
+ *
+ * `run_log_offset` is listed even though the validator treats it as optional,
+ * because records predating it are the only ones that may omit it. Every record
+ * written now carries it.
+ */
+export function declaredRecordFields(): string[] {
+  return [...TOP_LEVEL_FIELDS, RUN_LOG_CURSOR_FIELD].sort();
+}
+
 export class MalformedPendingPromptMetadataError extends Error {
   constructor() {
     super('persisted pending prompt authority is not canonical');

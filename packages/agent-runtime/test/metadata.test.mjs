@@ -7,11 +7,13 @@ import {
   deletePendingFlag,
   idleMeta,
   nextPromptCount,
+  OPTIONAL_TOP_LEVEL_FIELDS,
   pendingPrompt,
   persistedControlField,
   persistedInvocationCwd,
   persistedLifecycleState,
   persistedNativeSessionId,
+  persistedRunLogOffset,
   persistedTimestamp,
   persistedVariant,
   runnerGeneration,
@@ -119,11 +121,17 @@ test('schema v4 rejects old versions, missing fields and unknown fields', () => 
   assert.throws(() => validateAgentMetadata(old), /unsupported managed-agent metadata version/);
 
   for (const key of Object.keys(base)) {
-    // `invocation_cwd` is the one field the schema deliberately tolerates
-    // absent (board issue 178): it is an observation, not lifecycle authority,
-    // and every record written before this field existed must keep validating.
-    // It is covered separately, below, in both directions.
-    if (key === 'invocation_cwd') continue;
+    // The two fields the schema deliberately tolerates absent, and no others.
+    //
+    // `invocation_cwd` (board issue 178) is an observation, not lifecycle
+    // authority, and every record written before this field existed must keep
+    // validating. `run_log_offset` (board issue 177) is the same shape of
+    // tolerance for the same reason: it was added after records already existed
+    // on disk. Both sides each carried their own skip here; a closed-schema
+    // check that grows one exemption per feature is how a schema stops being
+    // closed, so the exemptions are stated once, together, and each field's
+    // shape is asserted separately below.
+    if (OPTIONAL_TOP_LEVEL_FIELDS.includes(key)) continue;
     const missing = { ...base };
     delete missing[key];
     assert.throws(
@@ -163,6 +171,33 @@ test('invocation_cwd is optional, canonical when absent, and validated when pres
     () => validateAgentMetadata({ ...base, invocation_cwd: 42 }),
     /invocation_cwd is malformed/,
   );
+});
+
+// Board issue 177: the run-scope cursor. Same tolerated absence as
+// `invocation_cwd` above and for the same reason -- a field added after records
+// already existed -- held to the same "a present-but-wrong value is a rejection"
+// rule.
+test('a record may omit run_log_offset, but a present one must be a byte cursor', () => {
+  const base = idleMeta('a11d', '/tmp/work', null, 100.5);
+  assert.equal(base.run_log_offset, null);
+
+  const absent = { ...base };
+  delete absent.run_log_offset;
+  assert.doesNotThrow(() => validateAgentMetadata(absent));
+  assert.equal(persistedRunLogOffset(absent), null);
+
+  assert.equal(persistedRunLogOffset(base), null);
+  assert.equal(persistedRunLogOffset({ ...base, run_log_offset: 0 }), 0);
+  assert.equal(persistedRunLogOffset({ ...base, run_log_offset: 4096 }), 4096);
+
+  for (const malformed of [-1, 1.5, '0', Number.NaN, {}]) {
+    assert.equal(persistedRunLogOffset({ ...base, run_log_offset: malformed }), null);
+    assert.throws(
+      () => validateAgentMetadata({ ...base, run_log_offset: malformed }),
+      /run_log_offset is malformed/,
+      `malformed run_log_offset unexpectedly accepted: ${JSON.stringify(malformed)}`,
+    );
+  }
 });
 
 test('schema v4 rejects partial process identities and malformed structured authority', () => {

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
+import { idleMeta, persistedRunLogOffset } from '../dist/packages/agent-runtime/src/metadata.js';
 import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import {
   beginInvocation,
@@ -106,6 +106,90 @@ test('steers are strict FIFO and promote into pending work', () => {
   assert.equal(meta.pending_prompt, 'first');
   assert.equal(meta.prompt_count, 1);
   assert.deepEqual(steerQueue(meta)?.map((entry) => entry.prompt), ['second']);
+});
+
+test('an accepted invocation records where its own output begins', () => {
+  const meta = idleMeta('a11d', '/tmp', null, 1);
+  assert.equal(persistedRunLogOffset(meta), null);
+
+  beginInvocation(meta, 'first', 2, 1, { logOffset: 4_096 });
+  assert.equal(persistedRunLogOffset(meta), 4_096);
+
+  // A later invocation re-cursors: the second run's scope excludes the first's.
+  beginInvocation(meta, 'second', 3, 2, { logOffset: 9_000 });
+  assert.equal(persistedRunLogOffset(meta), 9_000);
+
+  // A caller that cannot observe the log invents no cursor, and the inherited
+  // one is left exactly as it was.
+  beginInvocation(meta, 'third', 4, 3);
+  assert.equal(persistedRunLogOffset(meta), 9_000);
+  beginInvocation(meta, 'fourth', 5, 4, { logOffset: -1 });
+  assert.equal(persistedRunLogOffset(meta), 9_000);
+
+  // A drained steer is an accepted invocation of its own, so it re-cursors too.
+  const steered = idleMeta('a11d', '/tmp', null, 1);
+  assert.equal(queueSteer(steered, 'redirect', 2), true);
+  assert.equal(popSteerIntoPending(steered, 3, { logOffset: 512 }), 'redirect');
+  assert.equal(persistedRunLogOffset(steered), 512);
+});
+
+// Board issue 178, and the reason this assertion exists as a separate case from
+// the run-cursor one above.
+//
+// `beginInvocation` is the one function both invocation-accepting paths go
+// through: `cmdRun`'s fresh-front branch and the runner's steer drain. It
+// therefore used to be where a directory could be written at *acceptance* time,
+// which is the write that let a terminal record name a directory no front was
+// ever in. The observation (`invocation_cwd`) is the runner's to write, once a
+// child exists, so accepting work must leave it exactly as it found it -- on a
+// record that has never run, and on a record whose last real launch was
+// somewhere else.
+//
+// This also pins the shape of the options object after the 177 rebase: the
+// object is the seam both issues share, and the failure mode being guarded
+// against is a resolution that widens it to carry a directory again. That would
+// typecheck, would pass every other test in this file, and would silently
+// reinstate 178's defect -- so the guard is on the write, not on the signature.
+test('accepting an invocation never writes the observed directory', () => {
+  // A record that has never run: acceptance leaves "nothing observed" alone.
+  const fresh = idleMeta('a11d', '/tmp/declared', null, 1);
+  assert.equal(fresh.invocation_cwd, null);
+  beginInvocation(fresh, 'work', 2, 1);
+  assert.equal(fresh.invocation_cwd, null, 'an accepted invocation is not an observed one');
+  assert.equal(fresh.cwd, '/tmp/declared', 'and the declaration is untouched by acceptance');
+  beginInvocation(fresh, 'work again', 3, 2, { logOffset: 12 });
+  assert.equal(fresh.invocation_cwd, null);
+
+  // A record that has run: acceptance must not move the observation, in either
+  // accepting path, and must not be reachable into by an unknown option.
+  const ran = idleMeta('a11d', '/tmp/declared', null, 1);
+  ran.invocation_cwd = '/tmp/where-it-actually-ran';
+  beginInvocation(ran, 'work', 4, 1, { logOffset: 7 });
+  assert.equal(ran.invocation_cwd, '/tmp/where-it-actually-ran', 'the last real launch still names the record');
+
+  const drained = idleMeta('a11d', '/tmp/declared', null, 1);
+  drained.invocation_cwd = '/tmp/where-it-actually-ran';
+  assert.equal(queueSteer(drained, 'redirect', 5), true);
+  assert.equal(popSteerIntoPending(drained, 6, { logOffset: 21 }), 'redirect');
+  assert.equal(
+    drained.invocation_cwd,
+    '/tmp/where-it-actually-ran',
+    'promoting a steer into pending work is acceptance too, and moves nothing',
+  );
+
+  // The options object is not a channel for a directory. This is the specific
+  // way the board 177 rebase could have undone board 178: both issues needed a
+  // fifth parameter here, the natural resolution was one options object, and
+  // widening it to carry a directory again typechecks, passes every other case
+  // in this file, and reinstates the acceptance-time write. An unknown key is
+  // therefore passed deliberately and asserted to be inert: if this case ever
+  // fails with `/tmp/never` in it, an observation is being written before a
+  // process exists.
+  const trap = idleMeta('a11d', '/tmp/declared', null, 1);
+  trap.invocation_cwd = '/tmp/where-it-actually-ran';
+  beginInvocation(trap, 'work', 7, 1, { logOffset: 3, invocationCwd: '/tmp/never' });
+  assert.equal(trap.invocation_cwd, '/tmp/where-it-actually-ran');
+  assert.notEqual(trap.invocation_cwd, '/tmp/never');
 });
 
 test('malformed steer metadata fails closed instead of being normalized', () => {

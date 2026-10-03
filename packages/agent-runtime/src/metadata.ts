@@ -52,6 +52,16 @@ const TOP_LEVEL_FIELDS = [
 ] as const;
 
 /**
+ * Optional byte cursor into `output.log`: the offset at which the output of the
+ * currently accepted invocation begins. It is validated when present and allowed
+ * to be absent, exactly like `BACKEND_SIGNAL_FIELDS`, because a record written
+ * before this field existed has no run-scoped cursor and must still be a
+ * canonical record. `null` and absence both mean "no invocation has been
+ * accepted yet", not a malformed record.
+ */
+const RUN_LOG_CURSOR_FIELD = 'run_log_offset';
+
+/**
  * Optional, top-level *observation* fields. Validated when present, tolerated
  * when absent, exactly like {@link BACKEND_SIGNAL_FIELDS} below.
  *
@@ -76,9 +86,22 @@ const TOP_LEVEL_FIELDS = [
  * tolerated absence only ever applies to a pre-existing on-disk population,
  * and it reads as "nothing observed" -- never as a value synthesised from the
  * declaration.
+ *
+ * `run_log_offset` (board issue 177) sits in the same set and on the same
+ * footing: it is a cursor into the run's own log, written when the prompt is
+ * accepted, and nothing about accepting, refusing, ordering or owning work reads
+ * it. It was carried in separately by 177 and merged here into one list, so
+ * there is a single statement of which top-level keys may be absent rather than
+ * two that each claim to be the whole set.
+ *
+ * Exported so the closed-schema test can read the exemptions from here instead
+ * of restating them: a test that lists them itself drifts, and a drifted
+ * exemption list turns the "missing field is rejected" loop into a loop that
+ * quietly stops rejecting.
  */
-const OPTIONAL_TOP_LEVEL_FIELDS = [
+export const OPTIONAL_TOP_LEVEL_FIELDS = [
   'invocation_cwd',
+  RUN_LOG_CURSOR_FIELD,
 ] as const;
 
 const BACKEND_ERROR_FIELDS = [
@@ -322,6 +345,21 @@ export function validateAgentMetadata(meta: AgentMetadata): void {
   if (meta.error !== null && (typeof meta.error !== 'string' || meta.error.length === 0)) {
     throw new MalformedAgentMetadataError('managed-agent error is malformed');
   }
+  if (persistedRunLogOffset(meta) === null && meta[RUN_LOG_CURSOR_FIELD] !== null && meta[RUN_LOG_CURSOR_FIELD] !== undefined) {
+    throw new MalformedAgentMetadataError('managed-agent run_log_offset is malformed');
+  }
+}
+
+/**
+ * The byte offset into `output.log` where the currently accepted invocation's
+ * output begins, or `null` when no invocation has been accepted (absent field,
+ * an explicit `null`, or a malformed value).
+ */
+export function persistedRunLogOffset(meta: AgentMetadata): number | null {
+  if (!hasOwn(meta, RUN_LOG_CURSOR_FIELD)) return null;
+  const value = meta[RUN_LOG_CURSOR_FIELD];
+  if (value === null) return null;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 /**
@@ -556,6 +594,7 @@ export function idleMeta(agentId: string, cwd: string | null, title: string | nu
     pending_prompt: null,
     last_prompt: null,
     error: null,
+    run_log_offset: null,
     agent_version: AGENT_META_VERSION,
   };
   validateAgentMetadata(meta);

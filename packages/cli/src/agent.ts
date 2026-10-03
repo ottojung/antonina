@@ -55,6 +55,7 @@ import {
   persistedInvocationCwd,
   persistedLifecycleState,
   persistedNativeSessionId,
+  persistedRunLogOffset,
   persistedTimestamp,
   persistedVariant,
   requiredPersistedAgentId,
@@ -69,6 +70,7 @@ import {
   agentsDir,
   createAgentDirectory,
   logPath,
+  logSize,
   readMeta,
   removeAgentDirectory,
   updateMeta,
@@ -781,9 +783,16 @@ function spawnRunner(
   child.unref();
 }
 
-async function followAttached(agentId: string, context: AgentCommandContext): Promise<number> {
+async function followAttached(
+  agentId: string,
+  context: AgentCommandContext,
+  startOffset: number,
+): Promise<number> {
   const path = logPath(agentId, paths(context));
-  let offset = 0;
+  // `startOffset` is where this invocation's output begins, so an attached run
+  // reports its own progress and not the accumulated transcript of every earlier
+  // run. `agent log` remains the command that reads that history.
+  let offset = startOffset;
   let terminalSince: number | null = null;
   while (true) {
     if (existsSync(path)) {
@@ -886,10 +895,20 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   // in, including in a terminal state, and what let a fork report the source's
   // last launch directory as the clone's own. The observation is written by the
   // runner, once a child exists; nothing reachable from this command writes it.
+  //
+  // This is the hunk 177 and 178 both had to touch, and taking 177's side here
+  // -- an inline `if (runCwd !== null) meta.cwd = runCwd` -- would restore only
+  // the half of the write that is correct and would be indistinguishable from
+  // the write 178 exists to delete. Both branches below therefore call
+  // `acceptCwd`, which is the only place in the runtime that writes `cwd` at
+  // acceptance, and `invocation_cwd` appears nowhere in this command.
   const acceptCwd = (meta: AgentMetadata): void => {
     if (runCwd === null) return;
     meta.cwd = runCwd;
   };
+  // Observed before this command accepts anything, so it bounds the history it
+  // did not cause even on the paths that accept no new invocation of their own.
+  const historyLength = logSize(agentId, paths(context));
   await updateMeta(agentId, (meta) => {
     const lifecycle = persistedLifecycleState(meta);
     const active = activeRunnerFlag(meta);
@@ -1003,8 +1022,16 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     }
     const generation = currentGeneration + 1;
     const now = Date.now() / 1000;
+// The declared working directory is written by `acceptCwd` and by nothing
+    // else. 177's side of this hunk inlined `if (runCwd !== null) meta.cwd =
+    // runCwd` here; that line is the write 178 exists to keep in exactly one
+    // place, so it is not taken. Two inline copies of the same assignment, one
+    // per accepting branch, is precisely how the two commands drifted apart in
+    // the first place: one of them grew a second field on its own copy.
     acceptCwd(meta);
-    beginInvocation(meta, prompt, now, promptCount);
+    // 177's run scope: the cursor into `output.log` at which this invocation's
+    // output begins, recorded in the same write that accepts the prompt.
+    beginInvocation(meta, prompt, now, promptCount, { logOffset: logSize(agentId, paths(context)) });
     meta.active_runner = true;
     meta.runner_gen = generation;
     meta.runner_reservation = {
@@ -1033,6 +1060,15 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     if (current !== null) signalInvocation(current, 'SIGTERM');
   }
 
+  // A front this command accepted owns the cursor the runtime recorded for it.
+  // A `--steer` command owns no invocation of its own -- the runner begins the
+  // drained continuation, and sets its cursor at that moment -- so for it the
+  // boundary is the log as this command found it. A record with no usable cursor
+  // (written before cursors existed) falls back to that same observation, which
+  // is what the durable cursor would have been.
+  const accepted = decision.action === 'spawn' ? readMeta(agentId, paths(context)) : null;
+  const startOffset = persistedRunLogOffset(accepted ?? {}) ?? historyLength;
+
   if (parsed.flags.has('--detach')) {
     if (parsed.flags.has('--json')) {
       context.io.stdout(JSON.stringify({ id: agentId, state: 'running', detached: true }));
@@ -1041,7 +1077,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     }
     return EXIT_OK;
   }
-  return followAttached(agentId, context);
+  return followAttached(agentId, context, startOffset);
 }
 
 async function waitForRunnerGone(

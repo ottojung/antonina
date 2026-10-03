@@ -32,7 +32,7 @@ test('a review blocker refuses the close and leaves the issue in the queue', asy
 
   await client.recordReview({
     number: issue.number,
-    commit: 'aaaaaaa',
+    commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     verdict: 'request-changes',
     reviewer: 'independent',
     rationale: 'Error: recommend no merge, the handoff drops the blocker',
@@ -40,7 +40,7 @@ test('a review blocker refuses the close and leaves the issue in the queue', asy
 
   await assert.rejects(
     () => client.close(issue.number),
-    /unresolved review blocker recorded by independent against commit aaaaaaa/,
+    /unresolved review blocker recorded by independent against commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/,
   );
   const still = await client.getIssue(issue.number);
   assert.equal(still.state, 'open');
@@ -54,7 +54,7 @@ test('the blocker survives a fresh reader, so a restart is not a way around it',
   const issue = await writer.createIssue('Survives materialization');
   await writer.recordReview({
     number: issue.number,
-    commit: 'aaaaaaa',
+    commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     verdict: 'request-changes',
     reviewer: 'independent',
     rationale: 'recommend no merge',
@@ -72,7 +72,7 @@ test('the blocker survives a fresh reader, so a restart is not a way around it',
   });
   const reread = await reader.getIssue(issue.number);
   assert.equal(reread.review.verdict, 'request-changes');
-  assert.equal(reread.review.commit, 'aaaaaaa');
+  assert.equal(reread.review.commit, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
   await assert.rejects(() => reader.close(issue.number), /unresolved review blocker/);
 
   // And the verdict is on the issue list projection, not only the detail read:
@@ -88,24 +88,24 @@ test('the same-commit override is refused, and the fix-as-a-new-commit path work
   await client.initialize();
   const issue = await client.createIssue('Override attempt');
   await client.recordReview({
-    number: issue.number, commit: 'aaaaaaa', verdict: 'request-changes',
+    number: issue.number, commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', verdict: 'request-changes',
     reviewer: 'independent', rationale: 'recommend no merge',
   });
 
   await assert.rejects(
     () => client.recordReview({
-      number: issue.number, commit: 'aaaaaaa', verdict: 'approve',
+      number: issue.number, commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', verdict: 'approve',
       reviewer: 'front', rationale: 'proceed anyway',
     }),
-    /an approval cannot clear the review blocker recorded against commit aaaaaaa/,
+    /an approval cannot clear the review blocker recorded against commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/,
   );
   await assert.rejects(() => client.close(issue.number), /unresolved review blocker/);
 
   const approval = await client.recordReview({
-    number: issue.number, commit: 'bbbbbbb', verdict: 'approve',
+    number: issue.number, commit: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', verdict: 'approve',
     reviewer: 'independent', rationale: 'blocker addressed',
   });
-  assert.equal(approval.commit, 'bbbbbbb');
+  assert.equal(approval.commit, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
   const closed = await client.close(issue.number);
   assert.equal(closed.state, 'closed');
   assert.equal((await client.getQueue()).includes(issue.number), false);
@@ -140,13 +140,13 @@ test('an empty reviewer or rationale is refused before anything is written', asy
   const issue = await client.createIssue('Incomplete review');
   await assert.rejects(
     () => client.recordReview({
-      number: issue.number, commit: 'aaaaaaa', verdict: 'approve', reviewer: '  ', rationale: 'fine',
+      number: issue.number, commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', verdict: 'approve', reviewer: '  ', rationale: 'fine',
     }),
     /Review reviewer is required/,
   );
   await assert.rejects(
     () => client.recordReview({
-      number: issue.number, commit: 'aaaaaaa', verdict: 'approve', reviewer: 'a', rationale: '',
+      number: issue.number, commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', verdict: 'approve', reviewer: 'a', rationale: '',
     }),
     /Review rationale is required/,
   );
@@ -156,12 +156,12 @@ test('reviewBlocksCompletion is the predicate, and it reads a parsed board', () 
   assert.equal(reviewBlocksCompletion({ number: 1 }), null);
   assert.equal(reviewBlocksCompletion({
     number: 1,
-    review: { commit: 'aaaaaaa', verdict: 'approve', reviewer: 'a', rationale: 'ok', recordedAt: '2026-10-02T22:00:00.000Z' },
+    review: { commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', verdict: 'approve', reviewer: 'a', rationale: 'ok', recordedAt: '2026-10-02T22:00:00.000Z' },
   }), null);
   assert.match(reviewBlocksCompletion({
     number: 1,
-    review: { commit: 'aaaaaaa', verdict: 'request-changes', reviewer: 'a', rationale: 'no merge', recordedAt: '2026-10-02T22:00:00.000Z' },
-  }), /commit aaaaaaa: no merge/);
+    review: { commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', verdict: 'request-changes', reviewer: 'a', rationale: 'no merge', recordedAt: '2026-10-02T22:00:00.000Z' },
+  }), /commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: no merge/);
 
   // A board carrying the field still parses, and one carrying a verdict this
   // build does not know is refused rather than read as "no blocker".
@@ -171,7 +171,7 @@ test('reviewBlocksCompletion is the predicate, and it reads a parsed board', () 
     issues: [{
       number: 1, title: 'T', body: '', state: 'open',
       createdAt: '2026-10-02T22:00:00.000Z', updatedAt: '2026-10-02T22:00:00.000Z', messages: [],
-      review: { commit: 'aaaaaaa', verdict: 'request-changes', reviewer: 'a', rationale: 'r', recordedAt: '2026-10-02T22:00:00.000Z' },
+      review: { commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', verdict: 'request-changes', reviewer: 'a', rationale: 'r', recordedAt: '2026-10-02T22:00:00.000Z' },
     }],
     resources: [],
     targets: [],

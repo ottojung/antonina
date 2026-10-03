@@ -13,6 +13,8 @@ import {
   parseExecutionTargetKind,
   parseExecutionTargetPersistence,
   parseExecutionTargetStatus,
+  canonicalReviewCommit,
+  outstandingBlocksAfter,
   parseReviewVerdict,
   reviewBlocksCompletion,
   reviewMayReplace,
@@ -177,10 +179,19 @@ export interface TargetSetPayload {
 /**
  * One review verdict about one exact commit of one issue's work.
  *
+ * `commit` is either a full 40-character lowercase hex object id or empty;
+ * anything else -- an abbreviation from `git rev-parse --short`, a digest typed
+ * in another case, a branch name -- is refused as malformed at record time,
+ * because a partially written commit id is a different string from the commit it
+ * abbreviates and would be compared as such.
+ *
  * `commit` may be empty, which records that the review named no commit rather
  * than refusing: a reviewer who found a blocker before a tree existed still has
  * to be able to stop the lifecycle, and inventing a commit id for them would be
- * worse than admitting there is none.
+ * worse than admitting there is none. An unnamed-commit block is cleared by the
+ * next approval that names a commit, which is the only reading of "the work has
+ * moved on" available for a blocker that named no tree; an approval that itself
+ * names no commit clears nothing and is refused while a block is outstanding.
  */
 export interface ReviewRecordPayload {
   number: number;
@@ -546,15 +557,15 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
     case 'review.record': {
       if (!hasExactKeys(value, ['number', 'commit', 'verdict', 'reviewer', 'rationale'])
           || !isPositiveSafeInteger(value.number)
-          || typeof value.commit !== 'string'
           || !isText(value.verdict)
           || !isText(value.reviewer)
           || !isText(value.rationale)) {
         throw new Error('Review-record payload is malformed');
       }
+      const commit = canonicalReviewCommit(value.commit);
       return {
         number: value.number,
-        commit: value.commit,
+        commit,
         verdict: parseReviewVerdict(value.verdict),
         reviewer: value.reviewer,
         rationale: value.rationale,
@@ -1015,17 +1026,20 @@ export function applyBoardMutation(
       const issue = requireIssue(candidate, payload.number);
       if (issue.state !== 'open') throw new OperationLogVerificationError('Only an open issue can be reviewed');
       const review: BoardReview = {
-        commit: payload.commit,
+        commit: canonicalReviewCommit(payload.commit),
         verdict: payload.verdict,
         reviewer: payload.reviewer,
         rationale: payload.rationale,
         recordedAt: operation.timestamp,
       };
-      const refused = reviewMayReplace(issue.review, review);
+      const refused = reviewMayReplace(issue, review);
       if (refused !== null) {
         throw new OperationLogVerificationError(`Review verdict cannot be recorded on issue ${payload.number}: ${refused}`);
       }
       issue.review = review;
+      const outstanding = outstandingBlocksAfter(issue, review);
+      if (outstanding.length === 0) delete issue.outstandingBlocks;
+      else issue.outstandingBlocks = outstanding;
       issue.updatedAt = operation.timestamp;
       break;
     }

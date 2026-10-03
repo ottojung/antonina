@@ -105,7 +105,7 @@ Queue order still expresses shared priority. The orchestrator should preserve th
 
 Useful evidence of independence includes disjoint repositories, separate monorepo packages/apps, unrelated subsystems, separate worktrees, distinct deployment targets, or clearly non-overlapping implementation areas. Potential conflict domains include the same source files, shared core APIs under active redesign, one database/schema migration path, the same mutable deployment environment, or another shared external resource.
 
-Runtime resource management is not part of orchestration. The orchestrator must not inspect or reason about CPU, RAM, cgroups, OOM history, load, process RSS, cache composition, compiler/build cost, test fan-out, device utilization, or similar runtime-capacity signals. A topologically valid front is launched regardless of predicted machine load. Runtime systems and workers may succeed, throttle, fail, or report an execution blocker, but the orchestrator must not convert such observations into capacity heuristics, worker limits, or serialization policy.
+Runtime capacity is entirely outside orchestration. Do not inspect it, estimate it, or use it in launch decisions. A topologically valid front is launched; execution behavior belongs to workers and the runtime layer.
 
 Development can often proceed concurrently even when integration must later serialize. Separate branches or worktrees may be safe to implement in parallel and then merge into a shared release branch one at a time.
 
@@ -221,7 +221,7 @@ For each orchestration pass:
 1. Harvest terminal agents and incorporate their durable results before deciding what is still open.
 2. Sweep enough of the queue to discover independent actionable fronts instead of serializing unrelated work behind the first issue.
 3. For every distinct front, ask only whether topology permits useful independent execution now: is it unblocked, sufficiently understood, non-duplicative, and isolated from conflicting ownership/write surfaces? If yes, launch it.
-4. Runtime resource state is outside the orchestrator's responsibility. Do not inspect, estimate, or schedule around RAM, CPU, load average, cgroup pressure, compiler/build cost, test fan-out, device utilization, or similar host-capacity signals. Do not delay or suppress a topologically valid front because of predicted runtime load.
+4. Ignore runtime capacity completely. Topology alone determines whether a front is launchable.
 5. Preparing a worktree, branch, registered path, prompt, or handoff is not delegation. If a front is ready to run, complete agent new / agent run --detach in the same pass and verify the resulting live handle. Do not end a pass with next: launch for work that is already prepared and unblocked.
 6. After harvesting completed or failed agents, refill newly exposed useful work in the same pass. Avoid batch behavior in which a pool drains to zero and waits for a later invocation.
 7. Before ending the pass, every actionable front you identified should either have a live owner or have a precise recorded topological blocker/dependency/collision reason.

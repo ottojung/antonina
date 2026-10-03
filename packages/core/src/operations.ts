@@ -13,9 +13,16 @@ import {
   parseExecutionTargetKind,
   parseExecutionTargetPersistence,
   parseExecutionTargetStatus,
+  canonicalReviewCommit,
+  outstandingBlocksAfter,
+  parseReviewVerdict,
+  reviewBlocksCompletion,
+  reviewMayReplace,
   type Board,
   type PersistedBoard,
   type BoardIssue,
+  type BoardReview,
+  type ReviewVerdict,
   type ExecutionTargetAccessMethod,
   type ExecutionTargetBackend,
   type ExecutionTargetCapability,
@@ -41,6 +48,7 @@ export const BOARD_CAPABILITIES = [
   'issue.comment',
   'issue.state',
   'queue.reorder',
+  'review.record',
   'resource.read',
   'resource.modify',
   'target.read',
@@ -75,6 +83,7 @@ export const BOARD_OPERATION_KINDS = [
   'target.register',
   'target.set',
   'dispatch.record',
+  'review.record',
   'queue.reorder',
   'board.delete',
 ] as const;
@@ -167,6 +176,31 @@ export interface TargetSetPayload {
   guidance?: string[];
 }
 
+/**
+ * One review verdict about one exact commit of one issue's work.
+ *
+ * `commit` is either a full 40-character lowercase hex object id or empty;
+ * anything else -- an abbreviation from `git rev-parse --short`, a digest typed
+ * in another case, a branch name -- is refused as malformed at record time,
+ * because a partially written commit id is a different string from the commit it
+ * abbreviates and would be compared as such.
+ *
+ * `commit` may be empty, which records that the review named no commit rather
+ * than refusing: a reviewer who found a blocker before a tree existed still has
+ * to be able to stop the lifecycle, and inventing a commit id for them would be
+ * worse than admitting there is none. An unnamed-commit block is cleared by the
+ * next approval that names a commit, which is the only reading of "the work has
+ * moved on" available for a blocker that named no tree; an approval that itself
+ * names no commit clears nothing and is refused while a block is outstanding.
+ */
+export interface ReviewRecordPayload {
+  number: number;
+  commit: string;
+  verdict: ReviewVerdict;
+  reviewer: string;
+  rationale: string;
+}
+
 export interface DispatchRecordPayload {
   number: number;
   targetId: string;
@@ -189,6 +223,7 @@ export type BoardOperationPayload =
   | TargetRegisterPayload
   | TargetSetPayload
   | DispatchRecordPayload
+  | ReviewRecordPayload
   | QueueReorderPayload
   | Record<string, never>;
 
@@ -519,6 +554,23 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
         rationale: value.rationale,
       };
     }
+    case 'review.record': {
+      if (!hasExactKeys(value, ['number', 'commit', 'verdict', 'reviewer', 'rationale'])
+          || !isPositiveSafeInteger(value.number)
+          || !isText(value.verdict)
+          || !isText(value.reviewer)
+          || !isText(value.rationale)) {
+        throw new Error('Review-record payload is malformed');
+      }
+      const commit = canonicalReviewCommit(value.commit);
+      return {
+        number: value.number,
+        commit,
+        verdict: parseReviewVerdict(value.verdict),
+        reviewer: value.reviewer,
+        rationale: value.rationale,
+      };
+    }
     case 'queue.reorder': {
       if (!hasExactKeys(value, ['numbers'])
           || !Array.isArray(value.numbers)
@@ -724,6 +776,7 @@ function requiredCapability(kind: BoardOperationKind): BoardCapability | null {
     case 'target.register':
     case 'target.set':
     case 'dispatch.record': return 'target.modify';
+    case 'review.record': return 'review.record';
     case 'queue.reorder': return 'queue.reorder';
     case 'board.delete': return 'board.delete';
   }
@@ -819,6 +872,14 @@ export function applyBoardMutation(
     case 'issue.close': {
       const payload = operation.payload as IssueReferencePayload;
       const issue = requireIssue(candidate, payload.number);
+      // The completion predicate docs/skills/itinerary-antonina.md states in
+      // prose, enforced here so it cannot be satisfied by an orchestrator that
+      // reads the review and merges anyway. A blocker is a refusal to close,
+      // reported by name, not a warning that a merge will not mind.
+      const blocker = reviewBlocksCompletion(issue);
+      if (blocker !== null) {
+        throw new OperationLogVerificationError(`Issue cannot be closed: ${blocker}`);
+      }
       issue.state = 'closed';
       issue.updatedAt = operation.timestamp;
       nextQueue = nextQueue.filter((number) => number !== payload.number);
@@ -958,6 +1019,28 @@ export function applyBoardMutation(
       if (index < 0) candidate.dispatches.push(record);
       else candidate.dispatches[index] = record;
       candidate.dispatches.sort((left, right) => left.issueNumber - right.issueNumber);
+      break;
+    }
+    case 'review.record': {
+      const payload = operation.payload as ReviewRecordPayload;
+      const issue = requireIssue(candidate, payload.number);
+      if (issue.state !== 'open') throw new OperationLogVerificationError('Only an open issue can be reviewed');
+      const review: BoardReview = {
+        commit: canonicalReviewCommit(payload.commit),
+        verdict: payload.verdict,
+        reviewer: payload.reviewer,
+        rationale: payload.rationale,
+        recordedAt: operation.timestamp,
+      };
+      const refused = reviewMayReplace(issue, review);
+      if (refused !== null) {
+        throw new OperationLogVerificationError(`Review verdict cannot be recorded on issue ${payload.number}: ${refused}`);
+      }
+      issue.review = review;
+      const outstanding = outstandingBlocksAfter(issue, review);
+      if (outstanding.length === 0) delete issue.outstandingBlocks;
+      else issue.outstandingBlocks = outstanding;
+      issue.updatedAt = operation.timestamp;
       break;
     }
     case 'queue.reorder': {

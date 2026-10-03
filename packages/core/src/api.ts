@@ -54,6 +54,8 @@ import {
   type BoardExecutionTarget,
   type BoardIssue,
   type BoardResource,
+  type BoardReview,
+  type ReviewVerdict,
   type ExecutionTargetAccessMethod,
   type ExecutionTargetBackend,
   type ExecutionTargetCapability,
@@ -105,6 +107,15 @@ export {
 };
 
 export class AntoninaApiError extends Error {}
+
+export interface ReviewRecordInput {
+  number: number;
+  /** The exact commit reviewed, or empty when the review named none. */
+  commit: string;
+  verdict: ReviewVerdict;
+  reviewer: string;
+  rationale: string;
+}
 
 export const MAX_ISSUE_BODY_CHARACTERS = 1_000;
 export const MAX_COMMENT_BODY_CHARACTERS = 1_000;
@@ -599,6 +610,37 @@ export class BoardApi {
       { number, title: null, body: body.trim() },
     );
     return clone(this.requireIssue(committed.state.board.issues, number));
+  }
+
+  /**
+   * Records one review verdict about one exact commit of an issue's work.
+   *
+   * This is the board-side half of the review step in
+   * docs/skills/itinerary-antonina.md: the verdict is a signed board operation
+   * rather than a sentence in a comment, because {@link close} has to be able to
+   * refuse a blocked issue without reading anybody's prose. An approval that
+   * names the commit a block was recorded against is refused rather than stored,
+   * so the override this repository has a documented history of cannot be
+   * expressed as a state the board accepts.
+   */
+  async recordReview(input: ReviewRecordInput): Promise<BoardReview> {
+    const reviewer = input.reviewer.trim();
+    const rationale = input.rationale.trim();
+    if (!reviewer) throw new AntoninaApiError('Review reviewer is required');
+    if (!rationale) throw new AntoninaApiError('Review rationale is required');
+    const committed = await this.append(
+      'review.record',
+      {
+        number: input.number,
+        commit: input.commit.trim(),
+        verdict: input.verdict,
+        reviewer,
+        rationale,
+      },
+    );
+    const review = this.requireIssue(committed.state.board.issues, input.number).review;
+    if (review === undefined) throw new AntoninaApiError('Antonina review record disappeared after mutation');
+    return clone(review);
   }
 
   async listResources(host?: string, issueNumber?: number): Promise<ResourceView[]> {

@@ -22,7 +22,6 @@ import {
   RESOURCE_LIST_PAGES_LABEL,
   RESOURCE_PAGE_SIZE,
   resourcePage,
-  resourcePageCount,
 } from './ui-state';
 
 const STAMP = '2026-09-27T12:00:00.000Z';
@@ -228,13 +227,11 @@ afterEach(cleanup);
 describe('resource paging arithmetic', () => {
   it('holds 50 resources a page and pages the board\'s own resource order', () => {
     expect(RESOURCE_PAGE_SIZE).toBe(50);
-    // The default is a default argument, so the count and the slice agree
-    // without a number repeated at a call site.
-    expect(resourcePageCount(50)).toBe(1);
-    expect(resourcePageCount(51)).toBe(2);
-    expect(resourcePageCount(126)).toBe(3);
-    expect(resourcePageCount(0)).toBe(1);
-
+    // There is no resource-scoped page-count helper to assert against, on
+    // purpose: the drawn boundary is asserted below instead, against the DOM —
+    // "50 rows, Next live, range 1–50 of 126" is what a reader can check, and
+    // the arithmetic behind it is the Issues list's `issuePageCount`, tested in
+    // `issues-pagination.test.tsx`.
     const resources = resourcesOn('lubko://one', 126);
     expect(resourcePage(resources, 1)).toEqual(resources.slice(0, 50));
     expect(resourcePage(resources, 2)).toEqual(resources.slice(50, 100));

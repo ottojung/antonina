@@ -125,6 +125,84 @@ function materializedObjects(server) {
     .filter(([key]) => key !== 'board-v2');
 }
 
+/**
+ * Every materialized shard that carries the review record, in either place it
+ * is written: the issue snapshot (`entry.value.issue.review`) and the list
+ * projection (`entry.value.entries[].review`). Both are overwritten together by
+ * the malformed-read tests below, because a reader is entitled to serve either
+ * and a reader that served only the intact one would be reading a clear issue
+ * off a shard that does not say so.
+ */
+function shardsCarryingReview(server) {
+  return [...server.objects.entries()].filter(([, entry]) =>
+    entry.value?.issue?.review !== undefined
+    || (entry.value?.entries ?? []).some((summary) => summary?.review !== undefined));
+}
+
+/**
+ * Rewrites the stored `review` of every shard `shardsCarryingReview` names, in
+ * place, the way another writer of the same object would. The ref still names
+ * this content's digest, which is what makes the read path's refusal the only
+ * thing standing between a value this build does not accept and a clear issue.
+ */
+async function overwriteStoredReview(server, shards, nextReview) {
+  for (const [key] of shards) {
+    const entry = server.objects.get(key);
+    const stored = entry.value.issue !== undefined
+      ? { ...entry.value, issue: { ...entry.value.issue, review: nextReview(entry.value.issue.review) } }
+      : {
+        ...entry.value,
+        entries: entry.value.entries.map((summary) => (
+          summary.review === undefined ? summary : { ...summary, review: nextReview(summary.review) }
+        )),
+      };
+    const response = await server.fetch(`https://example.invalid/_skrynia/store/antonina/${key}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Skrynia-Capability': server.capabilityOf(key) },
+      body: JSON.stringify(stored),
+    });
+    assert.equal(response.status, 200, 'the contract double must model anonymous overwrite');
+  }
+}
+
+/** The rewritten value, read back the way any other reader would see it. */
+function storedReviewOf(server, key) {
+  const value = server.objects.get(key).value;
+  return (value.issue ?? value.entries[0]).review;
+}
+
+/** The `outstandingBlocks` of one shard, in either place it is materialized. */
+function storedBlocksOf(server, key) {
+  const value = server.objects.get(key).value;
+  return (value.issue ?? value.entries[0]).outstandingBlocks;
+}
+
+/** Every shard whose stored `outstandingBlocks` this build materialized. */
+function shardsCarryingBlocks(server) {
+  return [...server.objects.entries()].filter(([, entry]) =>
+    entry.value?.issue?.outstandingBlocks !== undefined
+    || (entry.value?.entries ?? []).some((summary) => summary?.outstandingBlocks !== undefined));
+}
+
+async function overwriteStoredBlocks(server, shards, blocks) {
+  for (const [key] of shards) {
+    const entry = server.objects.get(key);
+    const stored = entry.value.issue !== undefined
+      ? { ...entry.value, issue: { ...entry.value.issue, outstandingBlocks: blocks } }
+      : {
+        ...entry.value,
+        entries: entry.value.entries.map((summary) => ({ ...summary, outstandingBlocks: blocks })),
+      };
+    const response = await server.fetch(`https://example.invalid/_skrynia/store/antonina/${key}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Skrynia-Capability': server.capabilityOf(key) },
+      body: JSON.stringify(stored),
+    });
+    assert.equal(response.status, 200, 'the contract double must model anonymous overwrite');
+    assert.deepEqual(storedBlocksOf(server, key), blocks);
+  }
+}
+
 function findMeta(server, head) {
   return materializedObjects(server).find(([, entry]) =>
     entry.value?.schemaVersion === 2
@@ -447,6 +525,10 @@ test('commenting rewrites only the affected issue-list page plus snapshot leaves
 // into a fail-open one and the whole suite stayed green. The shard below is
 // written by this build, then its stored verdict is replaced with a value this
 // build does not name, exactly as a shard written by something else would look.
+// The second round covers the other half of that reader: a verdict that is
+// well formed in every field except its commit id (review 44e05's required fix 2,
+// mutation M4a), which is the shape a writer that abbreviates a digest would
+// leave behind.
 test('a shard carrying a verdict this build does not name is refused, not read as no review', async () => {
   const server = fakeSkrynia();
   const store = deterministicStore(server);
@@ -468,39 +550,16 @@ test('a shard carrying a verdict this build does not name is refused, not read a
 
   const before = await store.getIssue(initialized.credential, 1);
   assert.equal(before.review.verdict, 'request-changes');
+  assert.equal(before.review.commit, 'a'.repeat(40));
 
-  // Overwrite the stored issue snapshot in place, the way another writer of the
-  // same object would: the ref still names this content's digest, which is what
-  // makes the read path's refusal the only thing standing between an unknown
-  // verdict and a clear issue.
-  // Both places the verdict is materialized -- the issue snapshot and the
-  // list projection -- are overwritten, because a reader is entitled to serve
-  // either and a reader that served only the intact one would be reading a
-  // clear issue off a shard that does not say so.
-  const carrying = [...server.objects.entries()].filter(([, entry]) =>
-    entry.value?.issue?.review?.verdict === 'request-changes'
-    || (entry.value?.entries ?? []).some((summary) => summary?.review?.verdict === 'request-changes'));
+  // Both places the verdict is materialized -- the issue snapshot and the list
+  // projection -- are overwritten, for the reason the helpers record.
+  const carrying = shardsCarryingReview(server);
   assert.ok(carrying.length >= 2, 'the verdict must be materialized in both the snapshot and the projection');
-  for (const [key, entry] of carrying) {
-    const withUnknownVerdict = entry.value.issue !== undefined
-      ? { ...entry.value, issue: { ...entry.value.issue, review: { ...entry.value.issue.review, verdict: 'recommend-no-merge' } } }
-      : {
-        ...entry.value,
-        entries: entry.value.entries.map((summary) => ({
-          ...summary,
-          review: { ...summary.review, verdict: 'recommend-no-merge' },
-        })),
-      };
-    const response = await server.fetch(`https://example.invalid/_skrynia/store/antonina/${key}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'X-Skrynia-Capability': server.capabilityOf(key) },
-      body: JSON.stringify(withUnknownVerdict),
-    });
-    assert.equal(response.status, 200, 'the contract double must model anonymous overwrite');
-    assert.equal(
-      (server.objects.get(key).value.issue ?? server.objects.get(key).value.entries[0]).review.verdict,
-      'recommend-no-merge',
-    );
+
+  await overwriteStoredReview(server, carrying, (review) => ({ ...review, verdict: 'recommend-no-merge' }));
+  for (const [key] of carrying) {
+    assert.equal(storedReviewOf(server, key).verdict, 'recommend-no-merge');
   }
 
   // A reader that has never seen the write -- a restart, or a second client --
@@ -515,4 +574,97 @@ test('a shard carrying a verdict this build does not name is refused, not read a
     () => reader.readIssuePage(initialized.credential, 'open', 1),
     /stored review verdict is malformed/,
   );
+
+  // The commit-id gate is the same refusal for a verdict this build otherwise
+  // reads field for field. An abbreviated or upper-case digest is not an object
+  // id, so the block it names could never be compared against an approval's
+  // canonical commit, and reading it would launder the block into a value that
+  // matches nothing. Repairing the verdict and keeping every other field
+  // canonical isolates the commit id as the only reason the shard is refused.
+  const nonCanonicalCommits = [
+    ['an abbreviated digest', 'a'.repeat(7)],
+    ['an upper-case digest', 'A'.repeat(40)],
+  ];
+  for (const [what, commit] of nonCanonicalCommits) {
+    await overwriteStoredReview(server, carrying, (review) => ({
+      ...review,
+      verdict: 'request-changes',
+      commit,
+    }));
+    for (const [key] of carrying) {
+      const stored = storedReviewOf(server, key);
+      assert.equal(stored.commit, commit, `the overwrite must land ${what}`);
+      assert.deepEqual(
+        { verdict: stored.verdict, reviewer: stored.reviewer, rationale: stored.rationale },
+        { verdict: 'request-changes', reviewer: 'independent', rationale: 'recommend no merge' },
+        'the rest of the review must stay well formed, so only the commit id can be the reason for refusal',
+      );
+    }
+    const rereader = deterministicStore(server);
+    await assert.rejects(
+      () => rereader.getIssue(initialized.credential, 1),
+      /stored review verdict is malformed/,
+      `getIssue must refuse a review whose commit is ${what}`,
+    );
+    await assert.rejects(
+      () => rereader.readIssuePage(initialized.credential, 'open', 1),
+      /stored review verdict is malformed/,
+      `readIssuePage must refuse a review whose commit is ${what}`,
+    );
+  }
+});
+
+// Required fix 1 of review 44e05 (/workspace/BOARD44-FIXES-REVIEW-0450.md):
+// `parseStoredOutstandingBlocks` shipped with no test of its failure mode --
+// mutation M6 dropped both its shape checks and the full core suite stayed
+// green. The shard below is written by this build, so its stored block list is
+// exactly the list this build wrote, and is then replaced with a list this
+// build cannot compare.
+test('a shard carrying outstanding blocks this build cannot compare is refused, not read as unblocked', async () => {
+  const server = fakeSkrynia();
+  const store = deterministicStore(server);
+  const initialized = await store.initialize();
+  const created = await store.appendFast(initialized.credential, {
+    kind: 'issue.create',
+    payload: { number: 1, title: 'Blocked', body: '' },
+  });
+  await store.appendFast(initialized.credential, {
+    kind: 'review.record',
+    payload: {
+      number: 1,
+      commit: 'a'.repeat(40),
+      verdict: 'request-changes',
+      reviewer: 'independent',
+      rationale: 'recommend no merge',
+    },
+  }, created.state.head);
+
+  const before = await store.getIssue(initialized.credential, 1);
+  assert.deepEqual(before.outstandingBlocks, ['a'.repeat(40)]);
+
+  const carrying = shardsCarryingBlocks(server);
+  assert.ok(carrying.length >= 2, 'the block list must be materialized in both the snapshot and the projection');
+
+  // Two shapes, because the two checks are two claims. A non-canonical entry is
+  // a commit id this build cannot resolve, and a duplicate is a list that no
+  // append-only growth-only writer can have produced -- so either one means the
+  // shard was not written by the record this build reads.
+  const malformedLists = [
+    ['a non-canonical block id', ['a'.repeat(7)]],
+    ['a duplicated block id', ['b'.repeat(40), 'b'.repeat(40)]],
+  ];
+  for (const [what, blocks] of malformedLists) {
+    await overwriteStoredBlocks(server, carrying, blocks);
+    const reader = deterministicStore(server);
+    await assert.rejects(
+      () => reader.getIssue(initialized.credential, 1),
+      /stored outstanding review blocks are malformed/,
+      `getIssue must refuse ${what}`,
+    );
+    await assert.rejects(
+      () => reader.readIssuePage(initialized.credential, 'open', 1),
+      /stored outstanding review blocks are malformed/,
+      `readIssuePage must refuse ${what}`,
+    );
+  }
 });

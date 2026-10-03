@@ -277,6 +277,40 @@ describe('closed issue ordering by closing time', () => {
     expect(visibleIssues(summaries, [], 'closed').map((each) => each.number)).toEqual([7, 11, 4]);
   });
 
+  it('shows a closed filter nothing but closed issues', () => {
+    // The state filter inside `closedIssueOrder` is what keeps open work out of
+    // the Closed view, and it was untested: every other case in this file feeds
+    // `visibleIssues` a list that is already entirely closed, so an
+    // implementation that dropped `issue.state === 'closed'` and sorted the
+    // whole board passed all of them -- and the whole web suite.
+    //
+    // The open rows here are given a `closedAt` of `null`, so a filter-less
+    // implementation resolves them through core's comparator to their
+    // `updatedAt`, which `closedSummary` places far older than any closure in the
+    // fixture. They would therefore land at the *end* of the list rather than
+    // interleaved, which is why the assertion checks membership by number and
+    // not just the order of the first few rows.
+    const open: IssueListSummary[] = [
+      { ...closedSummary(1, 4000), state: 'open', closedAt: null },
+      { ...closedSummary(2, 3000), state: 'open', closedAt: null },
+    ];
+    const closed = nonMonotonicClosed(6);
+    const drawn = visibleIssues([...open, ...closed], [1, 2], 'closed').map((each) => each.number);
+
+    // Expected order is read off the fixture's own `closedAt` column, not back
+    // off `visibleIssues`, so the assertion is a fact about these six rows rather
+    // than a restatement of the sort under test.
+    const expected = closed
+      .map((each) => ({ number: each.number, at: Date.parse(each.closedAt!) }))
+      .sort((left, right) => right.at - left.at || right.number - left.number)
+      .map((each) => each.number);
+
+    expect(drawn).toEqual(expected);
+    expect(drawn).toHaveLength(closed.length);
+    for (const number of drawn) expect(number).not.toBe(1);
+    for (const number of drawn) expect(number).not.toBe(2);
+  });
+
   it('leaves open-issue ordering exactly as the shared queue has it', () => {
     const open: IssueListSummary[] = [
       { ...closedSummary(1, 999), state: 'open', closedAt: null },

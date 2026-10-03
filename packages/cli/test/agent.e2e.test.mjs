@@ -852,6 +852,35 @@ test('public CLI help is available at the top level, namespaces, groups, and lea
 });
 
 
+// Board issue 178, residual RF3. `--cwd` is one name with two contracts, and
+// the help text is public contract, so the two commands must not share one
+// sentence: `agent run --cwd` names the directory *this invocation* runs in,
+// while `agent new --cwd` declares a default for every invocation of an agent
+// that creates none -- and is refused outright when combined with `--fork`.
+// Documenting the run contract on `new` is the one-name-two-meanings hazard the
+// intent record forbids, relocated into the help.
+test('agent new and agent run document --cwd as the two different contracts they are', (t) => {
+  const { env } = fixture(t);
+  const help = (args) => {
+    const result = run([...args, '--help'], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Usage: antonina /);
+    const row = result.stdout.split('\n').find((line) => line.trimStart().startsWith('--cwd'));
+    assert.ok(row !== undefined, `no --cwd row in ${args.join(' ')} --help`);
+    return row;
+  };
+
+  const newRow = help(['agent', 'new']);
+  assert.match(newRow, /Declared default directory for every invocation/);
+  assert.match(newRow, /refused with --fork/);
+  assert.doesNotMatch(newRow, /THIS invocation/, 'agent new --help must not describe the run contract');
+
+  const runRow = help(['agent', 'run']);
+  assert.match(runRow, /THIS invocation/);
+  assert.match(runRow, /--steer/);
+  assert.doesNotMatch(runRow, /refused with --fork/, 'agent run --help must not describe the new contract');
+});
+
 test('public CLI rejects positional data arguments', (t) => {
   const { env } = fixture(t);
   const board = run(['board', 'show', '1'], env);
@@ -2249,8 +2278,8 @@ test('run --cwd on a live front is refused without --steer, and accepted with it
   // The killed *invocation* is gone. Its runner deliberately is not: one runner
   // loops the invocations of a conversation, so the runner that was steering is
   // the runner that runs the relocated invocation. (Runner-reaping coherence is
-  // pinned in `stop and kill accept --json and emit JSON`, which stops a live
-  // front rather than a finished one.)
+  // pinned in `stop and kill converge without --json and refuse the flag
+  // outright`, which stops a live front rather than a finished one.)
   assert.equal(
     procStartTicks(live.pid),
     null,
@@ -2305,13 +2334,24 @@ test('status distinguishes the declared directory from the one invoked in', asyn
   assert.equal(readBack.cwd, work);
 });
 
-// (11) `stop --json` and `kill --json` are accepted and emit JSON. They were
-// the only lifecycle commands that rejected `--json` outright (exit 2, "unknown
-// option"), so an operator scripting a cleanup had to parse prose from exactly
-// the commands that destroy state.
-test('stop and kill accept --json and emit JSON', async (t) => {
+// (11) Board issue 178 residual RF4. `stop`/`kill` used to gain a `--json`
+// form in this same PR. That was unrelated public surface with its own output
+// and exit matrix, so it is dropped. What must survive the drop is the
+// convergence the other cases depend on: `stop` returns only once the
+// invocation *and* the detached runner are gone, so a caller that reads the
+// record afterwards is not racing the runner's final write. This case is the
+// pin for that, and it pins the refusal too: `--json` is an unknown option here
+// again, exit 2, rather than a silently accepted flag.
+test('stop and kill converge without --json and refuse the flag outright', async (t) => {
   const { root, work, env } = fixture(t);
   assert.equal(run(['agent', 'new', '--id', '5e70', '--cwd', work], env).status, 0);
+
+  // The flag is gone, and gone loudly.
+  const refused = run(['agent', 'stop', '--id', '5e70', '--json'], env);
+  assert.equal(refused.status, 2, `expected an unknown-option refusal, got: ${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stderr, /unknown option/);
+  const refusedKill = run(['agent', 'kill', '--id', '5e70', '--json'], env);
+  assert.equal(refusedKill.status, 2, `expected an unknown-option refusal, got: ${refusedKill.stdout}${refusedKill.stderr}`);
 
   assert.equal(run(['agent', 'run', '--id', '5e70', '--detach', '--prompt', 'slow'], env).status, 0);
   const live = await waitFor(
@@ -2326,26 +2366,23 @@ test('stop and kill accept --json and emit JSON', async (t) => {
   // asserts directly. A belt-and-braces kill here would fire a signal at a pid
   // that the command has already finished with.
 
-  const stopped = run(['agent', 'stop', '--id', '5e70', '--json'], env);
+  const stopped = run(['agent', 'stop', '--id', '5e70'], env);
   assert.equal(stopped.status, 0, `${stopped.stdout}${stopped.stderr}`);
-  const stopReport = JSON.parse(stopped.stdout);
-  assert.equal(stopReport.id, '5e70');
-  assert.equal(stopReport.command, 'stop');
-  assert.equal(stopReport.state, 'stopped');
-  // Coherence: the JSON is emitted only once the invocation *and* the detached
-  // runner are gone, so a caller that reads it is not racing the runner's final
-  // state write.
+  assert.match(stopped.stdout, /^stopped agent 5e70/, stopped.stdout);
+  // Coherence: the command returns only once the invocation *and* the detached
+  // runner are gone, so a caller that reads the record is not racing the
+  // runner's final state write.
   assert.equal(
     procStartTicks(live.runner_pid),
     null,
-    'stop --json must not report success while the runner can still write agent state',
+    'stop must not return while the runner can still write agent state',
   );
   await waitFor(root, '5e70', (meta) => meta.state === 'stopped');
 
   // And the already-dead case, which reports rather than pretending to act.
-  const again = run(['agent', 'stop', '--id', '5e70', '--json'], env);
+  const again = run(['agent', 'stop', '--id', '5e70'], env);
   assert.equal(again.status, 0, `${again.stdout}${again.stderr}`);
-  assert.equal(JSON.parse(again.stdout).state, 'stopped');
+  assert.match(again.stdout, /is already stopped \(state stopped\)/);
 
   assert.equal(run(['agent', 'run', '--id', '5e70', '--detach', '--prompt', 'slow'], env).status, 0);
   const second = await waitFor(
@@ -2353,12 +2390,17 @@ test('stop and kill accept --json and emit JSON', async (t) => {
     '5e70',
     (meta) => meta.state === 'running' && typeof meta.runner_pid === 'number' && meta.pid !== live.pid,
   );
-  const killed = run(['agent', 'kill', '--id', '5e70', '--json'], env);
+  const killed = run(['agent', 'kill', '--id', '5e70'], env);
   assert.equal(killed.status, 0, `${killed.stdout}${killed.stderr}`);
-  const killReport = JSON.parse(killed.stdout);
-  assert.equal(killReport.command, 'kill');
-  assert.equal(killReport.state, 'killed');
-  assert.equal(procStartTicks(second.runner_pid), null, 'kill --json must also reap the runner first');
+  assert.match(killed.stdout, /^killed agent 5e70/, killed.stdout);
+  // Matched on the durable record rather than on the sentence: `kill` prints one
+  // of two things depending on whether it found a live invocation or only
+  // reserved runner work, and which of the two fired is not what this case is
+  // about. What it is about is that both leave the same coherent terminal state,
+  // which the record is where.
+  const reaped = JSON.parse(run(['agent', 'status', '--id', '5e70', '--json'], env).stdout);
+  assert.equal(reaped.state, 'killed');
+  assert.equal(procStartTicks(second.runner_pid), null, 'kill must also reap the runner first');
 });
 
 // (8) `run --cwd <missing>` is a usage error, exit 2, and writes nothing at all.
@@ -2420,7 +2462,7 @@ test('an accepted invocation that never launches does not move the observed dire
     'b0ad',
     (meta) => meta.state === 'running' && typeof meta.pid === 'number' && typeof meta.runner_pid === 'number',
   );
-  // No belt-and-braces kill: `stop --json` is required to converge and reap both
+  // No belt-and-braces kill: `stop` is required to converge and reap both
   // the invocation and its runner, and this case asserts that it does.
 
   // The relocating steer is accepted on a live front, and rewrites the
@@ -2440,13 +2482,13 @@ test('an accepted invocation that never launches does not move the observed dire
 
   // Stop before the queued invocation can be drained. `stop` converges, so by
   // the time it returns no invocation and no runner of this agent is alive.
-  const stopped = run(['agent', 'stop', '--id', 'b0ad', '--json'], env);
+  const stopped = run(['agent', 'stop', '--id', 'b0ad'], env);
   assert.equal(stopped.status, 0, `${stopped.stdout}${stopped.stderr}`);
-  assert.equal(JSON.parse(stopped.stdout).state, 'stopped');
+  assert.match(stopped.stdout, /^stopped agent b0ad/, stopped.stdout);
   assert.equal(
     procStartTicks(live.runner_pid),
     null,
-    'stop --json must not report success while the runner can still write agent state',
+    'stop must not return while the runner can still write agent state',
   );
   const done = await waitFor(root, 'b0ad', (meta) => meta.state === 'stopped' && meta.active_runner === false);
 

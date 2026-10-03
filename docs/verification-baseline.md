@@ -805,3 +805,41 @@ What this front does change, stated as the file-level delta it is responsible fo
   the delete-each-field loop, because that field is the one the schema deliberately tolerates
   absent. That loop is what keeps the closed top-level shape closed for every other field, and it
   still runs for all of them.
+
+## Addendum correction: the board-178 counts re-measured at the head being landed
+
+**The `agent.e2e.test.mjs` count in the addendum above was measured at a head this branch has moved
+past, which is the mistake this document's own header warns against.** It claims `44 -> 50` `^test(`
+cases, net **+5**, and names five new ones. Measured on the release line head this branch was merged
+onto (`4c27eb68`) and on the head being landed, the real figures are:
+
+| file | `4c27eb68` | landed head | delta |
+| --- | --- | --- | --- |
+| `packages/cli/test/agent.e2e.test.mjs` | 46 `^test(` cases | **58** | **+12** |
+| `packages/agent-runtime/test/metadata.test.mjs` | 8 | **9** | **+1** (unchanged, still correct) |
+
+The name-level diff is 13 added, 1 removed, net +12. Seven cases were added after the addendum was
+written and were unaccounted for: `R1: a directory declared while capable is not launched after the
+capability is withdrawn`, `R2: new --fork refuses to inherit a declared directory the backend cannot
+place`, `new refuses a --cwd the configured backend cannot place an invocation in`, `every entry
+point refuses an empty --cwd instead of inheriting the shell directory`, `status distinguishes the
+declared directory from the one invoked in`, `an accepted invocation that never launches does not
+move the observed directory`, and `agent new and agent run document --cwd as the two different
+contracts they are`. The single removal is `--cwd is refused while a front exists, and changes
+nothing`, whose premise this contract deletes; it is replaced by `run --cwd on a live front is
+refused without --steer, and accepted with it`.
+
+Two more deltas this front is responsible for, stated as such:
+
+- **`packages/cli/test/agent-launch-directory-missing.test.mjs`: a new file, 2 cases.** It covers
+  the launch-time half of the working-directory check in `runner.ts` and the `LAUNCH_DIRECTORY_MISSING`
+  entry in `DISPLAYABLE_AGENT_ERRORS`, neither of which had any test. It is a new file rather than an
+  addition to `agent.e2e.test.mjs` because it drives the runtime's runner in-process and then reads
+  the record back through the CLI, and it keeps itself disjoint from that suite's fixture.
+- **`stop and kill accept --json and emit JSON` is replaced by `stop and kill converge without --json
+  and refuse the flag outright`, at the same count of one case.** `stop`/`kill` had gained `--json`
+  in this same PR; that was unrelated public surface with its own output and exit matrix, so it was
+  dropped rather than carried. The replacement case pins the two things that must survive the drop:
+  `--json` is an unknown option again (exit 2), and `stop`/`kill` still converge -- returning only
+  once the invocation and the detached runner are both gone. The two other cases that had used
+  `stop --json` as their convergence mechanism now use plain `stop`.

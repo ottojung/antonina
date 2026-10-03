@@ -28,6 +28,8 @@ interface CommandSpec {
   readonly repeated?: readonly string[];
   readonly required?: readonly string[];
   readonly requireRepeated?: readonly string[];
+  /** Per-command overrides for OPTION_HELP, where one option name carries two contracts. */
+  readonly optionHelp?: Readonly<Record<string, string>>;
   readonly normalize: (parsed: ParsedOptions) => string[];
 }
 
@@ -338,6 +340,9 @@ const AGENT_SPECS: readonly CommandSpec[] = [
     values: ['--id', '--cwd', '--title', '--fork'],
     flags: ['--json'],
     required: ['--id'],
+    optionHelp: {
+      '--cwd': 'Declared default directory for every invocation of this agent; refused with --fork',
+    },
     normalize: (p) => ['new', ...valueArgs(p, ['--id', '--cwd', '--title', '--fork']), ...flagArgs(p, ['--json'])],
   },
   {
@@ -391,12 +396,18 @@ const AGENT_SPECS: readonly CommandSpec[] = [
     required: ['--id', '--timeout'],
     normalize: (p) => ['wait', '--id', p.values.get('--id')!, '--timeout', p.values.get('--timeout')!],
   },
-  ...(['stop', 'kill'] as const).map((command): CommandSpec => withJson({
+  // Board issue 178, residual RF4: neither command takes `--json`. An earlier
+  // draft added it here; it is unrelated public surface with its own output and
+  // exit matrix, so it is dropped rather than carried by this contract PR. The
+  // convergence behaviour these commands are relied on for -- returning only
+  // once the invocation and its detached runner are both gone -- is unaffected
+  // and is pinned in packages/cli/test/agent.e2e.test.mjs.
+  ...(['stop', 'kill'] as const).map((command): CommandSpec => ({
     path: [command],
     summary: command === 'stop' ? 'Stop a managed agent.' : 'Kill a managed agent.',
     values: ['--id'],
     required: ['--id'],
-    normalize: (p) => [command, '--id', p.values.get('--id')!, ...jsonArg(p)],
+    normalize: (p) => [command, '--id', p.values.get('--id')!],
   })),
   {
     path: ['delete'],
@@ -515,7 +526,7 @@ function commandHelp(namespace: PublicNamespace, spec: CommandSpec): string {
     const takesValue = (spec.values ?? []).includes(name) || (spec.repeated ?? []).includes(name);
     const required = (spec.required ?? []).includes(name) || (spec.requireRepeated ?? []).includes(name);
     const shown = name + (takesValue ? ' <value>' : '');
-    return '  ' + shown.padEnd(24) + (OPTION_HELP[name] ?? '') + (required ? ' (required)' : '');
+    return '  ' + shown.padEnd(24) + (spec.optionHelp?.[name] ?? OPTION_HELP[name] ?? '') + (required ? ' (required)' : '');
   });
   return [
     'Usage: antonina ' + namespace + ' ' + spec.path.join(' ') + (optionNames.length === 0 ? '' : ' [options]'),

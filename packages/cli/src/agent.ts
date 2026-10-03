@@ -1186,22 +1186,16 @@ async function stopLike(
   args: string[],
   context: AgentCommandContext,
 ): Promise<number> {
-  // Board issue 178: `stop`/`kill` are the only lifecycle commands that rejected
-  // `--json` outright, so an operator scripting a cleanup had to parse prose
-  // from exactly the commands that destroy state. The command's meaning is
-  // unchanged; only its output form is added, and both forms still exit after
-  // the invocation *and* the detached runner are gone.
-  const parsed = parse(args, ['--json']);
+  // Board issue 178, residual RF4: an earlier draft of this contract also gave
+  // `stop`/`kill` a `--json` form. That is unrelated public surface with its own
+  // output and exit matrix, and a contract PR that changes commands it does not
+  // discuss is how a review gate stops being a gate, so it was dropped rather
+  // than carried. Both commands still converge the same way: they exit only
+  // after the invocation *and* the detached runner are gone, whatever they
+  // print.
+  const parsed = parse(args);
   if (parsed.positionals.length !== 0) throw new UsageError(`${command}: unexpected positional arguments`);
   const agentId = requireAgentId(parsed.values.get('--id'), command);
-  const report = (current: AgentMetadata): number => {
-    if (parsed.flags.has('--json')) {
-      context.io.stdout(stableJson({ id: agentId, state: deriveState(current), command }));
-    } else {
-      context.io.stdout(`${command === 'stop' ? 'stopped' : 'killed'} agent ${agentId}`);
-    }
-    return EXIT_OK;
-  };
   let meta = requireMeta(agentId, context);
   if (!invocationAlive(meta)) {
     let acceptedPending: string | null;
@@ -1212,7 +1206,6 @@ async function stopLike(
     }
     const ownsWork = activeRunnerFlag(meta) === true || acceptedPending !== null || reservationInFlight(meta);
     if (!ownsWork) {
-      if (parsed.flags.has('--json')) return report(meta);
       context.io.stdout(
         command === 'stop'
           ? `antonina: agent ${agentId} is already stopped (state ${deriveState(meta)})`
@@ -1231,7 +1224,6 @@ async function stopLike(
       finalizeTerminal(current, command === 'stop' ? 'stopped' : 'killed', Date.now() / 1000, null, null);
       current.stop_reason = command;
     }, paths(context));
-    if (parsed.flags.has('--json')) return report(requireMeta(agentId, context));
     context.io.stdout(`${command === 'stop' ? 'stopped' : 'killed'} agent ${agentId} (cancelled reserved runner work)`);
     return EXIT_OK;
   }
@@ -1255,7 +1247,8 @@ async function stopLike(
     current.runner_reservation = null;
   }, paths(context));
   await reapRunnerBeforeReturn(agentId, command, context);
-  return report(requireMeta(agentId, context));
+  context.io.stdout(`${command === 'stop' ? 'stopped' : 'killed'} agent ${agentId}`);
+  return EXIT_OK;
 }
 
 async function cmdDelete(args: string[], context: AgentCommandContext): Promise<number> {

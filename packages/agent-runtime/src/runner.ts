@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, fstatSync, openSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, statSync } from 'node:fs';
 import { constants } from 'node:os';
 
 import {
@@ -29,12 +29,13 @@ import {
   stopLikeOrMalformed,
 } from './lifecycle.js';
 import {
+  LAUNCH_DIRECTORY_MISSING,
   activeRunnerFlag,
   deletePendingFlag,
   pendingPrompt,
   persistedControlField,
   persistedNativeSessionId,
-  requiredAgentCwd,
+  effectiveInvocationCwd,
   runnerGeneration,
   runnerReservationMode,
   runnerReservationState,
@@ -50,6 +51,8 @@ import {
 
 const CONTROL_POLL_MS = 200;
 const CONTROL_GRACE_MS = 10_000;
+
+
 
 export interface RunnerOptions extends StatePathsOptions {
   env?: Record<string, string | undefined>;
@@ -429,6 +432,10 @@ async function runInvocation(
 ): Promise<boolean> {
   const meta = readMeta(agentId, options);
   if (meta === null) return false;
+  // Board issue 178: resolved once, from this one snapshot of the record, and
+  // then used for both `--dir` and `spawn({cwd})`. These used to be two reads
+  // in two files with nothing forcing them to agree.
+  const launchCwd = effectiveInvocationCwd(meta);
   let command: string[] | null;
   try {
     command = buildAgentCommand(meta, prompt, isContinue, options.env);
@@ -453,6 +460,27 @@ async function runInvocation(
   }
   if (!await claimPendingPrompt(agentId, prompt, options)) return false;
 
+  // A directory that no longer exists produces no pid and no spawn error, and
+  // the recorded reason would otherwise be `OpenCode process had no pid` with
+  // exit 127 -- a note that does not name the real cause at all. This is the
+  // launch-time half of the check the CLI also performs at acceptance: a
+  // directory can disappear in between, and an accepted prompt must still end
+  // with a named reason.
+  if (launchCwd === null || !statSync(launchCwd, { throwIfNoEntry: false })?.isDirectory()) {
+    await updateMeta(agentId, (current) => {
+      finalizeTerminal(
+        current,
+        'failed',
+        Date.now() / 1000,
+        null,
+        null,
+        `${LAUNCH_DIRECTORY_MISSING}: ${launchCwd ?? 'undeclared'}`,
+      );
+      setActiveRunner(current, false);
+    }, options);
+    return false;
+  }
+
   let attempt = 0;
   while (true) {
     const invocationId = randomBytes(16).toString('hex');
@@ -471,7 +499,7 @@ async function runInvocation(
     let child: ChildProcess;
     try {
       child = spawn(command[0]!, command.slice(1), {
-        cwd: requiredAgentCwd(meta),
+        cwd: launchCwd,
         env,
         detached: true,
         stdio: ['ignore', fd, fd],

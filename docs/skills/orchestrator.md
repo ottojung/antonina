@@ -205,7 +205,9 @@ antonina agent run --id ID --cwd /absolute/worktree --prompt '...' --detach
 antonina agent new --id ID --cwd /absolute/worktree
 ```
 
-Always declare `--cwd` on `run`. A front's working directory is the one declared there, never the directory the orchestrator happened to run the command from, and `agent status`/`agent list` report exactly that declared directory or an explicit `null`. A reported `cwd` is therefore the directory the front runs in, not an observation of where the front has since worked: to learn that, read `agent log`. An agent created without `--cwd` has no working directory and `run` refuses to launch it, so declare one at launch.
+Always declare `--cwd` on `run`, on every run. A front's working directory is the one named there, never the directory the orchestrator happened to run the command from. `--cwd` is run-scoped: it names the directory *that invocation* runs in, and it is accepted on a live front too. A steer **kills the current invocation and starts the next one in the same conversation**, so `agent run --steer --cwd PATH` relocates live work into `PATH`; a steer without `--cwd` continues in the directory the previous invocation ran in. Never steer with a `--cwd` you have not checked, because that is how live work silently changes directory.
+
+Two reported facts, not one: `cwd` is the declared default and `invocation_cwd` (`ran in:` in human `agent status`) is the directory the current or most recent invocation launched in. Neither is an observation of where the front has since worked: to learn that, read `agent log`. An agent created without `--cwd` has no working directory and `run` refuses to launch it, so declare one at launch.
 
 Launch newly delegated work with `--detach`; do not keep the orchestrator attached to a subordinate agent while it works.
 

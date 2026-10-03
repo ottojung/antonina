@@ -93,7 +93,22 @@ export function setActiveRunner(meta: AgentMetadata, value: boolean): void {
   if (!value) meta.runner_reservation = null;
 }
 
-export function beginInvocation(meta: AgentMetadata, prompt: string, now: number, promptCount: number): void {
+/**
+ * `invocationCwd` is the directory this invocation is being launched in, when
+ * the accepting command named one. It is `undefined` on the paths that accept a
+ * prompt without naming a directory -- a steer popped into pending, which
+ * inherits the invocation it replaces -- and `null` when there is provably
+ * nothing to inherit and nothing to name. Writing it here rather than at each
+ * acceptance site is what keeps the two paths from diverging.
+ */
+export function beginInvocation(
+  meta: AgentMetadata,
+  prompt: string,
+  now: number,
+  promptCount: number,
+  invocationCwd?: string | null,
+): void {
+  if (invocationCwd !== undefined) meta.invocation_cwd = invocationCwd;
   meta.state = 'running';
   meta.started_at = now;
   meta.last_activity_at = now;

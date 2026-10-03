@@ -3,7 +3,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { constants } from 'node:os';
 import { isAbsolute } from 'node:path';
 
-import { DEFAULT_VARIANT, persistedNativeSessionId, persistedVariant, requiredAgentCwd, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
+import { DEFAULT_VARIANT, persistedNativeSessionId, persistedVariant, requiredInvocationCwd, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
 
 export const AGENT_MODEL = 'opencode/space-bunny-free';
@@ -375,6 +375,34 @@ export function configuredModelAvailable(
   return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).includes(AGENT_MODEL);
 }
 
+/**
+ * What the configured backend can actually honour, asked as data rather than
+ * discovered by failing.
+ *
+ * Board issue 178: `--cwd` means "run this invocation in this directory", for
+ * every invocation including a `--steer`. A backend that cannot place a single
+ * invocation in a named directory must say so *here*, so that `agent run --cwd`
+ * refuses with a named capability error instead of quietly running somewhere
+ * else. A backend-agnostic CLI cannot do better than this: it cannot invent a
+ * meaning for the flag that the backend will honour, and it must not change the
+ * meaning of the flag depending on which backend is configured.
+ *
+ * OpenCode can: every invocation is a fresh `opencode run` process, spawned
+ * with `spawn({cwd})` *and* told `--dir` the same value, and a continuation is
+ * a new process re-attaching the same session rather than a live process whose
+ * directory would have to change in place.
+ */
+export interface BackendCapabilities {
+  /** An invocation can be launched in a named working directory. */
+  invocation_cwd: boolean;
+}
+
+export function backendCapabilities(
+  _env: Record<string, string | undefined> = process.env,
+): BackendCapabilities {
+  return { invocation_cwd: true };
+}
+
 export function buildAgentCommand(
   meta: AgentMetadata,
   prompt: string,
@@ -382,7 +410,10 @@ export function buildAgentCommand(
   env: Record<string, string | undefined> = process.env,
 ): string[] | null {
   const agentId = requiredPersistedAgentId(meta);
-  const cwd = requiredAgentCwd(meta);
+  // Board issue 178: the launch directory is resolved by one function in
+  // `metadata.ts` and consumed here and in `runner.ts`, so `--dir` and the
+  // `spawn({cwd})` this process is launched with cannot name different places.
+  const cwd = requiredInvocationCwd(meta);
   const variant = persistedVariant(meta) || DEFAULT_VARIANT;
   const executable = resolveOpencode(env);
   if (isContinue) {

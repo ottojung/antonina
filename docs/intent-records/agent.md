@@ -35,3 +35,17 @@ kind: constraint
 The public `antonina agent` command is responsible for launching and managing an agent, not for deciding whether the host has enough memory, CPU, disk, or other capacity to run it. It must not refuse, delay, or suppress an otherwise valid launch based on host-capacity heuristics or preflight resource thresholds. If an agent dies because the host runs out of resources, it dies.
 
 Antonina may improve observation, failure classification, and diagnostics around resource exhaustion — for example, reporting available operating-system evidence that an invocation was OOM-killed — but such diagnostics must not turn the agent command into a host scheduler or admission controller.
+
+$id-8255170639024174
+title: One flag has one meaning, and a backend limitation is a capability error
+date: 2026/10/03
+source: issue-178
+kind: constraint
+
+An option on the public command surface means the same thing on every path that accepts it. A flag whose meaning depends on the state the command happens to find — rewritten configuration while the agent is idle, a refusal while it is busy — is two flags wearing one name, and an operator cannot predict it. Where the previous behaviour was exactly that, it is deleted rather than preserved: `agent run --cwd PATH` names the directory *that invocation* runs in, on every run, including `agent run --steer`, and is accepted while a front is live.
+
+A steer kills the current invocation and starts the next one in the same conversation. Naming a directory on a steer therefore relocates live work into that directory, and an operator who steers with a `--cwd` they have not checked has moved work; this is stated in the orchestrator skill rather than left to be discovered.
+
+A backend that cannot honour a request is represented as an explicit capability or error — never as a different meaning for the same flag, and never by silently running somewhere other than the directory the record names. Antonina's CLI stays backend-agnostic by exposing one stable abstraction and asking the backend what it can do, not by branching on which backend is configured. A capability that cannot be honoured refuses before any state is written.
+
+The working directory is not inherited from the invoking shell under any circumstance, including when a directory is omitted and one was observed earlier: the launch directory is resolved from durable state alone, and when no durable value exists the launch is refused by name.

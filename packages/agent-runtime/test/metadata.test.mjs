@@ -9,6 +9,7 @@ import {
   nextPromptCount,
   pendingPrompt,
   persistedControlField,
+  persistedInvocationCwd,
   persistedLifecycleState,
   persistedNativeSessionId,
   persistedTimestamp,
@@ -118,6 +119,11 @@ test('schema v4 rejects old versions, missing fields and unknown fields', () => 
   assert.throws(() => validateAgentMetadata(old), /unsupported managed-agent metadata version/);
 
   for (const key of Object.keys(base)) {
+    // `invocation_cwd` is the one field the schema deliberately tolerates
+    // absent (board issue 178): it is an observation, not lifecycle authority,
+    // and every record written before this field existed must keep validating.
+    // It is covered separately, below, in both directions.
+    if (key === 'invocation_cwd') continue;
     const missing = { ...base };
     delete missing[key];
     assert.throws(
@@ -130,6 +136,32 @@ test('schema v4 rejects old versions, missing fields and unknown fields', () => 
   assert.throws(
     () => validateAgentMetadata({ ...base, legacy_field: true }),
     /fields are not canonical/,
+  );
+});
+
+// Board issue 178: `invocation_cwd` is optional and validated when present.
+// Absent is canonical (every record written before this field existed), present
+// is held to the same absolute-path rule as `cwd`, and a present-but-wrong value
+// is still a rejection rather than something the runtime silently drops.
+test('invocation_cwd is optional, canonical when absent, and validated when present', () => {
+  const base = idleMeta('a11d', '/tmp/work', null, 100.5);
+  assert.equal(base.invocation_cwd, null, 'a new record observes no invocation yet');
+
+  const legacy = { ...base };
+  delete legacy.invocation_cwd;
+  assert.doesNotThrow(() => validateAgentMetadata(legacy), 'a pre-178 record must still validate');
+  assert.equal(persistedInvocationCwd(legacy), null, 'absent reads as "nothing observed", never as a guess');
+
+  assert.doesNotThrow(() => validateAgentMetadata({ ...base, invocation_cwd: '/tmp/other' }));
+  assert.equal(persistedInvocationCwd({ ...base, invocation_cwd: '/tmp/other' }), '/tmp/other');
+
+  assert.throws(
+    () => validateAgentMetadata({ ...base, invocation_cwd: 'relative/path' }),
+    /invocation_cwd is malformed/,
+  );
+  assert.throws(
+    () => validateAgentMetadata({ ...base, invocation_cwd: 42 }),
+    /invocation_cwd is malformed/,
   );
 });
 

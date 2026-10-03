@@ -766,3 +766,42 @@ operator's real `trust.json` and `credential.json`. Every process spawned by the
 was reaped before its run ended — confirmed by the clean `git status --porcelain` and absent
 `.antonina-test-tmp` rows in both tables, and by observing that no `node` process from this
 worktree survived either run.
+
+---
+
+## Addendum: the board-178 `--cwd` contract front (branch `impl/178-cwd-contract`)
+
+**The tables above are not re-pinned by this front, and the reason is stated rather than left
+implicit.** Every count in them was measured on `65caa73` under a specific pair of `TMPDIR`
+accounts, and this front changed none of the files those tables attribute counts to except
+`packages/cli/test/agent.e2e.test.mjs`. Re-pinning them honestly would mean re-running the whole
+chain under both a pinned executable `TMPDIR` and an unset one — a measurement this front did not
+perform. A count asserted from a different head's run would be exactly the documentation bug this
+note's own header warns about, so none is asserted here.
+
+What this front does change, stated as the file-level delta it is responsible for:
+
+- **`packages/cli/test/agent.e2e.test.mjs`: 44 → 50 `^test(` cases, i.e. +6.** Five new cases and
+  one rewritten in place. The five new ones are `a --steer relocates a live front, and status
+  reports both directories`, `after a relocating steer, the --dir, the log and status name one
+  directory`, `a --steer without --cwd keeps the directory of the invocation it replaces`,
+  `run --cwd on a live front is refused without --steer, and accepted with it`, and `a recorded
+  working directory that no longer exists is refused by name`. The rewritten one is
+  `--cwd is refused while a front exists, and changes nothing`, whose premise — that `--cwd` is
+  refused while a front exists — this contract deletes; it is now the case named above with the
+  busy-without-`--steer` half kept, because that half is still true and still needs a pin. Net
+  **+5**, from one removal and one rename absorbed rather than counted twice.
+- **`packages/cli/test/agent.e2e.test.mjs`: one intentional expectation change, not a count.**
+  `new refuses a --cwd that is not an existing directory and creates no state` now asserts exit
+  **2** where it asserted exit 1, and `run refuses a --cwd that is not an existing directory` does
+  the same. A `--cwd` that names something which is not a directory is a usage error; the exit-1
+  code is reserved for state conflicts. Both files' fixture anchors are unchanged: `fixture()`,
+  `REPO_FIXTURE_PARENT` and the exec probe were not touched, so the noexec-column claims about
+  which cases need a real fixture still hold for every case this front added — all five new cases
+  drive a real spawn, as did the case they replaced.
+- **`packages/agent-runtime/test/metadata.test.mjs`: +1** case (`invocation_cwd is optional,
+  canonical when absent, and validated when present`), and one line inside
+  `schema v4 rejects old versions, missing fields and unknown fields` now skips `invocation_cwd` in
+  the delete-each-field loop, because that field is the one the schema deliberately tolerates
+  absent. That loop is what keeps the closed top-level shape closed for every other field, and it
+  still runs for all of them.

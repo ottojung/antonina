@@ -2642,17 +2642,21 @@ export class ShardedBoardStore {
       head,
       migration: unMigratedBoardReport(),
     };
-    const { refs: openPageRefs, superseded: openSuperseded } = await this.writeIssueListPages(
+    // The `null, null, []` tail of each call is what makes the replaced set
+    // empty, and it is not a coincidence of this board: with no previous state
+    // there are no previous pages to diff against and no previous refs to
+    // replace, so `writeIssueListPages` cannot report anything. The import is
+    // also the first writer, so there is nothing of its own to reclaim -- the
+    // sweep belongs to the generations after it, which is why the meta below
+    // carries `supersededRefs: []`. Hence only the refs are destructured: a
+    // value bound here would have to be discarded, and a discarded value next
+    // to a comment is what the previous version of this code did.
+    const { refs: openPageRefs } = await this.writeIssueListPages(
       credential, logical.boardId, state, logical.closedAt, 'open', null, null, [],
     );
-    const { refs: closedPageRefs, superseded: closedSuperseded } = await this.writeIssueListPages(
+    const { refs: closedPageRefs } = await this.writeIssueListPages(
       credential, logical.boardId, state, logical.closedAt, 'closed', null, null, [],
     );
-    // The import has no superseded generation, so anything these report is a
-    // ref that was written twice in this same run. Nothing is reclaimed here: the
-    // import is the first writer, and the sweep belongs to the generations after
-    // it. The values are returned only so the caller can assert they are empty.
-    void [openSuperseded, closedSuperseded];
 
     const feedPageRefs: string[] = [];
     const feedPages = paginate(logical.feed, V3_FEED_PAGE_SIZE);

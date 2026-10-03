@@ -43,6 +43,7 @@ import {
 import { procStartTicks, signalMarkedInvocationProcesses } from './process.js';
 import {
   logPath,
+  logSize,
   readMeta,
   updateMeta,
   type StatePathsOptions,
@@ -73,15 +74,40 @@ interface ChildResult {
   code: number | null;
   signal: NodeJS.Signals | null;
   /**
-   * True when this runner is the process that asked for the invocation to end.
+   * True when this runner is the process that *delivered* the signal asking for
+   * the invocation to end.
    *
    * A steer, a stop and a kill are all operator decisions, and this runner
    * signals the invocation for each of them. Without this flag the only
    * evidence available at death is the persisted intent, and the intent alone
    * cannot distinguish the death the operator asked for from a host kill that
    * happened to land while the intent was pending.
+   *
+   * "Delivered", not "asked for": `signalInvocation` returns whether it
+   * actually sent anything, having refused on its identity checks. Recording the
+   * attempt instead of the outcome told the classification that a death nobody
+   * requested was the operator's, and a death on a signal under a `stop` or
+   * `kill` intent was then recorded as a clean operator-initiated terminal
+   * state with a null `error` and a null `backend_error` -- a SIGKILL from the
+   * host, the OOM killer or anywhere else, recorded as if the operator had
+   * asked for it and saying nothing at all about why it ended.
+   *
+   * Sticky once true: a later refused poll cannot un-deliver a signal that
+   * already arrived, so this is a latch, not a snapshot of the last poll.
    */
   operatorSignalled: boolean;
+  /**
+   * True only when `signalInvocation` accepted at least one operator signal
+   * for this invocation, i.e. the runtime delivered it to the backend process
+   * group rather than only intending to.
+   *
+   * `operatorSignalled` is set before the send and whether or not it succeeds:
+   * `signalInvocation` returns false whenever the durable identity no longer
+   * resolves, or the pid/start-time/marker checks fail against live `/proc`, or
+   * the signal itself fails. Without this second flag a refused signal is
+   * indistinguishable from a delivered one in durable state.
+   */
+  operatorSignalDelivered: boolean;
 }
 
 function signalNumber(signal: NodeJS.Signals | null): number | null {
@@ -93,6 +119,7 @@ function childResult(child: ChildProcess, agentId: string, options: RunnerOption
   return new Promise((resolve) => {
     let controlStartedAt: number | null = null;
     let operatorSignalled = false;
+    let operatorSignalDelivered = false;
     const timer = setInterval(() => {
       const meta = readMeta(agentId, options);
       if (meta === null) return;
@@ -100,23 +127,23 @@ function childResult(child: ChildProcess, agentId: string, options: RunnerOption
       if (intent.malformed || intent.value === null) return;
       if (intent.value === 'kill') {
         operatorSignalled = true;
-        signalInvocation(meta, 'SIGKILL');
+        if (signalInvocation(meta, 'SIGKILL')) operatorSignalDelivered = true;
         return;
       }
       if (intent.value === 'stop' || intent.value === 'steer') {
         if (controlStartedAt === null) controlStartedAt = Date.now();
         const signal = Date.now() - controlStartedAt >= CONTROL_GRACE_MS ? 'SIGKILL' : 'SIGTERM';
         operatorSignalled = true;
-        signalInvocation(meta, signal);
+        if (signalInvocation(meta, signal)) operatorSignalDelivered = true;
       }
     }, CONTROL_POLL_MS);
     child.once('close', (code, signal) => {
       clearInterval(timer);
-      resolve({ code, signal, operatorSignalled });
+      resolve({ code, signal, operatorSignalled, operatorSignalDelivered });
     });
     child.once('error', () => {
       clearInterval(timer);
-      resolve({ code: 127, signal: null, operatorSignalled });
+      resolve({ code: 127, signal: null, operatorSignalled, operatorSignalDelivered });
     });
   });
 }
@@ -180,7 +207,9 @@ async function reclaimOrStop(agentId: string, options: RunnerOptions): Promise<b
       return;
     }
     if (queue.length > 0) {
-      popSteerIntoPending(meta, Date.now() / 1000);
+      // The drained continuation begins where the log ends right now, so its own
+      // run scope excludes everything the interrupted invocation wrote.
+      popSteerIntoPending(meta, Date.now() / 1000, { logOffset: logSize(agentId, options) });
       meta.active_runner = true;
       busy = true;
       return;
@@ -213,7 +242,13 @@ async function recordSpawned(
     meta.exit_code = null;
     meta.exit_signal = null;
     meta.backend_error = null;
-    meta.error = null;
+    // As in `beginInvocation`: a note an earlier invocation recorded stays on
+    // the record until some invocation replaces it. Every field that would give
+    // it a run to belong to is reset just above, so it cannot be read as this
+    // spawn's outcome, and `meta.backend_error` being cleared here is what
+    // stops `displayableAgentError` from re-deriving and quoting it against this
+    // record. Board issue 167 owns the recording policy and resolved it as
+    // persistence.
     meta.active_runner = true;
     accepted = true;
   }, options);
@@ -288,12 +323,18 @@ async function finalizeInvocation(
     // reparented runner does not weaken this argument: the poll belongs to the
     // process that spawned the child, and a reparented runner polls the *next*
     // invocation, never the one that just died under this process.
-    const operatorSignalled = result.operatorSignalled;
-    const externalSignalDeath = signal !== null && !operatorSignalled;
+    //
+    // The flag is the delivery, not the attempt: `signalInvocation` refuses on
+    // its invocation-identity checks and says so, and a refusal means this
+    // runner never got a signal into the invocation. Reading the attempt as if
+    // it were the delivery classified a refused-signal death as the operator's,
+    // which under `stop` and `kill` intent is the silence board 167 is about.
+    const operatorSignalDelivered = result.operatorSignalDelivered;
+    const externalSignalDeath = signal !== null && !operatorSignalDelivered;
     let state: 'succeeded' | 'failed' | 'stopped' | 'killed';
     if (intent.value === 'stop') state = 'stopped';
     else if (intent.value === 'kill') state = 'killed';
-    else if (signal !== null) state = operatorSignalled ? 'stopped' : 'failed';
+    else if (signal !== null) state = operatorSignalDelivered ? 'stopped' : 'failed';
     else state = code === 0 ? 'succeeded' : 'failed';
     // The pending steer is left recorded even when the invocation died without
     // it taking effect: the operator did ask for it, and `error` below names the
@@ -324,10 +365,48 @@ async function finalizeInvocation(
     // runtime lost the invocation before any exit status existed. The note names
     // which one this is, and it is only ever written for this path, so the
     // runtime-lost case keeps its own distinct wording from reconcileDeadMeta.
+    //
+    // A backend that *catches* the signal this runner sent and then exits
+    // non-zero comes back from `close` as (code !== 0, signal === null) with
+    // `operatorSignalled === true`, so the condition below matched an
+    // operator-driven death too and recorded "the backend process exited
+    // unsuccessfully" for a steer or stop the operator asked for, on a record
+    // whose own `stop_reason` said the operator asked. `operatorSignalled` is
+    // the runtime's evidence that it sent that signal itself, so it gates the
+    // note: the same misattribution this note exists to remove, in the opposite
+    // direction.
+    //
+    // That gate must not become a blanket either. `operatorSignalled` is set
+    // before the send and regardless of whether it lands: `signalInvocation`
+    // returns false when the durable identity no longer resolves or the
+    // pid/start-time/marker checks fail against live `/proc`. In that case
+    // nothing reaches the backend, the child keeps running and then dies on its
+    // own, and suppressing the note would swallow an unexplained failure behind a
+    // record that reads, field for field, like a delivered one. So the note is
+    // withheld only when a signal was actually delivered, and otherwise it says
+    // what was measured: the runtime did not deliver one.
+    //
+    // Board 167, second half. That withholding keys on the delivered-signal fact
+    // and on nothing else. It used to also require `state === 'failed'`, which
+    // is not a fact about this invocation at all -- it is one term of the state
+    // mapping above, which honours the recorded intent -- so a refused `stop` or
+    // `kill` produced `state stopped` / `state killed` with `error null` while
+    // `backend_error.classification` said `unrecognized_backend_failure`: the
+    // runtime knew the backend died, the operator signal was never delivered,
+    // and the record claimed a clean operator stop and explained the failure
+    // nowhere. The same evidence, the same delivery fact, a different terminal
+    // state, and the reason disappeared with it.
+    //
+    // `code !== 0` and `signal === null` are kept: an invocation that exited
+    // cleanly, or that died on a signal, has no unexplained non-signal exit to
+    // account for, and a signal death is `death`'s subject above. What is left
+    // is exactly "this invocation ended with a non-zero exit that nothing
+    // explains, and no operator signal was delivered for it", which is the
+    // shape the note describes.
     const note = death !== null
       ? describeSignalDeath(death) ?? undefined
-      : state === 'failed' && code !== 0 && signal === null
-        ? describeBackendDeath(backendError, tailExcerpt) ?? undefined
+      : code !== 0 && signal === null && !operatorSignalDelivered
+        ? describeBackendDeath(backendError, tailExcerpt, result.operatorSignalled) ?? undefined
         : undefined;
     finalizeTerminal(meta, state, Date.now() / 1000, code, signal, note);
   }, options);

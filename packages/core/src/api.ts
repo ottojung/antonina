@@ -1,4 +1,4 @@
-import type { BoardOverview, IssueListSummary } from './board-v3-store.js';
+import type { BoardOverview, IssueCommentPage, IssueListSummary } from './board-v3-store.js';
 import {
   ANTONINA_NAMESPACE,
   BoardDeletedError,
@@ -495,6 +495,25 @@ export class BoardApi {
   }
 
   /**
+   * One bounded page of an issue's conversation: the issue's core fields with
+   * its `messages` empty, plus the 50 messages of the requested page and the
+   * whole thread's total count and page count.
+   *
+   * This exists beside `getIssue` and does not replace it. `getIssue` is the
+   * whole issue — every message — and its callers (the CLI's issue view,
+   * `listIssues`) ask for that. A client paging through a conversation does not,
+   * and reassembling a 5,000-message thread to draw 50 of them is the cost this
+   * read removes: it fetches the issue's own shard and at most the one comment
+   * shard holding the page, and a page past the end fetches none at all.
+   */
+  async getIssueCommentPage(number: number, page: number): Promise<IssueCommentPage> {
+    const credential = await this.fastReadCredential();
+    const read = await this.store.readIssueCommentPage(credential, number, page);
+    if (read === null) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
+    return clone(read);
+  }
+
+  /**
    * One page of the materialized chronological board feed, newest first.
    * V3 stores feed pages directly; reading the feed never reconstructs history.
    */
@@ -907,6 +926,8 @@ export type {
   BoardImportReport,
   BoardOverview,
   BoardSweepReport,
+  IssueCommentPage,
+  IssueListPage,
   IssueListSummary,
 } from './board-v3-store.js';
 export {

@@ -150,7 +150,20 @@ export function describeSignalDeath(error: BackendError | null): string | null {
  * invocation before any exit status existed (`reconcileDeadMeta`'s note, which
  * carries no exit code at all). Before board 159 both produced a bare `failed`.
  */
-export function describeBackendDeath(error: BackendError | null, excerpt: string | null): string | null {
+export function describeBackendDeath(
+  error: BackendError | null,
+  excerpt: string | null,
+  operatorSignalRefused = false,
+): string | null {
+  if (operatorSignalRefused) {
+    // The operator asked for this invocation to end and the runtime tried, but
+    // `signalInvocation` refused: the durable identity no longer resolved, or
+    // the pid/start-time/marker checks failed against live `/proc`, or the
+    // signal itself failed. Nothing reached the backend process group. Say
+    // exactly that, rather than saying the operator stopped the backend.
+    const base = describeBackendDeath(error, excerpt);
+    return `${base ?? 'the backend process ended unsuccessfully'}; this runtime did not deliver a signal to the backend process group for that request`;
+  }
   if (error === null) {
     const tail = excerpt === null ? '' : `; the last line it wrote was: ${excerpt}`;
     return `the backend process exited unsuccessfully without writing a diagnostic this runtime could read${tail}`;

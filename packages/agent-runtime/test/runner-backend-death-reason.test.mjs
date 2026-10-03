@@ -157,6 +157,29 @@ function agent(t, options, overrides = {}) {
   return id;
 }
 
+// Wait until the child is published *and* has demonstrably passed its own setup
+// and printed, so the pid in the record is the live one, then make the durable
+// invocation marker stop matching /proc so every poll tick's signalInvocation
+// is refused while the child is alive. Nothing is signalled; the child is left
+// running on purpose and the runner's own close handler reaps it.
+async function refuseEverySignal(t, id, options, logPath, overrides = {}) {
+  let tampered = false;
+  for (let i = 0; i < 200; i += 1) {
+    await new Promise((resolveTick) => setTimeout(resolveTick, 100));
+    const live = readMeta(id, options);
+    if (live === null || live.state !== 'running' || !Number.isSafeInteger(live.pid)) continue;
+    if (!existsSync(logPath) || !readFileSync(logPath, 'utf8').includes('backend up')) continue;
+    // Still well-formed 32-hex, so the identity resolves and only the
+    // ANTONINA_INVOCATION_ID check in identityMatches fails.
+    live.invocation_id = 'f'.repeat(32);
+    Object.assign(live, overrides);
+    writeMeta(id, live, options);
+    tampered = true;
+    break;
+  }
+  assert.equal(tampered, true, 'the durable invocation marker was never invalidated while the child ran');
+}
+
 async function runToCompletion(t, id, options) {
   let watchdog = null;
   try {
@@ -273,6 +296,157 @@ test('a quoted backend excerpt never carries a credential-shaped run', async (t)
   const log = readFileSync(join(options.env.XDG_STATE_HOME, 'antonina', 'agents', id, 'output.log'), 'utf8');
   assert.ok(log.includes(secret), 'the partial transcript is preserved verbatim');
   assert.ok(existsSync(join(options.env.XDG_STATE_HOME, 'antonina', 'agents', id, 'output.log')));
+});
+
+// A backend that traps the runner's own SIGTERM and exits non-zero comes back
+// from `close` as (code = 1, signal = null), which is indistinguishable by exit
+// status alone from a backend that failed on its own. `ChildResult
+// .operatorSignalled` is what separates them, and it is set in the same poll
+// that sends the signal. Without the gate on that flag the durable record read
+// state "failed", exit_code 1, stop_reason "steer", error "the backend process
+// exited unsuccessfully ..." — a cause the runtime's own evidence contradicts,
+// on a record that says the operator asked for the death.
+test('a steer the operator asked for is not recorded as a backend failure', async (t) => {
+  if (!requireProc(t)) return;
+  const backend = fakeBackend(
+    t,
+    '#!/bin/sh\ntrap \'printf "%s\\n" "Error: trapped bye"\nexit 1\' TERM\nprintf \'%s\\n\' "Wrote file successfully."\nsleep 5\n',
+  );
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const id = agent(t, options, { intent: 'steer', stop_reason: 'steer' });
+  const after = await runToCompletion(t, id, options);
+
+  // The state mapping is not the subject of this fix: an operator-signalled
+  // death with no usable signal is still `failed`, as it was before board 159.
+  assert.equal(after.state, 'failed');
+  assert.equal(after.exit_code, 1);
+  assert.equal(after.exit_signal, null, 'the backend caught the SIGTERM and exited on its own');
+  assert.equal(after.stop_reason, 'steer', 'the record still says the operator asked for this');
+  assert.equal(after.active_runner, false, 'the invocation converged and released its claim');
+
+  // Red without the gate: this was the misattributed backend-death note.
+  assert.equal(after.error, null, 'no reason is invented for a death this runner asked for');
+});
+
+// A refused signal is not a delivered one. `signalInvocation` returns false
+// when the durable identity no longer resolves or the pid/start-time/marker
+// checks fail against live /proc; `ChildResult.operatorSignalled` is set
+// before the send regardless, so gating the note on that flag alone also
+// swallowed the death of a backend this runner never reached: the child kept
+// running and then exited non-zero on its own, and the record read, field for
+// field, like the delivered case above.
+//
+// This reproduces exactly that: a real runManagedRunner, a real live child,
+// with the durable invocation marker made not to match /proc after the child is
+// demonstrably running, so every poll tick's signalInvocation is refused. The
+// backend prints its own diagnostic and exits non-zero by itself. The record
+// must say the runtime did not deliver a signal, durably, so a later pass
+// reading meta.json alone can tell this apart from the delivered case.
+test('a steer the runtime refused to deliver is recorded as not delivered', async (t) => {
+  if (!requireProc(t)) return;
+  const backend = fakeBackend(
+    t,
+    '#!/bin/sh\nprintf \'%s\\n\' "backend up"\nsleep 4\nprintf \'%s\\n\' "Error: the widget sprocket failed on its own"\nexit 1\n',
+  );
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const id = agent(t, options, { intent: 'steer', stop_reason: 'steer' });
+  const logPath = join(options.env.XDG_STATE_HOME, 'antonina', 'agents', id, 'output.log');
+
+  // Start the runner in the background of this test only, so the marker can be
+  // invalidated while the child is alive; runToCompletion's watchdog still
+  // reaps the whole thing and the child is waited on by the runner's own close.
+  const running = runToCompletion(t, id, options);
+
+  await refuseEverySignal(t, id, options, logPath);
+
+  const after = await running;
+
+  const log = readFileSync(logPath, 'utf8');
+  assert.equal(log.includes('backend up'), true);
+  assert.equal(log.includes('Terminated'), false, 'no SIGTERM ever reached the backend process group');
+
+  // The record shape is unchanged, exactly as before this correction.
+  assert.equal(after.state, 'failed');
+  assert.equal(after.exit_code, 1);
+  assert.equal(after.exit_signal, null, 'the backend died on its own, not on a signal');
+  assert.equal(after.stop_reason, 'steer', 'the operator did ask, and the record still says so');
+  assert.equal(after.active_runner, false, 'the invocation converged and released its claim');
+
+  // Distinguishable from the delivered case purely by reading meta.json: this
+  // one carries a reason, and that reason names the non-delivery.
+  assert.equal(typeof after.error, 'string', 'a refused signal must not be recorded as no reason at all');
+  assert.match(after.error, /did not deliver a signal to the backend process group/);
+});
+
+// Board 167, the A/A2 shape. The steer case above lands on state `failed`, so
+// the note gate's `state === 'failed'` term is satisfied and the reason is
+// recorded. A refused `stop` or `kill` is the same evidence with a different
+// terminal state: the runtime knew the backend died, it never delivered the
+// signal the operator asked for, and the state mapping honours the recorded
+// intent and calls it `stopped` / `killed`. The gate therefore suppressed the
+// note and the record read
+//
+//   exit_code 1, exit_signal null, stop_reason stop, error null,
+//   backend_error.classification unrecognized_backend_failure
+//
+// which claims a clean operator stop while carrying a classified backend
+// failure it explains nowhere. The rule is not "failed records get a reason":
+// it is "a record whose intended signal was never delivered gets one",
+// whatever the terminal state is.
+//
+// The intent is recorded while the invocation is live, as the CLI does, because
+// a `stop` / `kill` already in the record before the spawn is refused by
+// recordSpawned (`stopLikeOrMalformed`) and never reaches the note gate at all.
+// It lands in the same atomic write that invalidates the marker, so the runner's
+// very first poll tick sees an intent it tries to act on and an identity it
+// cannot act on -- the production shape, not a staged one.
+for (const intent of ['stop', 'kill']) {
+  test(`a ${intent} the runtime refused to deliver still records a reason`, async (t) => {
+    if (!requireProc(t)) return;
+    const backend = fakeBackend(
+      t,
+      '#!/bin/sh\nprintf \'%s\\n\' "backend up"\nsleep 4\nprintf \'%s\\n\' "Error: the widget sprocket failed on its own"\nexit 1\n',
+    );
+    if (backend === null) return;
+    const options = scratch(t, backend);
+    const id = agent(t, options);
+    const logPath = join(options.env.XDG_STATE_HOME, 'antonina', 'agents', id, 'output.log');
+
+    const running = runToCompletion(t, id, options);
+    await refuseEverySignal(t, id, options, logPath, { intent, stop_reason: intent });
+    const after = await running;
+
+    const log = readFileSync(logPath, 'utf8');
+    assert.equal(log.includes('backend up'), true);
+    assert.equal(/Terminated|Killed/.test(log), false, 'no signal ever reached the backend process group');
+
+    // The terminal state follows the recorded intent and is NOT what this fix
+    // changes; the stop/kill state mapping is coherent and stays as it is.
+    assert.equal(after.state, intent === 'stop' ? 'stopped' : 'killed');
+    assert.equal(after.exit_code, 1);
+    assert.equal(after.exit_signal, null, 'the backend died on its own, not on a signal');
+    assert.equal(after.stop_reason, intent, 'the operator did ask, and the record still says so');
+    assert.equal(after.active_runner, false, 'the invocation converged and released its claim');
+    assert.equal(after.backend_error.classification, UNRECOGNIZED_BACKEND_FAILURE);
+
+    // Red on 2f51caa7: error was null, so the record claimed a clean operator
+    // stop while carrying an unexplained classified backend failure.
+    assert.equal(typeof after.error, 'string', 'an undelivered signal must leave a reason, whatever the state');
+    assert.match(after.error, /did not deliver a signal to the backend process group/);
+  });
+}
+
+test('a refused signal does not make a backend death look delivered either', () => {
+  // The wording is honest in the other direction too: nothing here says the
+  // operator stopped the backend, because nothing was sent to it.
+  const note = describeBackendDeath(null, null, true);
+  assert.equal(typeof note, 'string');
+  assert.match(note, /did not deliver a signal to the backend process group/);
+  assert.equal(/operator (stopped|asked to stop)/.test(note), false);
+  // The flag defaults off, so every existing caller keeps its exact wording.
+  assert.equal(describeBackendDeath(null, null), 'the backend process exited unsuccessfully without writing a diagnostic this runtime could read');
 });
 
 test('classifyBackendFailure still declines an empty log window', () => {

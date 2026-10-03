@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
+import { idleMeta, persistedRunLogOffset } from '../dist/packages/agent-runtime/src/metadata.js';
 import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import {
   beginInvocation,
@@ -106,6 +106,31 @@ test('steers are strict FIFO and promote into pending work', () => {
   assert.equal(meta.pending_prompt, 'first');
   assert.equal(meta.prompt_count, 1);
   assert.deepEqual(steerQueue(meta)?.map((entry) => entry.prompt), ['second']);
+});
+
+test('an accepted invocation records where its own output begins', () => {
+  const meta = idleMeta('a11d', '/tmp', null, 1);
+  assert.equal(persistedRunLogOffset(meta), null);
+
+  beginInvocation(meta, 'first', 2, 1, { logOffset: 4_096 });
+  assert.equal(persistedRunLogOffset(meta), 4_096);
+
+  // A later invocation re-cursors: the second run's scope excludes the first's.
+  beginInvocation(meta, 'second', 3, 2, { logOffset: 9_000 });
+  assert.equal(persistedRunLogOffset(meta), 9_000);
+
+  // A caller that cannot observe the log invents no cursor, and the inherited
+  // one is left exactly as it was.
+  beginInvocation(meta, 'third', 4, 3);
+  assert.equal(persistedRunLogOffset(meta), 9_000);
+  beginInvocation(meta, 'fourth', 5, 4, { logOffset: -1 });
+  assert.equal(persistedRunLogOffset(meta), 9_000);
+
+  // A drained steer is an accepted invocation of its own, so it re-cursors too.
+  const steered = idleMeta('a11d', '/tmp', null, 1);
+  assert.equal(queueSteer(steered, 'redirect', 2), true);
+  assert.equal(popSteerIntoPending(steered, 3, { logOffset: 512 }), 'redirect');
+  assert.equal(persistedRunLogOffset(steered), 512);
 });
 
 test('malformed steer metadata fails closed instead of being normalized', () => {

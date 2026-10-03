@@ -393,6 +393,29 @@ export interface IssueListPage {
 
 type StoredIssueListPage = Omit<IssueListPage, 'revision'>;
 
+/**
+ * One bounded page of one issue's conversation, as a reader outside the store
+ * sees it.
+ *
+ * `issue` is the issue itself with `messages` empty — the core fields, not the
+ * thread — and `messages` is only the requested page. Together they are one
+ * read: a reader opening an issue gets its title, body and state without any
+ * comment shard being fetched, and then the page they asked for.
+ *
+ * `total` is the whole thread's message count and `pageCount` how many pages it
+ * occupies, so the count line and the Previous/Next controls can be drawn from
+ * this read alone.
+ */
+export interface IssueCommentPage {
+  schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
+  boardId: string;
+  issue: BoardIssue;
+  page: number;
+  pageCount: number;
+  total: number;
+  messages: BoardMessage[];
+}
+
 export interface BoardOverview {
   boardId: string;
   head: string;
@@ -1391,6 +1414,37 @@ export class ShardedBoardStore {
     };
   }
 
+  /**
+   * One comment shard, fetched on its own.
+   *
+   * This is the only place a comment shard is read, so the whole-thread
+   * reassembly below and the bounded single-page read in front of it parse the
+   * same shard the same way and cannot disagree about what one holds. `index` is
+   * the shard's one-based page number minus one, and it is checked against the
+   * shard's own `page`, so a ref that does not sit where the snapshot says it
+   * does is a malformed board rather than a silently reordered thread.
+   */
+  private async readCommentShard(
+    credential: BoardCredential,
+    meta: ShardedBoardMeta,
+    snapshot: IssueSnapshot,
+    index: number,
+  ): Promise<BoardMessage[]> {
+    const commentRef = snapshot.commentRefs[index];
+    if (commentRef === undefined) return [];
+    const pageStored = await this.requireJson<unknown>(credential.storageCapability, commentRef);
+    const pageValue = pageStored.value;
+    if (!isRecord(pageValue)
+        || pageValue.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
+        || pageValue.boardId !== meta.boardId
+        || pageValue.number !== snapshot.number
+        || pageValue.page !== index + 1
+        || !Array.isArray(pageValue.messages)) {
+      throw new ShardedBoardStoreError('Antonina comment page is malformed');
+    }
+    return clone(pageValue.messages as BoardMessage[]);
+  }
+
   private async readIssueSnapshot(
     credential: BoardCredential,
     meta: ShardedBoardMeta,
@@ -1440,9 +1494,8 @@ export class ShardedBoardStore {
     };
     if (!withMessages) return { snapshot, issue: issueFromCore(core, []) };
 
-    const pages = await Promise.all(snapshot.commentRefs.map(
-      (commentRef, index) => this.readCommentPage(credential, meta, snapshot.number, commentRef, index + 1),
-    ));
+const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, index) =>
+      this.readCommentShard(credential, meta, snapshot, index)));
     const messages = pages.flat();
     if (messages.length !== snapshot.messageCount) {
       throw new ShardedBoardStoreError('Antonina issue message count does not match its comment pages');
@@ -1478,6 +1531,12 @@ export class ShardedBoardStore {
    * a comment on a deleted issue because the feed entry carries its own body --
    * a comment is still board history and still readable without hydrating an
    * issue that is not there.
+   *
+   * `withMessages` is the whole difference between reading an issue and reading
+   * its thread: `false` reads the issue's own shard and no comment shard at all,
+   * which is what the list, overview and write paths use. It defaults to `true`
+   * so the callers that do want the whole thread keep saying so implicitly; the
+   * bounded per-page read below never goes through here at all.
    */
   private async readIssueSnapshotByNumber(
     credential: BoardCredential,
@@ -3285,6 +3344,50 @@ export class ShardedBoardStore {
     const physicalStart = firstPhysicalIndex * V3_COMMENT_PAGE_SIZE;
     const messages = physicalPages.flat().slice(start - physicalStart, end - physicalStart);
     return { ...issue, messages: clone(messages) };
+  }
+
+  /**
+   * One bounded page of one issue's conversation.
+   *
+   * This is the read that replaces "reassemble the thread" for a reader who is
+   * looking at a page of it. It fetches the directory page that names the
+   * issue, that issue's own snapshot shard, and at most ONE comment shard: the
+   * one holding the requested page. A page past the end of the thread fetches no
+   * comment shard at all, because the snapshot's own `commentRefs` already says
+   * there is nothing there — the empty page is a fact about the snapshot, not
+   * something that has to be confirmed against the shards.
+   *
+   * `issue` comes back with its `messages` array empty. The page the caller asked
+   * for is `messages`, and carrying the thread as well would reintroduce exactly
+   * the fan-out this method exists to remove.
+   *
+   * `pageCount` is the number of comment shards the snapshot carries, which is
+   * the number of pages the thread has; `total` is the whole thread's message
+   * count, taken from the snapshot's stored `messageCount` rather than from the
+   * page. So the count and the range a reader sees are the thread's, not this
+   * page's.
+   */
+  async readIssueCommentPage(
+    credentialValue: BoardCredential,
+    number: number,
+    page: number,
+  ): Promise<IssueCommentPage | null> {
+    if (!Number.isSafeInteger(page) || page < 1) {
+      throw new ShardedBoardStoreError('Antonina comment page must be a positive integer');
+    }
+    const { credential, meta } = await this.requirePointerForCredential(credentialValue);
+    const resolved = await this.readIssueSnapshotByNumber(credential, meta, number, false);
+    if (resolved === null) return null;
+    const { snapshot, issue } = resolved;
+    return {
+      schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
+      boardId: meta.boardId,
+      issue,
+      page,
+      pageCount: Math.max(1, snapshot.commentRefs.length),
+      total: snapshot.messageCount,
+      messages: await this.readCommentShard(credential, meta, snapshot, page - 1),
+    };
   }
 
   private async readIssuePageFromMeta(

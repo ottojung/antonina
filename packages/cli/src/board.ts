@@ -493,6 +493,18 @@ async function execute(
           : parsePositiveInteger(issueOption.value, '--issue');
         return {
           mode: 'resources',
+          // NOT a bounded read, and deliberately still not one. `--page` bounds
+          // what is PRINTED, never what is FETCHED: `listResources` is
+          // `resourceViews(await this.loadBoard())` in `packages/core/src/api.ts`,
+          // and per `docs/intent-records/board.md` the resource catalog is one
+          // materialized object (unlike issue summaries, which ARE paged in
+          // storage), so the whole collection crosses the wire before `pageSlice`
+          // takes one 50-row window of it. A true bounded read means sharding the
+          // catalog into resource pages — a storage-format and migration change,
+          // not a CLI or UI one, and out of scope here. The web Resources tab
+          // states the same limit rather than implying the UI alone fixes
+          // scaling; see the note above `RESOURCE_PAGE_SIZE` in
+          // `web/src/ui-state.ts`.
           value: pageSlice(await client.listResources(hostOption.value, issueNumber), pageNumber(pageOption.value)),
         };
       }

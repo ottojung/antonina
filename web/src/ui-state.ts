@@ -415,19 +415,21 @@ export const ISSUE_PAGE_NEXT = 'Next page';
  */
 export const RESOURCE_PAGE_SIZE = 50;
 
-/**
- * The Resources view's paging, as the same model the Issues list already uses.
- *
- * Exactly as the issue helpers above: `RESOURCE_PAGE_SIZE` is the argument and
- * the count, the clamp, the range line and the "is there more than one page"
- * question are all answered by `issuePageCount`, `clampIssuePage`,
- * `issuePageRange` and `hasIssuePages`. So the Resources view cannot disagree
- * with the Issues list about what a page number means, where an out-of-range one
- * lands, or when the controls disappear.
- */
-export function resourcePageCount(total: number, pageSize = RESOURCE_PAGE_SIZE): number {
-  return issuePageCount(total, pageSize);
-}
+// There is deliberately no `resourcePageCount` here.
+//
+// The Resources view's paging IS the Issues list's paging: `RESOURCE_PAGE_SIZE`
+// is the page size, and the count, the clamp, the range line and the "is there
+// more than one page" question are answered by `issuePageCount`,
+// `clampIssuePage` (through `clampResourcePage`), `issuePageRange` and
+// `hasIssuePages` inside the shared `IssuePagination` control. A resource-scoped
+// copy of the count was here once, exported, and called by nothing in `web/src`
+// but its own four assertions in `resources-pagination.test.tsx`: the control
+// derives the same number from the same total and the same 50, so the copy was
+// a second answer to a question the control already answers, free to drift from
+// the Issues list's, and those four assertions restated the four assertions
+// `issuePageCount` already has in `issues-pagination.test.tsx`. What is asserted
+// about resources is asserted where it is true — the drawn rows, the position
+// line, and the Previous/Next boundaries — not about a helper's existence.
 
 /**
  * The page the Resources view may actually be showing, given the page that was

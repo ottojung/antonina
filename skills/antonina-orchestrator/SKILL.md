@@ -11,13 +11,13 @@ The Antonina CLI is the orchestration interface. Read and mutate the board throu
 
 ## Operating model
 
-Treat each invocation as a fresh reconciliation pass. Conversation history is optional context; the board, referenced agent state, repository state, branches, pull requests, tests, and durable host resources are the sources of truth.
+Treat each invocation as a fresh reconciliation pass. Conversation history is optional context; the board, referenced agent state, repository state, branches, pull requests, tests, and registered coordination paths are the sources of truth.
 
 The orchestrator has four jobs:
 
 1. reconcile the board with objective execution state;
 2. continue useful work already in progress when possible;
-3. launch every distinct board front whose expected marginal benefit exceeds its expected marginal cost;
+3. launch every distinct board front that is topologically ready and non-conflicting;
 4. leave append-only board updates that make later passes able to continue safely.
 
 Do useful orchestration work and then return. Do not keep an invocation alive merely to wait for a long-running agent or external event. A later invocation should be able to reconstruct the state from the board and the durable artifacts named there.
@@ -28,7 +28,7 @@ The orchestrator is a coordinator, never an implementation worker. It must not i
 
 All substantive repository work must be delegated to Antonina agents. This includes source, test, documentation, configuration, migration, or generated-file edits; committing; merging or rebasing; cherry-picking; pushing repository refs; release integration; deployments; and substantial build/test/validation work. Independent review, verification, research, and integration are agent roles too: launch or steer an agent for them instead of doing them in the orchestrator process.
 
-The orchestrator may perform bounded coordination operations needed to delegate safely: inspect board and agent state; inspect repository metadata and small diffs read-only; fetch refs; inspect host resources; create or register worktrees/branches as agent reservations; write board comments; launch, steer, stop, or harvest Antonina agents; and close/reopen/reorder board issues when the durable evidence warrants it. These coordination actions must not become a back door for implementing the issue.
+The orchestrator may perform bounded coordination operations needed to delegate safely: inspect board and agent state; inspect repository metadata and small diffs read-only; fetch refs; create or register worktrees/branches as agent reservations; write board comments; launch, steer, stop, or harvest Antonina agents; and close/reopen/reorder board issues when the durable evidence warrants it. These coordination actions must not become a back door for implementing the issue.
 
 Once a useful agent has been launched and its real ID/resources are durably recorded, do not remain alive to supervise it command-by-command or wait for it to finish. Continue only long enough to fill other clearly safe frontier slots and record coordination state, then return. A future invocation will reconcile the results.
 
@@ -105,7 +105,7 @@ Queue order still expresses shared priority. The orchestrator should preserve th
 
 Useful evidence of independence includes disjoint repositories, separate monorepo packages/apps, unrelated subsystems, separate worktrees, distinct deployment targets, or clearly non-overlapping implementation areas. Potential conflict domains include the same source files, shared core APIs under active redesign, one database/schema migration path, the same mutable deployment environment, or another shared external resource.
 
-Runtime resource management is not part of orchestration. The orchestrator must not inspect or reason about CPU, RAM, cgroups, OOM history, load, process RSS, cache composition, compiler/build cost, test fan-out, device utilization, or similar runtime-capacity signals. A topologically valid front is launched regardless of predicted machine load. Runtime systems and workers may succeed, throttle, fail, or report an execution blocker, but the orchestrator must not convert such observations into capacity heuristics, worker limits, or serialization policy.
+Runtime capacity is entirely outside orchestration. Do not inspect it, estimate it, or use it in launch decisions. A topologically valid front is launched; execution behavior belongs to workers and the runtime layer.
 
 Development can often proceed concurrently even when integration must later serialize. Separate branches or worktrees may be safe to implement in parallel and then merge into a shared release branch one at a time.
 
@@ -221,7 +221,7 @@ For each orchestration pass:
 1. Harvest terminal agents and incorporate their durable results before deciding what is still open.
 2. Sweep enough of the queue to discover independent actionable fronts instead of serializing unrelated work behind the first issue.
 3. For every distinct front, ask only whether topology permits useful independent execution now: is it unblocked, sufficiently understood, non-duplicative, and isolated from conflicting ownership/write surfaces? If yes, launch it.
-4. Runtime resource state is outside the orchestrator's responsibility. Do not inspect, estimate, or schedule around RAM, CPU, load average, cgroup pressure, compiler/build cost, test fan-out, device utilization, or similar host-capacity signals. Do not delay or suppress a topologically valid front because of predicted runtime load.
+4. Ignore runtime capacity completely. Topology alone determines whether a front is launchable.
 5. Preparing a worktree, branch, registered path, prompt, or handoff is not delegation. If a front is ready to run, complete agent new / agent run --detach in the same pass and verify the resulting live handle. Do not end a pass with next: launch for work that is already prepared and unblocked.
 6. After harvesting completed or failed agents, refill newly exposed useful work in the same pass. Avoid batch behavior in which a pool drains to zero and waits for a later invocation.
 7. Before ending the pass, every actionable front you identified should either have a live owner or have a precise recorded topological blocker/dependency/collision reason.

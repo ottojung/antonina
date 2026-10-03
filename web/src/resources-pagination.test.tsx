@@ -239,6 +239,21 @@ describe('resource paging arithmetic', () => {
     expect(clampResourcePage(9, 126)).toBe(3);
     expect(clampResourcePage(0, 126)).toBe(1);
     expect(clampResourcePage(1.5, 126)).toBe(1);
+
+    // The clamp is `resourcePage`'s own, not a courtesy to the caller. The
+    // collection shortens under the reader — a dependency is removed, the board
+    // is re-read — while the address still names a page that no longer exists,
+    // and `resourcePage` itself must then land the reader on the last page that
+    // does rather than slicing past the end into an empty window. Slicing on the
+    // raw page instead would draw nothing at all for `resources` of 9, and would
+    // draw the wrong window for 1.5.
+    expect(resourcePage(resources, 9)).toEqual(resources.slice(100, 126));
+    expect(resourcePage(resources, 4)).toEqual(resources.slice(100, 126));
+    expect(resourcePage(resources, 0)).toEqual(resources.slice(0, 50));
+    expect(resourcePage(resources, 1.5)).toEqual(resources.slice(0, 50));
+    // Same rule against a collection that has already been emptied: page 1 of
+    // nothing is nothing, and no page number invents rows out of it.
+    expect(resourcePage([], 3)).toEqual([]);
   });
 
   it('reads the page number out of the address and writes it back', () => {

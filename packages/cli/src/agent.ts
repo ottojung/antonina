@@ -260,12 +260,26 @@ function matchesFilters(parsed: Parsed, state: string): boolean {
  * existing directory. Both `new` and `run` declare one, and both refuse a bad
  * one before any state is written.
  *
+ * An empty or whitespace-only value is refused too, and is refused *here*
+ * rather than at one of the call sites, because it is refused for the same
+ * reason at every one of them.
+ *
  * A path that is not an existing directory is a *usage* error, not a state
  * conflict: the command named a value that cannot mean anything, and no record
  * was read to find out so. Board issue 178 moved this from exit 1 to exit 2 for
  * that reason, and it applies to `new` and `run` alike.
  */
 function declaredCwd(raw: string, command: string): string {
+  // `--cwd ''` resolves to the invoking shell's directory, because
+  // `resolve('') === process.cwd()`. Accepting it would re-admit, through a
+  // wrapper's `${VAR:-}` or an unset variable passed straight through, exactly
+  // the inheritance this contract refuses: an agent durably attributed to
+  // wherever the shell happened to be. A whitespace-only value is refused for
+  // the same reason. Refused here, in the one function all three entry points
+  // share, so it is refused at all three at once.
+  if (raw.trim().length === 0) {
+    throw new UsageError(`${command}: --cwd requires a working directory path`);
+  }
   const cwd = resolve(raw);
   if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
     throw new UsageError(`${command}: working directory does not exist: ${cwd}`);
@@ -285,6 +299,17 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
   // `run` then refuses to launch it until one is declared, rather than
   // inheriting one and reporting it as the front's location.
   const cwd = parsed.values.has('--cwd') ? declaredCwd(parsed.values.get('--cwd')!, 'new') : null;
+  // Board issue 178, required fix 1: the capability half of the rule is
+  // consulted here exactly as `cmdRun` consults it -- same predicate, same
+  // message shape, same exit code. Declaring a default directory for a front is
+  // the same request as running an invocation in one: the declaration is the
+  // value `run` later launches from, so a backend that cannot place an
+  // invocation in a named directory must refuse the declaration too, by name,
+  // before any state is written. Without this clause `new` accepted a directory
+  // that `run --cwd` refused.
+  if (cwd !== null && !backendCapabilities(context.env).invocation_cwd) {
+    throw new Error('new: the configured backend cannot run an invocation in a different working directory');
+  }
   if (!createAgentDirectory(agentId, paths(context))) throw new Error(`new: agent ${agentId} already exists`);
   const meta = idleMeta(agentId, cwd, parsed.values.get('--title') ?? null);
   try {
@@ -1022,7 +1047,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     }
     const generation = currentGeneration + 1;
     const now = Date.now() / 1000;
-// The declared working directory is written by `acceptCwd` and by nothing
+    // The declared working directory is written by `acceptCwd` and by nothing
     // else. 177's side of this hunk inlined `if (runCwd !== null) meta.cwd =
     // runCwd` here; that line is the write 178 exists to keep in exactly one
     // place, so it is not taken. Two inline copies of the same assignment, one

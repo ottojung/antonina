@@ -397,9 +397,27 @@ export interface BackendCapabilities {
   invocation_cwd: boolean;
 }
 
+/**
+ * Test-only override that makes the configured backend report a capability it
+ * does not have, so the refusal path can be driven from outside the package.
+ *
+ * It exists only because `invocation_cwd` is currently a constant `true`: with
+ * one backend and no way to make the answer differ, no test could reach the
+ * refusal, and "unreachable" is exactly how a divergence between entry points
+ * hides. Board issue 178's required fix 1 is one clause in `cmdNew` that is
+ * otherwise unobservable by execution.
+ *
+ * Deliberately narrow and fail-safe in the safe direction: only the exact value
+ * `'1'` withdraws a capability, every other value (including unset) leaves the
+ * backend's real answer alone, so no ordinary environment can reach a
+ * different answer.
+ */
+const TEST_WITHDRAW_INVOCATION_CWD_ENV = 'ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD';
+
 export function backendCapabilities(
-  _env: Record<string, string | undefined> = process.env,
+  env: Record<string, string | undefined> = process.env,
 ): BackendCapabilities {
+  if (env[TEST_WITHDRAW_INVOCATION_CWD_ENV] === '1') return { invocation_cwd: false };
   return { invocation_cwd: true };
 }
 

@@ -427,6 +427,105 @@ test('the import replaces nothing, so the replaced set it discards is empty by c
   });
 });
 
+test('the import reaches the replaced set only through a previous ref it passes as []', () => {
+  // The claim under test, stated as one chain rather than three shapes:
+  //   1. the import path calls `writeIssueListPages` exactly twice,
+  //   2. both calls pass `null, null, []` as previousState, previousClosedAt
+  //      and previousRefs,
+  //   3. `writeIssueListPages` pushes into `superseded` from `previousRefs` and
+  //      from nothing else,
+  // so with `previousRefs` empty no push site is reachable and the replaced set
+  // is `[]` whatever the board looks like. 44b02's repair rests on that chain,
+  // and the chain is the only thing a source-shape check can see: the two file
+  // shapes agree on every observable behaviour, so a behavioural test cannot
+  // tell them apart.
+  //
+  // Pre-272dabfd this is red at (3)'s call sites, which bound `superseded` off
+  // both results and dropped it with `void` -- binding the value the chain says
+  // cannot matter. (1), (2) and the body of `writeIssueListPages` are unchanged
+  // across the repair, which is exactly why (3) is the discriminating half and
+  // why this asserts the chain rather than the whole file's text.
+  const importBody = materializeLogicalSource();
+  const calls = writeIssueListPagesCallSites(importBody);
+  assert.equal(
+    calls.length,
+    2,
+    `materializeLogical must call writeIssueListPages exactly twice, found ${calls.length}`,
+  );
+  for (const [index, site] of calls.entries()) {
+    assert.deepEqual(
+      site.args.slice(5, 8),
+      ['null', 'null', '[]'],
+      `import call site ${index + 1} must pass previousState=null, previousClosedAt=null, previousRefs=[]`,
+    );
+    assert.match(
+      site.args[0] ?? '',
+      /^credential\b/,
+      `import call site ${index + 1} must lead with the credential argument`,
+    );
+    // The bindings, not the prose: a call site may destructure only `refs`, so
+    // there is no replaced set on the import path to consume or to discard.
+    assert.deepEqual(
+      site.bound.map((property) => property.split(':')[0].trim()),
+      ['refs'],
+      `import call site ${index + 1} must destructure only refs, found: ${site.bound.join(', ')}`,
+    );
+  }
+
+  const writer = writeIssueListPagesSource();
+  const pushes = [...writer.matchAll(/superseded\.push\(([^;]*)\)/g)].map((match) => match[1].trim());
+  assert.equal(
+    pushes.length,
+    2,
+    `writeIssueListPages must have exactly two superseded push sites, found ${pushes.length}`,
+  );
+  // Each push site reads either `previousRefs` directly or a local bound from
+  // it, so `previousRefs` is the only source of the replaced set. Anything else
+  // -- the previous pages, the entries just written, a diff against live state
+  // -- would be a second source and would break the empty-by-construction
+  // argument the repair rests on.
+  const sources = new Set(
+    pushes.flatMap((pushed) => [...pushed.matchAll(/\b([A-Za-z_$][\w$]*)\b/g)].map((match) => match[1])),
+  );
+  for (const name of sources) {
+    assert.ok(
+      ['previousRefs', 'previousRef', 'index'].includes(name),
+      `the replaced set is read from ${name}; only previousRefs, its single alias and the loop index may feed a push site`,
+    );
+  }
+  assert.ok(
+    sources.has('previousRef') || sources.has('previousRefs'),
+    'no push site reads a previous ref at all, so the replaced set has no source',
+  );
+  for (const [index, pushed] of pushes.entries()) {
+    assert.match(
+      pushed,
+      /^(?:\(?\s*previousRefs\[index\]\s*!?\s*\)?|\(?\s*previousRef\s*\)?)$/,
+      `superseded push site ${index + 1} must read only a previous ref, found: ${pushed}`,
+    );
+  }
+  // The one alias the body is allowed, bound once and only from `previousRefs`.
+  const aliasBindings = [...writer.matchAll(/\bpreviousRef\s*=[^=]/g)];
+  assert.equal(
+    aliasBindings.length,
+    1,
+    `previousRef must be bound exactly once in writeIssueListPages, found ${aliasBindings.length} bindings`,
+  );
+  assert.match(
+    writer,
+    /\bconst previousRef = previousRefs\[index\];/,
+    'previousRef must be bound to previousRefs[index] and to nothing else',
+  );
+  // The empty tail above is what makes `previousRefs` length zero at both
+  // import call sites; assert the trailing loop is bounded by that length, so
+  // it cannot fire from the previous *pages* instead.
+  assert.match(
+    writer,
+    /for \(let index = nextPages\.length; index < previousRefs\.length; index \+= 1\)/,
+    'the trailing superseded push must be bounded by previousRefs.length, not by the previous page count',
+  );
+});
+
 /**
  * The body of `materializeLogical`, read out of the source.
  *
@@ -447,4 +546,101 @@ function materializeLogicalSource() {
   const end = text.indexOf('\n  private ', start + 1);
   assert.notEqual(end, -1, 'materializeLogical is not followed by another member');
   return text.slice(start, end);
+}
+
+/**
+ * The body of `writeIssueListPages`, read out of the same source file.
+ *
+ * The chain needs both ends: the call sites that pass the arguments, and the
+ * push sites that read them.
+ */
+function writeIssueListPagesSource() {
+  const text = readFileSync(storeSourcePath(), 'utf8');
+  const start = text.indexOf('private async writeIssueListPages(');
+  assert.notEqual(start, -1, 'writeIssueListPages is not in board-v3-store.ts');
+  const end = text.indexOf('\n  private ', start + 1);
+  assert.notEqual(end, -1, 'writeIssueListPages is not followed by another member');
+  return text.slice(start, end);
+}
+
+function storeSourcePath() {
+  return join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'board-v3-store.ts');
+}
+
+/**
+ * The `writeIssueListPages` call sites in `body`, as bound properties plus
+ * top-level arguments.
+ *
+ * The binding is read as written, off the `const { ... } =` the call sits in,
+ * rather than inferred from the call: the two file shapes differ only in what
+ * the import path binds off the result, and that is the discriminating half.
+ */
+function writeIssueListPagesCallSites(body) {
+  const callee = 'this.writeIssueListPages(';
+  const sites = [];
+  for (let at = body.indexOf(callee); at !== -1; at = body.indexOf(callee, at + callee.length)) {
+    const head = body.slice(0, at);
+    const braceStart = head.lastIndexOf('{');
+    const equalsStart = head.lastIndexOf('=');
+    assert.notEqual(braceStart, -1, 'writeIssueListPages is called without a destructuring binding');
+    assert.ok(
+      equalsStart > braceStart,
+      'the destructuring binding of a writeIssueListPages call must be its own statement',
+    );
+    const bound = body.slice(braceStart + 1, equalsStart)
+      .split(',')
+      .map((entry) => entry.replace(/\s+/g, ' ').trim())
+      .filter((entry) => entry !== '');
+    sites.push({ bound, args: balancedCallArguments(body, callee, at) });
+  }
+  return sites;
+}
+
+/**
+ * The argument list of the call `callee` starts at `at`, bracket-balanced and
+ * string-aware, and split at its top-level commas.
+ */
+function balancedCallArguments(body, callee, at) {
+  let index = at + callee.length;
+  let depth = 1;
+  let quote = null;
+  for (; index < body.length && depth > 0; index += 1) {
+    const char = body[index];
+    if (quote !== null) {
+      if (char === '\\') index += 1;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`') quote = char;
+    else if (char === '(' || char === '[' || char === '{') depth += 1;
+    else if (char === ')' || char === ']' || char === '}') depth -= 1;
+  }
+  assert.equal(depth, 0, `unbalanced call arguments at ${callee} in the source`);
+  return splitTopLevel(body.slice(at + callee.length, index - 1));
+}
+
+/** Splits an argument list on the commas that are not inside any bracket or string. */
+function splitTopLevel(text) {
+  const parts = [];
+  let depth = 0;
+  let quote = null;
+  let start = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote !== null) {
+      if (char === '\\') index += 1;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`') quote = char;
+    else if (char === '(' || char === '[' || char === '{') depth += 1;
+    else if (char === ')' || char === ']' || char === '}') depth -= 1;
+    else if (char === ',' && depth === 0) {
+      parts.push(text.slice(start, index).replace(/\s+/g, ' ').trim());
+      start = index + 1;
+    }
+  }
+  const last = text.slice(start).replace(/\s+/g, ' ').trim();
+  if (last !== '') parts.push(last);
+  return parts;
 }

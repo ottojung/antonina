@@ -218,7 +218,7 @@ Record a new agent ID/name and its worktree in the issue comment's `resources:` 
 
 ### Parallelism follows the work topology
 
-Maximize useful parallel progress across the board. The generic orchestrator has no fixed worker target, floor, or ceiling: parallelism is limited only by the topology of the available work, collision/reconciliation risk, actual host resources, and explicit constraints supplied by the affected project or issue.
+Maximize useful parallel progress across the board. The generic orchestrator is a **topology-only scheduler**. Its decision procedure is based only on the topology of the available work: dependencies, ownership, write-surface overlap, branch/worktree collisions, reconciliation structure, and explicit project/issue workflow constraints. It has no fixed worker target, floor, or ceiling.
 
 Never encode project-, repository-, issue-, branch-, theorem-, or domain-specific quotas or requirements in this generic skill. Read such constraints from the issue's recent comments, registered resources, and the project's own AGENTS.md or other project documentation, and apply them only to that work.
 
@@ -230,11 +230,11 @@ For each orchestration pass:
 
 1. Harvest terminal agents and incorporate their durable results before deciding what is still open.
 2. Sweep enough of the queue to discover independent actionable fronts instead of serializing unrelated work behind the first issue.
-3. For every distinct front, ask whether starting it now is likely to produce more constructive progress than expected waste from duplication, rebasing, reconciliation, contention, or resource pressure. If yes, launch it.
-4. Treat resource constraints narrowly. A scarce compiler, database, device, memory-heavy build, or other exclusive resource may serialize that operation, but it is not by itself a reason to leave unrelated lightweight research, review, audit, documentation, or implementation fronts idle.
-5. Preparing a worktree, branch, resource reservation, prompt, or handoff is not delegation. If a front is ready to run, complete agent new / agent run --detach in the same pass and verify the resulting live handle. Do not end a pass with next: launch for work that is already prepared and unblocked.
+3. For every distinct front, ask only whether topology permits useful independent execution now: is it unblocked, sufficiently understood, non-duplicative, and isolated from conflicting ownership/write surfaces? If yes, launch it.
+4. Runtime resource state is outside the orchestrator's responsibility. Do not inspect, estimate, or schedule around RAM, CPU, load average, cgroup pressure, compiler/build cost, test fan-out, device utilization, or similar host-capacity signals. Do not delay or suppress a topologically valid front because of predicted runtime load.
+5. Preparing a worktree, branch, registered path, prompt, or handoff is not delegation. If a front is ready to run, complete agent new / agent run --detach in the same pass and verify the resulting live handle. Do not end a pass with next: launch for work that is already prepared and unblocked.
 6. After harvesting completed or failed agents, refill newly exposed useful work in the same pass. Avoid batch behavior in which a pool drains to zero and waits for a later invocation.
-7. Before ending the pass, every actionable front you identified should either have a live owner, have a precise recorded blocker/dependency/collision reason, or have an explicit reason why starting it would likely create more waste than value.
+7. Before ending the pass, every actionable front you identified should either have a live owner or have a precise recorded topological blocker/dependency/collision reason.
 
 Give every newly delegated agent a descriptive title and an explicit working directory so later passes can identify ownership reliably.
 
@@ -258,13 +258,13 @@ A blocked issue stays open. Name the blocker precisely and, when possible, the e
 
 Do not create a follow-up issue for work that is merely the unfinished remainder of the current issue. Create a new issue only when it is a distinct durable task that deserves independent priority, lifecycle, or ownership.
 
-## Durable host resources
+## Durable coordination paths
 
-When work depends on a durable host path, follow [resources.md](resources.md).
+When work depends on a durable host path, follow [resources.md](resources.md). Treat registered paths only as coordination/ownership metadata: they may reveal topology such as shared write surfaces or handoff dependencies, but they are never capacity or load signals.
 
-Register and verify the dependency before relying on the path for handoff. When moving a resource dependency to a follow-up issue, add and verify the new dependency before removing the old one or closing the old issue.
+Register and verify the dependency before relying on the path for handoff. When moving a path dependency to a follow-up issue, add and verify the new dependency before removing the old one or closing the old issue.
 
-Never perform resource collection merely as part of routine orchestration.
+Never inspect or infer host capacity from the resource registry, and never perform resource collection merely as part of routine orchestration.
 
 ## Completion
 

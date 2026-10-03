@@ -88,9 +88,13 @@ test('the traced make target comes from a run step, not from a comment', (t) => 
   // 174 added to cover the paged issue conversation. 42 is this revision: 41
   // before, plus `feed-pagination.test.tsx`, which board issue 173 added to cover
   // the feed's numbered pages and their addressable page state. 43 is this
-  // revision: 42 before, plus `resources-pagination.test.tsx`, which board issue
-  // 171 added to cover the paginated Resources view.
-  assert.match(result.stdout, /traced bundle inputs: 43/);
+  // revision: 43 before, plus `resources-pagination.test.tsx`, which board issue
+  // 171 added to cover the paginated Resources view, and
+  // `closed-issue-order.test.tsx`, which board issue 179 added to cover the
+  // closed list's closing-time order across pages. 44 is this revision: both
+  // of those tests are present here, so 179 landing on top of 171's already-landed
+  // `resources-pagination.test.tsx` is an addition, not a replacement.
+  assert.match(result.stdout, /traced bundle inputs: 44/);
 });
 
 test('a bare filename include is traced as the file it names', (t) => {

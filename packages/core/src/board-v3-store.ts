@@ -376,6 +376,41 @@ export interface IssueListSummary {
   hasBody: boolean;
 }
 
+/** What a closed issue is ordered by, and what a missing `closedAt` falls back to. */
+export interface ClosedIssueOrderKey {
+  number: number;
+  closedAt: string | null;
+  updatedAt: string;
+}
+
+/**
+ * When an issue was closed, as the board records it: the closing timestamp when
+ * the store knows one, and the issue's own last update when it does not. An
+ * issue that is closed always has a `closedAt` in a summary this board wrote;
+ * the fallback exists so a caller holding a bare issue is ordered rather than
+ * silently dropped.
+ */
+export function closingTimeOf(issue: Pick<ClosedIssueOrderKey, 'closedAt' | 'updatedAt'>): string {
+  return issue.closedAt ?? issue.updatedAt;
+}
+
+/**
+ * The board's one closed-issue order: most recently closed first, and among
+ * issues closed at the same instant the higher issue number first.
+ *
+ * This is the whole sort key, and it lives here rather than in a list view so
+ * every ordered surface agrees on it. The store orders the materialized closed
+ * list pages with it, so the order is fixed before any page size is applied and
+ * therefore survives paging; the CLI's `--state closed` list and the web's
+ * Closed view order with the same comparator rather than each inventing a sort.
+ * Ordering by issue number or creation order is not available: neither is when
+ * the work actually finished.
+ */
+export function compareClosedIssues(left: ClosedIssueOrderKey, right: ClosedIssueOrderKey): number {
+  const time = closingTimeOf(right).localeCompare(closingTimeOf(left));
+  return time || right.number - left.number;
+}
+
 /**
  * A list page as a caller sees it. `revision` is not stored in the shard -- it
  * differs on every mutation and would defeat ref sharing -- so it is filled in
@@ -741,11 +776,12 @@ function orderedSummaries(
       })
     : state.board.issues
         .filter((issue) => issue.state === 'closed')
-        .sort((left, right) => {
-          const time = (closedAt.get(right.number) ?? right.updatedAt)
-            .localeCompare(closedAt.get(left.number) ?? left.updatedAt);
-          return time || right.number - left.number;
-        });
+        .map((issue) => ({
+          issue,
+          key: { number: issue.number, closedAt: closedAt.get(issue.number) ?? null, updatedAt: issue.updatedAt },
+        }))
+        .sort((left, right) => compareClosedIssues(left.key, right.key))
+        .map((entry) => entry.issue);
   return ordered.map((issue) => ({
     number: issue.number,
     title: issue.title,

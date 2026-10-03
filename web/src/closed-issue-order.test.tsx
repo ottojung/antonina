@@ -41,7 +41,14 @@ function closedSummary(number: number, minutesAgo: number): IssueListSummary {
     // The issue was last touched well after it was closed -- a reopen/edit that
     // never reopened it, or a label change -- so `updatedAt` is deliberately not
     // the closing time and any sort that reaches for it is wrong here.
-    updatedAt: closedMinutesAgo(minutesAgo - 500),
+    //
+    // The shift is keyed to the issue number, not to the closing time, so it is
+    // NOT a constant offset of `closedAt`. A constant offset would leave
+    // `updatedAt` order identical to `closedAt` order in every row of every
+    // fixture below, and then the whole file would pass with a comparator that
+    // sorted closed issues by last update instead of by closing time. Keying the
+    // shift to the number makes the two orders disagree row by row.
+    updatedAt: closedMinutesAgo(minutesAgo - 500 - ((number * 37) % 400)),
     closedAt,
     messageCount: 0,
     hasBody: false,
@@ -201,12 +208,16 @@ describe('closed issue ordering by closing time', () => {
   });
 
   it('reads the closing time from closedAt rather than from the last update', () => {
-    // Issue 8 closed most recently but was touched latest before any other issue
-    // in this board; issue 3 is the reverse. Ordering by either timestamp alone
-    // gives the wrong list, so only the closing time can be the key.
+    // Issue 8 closed most recently and has not been touched since; issue 3 was
+    // closed long ago but edited just now. The two keys disagree on these two
+    // rows: by `closedAt` the order is 8, 3; by `updatedAt` it would be 3, 8.
+    // Sorting by `updatedAt` therefore yields the exact reverse of what is
+    // asserted below, which is what makes this test able to fail at all. The rows
+    // are also supplied oldest-first, so a call site that simply trusted the
+    // arrival order would draw 3, 8 rather than 8, 3.
     const summaries = [
-      { ...closedSummary(8, 1), updatedAt: closedMinutesAgo(1) },
       { ...closedSummary(3, 90), updatedAt: closedMinutesAgo(2) },
+      { ...closedSummary(8, 1), updatedAt: closedMinutesAgo(900) },
     ];
 
     expect(visibleIssues(summaries, [], 'closed').map((each) => each.number)).toEqual([8, 3]);
@@ -248,6 +259,24 @@ describe('closed issue ordering by closing time', () => {
     expect(EXPECTED_ORDER).not.toEqual([23, 17, 12, 9, 4]);
   });
 
+  it('is not the creation order the rows happen to carry', () => {
+    // `createdAt` is the same `STAMP` in every fixture so far, which meant a
+    // comparator that keyed on creation time instead of closing time would have
+    // passed all of them. Here the two orders are exact reverses of each other:
+    // reading the rows newest-created first gives 4, 11, 7, while reading them
+    // newest-closed first gives 7, 11, 4. Three rows, so the closing order is
+    // non-monotonic in issue number too -- descending number gives 11, 7, 4 and
+    // ascending gives 4, 7, 11 -- and no single column of this fixture yields
+    // the asserted order but `closedAt`.
+    const summaries = [
+      { ...closedSummary(7, 5), createdAt: '2018-01-01T00:00:00.000Z' },
+      { ...closedSummary(4, 100), createdAt: '2026-09-01T00:00:00.000Z' },
+      { ...closedSummary(11, 50), createdAt: '2021-01-01T00:00:00.000Z' },
+    ];
+
+    expect(visibleIssues(summaries, [], 'closed').map((each) => each.number)).toEqual([7, 11, 4]);
+  });
+
   it('leaves open-issue ordering exactly as the shared queue has it', () => {
     const open: IssueListSummary[] = [
       { ...closedSummary(1, 999), state: 'open', closedAt: null },
@@ -270,22 +299,33 @@ describe('closed issue ordering across page boundaries', () => {
     // issue 441 -- a higher number -- closed least recently and belongs last.
     const summaries = nonMonotonicClosed(60);
     const every = visibleIssues(summaries, [], 'closed');
-    const expected = every.map((each) => each.number);
 
     expect(every).toHaveLength(60);
     expect(issuePage(every, 1)).toHaveLength(ISSUE_PAGE_SIZE);
     expect(issuePage(every, 2)).toHaveLength(10);
 
-    // Concatenating the pages reproduces the global order exactly.
-    expect([1, 2].flatMap((page) => issuePage(every, page).map((each) => each.number))).toEqual(expected);
-    expect(issuePage(every, 2, 25).map((each) => each.number)).toEqual(expected.slice(25, 50));
+    // No page-order expectation here is derived from `visibleIssues`: the two
+    // assertions that once compared the pages against `every.map(...)` read their
+    // expectation back off the function under test, so they held for any ordering
+    // at all, including no ordering. Everything below is anchored on
+    // `newestAndOldest`, which is computed from the fixture's own `closedAt`.
 
     // The boundary is the point: the newest closure and the oldest sit on
     // different pages, and a list that sorted each page on its own would have
     // page 2 beginning with a closure newer than something on page 1.
     const { newest, oldest } = newestAndOldest(summaries);
-    expect(expected[0]).toBe(newest);
-    expect(expected.at(-1)).toBe(oldest);
+    expect(issuePage(every, 1)[0]!.number).toBe(newest);
+    expect(issuePage(every, 2).at(-1)!.number).toBe(oldest);
+    // A non-default page size is still a slice of the same global order: on a grid
+    // of 25, every closure drawn on the second page is older than every closure
+    // drawn on the first. The expectation comes from the fixture's own `closedAt`
+    // values, so a reversed comparator -- which would swap the two pages -- fails
+    // here.
+    const quarter = issuePage(every, 2, 25).map((each) => each.closedAt!);
+    expect(quarter).toHaveLength(25);
+    expect(Math.min(...quarter.map(Date.parse))).toBeLessThan(
+      Math.min(...issuePage(every, 1, 25).map((each) => Date.parse(each.closedAt!))),
+    );
     // The newest closure is not the highest issue number, so this fixture cannot
     // pass on any issue-number sort at all.
     expect(newest).not.toBe(Math.max(...summaries.map((each) => each.number)));
@@ -312,14 +352,19 @@ describe('the Closed view draws that order', () => {
     // derive its expectation from the function under test, so it stayed green
     // under both a reversed core comparator and a call site that did not sort at
     // all. These are the 60 issue numbers of the fixture in the order its
-    // `closedAt` values demand -- `nonMonotonicClosed(60)` closes issue
-    // `441 + ((rank * 53) mod 60)` at `7 * (rank + 1)` minutes before the stamp,
-    // so the closing order is by ascending rank, i.e. by ascending
-    // `(number - 441) * 17 mod 60`.
+    // `closedAt` values demand -- `nonMonotonicClosed(60)` issues number
+    // `441 + index` a closing time of `7 * (((index * 17) mod 60) + 1)` minutes
+    // before the stamp, so the closing order is by ascending rank, i.e. by
+    // ascending `(number - 441) * 17 mod 60`.
     const EXPECTED_ORDER = [441, 494, 487, 480, 473, 466, 459, 452, 445, 498, 491, 484, 477, 470, 463, 456, 449, 442, 495, 488, 481, 474, 467, 460, 453, 446, 499, 492, 485, 478, 471, 464, 457, 450, 443, 496, 489, 482, 475, 468, 461, 454, 447, 500, 493, 486, 479, 472, 465, 458, 451, 444, 497, 490, 483, 476, 469, 462, 455, 448];
-    // The fixture's own most recent closure is issue 441, not its highest number.
-    expect(EXPECTED_ORDER[0]).toBe(441);
-    expect(EXPECTED_ORDER.at(-1)).toBe(448);
+    // Self-checking against the fixture: the two ends of the literal must be the
+    // fixture's own most and least recent closures, computed from its `closedAt`
+    // and not from the list being checked. (Comparing the literal to itself would
+    // assert nothing.)
+    const { newest, oldest } = newestAndOldest(summaries);
+    expect(EXPECTED_ORDER[0]).toBe(newest);
+    expect(EXPECTED_ORDER.at(-1)).toBe(oldest);
+    expect(EXPECTED_ORDER).toHaveLength(summaries.length);
 
     expect(drawnRows(container)).toEqual(EXPECTED_ORDER.slice(0, ISSUE_PAGE_SIZE));
 

@@ -234,6 +234,8 @@ For each orchestration pass:
 
 Give every newly delegated agent a descriptive title and an explicit working directory so later passes can identify ownership reliably.
 
+Coordination comments are control-plane records, not essays. Keep them comfortably within the board comment limit; put detailed evidence in durable artifacts and name those artifacts from the comment. If a comment is too long, shorten it rather than spending orchestration time repeatedly reformatting prose. Comment formatting must never delay launching an otherwise ready front.
+
 Do not wait idly for long-running agents. Inspect what is available now, steer if useful, record durable state when it materially changes, and continue launching other independent useful work during the same pass. A later orchestrator pass should be needed because the remaining work genuinely depends on future results, not because ready delegation was deferred.
 
 ## Progress, blockers, and handoff

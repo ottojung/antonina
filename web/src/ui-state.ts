@@ -439,8 +439,9 @@ export const ISSUE_LIST_PAGES_LABEL = 'Issue list pages';
  * How many resources one page of the Resources view holds.
  *
  * 50 for the same reason `ISSUE_PAGE_SIZE` and `COMMENT_PAGE_SIZE` are 50: it is
- * the page size `packages/core` already uses for board collections
- * (`DEFAULT_COLLECTION_PAGE_SIZE`, which `board resource list --page` slices
+ * the page size the CLI already uses for board collections
+ * (`DEFAULT_COLLECTION_PAGE_SIZE`, defined in `packages/cli/src/board.ts` and
+ * applied by that file's `pageSlice`, which `board resource list --page` slices
  * with), so the browser's page and the CLI's page are the same chunk and cannot
  * drift apart into two different definitions of a page.
  *
@@ -479,6 +480,15 @@ export function resourcePageCount(total: number, pageSize = RESOURCE_PAGE_SIZE):
  * asked for. Out of range moves down onto the last existing page, exactly as
  * `clampIssuePage` does: registering a resource lengthens the list, removing a
  * dependency shortens it, and both are the same event to a reader.
+ *
+ * What moves is the VIEW, deliberately not the ADDRESS. The clamp here is what
+ * `resourcePage` slices on and what the position line and the controls describe,
+ * so the screen never claims a page it is not drawing; the URL is left naming the
+ * page the reader asked for, because normalising it would rewrite user-visible
+ * address-bar state on a background board poll — which is the same reason
+ * `clampIssuePage` is not a writer, and rewriting it here would fight that
+ * contract rather than keep it. A reader who shares or reloads the address gets
+ * the same clamp applied again to the collection as it stands then.
  */
 export function clampResourcePage(page: number, total: number, pageSize = RESOURCE_PAGE_SIZE): number {
   return clampIssuePage(page, total, pageSize);

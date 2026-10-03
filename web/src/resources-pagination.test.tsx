@@ -14,7 +14,7 @@ import type { BoardIssue, BoardResource } from './model';
 import type { BoardOverview, IssueCommentPage } from '../../packages/core/src/api';
 import type { BoardAccessState } from '../../packages/core/src/api';
 import type { BrowserBoardSession } from './api';
-import { DEFAULT_RESOURCE_PAGE, parseBoardUrl } from './board-url';
+import { DEFAULT_ISSUE_PAGE, DEFAULT_RESOURCE_PAGE, parseBoardUrl } from './board-url';
 import {
   clampResourcePage,
   ISSUE_PAGE_NEXT,
@@ -48,6 +48,9 @@ function resourcesOn(host: string, count: number): BoardResource[] {
 let board: BoardIssue[] = [];
 let registered: BoardResource[] = [];
 let reads = 0;
+// The board's write access, so a case can mount the same board read-only. Reset
+// to true in `beforeEach` like every other piece of per-test state.
+let canEdit = true;
 
 function overview(): BoardOverview {
   reads += 1;
@@ -82,7 +85,7 @@ const removedDependencies: Array<{ host: string; path: string; number: number }>
 
 const session = {
   api: {
-    accessState: (): BoardAccessState => ({ boardId: 'board-1', keyId: null, rootKeyId: 'root-1', capabilities: [], credentialRejection: null, storageRejected: false, canEdit: true }),
+    accessState: (): BoardAccessState => ({ boardId: 'board-1', keyId: null, rootKeyId: 'root-1', capabilities: [], credentialRejection: null, storageRejected: false, canEdit }),
     getIssueCommentPage: async (number: number, page: number): Promise<IssueCommentPage> => {
       const found = board.find((each) => each.number === number);
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
@@ -168,7 +171,12 @@ function drawnHosts(container: HTMLElement): string[] {
 }
 
 function rangeText(container: HTMLElement): string {
-  const range = container.querySelector('.resource-view .issue-page-range, .resources-view .issue-page-range');
+  // `.resources-view` is the only container class the Resources tab draws
+  // (App.tsx). This selector used to carry a second, singular-prefixed half that
+  // named nothing anywhere in the app, which made the helper's reach look wider
+  // than it is and left its empty-string answer ambiguous between "the control is
+  // absent" and "I looked in the wrong place".
+  const range = container.querySelector('.resources-view .issue-page-range');
   return range === null ? '' : (range.textContent ?? '');
 }
 
@@ -206,6 +214,7 @@ beforeEach(() => {
   board = [issue(1), issue(2), issue(3)];
   registered = [];
   reads = 0;
+  canEdit = true;
   addedDependencies.length = 0;
   removedDependencies.length = 0;
   session.api.addResourceDependency.mockClear();
@@ -256,7 +265,10 @@ describe('resource paging arithmetic', () => {
     expect(resourcePage([], 3)).toEqual([]);
   });
 
-  it('reads the page number out of the address and writes it back', () => {
+  it('reads the page number out of the address, and leaves the other page fields alone', () => {
+    // The reading half only. The writing half is `boardUrlFor`/`boardSearch`,
+    // and it is asserted against this same field in `board-url.test.ts`; naming a
+    // write here that the body does not perform is how an assertion goes missing.
     expect(parseBoardUrl('?view=resources&resources=3').resourcePage).toBe(3);
     expect(parseBoardUrl('?view=resources').resourcePage).toBe(DEFAULT_RESOURCE_PAGE);
     // A value that is not a positive integer is page 1, like every other page
@@ -314,8 +326,10 @@ describe('the resources view, paginated', () => {
     const container = await mountResources();
 
     expect(drawnPaths(container)).toHaveLength(50);
-    expect(rangeText(container)).toBe('');
     expect(pagination(container)).toBeNull();
+    // No range assertion here: with no controls there is no `.issue-page-range`
+    // at all, and `rangeText` answers "absent" as `''`, so `toBe('')` would pass
+    // on the helper's default rather than on anything the view drew.
   });
 
   it('keeps the page state in the URL, so it survives a reload', async () => {
@@ -340,7 +354,61 @@ describe('the resources view, paginated', () => {
     const linked = await mountResources();
     expect(rangeText(linked)).toBe('101–126 of 126');
     expect(nextButton().disabled).toBe(true);
-    expect(container).not.toBe(linked);
+    // No container-identity assertion here: `container` and `linked` are two
+    // different `render()` roots by construction, so `not.toBe` is true before
+    // the view is asked to do anything and cannot fail if it regresses. What
+    // proves the third mount is a fresh read of the address is the range line
+    // and the disabled boundary above.
+  });
+
+  it('pages a read-only board exactly as an editable one, and draws the callout instead of the write controls', async () => {
+    // Both arms of one case, deliberately in one `it`: paging is a window onto
+    // what the browser already holds and is not a write, so the page, its
+    // position line and its boundaries must not depend on whether the reader may
+    // commit anything. Only the write affordances do. Running both here is what
+    // keeps that claim honest — the access-conditional branches of `ResourcesView`
+    // (App.tsx: `access === 'editable' && …` for the register form, the
+    // add-dependency form and the remove control, against the `access-callout`)
+    // were otherwise reachable by no test in this file at all.
+    for (const editable of [true, false]) {
+      canEdit = editable;
+      registered = resourcesOn('lubko://one', 126);
+      window.history.replaceState(null, '', '/?view=resources');
+      const container = await mountResources();
+
+      expect(rangeText(container)).toBe('1–50 of 126');
+      expect(drawnPaths(container)).toEqual(registered.slice(0, 50).map((each) => each.path));
+      expect(previousButton().disabled).toBe(true);
+      expect(nextButton().disabled).toBe(false);
+
+      await goNext();
+      expect(rangeText(container)).toBe('51–100 of 126');
+      expect(drawnPaths(container)).toEqual(registered.slice(50, 100).map((each) => each.path));
+      expect(previousButton().disabled).toBe(false);
+      expect(nextButton().disabled).toBe(false);
+
+      // The read link to a dependency is not a write, so the chips and their
+      // state labels are drawn either way; the per-dependency remove button,
+      // the add-dependency form and the register form are writes.
+      const card = container.querySelector('.resource-card') as HTMLElement;
+      expect(within(card).getByRole('button', { name: /#1 Issue 1/ })).toBeDefined();
+      expect(card.querySelector('.state-label.open')).not.toBeNull();
+      if (editable) {
+        expect(card.querySelector('.dependency-add')).not.toBeNull();
+        expect(within(card).getByRole('button', { name: 'Remove issue 1' })).toBeDefined();
+        expect(container.querySelector('.resource-form')).not.toBeNull();
+        expect(container.querySelector('.resources-view .access-callout')).toBeNull();
+      } else {
+        expect(card.querySelector('.dependency-add')).toBeNull();
+        expect(within(card).queryByRole('button', { name: 'Remove issue 1' })).toBeNull();
+        expect(container.querySelector('.resource-form')).toBeNull();
+        // Scoped to `.resources-view`: the Issues pane draws its own callout at
+        // the same class, so an unscoped selector would pass on the wrong tab.
+        expect(container.querySelector('.resources-view .access-callout')).not.toBeNull();
+      }
+
+      cleanup();
+    }
   });
 
   it('clamps an out-of-range page from the address onto the last page that exists', async () => {
@@ -359,7 +427,10 @@ describe('the resources view, paginated', () => {
     const container = await mountResources();
     await goNext();
     expect(window.location.search).toContain('resources=2');
-    expect(window.location.search).not.toContain('page=2');
+    // Exactly, not by substring: `not.toContain('page=2')` also matches
+    // `page=20`, so it would pass on a renumbered Issues list. The parsed field
+    // is the claim "the Issues list's page is untouched".
+    expect(parseBoardUrl(window.location.search).page).toBe(DEFAULT_ISSUE_PAGE);
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'issues' })); });
     // A tab change returns both lists to their first page, which is what the tab
@@ -372,28 +443,38 @@ describe('the resources view, paginated', () => {
 
 describe('grouping and dependency controls while paged', () => {
   it('still groups the page by host and sorts hosts and paths', async () => {
-    // 40 paths on each of two hosts, interleaved in the board's own order, so a
-    // page holds both hosts and neither is sorted away.
+    // PRODUCTION-SHAPED, which the old fixture here was not: it emitted 40
+    // `lubko://zulu` and then 40 `lubko://alpha`, a host-descending order no real
+    // board can hold, because `packages/core/src/operations.ts` re-sorts the
+    // whole collection by host then path on every add. So this is the order that
+    // sort produces — all of alpha, then all of zulu — and the page boundary at
+    // index 50 therefore falls INSIDE `lubko://zulu`, which is where a boundary
+    // almost always falls in practice and is the case worth testing: the host
+    // heading repeats across the two pages instead of each host sitting neatly
+    // on one page.
     registered = [
-      ...Array.from({ length: 40 }, (_, index) => resource('lubko://zulu', `/zulu/${String(index + 1).padStart(2, '0')}`)),
-      ...Array.from({ length: 40 }, (_, index) => resource('lubko://alpha', `/alpha/${String(index + 1).padStart(2, '0')}`)),
+      ...Array.from({ length: 30 }, (_, index) => resource('lubko://alpha', `/alpha/${String(index + 1).padStart(2, '0')}`)),
+      ...Array.from({ length: 60 }, (_, index) => resource('lubko://zulu', `/zulu/${String(index + 1).padStart(2, '0')}`)),
     ];
     const container = await mountResources();
 
-    // Both hosts are on page 1, and the group headings are in host order —
-    // `groupResources` runs on the page, exactly as it ran on the whole board.
+    // Grouping runs on the page, exactly as it ran on the whole board: page 1
+    // straddles the two hosts, so it draws two sections in host order.
     expect(drawnHosts(container)).toEqual(['lubko://alpha', 'lubko://zulu']);
-    const alpha = drawnPaths(container).filter((path) => path.startsWith('/alpha/'));
-    expect(alpha).toEqual(Array.from({ length: 10 }, (_, index) => `/alpha/${String(index + 1).padStart(2, '0')}`));
-    // Grouping moved the ten alpha paths ahead of the forty zulu paths, exactly as
-    // it does for an unpaged board: a page is a window, not a second order.
     expect(drawnPaths(container)).toHaveLength(RESOURCE_PAGE_SIZE);
+    expect(drawnPaths(container)).toEqual([
+      ...Array.from({ length: 30 }, (_, index) => `/alpha/${String(index + 1).padStart(2, '0')}`),
+      ...Array.from({ length: 20 }, (_, index) => `/zulu/${String(index + 1).padStart(2, '0')}`),
+    ]);
 
-    // Page 2 continues inside the same first host, so its resources appear on
-    // both pages rather than being pulled onto one of them.
+    // Page 2 continues INSIDE the second host, so zulu's resources appear on both
+    // pages rather than being pulled onto one of them, and the heading repeats.
     await goNext();
-    expect(drawnHosts(container)).toEqual(['lubko://alpha']);
-    expect(drawnPaths(container)).toEqual(Array.from({ length: 30 }, (_, index) => `/alpha/${String(index + 11).padStart(2, '0')}`));
+    expect(drawnHosts(container)).toEqual(['lubko://zulu']);
+    expect(drawnPaths(container)).toEqual(Array.from({ length: 40 }, (_, index) => `/zulu/${String(index + 21).padStart(2, '0')}`));
+    // Two pages of this collection and no third, so the straddle is the whole
+    // story rather than a corner of a longer list.
+    expect(nextButton().disabled).toBe(true);
   });
 
   it('keeps the dependency chips, their states and their remove control working on a page', async () => {

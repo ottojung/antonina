@@ -361,6 +361,98 @@ export const ISSUE_PAGE_PREVIOUS = 'Previous page';
 export const ISSUE_PAGE_NEXT = 'Next page';
 
 /**
+ * How many resources one page of the Resources view holds.
+ *
+ * 50 for the same reason `ISSUE_PAGE_SIZE` is 50: it is the page size the CLI
+ * already uses for board collections (`DEFAULT_COLLECTION_PAGE_SIZE`, defined in
+ * `packages/cli/src/board.ts` and applied by that file's `pageSlice`, which
+ * `board resource list --page` slices with), so the browser's page and the
+ * CLI's page are the same chunk and cannot
+ * drift apart into two different definitions of a page.
+ *
+ * What this paging is, precisely: a window onto what the browser already holds.
+ * It is NOT a bounded read, and it does not make one. The board's resources are
+ * not paged in storage — they live inline in the board's single catalog shard,
+ * which `BoardStore.readOverview` returns whole and which
+ * `BoardApi.listResources` in `packages/core/src/api.ts` also reads whole via
+ * `loadBoard()` before `resourceViews` filters it. So
+ * `antonina board resource list --page N` slices after fetching everything, and
+ * this view slices after an overview that already carried everything. What that
+ * buys is 50 rendered cards instead of all of them, and a page number in the
+ * URL; what it does not buy is fewer bytes. A true bounded read needs the
+ * catalog itself sharded into resource pages — a storage-format change, not a UI
+ * change, and deliberately out of scope here.
+ */
+export const RESOURCE_PAGE_SIZE = 50;
+
+/**
+ * The Resources view's paging, as the same model the Issues list already uses.
+ *
+ * Exactly as the issue helpers above: `RESOURCE_PAGE_SIZE` is the argument and
+ * the count, the clamp, the range line and the "is there more than one page"
+ * question are all answered by `issuePageCount`, `clampIssuePage`,
+ * `issuePageRange` and `hasIssuePages`. So the Resources view cannot disagree
+ * with the Issues list about what a page number means, where an out-of-range one
+ * lands, or when the controls disappear.
+ */
+export function resourcePageCount(total: number, pageSize = RESOURCE_PAGE_SIZE): number {
+  return issuePageCount(total, pageSize);
+}
+
+/**
+ * The page the Resources view may actually be showing, given the page that was
+ * asked for. Out of range moves down onto the last existing page, exactly as
+ * `clampIssuePage` does: registering a resource lengthens the list, removing a
+ * dependency shortens it, and both are the same event to a reader.
+ *
+ * What moves is the VIEW, deliberately not the ADDRESS. The clamp here is what
+ * `resourcePage` slices on and what the position line and the controls describe,
+ * so the screen never claims a page it is not drawing; the URL is left naming the
+ * page the reader asked for, because normalising it would rewrite user-visible
+ * address-bar state on a background board poll — which is the same reason
+ * `clampIssuePage` is not a writer, and rewriting it here would fight that
+ * contract rather than keep it. A reader who shares or reloads the address gets
+ * the same clamp applied again to the collection as it stands then.
+ */
+export function clampResourcePage(page: number, total: number, pageSize = RESOURCE_PAGE_SIZE): number {
+  return clampIssuePage(page, total, pageSize);
+}
+
+/**
+ * The one page of the board's resources, in the order the board holds them.
+ *
+ * Pagination is a window onto the board's own resource order and never a second
+ * sort of it: grouping still happens afterwards and still sorts hosts and paths
+ * inside the page (`groupResources`), exactly as it does for an unpaged board.
+ * So a page that happens to hold two hosts draws two host sections, and a host
+ * whose resources straddle a page boundary appears on both pages rather than
+ * being pulled onto one of them.
+ */
+export function resourcePage<T>(resources: readonly T[], page: number, pageSize = RESOURCE_PAGE_SIZE): T[] {
+  const index = clampResourcePage(page, resources.length, pageSize);
+  return resources.slice((index - 1) * pageSize, index * pageSize);
+}
+
+/**
+ * There is deliberately no `resourcePageRange` or `hasResourcePages` beside
+ * these.
+ *
+ * The Resources view draws its position line and its Previous/Next boundaries
+ * through the shared `IssuePagination` control, which already answers both
+ * questions with `issuePageRange` and `hasIssuePages` — and its position line
+ * reads `1–50 of 126` without naming a noun, so it is exactly as true of
+ * resources as it is of issues. A resource-specific copy of those two helpers
+ * would be a second answer to a question the list already answers, free to drift
+ * from the Issues list's.
+ */
+
+/** What the Issues list's own Previous/Next control announces itself as paging. */
+export const ISSUE_LIST_PAGES_LABEL = 'Issue list pages';
+
+/** What the Resources view's own Previous/Next control announces itself as paging. */
+export const RESOURCE_LIST_PAGES_LABEL = 'Resource list pages';
+
+/**
  * Moves one queued issue to another slot, returning the whole reordered queue.
  * A commit is only accepted when it names every open issue exactly once, so a
  * move sends the entire list, never the pair it swapped. `null` means the board

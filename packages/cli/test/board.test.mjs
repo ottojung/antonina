@@ -660,7 +660,7 @@ test('board review records a verdict and the blocked close is refused and report
   assert.equal((await owner.getIssue(issue.number)).state, 'open');
 
   // And the human form of `show` says the same thing without being asked.
-  const shown = await run(['show', String(issue.number)], { createClient: () => owner });
+  const shown = await run(['show', String(issue.number), '--page', '1'], { createClient: () => owner });
   assert.equal(shown.code, 0);
   assert.match(shown.out.join('\n'), /Review: request-changes/);
   assert.match(shown.out.join('\n'), /Completion blocked:/);

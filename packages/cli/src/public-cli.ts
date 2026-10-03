@@ -28,6 +28,8 @@ interface CommandSpec {
   readonly repeated?: readonly string[];
   readonly required?: readonly string[];
   readonly requireRepeated?: readonly string[];
+  /** Per-command overrides for OPTION_HELP, where one option name carries two contracts. */
+  readonly optionHelp?: Readonly<Record<string, string>>;
   readonly normalize: (parsed: ParsedOptions) => string[];
 }
 
@@ -41,7 +43,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--clear-limitations': 'Retract the target\'s caveats.',
   '--confirm': 'Confirm the destructive operation.',
   '--credential': 'Print only the initialized credential.',
-  '--cwd': 'Working directory the front runs in; declared, never inherited from the invoking shell.',
+  '--cwd': 'Directory THIS invocation runs in. Accepted on every run, including one with --steer; also becomes the agent\'s declared default for later runs. Never inherited from the invoking shell. A backend that cannot honour a named directory refuses by name, at new, at run, at --steer, and at new --fork (which inherits the source\'s declared directory), rather than running somewhere else: including for a directory the agent declared earlier, so a run that names no --cwd of its own is refused too.',
   '--days': 'Retention age in days, measured from the later of the agent\'s finished_at and its own created_at. A fork created today from a session that finished three months ago is therefore kept for the full window from today; measuring from finished_at alone would let a sweep delete that clone, which is the last copy of that history once the source is gone.',
   '--description': 'Human-readable description.',
   '--detach': 'Return after starting background work.',
@@ -354,6 +356,9 @@ const AGENT_SPECS: readonly CommandSpec[] = [
     values: ['--id', '--cwd', '--title', '--fork'],
     flags: ['--json'],
     required: ['--id'],
+    optionHelp: {
+      '--cwd': 'Declared default directory for every invocation of this agent; refused with --fork',
+    },
     normalize: (p) => ['new', ...valueArgs(p, ['--id', '--cwd', '--title', '--fork']), ...flagArgs(p, ['--json'])],
   },
   {
@@ -378,7 +383,7 @@ const AGENT_SPECS: readonly CommandSpec[] = [
   },
   {
     path: ['run'],
-    summary: 'Send work to a managed agent.',
+    summary: 'Send work to a managed agent. --cwd names the directory this invocation runs in and is accepted on every run, including a --steer.',
     values: ['--id', '--prompt', '--cwd'],
     flags: ['--steer', '--detach', '--json'],
     required: ['--id', '--prompt'],
@@ -407,6 +412,12 @@ const AGENT_SPECS: readonly CommandSpec[] = [
     required: ['--id', '--timeout'],
     normalize: (p) => ['wait', '--id', p.values.get('--id')!, '--timeout', p.values.get('--timeout')!],
   },
+  // Board issue 178, residual RF4: neither command takes `--json`. An earlier
+  // draft added it here; it is unrelated public surface with its own output and
+  // exit matrix, so it is dropped rather than carried by this contract PR. The
+  // convergence behaviour these commands are relied on for -- returning only
+  // once the invocation and its detached runner are both gone -- is unaffected
+  // and is pinned in packages/cli/test/agent.e2e.test.mjs.
   ...(['stop', 'kill'] as const).map((command): CommandSpec => ({
     path: [command],
     summary: command === 'stop' ? 'Stop a managed agent.' : 'Kill a managed agent.',
@@ -531,7 +542,7 @@ function commandHelp(namespace: PublicNamespace, spec: CommandSpec): string {
     const takesValue = (spec.values ?? []).includes(name) || (spec.repeated ?? []).includes(name);
     const required = (spec.required ?? []).includes(name) || (spec.requireRepeated ?? []).includes(name);
     const shown = name + (takesValue ? ' <value>' : '');
-    return '  ' + shown.padEnd(24) + (OPTION_HELP[name] ?? '') + (required ? ' (required)' : '');
+    return '  ' + shown.padEnd(24) + (spec.optionHelp?.[name] ?? OPTION_HELP[name] ?? '') + (required ? ' (required)' : '');
   });
   return [
     'Usage: antonina ' + namespace + ' ' + spec.path.join(' ') + (optionNames.length === 0 ? '' : ' [options]'),

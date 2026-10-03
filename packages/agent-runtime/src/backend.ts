@@ -375,6 +375,52 @@ export function configuredModelAvailable(
   return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).includes(AGENT_MODEL);
 }
 
+/**
+ * What the configured backend can actually honour, asked as data rather than
+ * discovered by failing.
+ *
+ * Board issue 178: `--cwd` means "run this invocation in this directory", for
+ * every invocation including a `--steer`. A backend that cannot place a single
+ * invocation in a named directory must say so *here*, so that `agent run --cwd`
+ * refuses with a named capability error instead of quietly running somewhere
+ * else. A backend-agnostic CLI cannot do better than this: it cannot invent a
+ * meaning for the flag that the backend will honour, and it must not change the
+ * meaning of the flag depending on which backend is configured.
+ *
+ * OpenCode can: every invocation is a fresh `opencode run` process, spawned
+ * with `spawn({cwd})` *and* told `--dir` the same value, and a continuation is
+ * a new process re-attaching the same session rather than a live process whose
+ * directory would have to change in place.
+ */
+export interface BackendCapabilities {
+  /** An invocation can be launched in a named working directory. */
+  invocation_cwd: boolean;
+}
+
+/**
+ * Test-only override that makes the configured backend report a capability it
+ * does not have, so the refusal path can be driven from outside the package.
+ *
+ * It exists only because `invocation_cwd` is currently a constant `true`: with
+ * one backend and no way to make the answer differ, no test could reach the
+ * refusal, and "unreachable" is exactly how a divergence between entry points
+ * hides. Board issue 178's required fix 1 is one clause in `cmdNew` that is
+ * otherwise unobservable by execution.
+ *
+ * Deliberately narrow and fail-safe in the safe direction: only the exact value
+ * `'1'` withdraws a capability, every other value (including unset) leaves the
+ * backend's real answer alone, so no ordinary environment can reach a
+ * different answer.
+ */
+const TEST_WITHDRAW_INVOCATION_CWD_ENV = 'ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD';
+
+export function backendCapabilities(
+  env: Record<string, string | undefined> = process.env,
+): BackendCapabilities {
+  if (env[TEST_WITHDRAW_INVOCATION_CWD_ENV] === '1') return { invocation_cwd: false };
+  return { invocation_cwd: true };
+}
+
 export function buildAgentCommand(
   meta: AgentMetadata,
   prompt: string,
@@ -382,6 +428,11 @@ export function buildAgentCommand(
   env: Record<string, string | undefined> = process.env,
 ): string[] | null {
   const agentId = requiredPersistedAgentId(meta);
+  // Board issue 178: the launch directory is resolved by one function in
+  // `metadata.ts` and consumed here and in `runner.ts`, so `--dir` and the
+  // `spawn({cwd})` this process is launched with cannot name different places.
+  // It resolves the declaration, not the observation: `invocation_cwd` records
+  // where a front actually ran and must never decide where one runs.
   const cwd = requiredAgentCwd(meta);
   const variant = persistedVariant(meta) || DEFAULT_VARIANT;
   const executable = resolveOpencode(env);

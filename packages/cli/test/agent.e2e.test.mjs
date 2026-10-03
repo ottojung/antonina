@@ -243,8 +243,8 @@ function assertFixtureInvoked(fixtureHandle, expected) {
   );
 }
 
-function run(args, env) {
-  return spawnSync(process.execPath, [CLI, ...args], { env, encoding: 'utf8', timeout: 15_000 });
+function run(args, env, options = {}) {
+  return spawnSync(process.execPath, [CLI, ...args], { env, encoding: 'utf8', timeout: 15_000, ...options });
 }
 
 function metaPath(root, id) {
@@ -852,6 +852,35 @@ test('public CLI help is available at the top level, namespaces, groups, and lea
 });
 
 
+// Board issue 178, residual RF3. `--cwd` is one name with two contracts, and
+// the help text is public contract, so the two commands must not share one
+// sentence: `agent run --cwd` names the directory *this invocation* runs in,
+// while `agent new --cwd` declares a default for every invocation of an agent
+// that creates none -- and is refused outright when combined with `--fork`.
+// Documenting the run contract on `new` is the one-name-two-meanings hazard the
+// intent record forbids, relocated into the help.
+test('agent new and agent run document --cwd as the two different contracts they are', (t) => {
+  const { env } = fixture(t);
+  const help = (args) => {
+    const result = run([...args, '--help'], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Usage: antonina /);
+    const row = result.stdout.split('\n').find((line) => line.trimStart().startsWith('--cwd'));
+    assert.ok(row !== undefined, `no --cwd row in ${args.join(' ')} --help`);
+    return row;
+  };
+
+  const newRow = help(['agent', 'new']);
+  assert.match(newRow, /Declared default directory for every invocation/);
+  assert.match(newRow, /refused with --fork/);
+  assert.doesNotMatch(newRow, /THIS invocation/, 'agent new --help must not describe the run contract');
+
+  const runRow = help(['agent', 'run']);
+  assert.match(runRow, /THIS invocation/);
+  assert.match(runRow, /--steer/);
+  assert.doesNotMatch(runRow, /refused with --fork/, 'agent run --help must not describe the new contract');
+});
+
 test('public CLI rejects positional data arguments', (t) => {
   const { env } = fixture(t);
   const board = run(['board', 'show', '1'], env);
@@ -1453,11 +1482,15 @@ test('stop refuses to report success when the invocation cannot be terminated', 
 // The invariant, in one sentence: `agent new` refuses a --cwd that is not an
 // existing directory, and it refuses it *before* creating any state, so a typo
 // cannot leave a half-built agent on disk.
+// Board issue 178: a `--cwd` that names something which is not a directory is a
+// *usage* error -- the command named a value that cannot mean anything -- so it
+// exits 2, like every other malformed argument, on both `new` and `run`. It
+// previously exited 1, the code this CLI reserves for state conflicts.
 test('new refuses a --cwd that is not an existing directory and creates no state', (t) => {
   const { root, work, env } = fixture(t);
   const missing = join(root, 'no-such-directory');
   const result = run(['agent', 'new', '--id', '4ec1', '--cwd', missing], env);
-  assert.equal(result.status, 1, `expected a refusal, got: ${result.stdout}${result.stderr}`);
+  assert.equal(result.status, 2, `expected a usage refusal, got: ${result.stdout}${result.stderr}`);
   assert.match(result.stderr, /working directory does not exist/);
   assert.equal(existsSync(missing), false, 'the refused working directory must not be created');
   assert.equal(
@@ -1471,7 +1504,7 @@ test('new refuses a --cwd that is not an existing directory and creates no state
   const file = join(work, 'not-a-directory');
   writeFileSync(file, 'regular file\n');
   const asFile = run(['agent', 'new', '--id', '4ec2', '--cwd', file], env);
-  assert.equal(asFile.status, 1, `expected a refusal, got: ${asFile.stdout}${asFile.stderr}`);
+  assert.equal(asFile.status, 2, `expected a usage refusal, got: ${asFile.stdout}${asFile.stderr}`);
   assert.match(asFile.stderr, /working directory does not exist/);
   assert.equal(
     existsSync(join(root, 'state', 'antonina', 'agents', '4ec2')),
@@ -1485,6 +1518,251 @@ test('new refuses a --cwd that is not an existing directory and creates no state
   assert.equal(accepted.status, 0, accepted.stderr);
   assert.equal(JSON.parse(accepted.stdout).cwd, work);
   assert.equal(existsSync(join(root, 'state', 'antonina', 'agents', '4ec3', 'meta.json')), true);
+});
+
+// -------------------------------------------------- 178 required fixes (F1/F2)
+// The remaining two gaps the R3 review of 349f1a2b found in the shared rule: the
+// capability half of the rule existed at one of the three entry points, and an
+// empty `--cwd` resolved to the invoking shell's directory at all three.
+//
+// Both are tested through the compiled CLI (packages/cli/dist/...), because the
+// three entry points only exist there, and the capability is withdrawn through a
+// test-only environment variable, because `backendCapabilities` reports a
+// constant `true` and an unobservable branch is how the divergence survived.
+
+test('new refuses a --cwd the configured backend cannot place an invocation in', (t) => {
+  const { root, work, env } = fixture(t);
+  // Board issue 178, required fix 1: `cmdNew` consults `backendCapabilities`,
+  // so a backend without `invocation_cwd` refuses the *declaration* by name too.
+  // Before the fix this accepted the cwd, and `run` then launched in it with no
+  // guard left anywhere -- a cwd that `run --cwd` refused by name.
+  const noCwd = { ...env, ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: '1' };
+  assert.equal(run(['agent', 'new', '--id', 'f000', '--cwd', work], env).status, 0);
+
+  const refused = run(['agent', 'new', '--id', 'f001', '--cwd', work, '--json'], noCwd);
+  assert.equal(refused.status, 1, `expected a capability refusal, got: ${refused.stdout}${refused.stderr}`);
+  assert.match(
+    refused.stderr,
+    /new: the configured backend cannot run an invocation in a different working directory/,
+  );
+  assert.equal(
+    existsSync(join(root, 'state', 'antonina', 'agents', 'f001')),
+    false,
+    'a refused new must not leave an agent directory behind',
+  );
+
+  // Parity, by assertion rather than by assumption: the same environment must
+  // refuse the same request at the entry point that already consulted the
+  // capability. If this stopped being true the two entry points would have
+  // drifted apart again, in the other direction.
+  const steered = run(
+    ['agent', 'run', '--id', 'f000', '--steer', '--cwd', work, '--detach', '--prompt', 'never'],
+    noCwd,
+  );
+  assert.equal(steered.status, 1, `run must refuse the same request: ${steered.stdout}${steered.stderr}`);
+  assert.match(steered.stderr, /run: the configured backend cannot run an invocation/);
+
+  // Positive control in both directions, so the guard cannot be satisfied by
+  // refusing every --cwd: without the override the same commands are accepted,
+  // and an override that is not the exact token `1` changes nothing.
+  assert.equal(run(['agent', 'new', '--id', 'f002', '--cwd', work, '--json'], env).status, 0);
+  const ignored = { ...env, ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: 'true' };
+  assert.equal(run(['agent', 'new', '--id', 'f003', '--cwd', work, '--json'], ignored).status, 0);
+  // `new` without --cwd declares nothing, so there is nothing for the backend to
+  // be unable to honour, and it must still be accepted under the override.
+  assert.equal(run(['agent', 'new', '--id', 'f004', '--json'], noCwd).status, 0);
+});
+
+// ------------------------------------------------ 178 residuals (R1 and R2)
+// The two latent residuals the RF1/RF2 review named rather than waved through.
+// Both are the same defect the gates above were added to remove -- `--cwd`
+// regaining backend-dependent meaning through a route that does not consult
+// `backendCapabilities` -- and both are latent only because the single
+// configured backend reports the capability and the test override can only
+// withdraw it. Latent is exactly how a divergence between entry points hides,
+// so both are driven through the compiled CLI with the capability withdrawn.
+
+test('R1: a directory declared while capable is not launched after the capability is withdrawn', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  const noCwd = { ...env, ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: '1' };
+  // Declared while the backend could honour it. Nothing about this record is
+  // unusual: it is an ordinary `new --cwd`, and the whole point of R1 is that
+  // its ordinariness is what gets the directory launched.
+  assert.equal(run(['agent', 'new', '--id', 'd010', '--cwd', work, '--json'], env).status, 0);
+
+  // No `--cwd` on this invocation, so the flag-shaped gate never fired. Before
+  // the fix this exited 0, handed the backend `--dir <work>`, and recorded the
+  // launch: a declared directory launched by a CLI that had just been told it
+  // could not run an invocation in a named directory.
+  const ungated = run(['agent', 'run', '--id', 'd010', '--detach', '--prompt', 'inherited-declaration'], noCwd);
+  assert.equal(ungated.status, 1, `expected a capability refusal, got: ${ungated.stdout}${ungated.stderr}`);
+  assert.match(ungated.stderr, /run: the configured backend cannot run an invocation in a different working directory/);
+  const untouched = JSON.parse(readFileSync(metaPath(root, 'd010'), 'utf8'));
+  assert.equal(untouched.prompt_count, 0, 'the refused run must not accept the prompt');
+  assert.equal(untouched.pending_prompt, null, 'and must not leave one accepted for a later runner');
+  assert.equal(untouched.cwd, work, 'and must not disturb the declaration it was refused for');
+  assert.deepEqual(
+    fixtureInvocations(env).filter((line) => line.includes('inherited-declaration')),
+    [],
+    'no invocation may have been launched in the declared directory',
+  );
+  assertFixtureInvoked(handle, undefined);
+
+  // Same on `--steer`, which is the entry point that relocates a live
+  // invocation: the gate must be ahead of the preemption, so the front is left
+  // running with an unchanged pid and the steer is not queued. The front here is
+  // this test's own fixture front, in this test's own state root, and it is
+  // reaped in `t.after` from the pid in its own meta -- no agent belonging to
+  // any other front on this host is signalled.
+  assert.equal(run(['agent', 'new', '--id', 'd011', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'd011', '--detach', '--prompt', 'slow'], env).status, 0);
+  const live = await waitFor(root, 'd011', (meta) => meta.state === 'running' && typeof meta.pid === 'number', 30_000);
+  t.after(() => {
+    try { process.kill(-live.pid, 'SIGKILL'); } catch {}
+    try { process.kill(live.pid, 'SIGKILL'); } catch {}
+  });
+  const steered = run(['agent', 'run', '--id', 'd011', '--steer', '--detach', '--prompt', 'steered'], noCwd);
+  assert.equal(steered.status, 1, `expected a capability refusal, got: ${steered.stdout}${steered.stderr}`);
+  assert.match(steered.stderr, /run: the configured backend cannot run an invocation/);
+  const held = JSON.parse(readFileSync(metaPath(root, 'd011'), 'utf8'));
+  assert.equal(held.prompt_count, 1, 'the refused steer must not have been queued');
+  assert.deepEqual(held.steer_queue ?? [], [], 'and must not have left a queued steer behind');
+  assert.equal(held.pid, live.pid, 'the live front must not have been terminated by the refusal');
+  assertFixtureInvoked(handle, 'slow');
+
+  // Positive controls, so the gate cannot be satisfied by refusing every run.
+  // With no override the same launch proceeds and reports the declared
+  // directory; and an agent that declared nothing has nothing for the backend
+  // to be unable to honour, so it still fails on its own "no declared working
+  // directory" rule rather than on the capability.
+  assert.equal(run(['agent', 'run', '--id', 'd010', '--detach', '--prompt', 'capable'], env).status, 0);
+  const done = await waitFor(root, 'd010', (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
+  assert.equal(done.invocation_cwd, work, 'the launch must have happened in the declared directory');
+  assert.equal(run(['agent', 'new', '--id', 'd012', '--json'], noCwd).status, 0);
+  const nowhere = run(['agent', 'run', '--id', 'd012', '--detach', '--prompt', 'nowhere'], noCwd);
+  assert.equal(nowhere.status, 1, nowhere.stdout);
+  assert.match(
+    nowhere.stderr,
+    /no declared working directory/,
+    'an agent with no declared directory must still be refused for that reason',
+  );
+});
+
+test('R2: new --fork refuses to inherit a declared directory the backend cannot place', (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  const noCwd = { ...env, ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: '1' };
+  // `--fork` refuses `--cwd` by name, so this is not a second spelling of the
+  // flag and not a second meaning for it. It is a route to a *declaration* that
+  // never consulted the capability: before the fix the clone recorded the
+  // source's directory verbatim and exited 0, which is what made R1 reachable
+  // today and not only once a second backend exists.
+  assert.equal(run(['agent', 'new', '--id', 'd020', '--cwd', work, '--json'], env).status, 0);
+  const forked = run(['agent', 'new', '--id', 'd021', '--fork', 'd020', '--json'], noCwd);
+  assert.equal(forked.status, 1, `expected a capability refusal, got: ${forked.stdout}${forked.stderr}`);
+  assert.match(
+    forked.stderr,
+    /new --fork: the configured backend cannot run an invocation in a different working directory/,
+  );
+  assert.equal(
+    existsSync(join(root, 'state', 'antonina', 'agents', 'd021')),
+    false,
+    'a refused fork must not leave a half-created clone behind',
+  );
+
+  // Parity with the three gates that already existed: with the capability
+  // intact the same fork is accepted and inherits the source's directory, so
+  // the gate is about the capability and not about forking.
+  const capable = run(['agent', 'new', '--id', 'd022', '--fork', 'd020', '--json'], env);
+  assert.equal(capable.status, 0, capable.stderr);
+  assert.equal(JSON.parse(capable.stdout).cwd, work);
+  assert.equal(JSON.parse(readFileSync(metaPath(root, 'd022'), 'utf8')).cwd, work);
+
+  // And a source that declared nothing inherits nothing, so there is nothing
+  // for the backend to be unable to honour: the fork is accepted under the
+  // override. Without this, the gate would be satisfied by refusing every fork.
+  assert.equal(run(['agent', 'new', '--id', 'd023', '--json'], env).status, 0);
+  const undeclared = run(['agent', 'new', '--id', 'd024', '--fork', 'd023', '--json'], noCwd);
+  assert.equal(undeclared.status, 0, undeclared.stderr);
+  assert.equal(JSON.parse(undeclared.stdout).cwd, null);
+  assertFixtureInvoked(handle, undefined);
+});
+
+test('every entry point refuses an empty --cwd instead of inheriting the shell directory', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  // A distinctive directory to invoke from, so "the shell's directory" is a
+  // specific string a test can name rather than whatever this process happens to
+  // be sitting in.
+  const shell = join(root, 'invoking-shell');
+  mkdirSync(shell);
+  const fromShell = (args) => run(args, env, { cwd: shell });
+
+  // (1) `new`. Before the fix: exit 0, and the record named `shell`.
+  const created = fromShell(['agent', 'new', '--id', 'e001', '--cwd', '', '--json']);
+  assert.equal(created.status, 2, `expected a usage refusal, got: ${created.stdout}${created.stderr}`);
+  assert.match(created.stderr, /new: --cwd requires a working directory path/);
+  assert.equal(
+    existsSync(join(root, 'state', 'antonina', 'agents', 'e001')),
+    false,
+    'a refused new must not leave an agent directory behind',
+  );
+  // Whitespace-only is the same value after `trim()`, and is refused for the
+  // same reason: `resolve('   ')` is the shell's directory too.
+  const blank = fromShell(['agent', 'new', '--id', 'e002', '--cwd', '   ', '--json']);
+  assert.equal(blank.status, 2, `expected a usage refusal, got: ${blank.stdout}${blank.stderr}`);
+
+  // (2) `run`. An agent declared with no directory of its own, so the only
+  // candidate on offer is the empty value; before the fix this launched in the
+  // shell's directory and reported it as the front's location.
+  assert.equal(run(['agent', 'new', '--id', 'e003'], env).status, 0);
+  const launched = fromShell([
+    'agent', 'run', '--id', 'e003', '--detach', '--cwd', '', '--prompt', 'inherited',
+  ]);
+  assert.equal(launched.status, 2, `expected a usage refusal, got: ${launched.stdout}${launched.stderr}`);
+  assert.match(launched.stderr, /run: --cwd requires a working directory path/);
+  const idle = JSON.parse(readFileSync(metaPath(root, 'e003'), 'utf8'));
+  assert.equal(idle.prompt_count, 0, 'a refused run must not accept the prompt');
+  assert.equal(idle.cwd, null, 'and must not declare the shell directory');
+  assert.equal(
+    existsSync(outputLogPath(root, 'e003')),
+    false,
+    'no invocation may have been launched from the shell directory',
+  );
+
+  // (3) `--steer`, on a live front, because that is the entry point where the
+  // flag relocates an invocation. The refusal has to happen before the steer is
+  // queued, not merely before the next invocation launches: a queued prompt is
+  // accepted work, and the operator asked for a directory, not for a prompt.
+  assert.equal(run(['agent', 'new', '--id', 'e004', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'e004', '--detach', '--prompt', 'slow'], env).status, 0);
+  const live = await waitFor(root, 'e004', (meta) => meta.state === 'running' && typeof meta.pid === 'number', 30_000);
+  t.after(() => {
+    try { process.kill(-live.pid, 'SIGKILL'); } catch {}
+    try { process.kill(live.pid, 'SIGKILL'); } catch {}
+  });
+  const steered = fromShell([
+    'agent', 'run', '--id', 'e004', '--steer', '--cwd', '', '--detach', '--prompt', 'relocated',
+  ]);
+  assert.equal(steered.status, 2, `expected a usage refusal, got: ${steered.stdout}${steered.stderr}`);
+  assert.match(steered.stderr, /run: --cwd requires a working directory path/);
+  const held = JSON.parse(readFileSync(metaPath(root, 'e004'), 'utf8'));
+  assert.equal(held.prompt_count, 1, 'the refused steer must not have been queued');
+  assert.equal(held.cwd, work, 'and the declaration must be unchanged');
+  assertFixtureInvoked(handle, 'slow');
+
+  // Positive control: the same directory named explicitly, invoked from the same
+  // shell directory, is accepted -- so what is refused is the empty value, not
+  // the shell, not `run`, and not `--steer`.
+  assert.equal(
+    run(['agent', 'new', '--id', 'e005', '--cwd', shell, '--json'], env, { cwd: shell }).status,
+    0,
+  );
+  assert.equal(
+    run(['agent', 'run', '--id', 'e005', '--detach', '--cwd', shell, '--prompt', 'named'], env, { cwd: shell }).status,
+    0,
+  );
 });
 
 test('a/d. a full host still launches, because launch is not host-capacity policy', async (t) => {
@@ -1788,19 +2066,29 @@ test('an agent with no declared working directory is never launched, and says so
   assert.equal(meta.cwd, null);
 });
 
-// A declared working directory is a statement about a front that does not exist
-// yet. Rewriting it under a live invocation, an accepted prompt, or an unclaimed
-// runner reservation would make the record disagree with a front that already
-// exists, so it is refused instead -- and refused without writing anything.
-test('--cwd is refused while a front exists, and changes nothing', async (t) => {
-  const { root, work, env } = fixture(t);
-  const elsewhere = join(root, 'not-yours');
+// ---------------------------------------------------------------- board 178
+// The contract under test, in one sentence: `--cwd` names the directory *this
+// invocation* runs in, it means exactly that on every path -- fresh run, and a
+// `--steer` that kills the current invocation and starts the next one in the
+// same conversation -- and it is never inherited from the invoking shell.
+//
+// The previous contract was that `--cwd` was a declaration about a front that
+// did not exist yet, so it was refused while one did, and the refusal also
+// refused the prompt. That is what the tests below replace.
+
+// (5) The steer case, which is the whole point: a live front can be redirected
+// to a different directory. `status` then reports both the declared default and
+// the directory this invocation launched in, and they agree.
+test('a --steer relocates a live front, and status reports both directories', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  const elsewhere = join(root, 'relocated-worktree');
   mkdirSync(elsewhere);
-  assert.equal(run(['agent', 'new', '--id', 'f0e5', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'run', '--id', 'f0e5', '--detach', '--prompt', 'slow'], env).status, 0);
+  assert.equal(run(['agent', 'new', '--id', 'beef', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'beef', '--detach', '--prompt', 'slow'], env).status, 0);
   const live = await waitFor(
     root,
-    'f0e5',
+    'beef',
     (meta) => meta.state === 'running'
       && typeof meta.pid === 'number'
       && typeof meta.runner_pid === 'number',
@@ -1809,39 +2097,435 @@ test('--cwd is refused while a front exists, and changes nothing', async (t) => 
     try { process.kill(-live.pid, 'SIGKILL'); } catch {}
     try { process.kill(live.pid, 'SIGKILL'); } catch {}
   });
-  const before = readFileSync(metaPath(root, 'f0e5'), 'utf8');
 
-  const refused = run(
-    ['agent', 'run', '--id', 'f0e5', '--steer', '--cwd', elsewhere, '--detach', '--prompt', 'moved'],
+  const steered = run(
+    ['agent', 'run', '--id', 'beef', '--steer', '--cwd', elsewhere, '--detach', '--prompt', 'moved'],
     env,
   );
-  assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
-  assert.match(refused.stderr, /--cwd/);
-  assert.equal(readFileSync(metaPath(root, 'f0e5'), 'utf8'), before, 'a refused --cwd must write nothing');
+  assert.equal(steered.status, 0, `--steer --cwd must be accepted: ${steered.stdout}${steered.stderr}`);
 
-  assert.equal(run(['agent', 'stop', '--id', 'f0e5'], env).status, 0);
-  await waitFor(root, 'f0e5', (meta) => meta.state === 'stopped');
+  const done = await waitFor(
+    root,
+    'beef',
+    (meta) => meta.prompt_count === 2 && meta.state === 'succeeded' && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(done.cwd, elsewhere, 'the steer declares the new default');
+  assert.equal(done.invocation_cwd, elsewhere, 'and this invocation launched there');
+
+  const status = run(['agent', 'status', '--id', 'beef', '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  const parsed = JSON.parse(status.stdout);
+  assert.equal(parsed.cwd, elsewhere);
+  assert.equal(parsed.invocation_cwd, elsewhere);
+  assert.deepEqual(parsed.capabilities, { invocation_cwd: true });
+  assert.equal(parsed.prompts, 2, 'both prompts were accepted: the steer was not refused with the cwd');
+
+  const entry = JSON.parse(run(['agent', 'list', '--page', '1', '--json'], env).stdout)
+    .agents.find((agent) => agent.id === 'beef');
+  assert.equal(entry.cwd, elsewhere);
+  assert.equal(entry.invocation_cwd, elsewhere);
+  assertFixtureInvoked(handle, 'moved');
+});
+
+// (12) The report-vs-record invariant, as a standing guard. Three independent
+// surfaces must name the same string after a relocation: the `--dir` the backend
+// was actually invoked with, the directory the backend itself reports from its
+// own log, and `status.invocation_cwd`. A divergence in any one of them is a
+// record that lies about where work ran.
+test('after a relocating steer, the --dir, the log and status name one directory', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  const elsewhere = join(root, 'invariant-worktree');
+  mkdirSync(elsewhere);
+  assert.equal(run(['agent', 'new', '--id', 'beef', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'beef', '--detach', '--prompt', 'slow'], env).status, 0);
+  const live = await waitFor(
+    root,
+    'beef',
+    (meta) => meta.state === 'running' && typeof meta.pid === 'number',
+  );
+  t.after(() => {
+    try { process.kill(-live.pid, 'SIGKILL'); } catch {}
+    try { process.kill(live.pid, 'SIGKILL'); } catch {}
+  });
   assert.equal(
-    procStartTicks(live.runner_pid),
+    run(['agent', 'run', '--id', 'beef', '--steer', '--cwd', elsewhere, '--detach', '--prompt', 'moved'], env).status,
+    0,
+  );
+  await waitFor(
+    root,
+    'beef',
+    (meta) => meta.prompt_count === 2 && meta.state === 'succeeded' && meta.active_runner === false,
+    20_000,
+  );
+
+  // (a) What the backend was invoked with. The fixture records every `run`
+  // invocation's argv, so this is the `--dir` the process actually got.
+  const calls = fixtureInvocations(env).filter((line) => line.includes(' moved'));
+  assert.equal(calls.length, 1, `expected one relocated invocation: ${JSON.stringify(calls)}`);
+  const dir = calls[0].split('--dir ')[1].split(' ')[0];
+  assert.equal(dir, elsewhere);
+
+  // (b) What the backend says it is in, from its own log.
+  const log = readFileSync(outputLogPath(root, 'beef'), 'utf8');
+  assert.match(log, new RegExp(`FAKE_CWD:${elsewhere}\\n`));
+
+  // (c) What the record reports.
+  const status = JSON.parse(run(['agent', 'status', '--id', 'beef', '--json'], env).stdout);
+  assert.equal(status.invocation_cwd, elsewhere);
+
+  assert.equal(dir, status.invocation_cwd, 'the invoked --dir and the record must name one string');
+  assert.equal(status.cwd, dir, 'the declared default follows the same relocation');
+});
+
+// (6) A steer that names no directory must not relocate anything: the queued
+// prompt continues the conversation in the directory the invocation it replaces
+// was launched in. Silently falling back to some other directory is the failure
+// this pins; the test relocates first, so it is testing a *changed* directory
+// rather than one that happens to equal the declaration.
+test('a --steer without --cwd keeps the directory of the invocation it replaces', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  const elsewhere = join(root, 'kept-worktree');
+  mkdirSync(elsewhere);
+  assert.equal(run(['agent', 'new', '--id', 'beef', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'beef', '--detach', '--prompt', 'slow'], env).status, 0);
+  const live = await waitFor(root, 'beef', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
+  t.after(() => {
+    try { process.kill(-live.pid, 'SIGKILL'); } catch {}
+    try { process.kill(live.pid, 'SIGKILL'); } catch {}
+  });
+  assert.equal(
+    run(['agent', 'run', '--id', 'beef', '--steer', '--cwd', elsewhere, '--detach', '--prompt', 'moved'], env).status,
+    0,
+  );
+  await waitFor(
+    root,
+    'beef',
+    (meta) => meta.prompt_count === 2 && meta.state === 'succeeded' && meta.active_runner === false,
+    20_000,
+  );
+
+  // The third prompt, with no --cwd at all. It must run where the previous
+  // invocation ran.
+  const third = run(['agent', 'run', '--id', 'beef', '--detach', '--prompt', 'kept'], env);
+  assert.equal(third.status, 0, third.stderr);
+  const done = await waitFor(
+    root,
+    'beef',
+    (meta) => meta.prompt_count === 3 && meta.state === 'succeeded' && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(done.invocation_cwd, elsewhere, 'a steer without --cwd must not relocate');
+  const calls = fixtureInvocations(env).filter((line) => line.includes(' kept'));
+  assert.equal(calls.length, 1, JSON.stringify(calls));
+  assert.equal(calls[0].split('--dir ')[1].split(' ')[0], elsewhere);
+  const log = readFileSync(outputLogPath(root, 'beef'), 'utf8');
+  assert.doesNotMatch(log, new RegExp(`FAKE_CWD:${work}\\n`));
+});
+
+// (7) The busy refusal survives the change, in both halves. Without `--steer`,
+// a live front is still refused -- that has never been in question -- and the
+// refusal still writes nothing at all. With `--steer`, the same `--cwd` that is
+// refused in one case is accepted in the other, which is what makes it one flag
+// with one meaning rather than two.
+test('run --cwd on a live front is refused without --steer, and accepted with it', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  const elsewhere = join(root, 'not-yours');
+  mkdirSync(elsewhere);
+  assert.equal(run(['agent', 'new', '--id', 'beef', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'beef', '--detach', '--prompt', 'slow'], env).status, 0);
+  const live = await waitFor(
+    root,
+    'beef',
+    (meta) => meta.state === 'running'
+      && typeof meta.pid === 'number'
+      && typeof meta.runner_pid === 'number',
+  );
+  t.after(() => {
+    try { process.kill(-live.pid, 'SIGKILL'); } catch {}
+    try { process.kill(live.pid, 'SIGKILL'); } catch {}
+  });
+  const before = readFileSync(metaPath(root, 'beef'), 'utf8');
+
+  const refused = run(
+    ['agent', 'run', '--id', 'beef', '--cwd', elsewhere, '--detach', '--prompt', 'not-a-steer'],
+    env,
+  );
+  assert.equal(refused.status, 1, `expected a busy refusal, got: ${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stderr, /still running; use --steer/);
+  assert.equal(
+    readFileSync(metaPath(root, 'beef'), 'utf8'),
+    before,
+    'a refused run must write nothing -- neither the prompt nor the directory',
+  );
+
+  // The same command with --steer is accepted, and relocation happens.
+  const steered = run(
+    ['agent', 'run', '--id', 'beef', '--steer', '--cwd', elsewhere, '--detach', '--prompt', 'moved'],
+    env,
+  );
+  assert.equal(steered.status, 0, `${steered.stdout}${steered.stderr}`);
+  const done = await waitFor(
+    root,
+    'beef',
+    (meta) => meta.prompt_count === 2 && meta.state === 'succeeded' && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(done.invocation_cwd, elsewhere);
+  // The killed *invocation* is gone. Its runner deliberately is not: one runner
+  // loops the invocations of a conversation, so the runner that was steering is
+  // the runner that runs the relocated invocation. (Runner-reaping coherence is
+  // pinned in `stop and kill converge without --json and refuse the flag
+  // outright`, which stops a live front rather than a finished one.)
+  assert.equal(
+    procStartTicks(live.pid),
     null,
-    'stop must not return while the detached runner can still write into agent state',
+    'the invocation a steer preempted must be gone',
   );
 });
 
-// run --cwd is a real option, validated exactly as `new --cwd` is: a path that
-// is not an existing directory is refused before any state is written.
+// (10) Three different facts, three different reports. An agent that has run
+// says where it ran; an agent created with a declared directory that has never
+// been launched in it says "never ran" rather than quoting the declaration as
+// though it were an observation; and a record written before this field existed
+// reports null rather than inventing one from the declaration.
+test('status distinguishes the declared directory from the one invoked in', async (t) => {
+  const { root, work, env } = fixture(t);
+  const elsewhere = join(root, 'observed-worktree');
+  mkdirSync(elsewhere);
+
+  // Declared, never launched in.
+  assert.equal(run(['agent', 'new', '--id', 'd1c0', '--cwd', work], env).status, 0);
+  const never = JSON.parse(run(['agent', 'status', '--id', 'd1c0', '--json'], env).stdout);
+  assert.equal(never.cwd, work, 'the declaration is still reported as the declaration');
+  assert.equal(never.invocation_cwd, null, 'nothing has been launched in it, so nothing is observed');
+  const neverHuman = run(['agent', 'status', '--id', 'd1c0'], env);
+  assert.match(neverHuman.stdout, /^cwd:\s+.*work$/m);
+  assert.match(neverHuman.stdout, /^ran in:\s+never ran$/m);
+
+  // Declared, launched elsewhere.
+  assert.equal(run(['agent', 'new', '--id', 'd1c1', '--cwd', work], env).status, 0);
+  assert.equal(
+    run(['agent', 'run', '--id', 'd1c1', '--cwd', elsewhere, '--detach', '--prompt', 'observed'], env).status,
+    0,
+  );
+  await waitFor(
+    root,
+    'd1c1',
+    (meta) => meta.state === 'succeeded' && meta.active_runner === false,
+    20_000,
+  );
+  const ran = JSON.parse(run(['agent', 'status', '--id', 'd1c1', '--json'], env).stdout);
+  assert.equal(ran.invocation_cwd, elsewhere);
+  assert.match(run(['agent', 'status', '--id', 'd1c1'], env).stdout, new RegExp(`^ran in:\\s+${elsewhere}$`, 'm'));
+
+  // A record written before this field existed: the absent field is canonical
+  // and reads as "nothing observed". Nothing is synthesised from the
+  // declaration, which is precisely the lie this contract exists to stop.
+  const path = metaPath(root, 'd1c0');
+  const legacy = JSON.parse(readFileSync(path, 'utf8'));
+  delete legacy.invocation_cwd;
+  writeFileSync(path, JSON.stringify(legacy));
+  const readBack = JSON.parse(run(['agent', 'status', '--id', 'd1c0', '--json'], env).stdout);
+  assert.equal(readBack.invocation_cwd, null, 'a pre-178 record reports null, never a guess');
+  assert.equal(readBack.cwd, work);
+});
+
+// (11) Board issue 178 residual RF4. `stop`/`kill` used to gain a `--json`
+// form in this same PR. That was unrelated public surface with its own output
+// and exit matrix, so it is dropped. What must survive the drop is the
+// convergence the other cases depend on: `stop` returns only once the
+// invocation *and* the detached runner are gone, so a caller that reads the
+// record afterwards is not racing the runner's final write. This case is the
+// pin for that, and it pins the refusal too: `--json` is an unknown option here
+// again, exit 2, rather than a silently accepted flag.
+test('stop and kill converge without --json and refuse the flag outright', async (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '5e70', '--cwd', work], env).status, 0);
+
+  // The flag is gone, and gone loudly.
+  const refused = run(['agent', 'stop', '--id', '5e70', '--json'], env);
+  assert.equal(refused.status, 2, `expected an unknown-option refusal, got: ${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stderr, /unknown option/);
+  const refusedKill = run(['agent', 'kill', '--id', '5e70', '--json'], env);
+  assert.equal(refusedKill.status, 2, `expected an unknown-option refusal, got: ${refusedKill.stdout}${refusedKill.stderr}`);
+
+  assert.equal(run(['agent', 'run', '--id', '5e70', '--detach', '--prompt', 'slow'], env).status, 0);
+  const live = await waitFor(
+    root,
+    '5e70',
+    (meta) => meta.state === 'running'
+      && typeof meta.pid === 'number'
+      && typeof meta.runner_pid === 'number',
+  );
+  // No `t.after` process-group kill here: `stop` and `kill` are the commands
+  // under test and they are required to converge and reap, which this case
+  // asserts directly. A belt-and-braces kill here would fire a signal at a pid
+  // that the command has already finished with.
+
+  const stopped = run(['agent', 'stop', '--id', '5e70'], env);
+  assert.equal(stopped.status, 0, `${stopped.stdout}${stopped.stderr}`);
+  assert.match(stopped.stdout, /^stopped agent 5e70/, stopped.stdout);
+  // Coherence: the command returns only once the invocation *and* the detached
+  // runner are gone, so a caller that reads the record is not racing the
+  // runner's final state write.
+  assert.equal(
+    procStartTicks(live.runner_pid),
+    null,
+    'stop must not return while the runner can still write agent state',
+  );
+  await waitFor(root, '5e70', (meta) => meta.state === 'stopped');
+
+  // And the already-dead case, which reports rather than pretending to act.
+  const again = run(['agent', 'stop', '--id', '5e70'], env);
+  assert.equal(again.status, 0, `${again.stdout}${again.stderr}`);
+  assert.match(again.stdout, /is already stopped \(state stopped\)/);
+
+  assert.equal(run(['agent', 'run', '--id', '5e70', '--detach', '--prompt', 'slow'], env).status, 0);
+  const second = await waitFor(
+    root,
+    '5e70',
+    (meta) => meta.state === 'running' && typeof meta.runner_pid === 'number' && meta.pid !== live.pid,
+  );
+  const killed = run(['agent', 'kill', '--id', '5e70'], env);
+  assert.equal(killed.status, 0, `${killed.stdout}${killed.stderr}`);
+  assert.match(killed.stdout, /^killed agent 5e70/, killed.stdout);
+  // Matched on the durable record rather than on the sentence: `kill` prints one
+  // of two things depending on whether it found a live invocation or only
+  // reserved runner work, and which of the two fired is not what this case is
+  // about. What it is about is that both leave the same coherent terminal state,
+  // which the record is where.
+  const reaped = JSON.parse(run(['agent', 'status', '--id', '5e70', '--json'], env).stdout);
+  assert.equal(reaped.state, 'killed');
+  assert.equal(procStartTicks(second.runner_pid), null, 'kill must also reap the runner first');
+});
+
+// (8) `run --cwd <missing>` is a usage error, exit 2, and writes nothing at all.
 test('run refuses a --cwd that is not an existing directory', (t) => {
   const { root, work, env } = fixture(t);
   assert.equal(run(['agent', 'new', '--id', '9a17', '--cwd', work], env).status, 0);
   const missing = join(root, 'no-such-worktree');
   const before = readFileSync(metaPath(root, '9a17'), 'utf8');
   const refused = run(['agent', 'run', '--id', '9a17', '--cwd', missing, '--detach', '--prompt', 'no'], env);
-  assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
+  assert.equal(refused.status, 2, `expected a usage refusal, got: ${refused.stdout}${refused.stderr}`);
   assert.match(refused.stderr, /working directory does not exist/);
   assert.equal(readFileSync(metaPath(root, '9a17'), 'utf8'), before, 'a refused --cwd must write nothing');
 });
 
+// The mirror of that, and the one place a launch can still be refused for a
+// directory rather than for a command: a recorded directory that has since been
+// removed is named, not launched into. On the unfixed head this produced no pid
+// and the note "OpenCode process had no pid" with exit 127, which named nothing
+// that an operator could act on.
+test('a recorded working directory that no longer exists is refused by name', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '9a18', '--cwd', work], env).status, 0);
+  const gone = join(root, 'vanishing-worktree');
+  mkdirSync(gone);
+  assert.equal(run(['agent', 'new', '--id', '9a19', '--cwd', gone], env).status, 0);
+  rmSync(gone, { recursive: true, force: true });
+  const refused = run(['agent', 'run', '--id', '9a19', '--detach', '--prompt', 'no'], env);
+  assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stderr, /working directory does not exist/);
+  const meta = JSON.parse(readFileSync(metaPath(root, '9a19'), 'utf8'));
+  assert.equal(meta.prompt_count, 0, 'a refused launch must not accept the prompt');
+});
 
+// (13) The false report this issue exists to remove, as a permanent guard on the
+// accepting side. A relocating steer is accepted while the front is live: the
+// transaction writes the declaration, because the invocation it queues is
+// *supposed* to run there. The invocation is then stopped before it ever
+// launches. `status` and `agent list` must still report the directory the last
+// real launch used.
+//
+// On the fixed behaviour this was the executed case from the review: the record
+// went terminal naming a directory no front was ever in, because
+// `invocation_cwd` was written by the accepting transaction rather than at the
+// spawn. `cwd` moving here is correct and is the other half of the contract --
+// `--cwd` names this invocation and also becomes the declared default -- so this
+// case asserts the two fields moving independently, which is what makes the
+// distinction between them real rather than a naming convention.
+test('an accepted invocation that never launches does not move the observed directory', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  const doomed = join(root, 'never-entered-worktree');
+  mkdirSync(doomed);
+  assert.equal(run(['agent', 'new', '--id', 'b0ad', '--cwd', work], env).status, 0);
+
+  // One real launch, so there is a real observation for the relocation to falsify.
+  assert.equal(run(['agent', 'run', '--id', 'b0ad', '--detach', '--prompt', 'slow'], env).status, 0);
+  const live = await waitFor(
+    root,
+    'b0ad',
+    (meta) => meta.state === 'running' && typeof meta.pid === 'number' && typeof meta.runner_pid === 'number',
+  );
+  // No belt-and-braces kill: `stop` is required to converge and reap both
+  // the invocation and its runner, and this case asserts that it does.
+
+  // The relocating steer is accepted on a live front, and rewrites the
+  // declaration immediately, in the transaction that accepts the prompt.
+  const steered = run(
+    ['agent', 'run', '--id', 'b0ad', '--steer', '--cwd', doomed, '--detach', '--prompt', 'never'],
+    env,
+  );
+  assert.equal(steered.status, 0, steered.stderr);
+  const queued = JSON.parse(readFileSync(metaPath(root, 'b0ad'), 'utf8'));
+  assert.equal(queued.cwd, doomed, 'the steer declares the directory for the invocation it queues');
+  assert.equal(
+    queued.invocation_cwd,
+    work,
+    'and nothing has been launched there yet, so the observation must not have moved',
+  );
+
+  // Stop before the queued invocation can be drained. `stop` converges, so by
+  // the time it returns no invocation and no runner of this agent is alive.
+  const stopped = run(['agent', 'stop', '--id', 'b0ad'], env);
+  assert.equal(stopped.status, 0, `${stopped.stdout}${stopped.stderr}`);
+  assert.match(stopped.stdout, /^stopped agent b0ad/, stopped.stdout);
+  assert.equal(
+    procStartTicks(live.runner_pid),
+    null,
+    'stop must not return while the runner can still write agent state',
+  );
+  const done = await waitFor(root, 'b0ad', (meta) => meta.state === 'stopped' && meta.active_runner === false);
+
+  // The declaration moved; the observation did not. On the unfixed head these
+  // two were the same field and this assertion read `doomed`.
+  assert.equal(done.cwd, doomed);
+  assert.equal(
+    done.invocation_cwd,
+    work,
+    'a terminal record must name the last directory a front actually ran in, not the one it was going to enter',
+  );
+  assert.equal(done.prompt_count, 2, 'the steer was accepted, so this is an accepted-then-never-launched prompt');
+
+  const status = run(['agent', 'status', '--id', 'b0ad', '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  const parsed = JSON.parse(status.stdout);
+  assert.equal(parsed.cwd, doomed);
+  assert.equal(parsed.invocation_cwd, work);
+  assert.match(run(['agent', 'status', '--id', 'b0ad'], env).stdout, new RegExp(`^ran in:\\s+${work}$`, 'm'));
+
+  // And the corroboration that no invocation was ever launched in `doomed`:
+  // the backend's own argv never names it.
+  const calls = fixtureInvocations(env);
+  assert.ok(calls.length > 0, 'the fixture backend was invoked at least once');
+  for (const call of calls) {
+    assert.ok(
+      call.includes(`--dir ${work}`),
+      `the backend must only ever have been invoked in the directory it really ran in; saw ${JSON.stringify(call)}`,
+    );
+  }
+  assert.equal(
+    calls.filter((call) => call.includes(doomed)).length,
+    0,
+    'no invocation may have been launched in the directory the queued steer named',
+  );
+  assertFixtureInvoked(handle, 'slow');
+});
 
 test('agent list requires --page and uses --limit as the page size', (t) => {
   const { work, env } = fixture(t);

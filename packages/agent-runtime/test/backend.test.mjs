@@ -13,6 +13,7 @@ import {
   OPENCODE_BIN_ENV,
   SIGNAL_DEATH_CLASSIFICATION,
   UNRECOGNIZED_BACKEND_FAILURE,
+  backendCapabilities,
   backendRetryDelay,
   buildAgentCommand,
   classifyBackendFailure,
@@ -634,6 +635,26 @@ test('a corrupted signal field is rejected rather than persisted', () => {
       () => validateAgentMetadata(meta),
       /backend_error is malformed/,
       `a signal death carrying ${JSON.stringify(patch)} must be rejected`,
+    );
+  }
+});
+
+// Board issue 178, required fix 1: the capability is consulted at all three CLI
+// entry points, which is only testable if the capability can be observed to be
+// false. This pins the test-only override's whole contract -- the real answer, the
+// one token that withdraws it, and that nothing else can.
+test('backendCapabilities reports the real backend, and only an exact test token withdraws a capability', () => {
+  assert.deepEqual(backendCapabilities({}), { invocation_cwd: true });
+  assert.deepEqual(backendCapabilities(process.env), { invocation_cwd: true });
+  assert.deepEqual(
+    backendCapabilities({ ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: '1' }),
+    { invocation_cwd: false },
+  );
+  for (const value of ['', '0', 'true', 'yes', '2', ' 1', '1 ']) {
+    assert.deepEqual(
+      backendCapabilities({ ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: value }),
+      { invocation_cwd: true },
+      `the override must only answer for the exact token '1', not for ${JSON.stringify(value)}`,
     );
   }
 });

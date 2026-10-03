@@ -7,8 +7,10 @@ import {
   deletePendingFlag,
   idleMeta,
   nextPromptCount,
+  OPTIONAL_TOP_LEVEL_FIELDS,
   pendingPrompt,
   persistedControlField,
+  persistedInvocationCwd,
   persistedLifecycleState,
   persistedNativeSessionId,
   persistedRunLogOffset,
@@ -119,11 +121,17 @@ test('schema v4 rejects old versions, missing fields and unknown fields', () => 
   assert.throws(() => validateAgentMetadata(old), /unsupported managed-agent metadata version/);
 
   for (const key of Object.keys(base)) {
-    // `run_log_offset` is the one field a record is allowed to omit: it was
-    // added after records already existed on disk, and a record written before
-    // it existed must still be canonical rather than rejected. Its shape is
-    // asserted separately, below.
-    if (key === 'run_log_offset') continue;
+    // The two fields the schema deliberately tolerates absent, and no others.
+    //
+    // `invocation_cwd` (board issue 178) is an observation, not lifecycle
+    // authority, and every record written before this field existed must keep
+    // validating. `run_log_offset` (board issue 177) is the same shape of
+    // tolerance for the same reason: it was added after records already existed
+    // on disk. Both sides each carried their own skip here; a closed-schema
+    // check that grows one exemption per feature is how a schema stops being
+    // closed, so the exemptions are stated once, together, and each field's
+    // shape is asserted separately below.
+    if (OPTIONAL_TOP_LEVEL_FIELDS.includes(key)) continue;
     const missing = { ...base };
     delete missing[key];
     assert.throws(
@@ -139,6 +147,36 @@ test('schema v4 rejects old versions, missing fields and unknown fields', () => 
   );
 });
 
+// Board issue 178: `invocation_cwd` is optional and validated when present.
+// Absent is canonical (every record written before this field existed), present
+// is held to the same absolute-path rule as `cwd`, and a present-but-wrong value
+// is still a rejection rather than something the runtime silently drops.
+test('invocation_cwd is optional, canonical when absent, and validated when present', () => {
+  const base = idleMeta('a11d', '/tmp/work', null, 100.5);
+  assert.equal(base.invocation_cwd, null, 'a new record observes no invocation yet');
+
+  const legacy = { ...base };
+  delete legacy.invocation_cwd;
+  assert.doesNotThrow(() => validateAgentMetadata(legacy), 'a pre-178 record must still validate');
+  assert.equal(persistedInvocationCwd(legacy), null, 'absent reads as "nothing observed", never as a guess');
+
+  assert.doesNotThrow(() => validateAgentMetadata({ ...base, invocation_cwd: '/tmp/other' }));
+  assert.equal(persistedInvocationCwd({ ...base, invocation_cwd: '/tmp/other' }), '/tmp/other');
+
+  assert.throws(
+    () => validateAgentMetadata({ ...base, invocation_cwd: 'relative/path' }),
+    /invocation_cwd is malformed/,
+  );
+  assert.throws(
+    () => validateAgentMetadata({ ...base, invocation_cwd: 42 }),
+    /invocation_cwd is malformed/,
+  );
+});
+
+// Board issue 177: the run-scope cursor. Same tolerated absence as
+// `invocation_cwd` above and for the same reason -- a field added after records
+// already existed -- held to the same "a present-but-wrong value is a rejection"
+// rule.
 test('a record may omit run_log_offset, but a present one must be a byte cursor', () => {
   const base = idleMeta('a11d', '/tmp/work', null, 100.5);
   assert.equal(base.run_log_offset, null);

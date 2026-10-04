@@ -265,6 +265,8 @@ Do not equate "agent stopped", "tests passed", "PR opened", or "code written" wi
 
 Derive the completion predicate from the issue plus the target repository's instructions. It normally includes the requested result, required validation, required review/integration state, and absence of unresolved blockers.
 
+Record a review verdict on the board when a review of the issue's work has concluded, with `antonina board review --id NUMBER --verdict request-changes|approve --rationale TEXT [--commit SHA] [--reviewer NAME]`. The verdict names the exact commit it is about, because it is what a later read compares against, and that commit must be the full 40-character lowercase object id: an abbreviation, a digest in another case, or a branch name is refused as malformed at record time rather than stored as some other commit. A `request-changes` verdict is a blocker: it stops the issue from being closed, and the refusal names the blocker. It can only be cleared by an approval naming a commit no `request-changes` on that issue has named, since a fix is a new commit and a re-reading of the same one is not a fix; the board keeps every commit a block named, so no ordering of approvals and re-blocks can launder one out. A block that named no commit is cleared by the first approval that names one. An approval that itself names no commit clears nothing and is refused while a block is outstanding. An issue with no recorded verdict is not blocked, which is a different statement from being approved.
+
 Before closing an issue:
 
 1. reconcile the claimed result with objective repository/execution state;
@@ -300,6 +302,7 @@ antonina board comment --id NUMBER --body BODY --author NAME
 
 # issue lifecycle
 antonina board create --title TITLE --body BODY
+antonina board review --id NUMBER --verdict VERDICT --rationale TEXT --commit SHA
 antonina board close --id NUMBER
 antonina board reopen --id NUMBER
 

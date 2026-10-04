@@ -22,6 +22,8 @@ The active release branch is the newest `release/*` branch on `origin` that stil
 
 Start issue work from the active release branch in an isolated worktree. After implementation, validation, and required review, integrate the work into the active release branch and push the updated release branch to `origin`. Agents and scheduled orchestrators are authorized and expected to merge and push the active release branch. A pull request against the release branch may be used when the available tooling supports it, but it is a review mechanism rather than an authority boundary: missing GitHub PR/API credentials must not block release integration when ordinary Git push access is available.
 
+The review step is recorded on the Antonina board, not only on the pull request, with `antonina board review --id NUMBER --verdict VERDICT --rationale TEXT [--commit SHA]`. That is what makes the review step independent of whether a pull request could be opened: the board holds the verdict about an exact commit whether or not a GitHub API was ever reachable, and the close path reads it. The commit must be the full 40-character lowercase object id when one is named; a block is cleared only by an approval naming a commit that no `request-changes` on that issue has named, and a block recorded before any tree existed is cleared by the first approval that names one.
+
 The only human integration gate is promotion from the active release branch into the repository default branch (`main` here). Scheduled orchestrators must not perform that promotion or otherwise merge/push the default branch as part of release promotion.
 
 ## Completion

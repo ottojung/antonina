@@ -639,3 +639,65 @@ test('collection reads require an explicit page and board issue pages follow que
   assert.equal(badPage.code, 1);
   assert.match(badPage.err[0], /--page must be a positive integer/);
 });
+
+test('board review records a verdict and the blocked close is refused and reported', async () => {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  await owner.initialize();
+  const issue = await owner.createIssue('Kawun handoff', 'branch-to-PR handoff and review lifecycle');
+
+  const recorded = await run(['review', String(issue.number), '--verdict', 'request-changes',
+    '--commit', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '--reviewer', 'independent',
+    '--rationale', 'Error: recommend no merge'], { createClient: () => owner });
+  assert.equal(recorded.code, 0, recorded.err.join('\n'));
+  assert.match(recorded.out[0], /Review #1 request-changes by independent about aaaaaaa/);
+
+  // The refusal is what the operator sees: exit 1, and a line that names the
+  // blocker rather than a generic failure.
+  const closed = await run(['close', String(issue.number)], { createClient: () => owner });
+  assert.equal(closed.code, 1);
+  assert.match(closed.err.join('\n'), /unresolved review blocker recorded by independent against commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
+  assert.equal((await owner.getIssue(issue.number)).state, 'open');
+
+  // And the human form of `show` says the same thing without being asked.
+  const shown = await run(['show', String(issue.number), '--page', '1'], { createClient: () => owner });
+  assert.equal(shown.code, 0);
+  assert.match(shown.out.join('\n'), /Review: request-changes/);
+  assert.match(shown.out.join('\n'), /Completion blocked:/);
+});
+
+test('board review refuses the same-commit override and accepts the fixed commit', async () => {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  await owner.initialize();
+  const issue = await owner.createIssue('Override attempt');
+  await run(['review', String(issue.number), '--verdict', 'request-changes', '--commit', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    '--reviewer', 'independent', '--rationale', 'recommend no merge'], { createClient: () => owner });
+
+  const override = await run(['review', String(issue.number), '--verdict', 'approve', '--commit', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    '--reviewer', 'front', '--rationale', 'proceed anyway'], { createClient: () => owner });
+  assert.equal(override.code, 1);
+  assert.match(override.err.join('\n'), /an approval cannot clear the review blocker/);
+
+  const approval = await run(['review', String(issue.number), '--verdict', 'approve', '--commit', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    '--reviewer', 'independent', '--rationale', 'blocker addressed'], { createClient: () => owner });
+  assert.equal(approval.code, 0, approval.err.join('\n'));
+  const closed = await run(['close', String(issue.number)], { createClient: () => owner });
+  assert.equal(closed.code, 0, closed.err.join('\n'));
+});
+
+test('board review names its own missing arguments', async () => {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  await owner.initialize();
+  const issue = await owner.createIssue('Incomplete review');
+
+  const noVerdict = await run(['review', String(issue.number), '--rationale', 'r'], { createClient: () => owner });
+  assert.equal(noVerdict.code, 1);
+  assert.match(noVerdict.err[0], /review requires --verdict/);
+
+  const badVerdict = await run(['review', String(issue.number), '--verdict', 'recommend-no-merge',
+    '--rationale', 'r', '--reviewer', 'independent'], { createClient: () => owner });
+  assert.equal(badVerdict.code, 1);
+  assert.match(badVerdict.err[0], /Unknown Antonina review verdict/);
+});

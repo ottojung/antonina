@@ -318,3 +318,253 @@ test('repeated resource registration is a deterministic no-op', async () => {
   assert.deepEqual(replayed.board.resources[0].issueNumbers, [1]);
   assert.equal(replayed.board.resources[0].updatedAt, timestamp(2));
 });
+
+test('a recorded review blocker refuses the close that would complete the issue', async () => {
+  const { root, anchor, log } = await initialized();
+  await append(log, root, 'issue.create', { number: 1, title: 'Branch to PR handoff', body: '' }, 1);
+  await append(log, root, 'review.record', {
+    number: 1,
+    commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    verdict: 'request-changes',
+    reviewer: 'independent',
+    rationale: 'Error: recommend no merge',
+  }, 2);
+  await append(log, root, 'issue.close', { number: 1 }, 3);
+
+  // The refusal has to name the blocker, not merely fail: an orchestrator that
+  // reads this has to be able to tell a review blocker apart from any other
+  // reason the close did not happen.
+  await assert.rejects(
+    () => verifyAndReplayOperationLog(log, anchor),
+    /Issue cannot be closed: issue 1 carries an unresolved review blocker recorded by independent against commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: Error: recommend no merge/,
+  );
+});
+
+test('an approval cannot clear a block recorded against the very commit it names', async () => {
+  const { root, anchor, log } = await initialized();
+  await append(log, root, 'issue.create', { number: 1, title: 'Override attempt', body: '' }, 1);
+  await append(log, root, 'review.record', {
+    number: 1,
+    commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    verdict: 'request-changes',
+    reviewer: 'independent',
+    rationale: 'recommend no merge',
+  }, 2);
+  await append(log, root, 'review.record', {
+    number: 1,
+    commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    verdict: 'approve',
+    reviewer: 'front',
+    rationale: 'proceed anyway',
+  }, 3);
+
+  await assert.rejects(
+    () => verifyAndReplayOperationLog(log, anchor),
+    /an approval cannot clear the review blocker recorded against commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/,
+  );
+});
+
+test('the honest path clears a blocker: the fix is a different commit', async () => {
+  const { root, anchor, log } = await initialized();
+  await append(log, root, 'issue.create', { number: 1, title: 'Re-reviewed', body: '' }, 1);
+  await append(log, root, 'review.record', {
+    number: 1,
+    commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    verdict: 'request-changes',
+    reviewer: 'independent',
+    rationale: 'recommend no merge',
+  }, 2);
+  await append(log, root, 'review.record', {
+    number: 1,
+    commit: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    verdict: 'approve',
+    reviewer: 'independent',
+    rationale: 'blocker addressed',
+  }, 3);
+  await append(log, root, 'issue.close', { number: 1 }, 4);
+
+  const replayed = await verifyAndReplayOperationLog(log, anchor);
+  const issue = replayed.board.issues[0];
+  assert.equal(issue.state, 'closed');
+  assert.equal(issue.review.commit, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+  assert.equal(issue.review.verdict, 'approve');
+  assert.equal(replayed.queue.includes(1), false);
+});
+
+test('a second blocked review is ordinary review work and is recorded', async () => {
+  const { root, anchor, log } = await initialized();
+  await append(log, root, 'issue.create', { number: 1, title: 'Re-reviewed twice', body: '' }, 1);
+  await append(log, root, 'review.record', {
+    number: 1, commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', verdict: 'request-changes', reviewer: 'a', rationale: 'first',
+  }, 2);
+  await append(log, root, 'review.record', {
+    number: 1, commit: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', verdict: 'request-changes', reviewer: 'a', rationale: 'still broken',
+  }, 3);
+
+  const replayed = await verifyAndReplayOperationLog(log, anchor);
+  assert.equal(replayed.board.issues[0].review.commit, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+  assert.equal(replayed.board.issues[0].review.rationale, 'still broken');
+});
+
+test('an unreviewed issue is not blocked, and a closed one cannot be reviewed', async () => {
+  const { root, anchor, log } = await initialized();
+  await append(log, root, 'issue.create', { number: 1, title: 'Unreviewed', body: '' }, 1);
+  await append(log, root, 'issue.close', { number: 1 }, 2);
+  await append(log, root, 'review.record', {
+    number: 1, commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', verdict: 'approve', reviewer: 'a', rationale: 'too late',
+  }, 3);
+
+  const withoutReview = clone(log);
+  withoutReview.operations.pop();
+  withoutReview.head = withoutReview.operations.at(-1).opId;
+  const replayed = await verifyAndReplayOperationLog(withoutReview, anchor);
+  assert.equal(replayed.board.issues[0].state, 'closed');
+  assert.equal(replayed.board.issues[0].review, undefined);
+
+  await assert.rejects(
+    () => verifyAndReplayOperationLog(log, anchor),
+    /Only an open issue can be reviewed/,
+  );
+});
+
+test('an unknown verdict and a malformed payload are refused before anything is stored', async () => {
+  const { root, anchor, log } = await initialized();
+  await append(log, root, 'issue.create', { number: 1, title: 'Malformed', body: '' }, 1);
+  await assert.rejects(
+    () => append(log, root, 'review.record', {
+      number: 1, commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', verdict: 'recommend-no-merge', reviewer: 'a', rationale: 'r',
+    }, 2),
+    /Unknown Antonina review verdict/,
+  );
+  await assert.rejects(
+    () => append(log, root, 'review.record', { number: 1, commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', verdict: 'approve', reviewer: 'a' }, 2),
+    /Review-record payload is malformed/,
+  );
+});
+
+test('reviewing a board that never recorded a review still replays as it was signed', async () => {
+  const { root, anchor, log } = await initialized();
+  await append(log, root, 'issue.create', { number: 1, title: 'Pre-existing', body: 'signed before reviews existed' }, 1);
+  const replayed = await verifyAndReplayOperationLog(log, anchor);
+  assert.equal(Object.hasOwn(replayed.board.issues[0], 'review'), false);
+  assert.equal(replayed.board.issues[0].title, 'Pre-existing');
+});
+
+// Required fix 1 of /workspace/BOARD44-REVIEW-2600.md: the commit id is
+// canonicalised and validated before anything compares it, so a spelling of the
+// blocked commit that is not the whole digest cannot be stored as some other
+// commit. The tests below are the three the review names; each one fails
+// against a `reviewMayReplace` that compares raw strings.
+test('a commit id that is not a full lowercase object id is refused at record time', async () => {
+  const { root, anchor, log } = await initialized();
+  await append(log, root, 'issue.create', { number: 1, title: 'Abbreviated commit', body: '' }, 1);
+  const blocked = 'a'.repeat(40);
+  await append(log, root, 'review.record', {
+    number: 1, commit: blocked, verdict: 'request-changes', reviewer: 'independent', rationale: 'no merge',
+  }, 2);
+
+  // `git rev-parse --short` output, and the same digest typed in another case:
+  // both name the very commit the block names, so both are malformed rather
+  // than accepted as "a different commit".
+  for (const spelling of [blocked.slice(0, 7), blocked.toUpperCase(), 'refs/heads/main', 'main', 'z'.repeat(40)]) {
+    await assert.rejects(
+      () => append(log, root, 'review.record', {
+        number: 1, commit: spelling, verdict: 'approve', reviewer: 'front', rationale: 'proceed anyway',
+      }, 3),
+      /full 40-character lowercase hex object id or empty/,
+      `commit ${JSON.stringify(spelling)} must be refused, not stored`,
+    );
+  }
+
+  // And the block survives every one of those refusals: nothing was written,
+  // so the issue is still exactly the blocked issue it was.
+  const replayed = await verifyAndReplayOperationLog(log, anchor);
+  assert.equal(replayed.board.issues[0].review.verdict, 'request-changes');
+  assert.equal(replayed.board.issues[0].review.commit, blocked);
+  assert.deepEqual(replayed.board.issues[0].outstandingBlocks, [blocked]);
+});
+
+// Required fix 2: the refusal is a function of every outstanding block, not of
+// whichever verdict happens to be newest. The four-step ordering below was
+// accepted in full by the reviewed code and left the issue holding an approval
+// of the very commit the first request-changes named.
+test('no ordering of four verdicts lands an approval on a blocked commit', async () => {
+  const { root, anchor, log } = await initialized();
+  await append(log, root, 'issue.create', { number: 1, title: 'Re-block laundering', body: '' }, 1);
+  const first = 'a'.repeat(40);
+  const second = 'b'.repeat(40);
+  await append(log, root, 'review.record', {
+    number: 1, commit: first, verdict: 'request-changes', reviewer: 'independent', rationale: 'no merge',
+  }, 2);
+  await append(log, root, 'review.record', {
+    number: 1, commit: second, verdict: 'approve', reviewer: 'independent', rationale: 'fixed on a new commit',
+  }, 3);
+  await append(log, root, 'review.record', {
+    number: 1, commit: second, verdict: 'request-changes', reviewer: 'independent', rationale: 'still broken',
+  }, 4);
+  // The whole four-step ordering is signed, and the log is refused rather than
+  // replayed: an approval of `first` is not a state this board accepts.
+  await append(log, root, 'review.record', {
+    number: 1, commit: first, verdict: 'approve', reviewer: 'front', rationale: 'proceed anyway',
+  }, 5);
+  await assert.rejects(
+    () => verifyAndReplayOperationLog(log, anchor),
+    new RegExp(`an approval cannot clear the review blocker recorded against commit ${first}`),
+  );
+
+  // Without that final operation the three legitimate verdicts replay, and the
+  // issue is still blocked, on both commits that were named.
+  const withoutTheOverride = clone(log);
+  withoutTheOverride.operations.pop();
+  withoutTheOverride.head = withoutTheOverride.operations.at(-1).opId;
+  const replayed = await verifyAndReplayOperationLog(withoutTheOverride, anchor);
+  const issue = replayed.board.issues[0];
+  assert.equal(issue.review.verdict, 'request-changes');
+  assert.deepEqual(issue.outstandingBlocks, [first, second]);
+
+  const withTheClose = clone(withoutTheOverride);
+  await append(withTheClose, root, 'issue.close', { number: 1 }, 6);
+  await assert.rejects(
+    () => verifyAndReplayOperationLog(withTheClose, anchor),
+    new RegExp(`unresolved review blocker recorded by independent against commit ${second}`),
+  );
+});
+
+// Required fix 3: the shape where no commit was named is decided explicitly.
+// An approval that names a commit clears such a block (the review's option, now
+// stated in the payload doc rather than left to be discovered), and an approval
+// that itself names no commit clears nothing and is refused rather than becoming
+// the newest verdict and reading as a clearance.
+test('a block that named no commit is cleared only by an approval that names one', async () => {
+  const { root, anchor, log } = await initialized();
+  await append(log, root, 'issue.create', { number: 1, title: 'Blocked before a tree existed', body: '' }, 1);
+  await append(log, root, 'review.record', {
+    number: 1, commit: '', verdict: 'request-changes', reviewer: 'independent', rationale: 'blocked, no tree yet',
+  }, 2);
+
+  const fix = 'c'.repeat(40);
+  await append(log, root, 'review.record', {
+    number: 1, commit: '', verdict: 'approve', reviewer: 'front', rationale: 'looks fine to me',
+  }, 3);
+  await append(log, root, 'review.record', {
+    number: 1, commit: fix, verdict: 'approve', reviewer: 'independent', rationale: 'reviewed the tree',
+  }, 4);
+  await assert.rejects(
+    () => verifyAndReplayOperationLog(log, anchor),
+    /an approval that names no commit clears no review blocker/,
+  );
+
+  // The same two reviews without the empty-commit approval, signed as their own
+  // log, replay to a cleared issue: this is the shape the payload doc now states.
+  const honest = await initialized();
+  await append(honest.log, honest.root, 'issue.create', { number: 1, title: 'Blocked before a tree existed', body: '' }, 1);
+  await append(honest.log, honest.root, 'review.record', {
+    number: 1, commit: '', verdict: 'request-changes', reviewer: 'independent', rationale: 'blocked, no tree yet',
+  }, 2);
+  await append(honest.log, honest.root, 'review.record', {
+    number: 1, commit: fix, verdict: 'approve', reviewer: 'independent', rationale: 'reviewed the tree',
+  }, 3);
+  const replayed = await verifyAndReplayOperationLog(honest.log, honest.anchor);
+  assert.equal(replayed.board.issues[0].review.verdict, 'approve');
+  assert.equal(Object.hasOwn(replayed.board.issues[0], 'outstandingBlocks'), false);
+});

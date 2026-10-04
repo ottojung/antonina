@@ -33,6 +33,7 @@ import {
 import {
   activeRunnerFlag,
   deletePendingFlag,
+  ownerTokensEqual,
   pendingPrompt,
   persistedControlField,
   persistedNativeSessionId,
@@ -56,13 +57,20 @@ const CONTROL_POLL_MS = 200;
 const CONTROL_GRACE_MS = 10_000;
 
 /**
- * The identity the launcher stamps on the runner it spawns, beside the argv it
- * already passes. Read only as corroboration for a reservation whose recorded
- * owner is no longer live, and never as a substitute for a verified identity
- * where one is available: see `verifyReservationOwner`.
+ * The one identity the launcher hands the runner it spawns, beside the argv it
+ * already passes, through the environment it already builds.
+ *
+ * `ANTONINA_RUNNER_OWNER_TOKEN` is load-bearing: a cryptographically random
+ * per-invocation value minted by the launcher when it writes the reservation,
+ * so the runner can prove it is the process that reservation was created for
+ * even after the kernel has reparented it and no owner identity is left to
+ * verify. It is the whole of the evidence in that shape, which is why
+ * `verifyReservationOwner` requires it there rather than reading a name. The
+ * environment also carries `ANTONINA_AGENT_ID` and `ANTONINA_RUNNER_GEN`, but
+ * those are values a claimant could simply write into its own environment, so
+ * they are never evidence of anything.
  */
-const RUNNER_AGENT_ENV = 'ANTONINA_AGENT_ID';
-const RUNNER_GENERATION_ENV = 'ANTONINA_RUNNER_GEN';
+const RUNNER_OWNER_TOKEN_ENV = 'ANTONINA_RUNNER_OWNER_TOKEN';
 
 export interface RunnerOptions extends StatePathsOptions {
   env?: Record<string, string | undefined>;
@@ -188,10 +196,15 @@ function childResult(child: ChildProcess, agentId: string, options: RunnerOption
  * is not this process's parent. This is the ordinary detached launch: the CLI
  * writes the reservation, spawns the runner detached, and exits, so by the time
  * the runner reaches its first durable write the kernel has already reparented
- * it and there is no parent link left to verify. What remains is checked
- * instead: this runner cannot have existed before the recorded owner started,
- * and the launcher stamped this agent id and generation on the runner's own
- * environment beside the argv it passed.
+ * it (`/proc/self/stat` reads `ppid == 1`) and there is no parent link left to
+ * verify -- measured on this host, and the reparenting reaper's name is not an
+ * identity and is never read. Nothing in the record can tie a reparented
+ * process back to a launcher that is gone, so the evidence is the one thing the
+ * launcher could hand over that the record could not have been guessed from:
+ * the per-invocation owner token. Board 197's residual, and its closure --
+ * this verdict now *requires* the token rather than falling back to two
+ * self-declared names, and a token minted for a different invocation does not
+ * match, so one invocation can never be confused for another.
  *
  * `refused` -- anything else, including a reservation whose recorded owner is a
  * *different* live process, a recorded start time that does not match the live
@@ -201,8 +214,6 @@ type OwnerIdentityVerdict = 'self' | 'parent' | 'declared' | 'refused';
 
 function verifyReservationOwner(
   reservation: Record<string, unknown>,
-  agentId: string,
-  generation: number,
   env: Record<string, string | undefined>,
 ): OwnerIdentityVerdict {
   const ownerPid = persistedProcessInteger(reservation.owner_pid, 1);
@@ -217,8 +228,13 @@ function verifyReservationOwner(
   }
   if (procStartTicks(ownerPid) !== null) return 'refused';
   if (selfTicks <= ownerStart) return 'refused';
-  if (env[RUNNER_AGENT_ENV] !== agentId) return 'refused';
-  if (env[RUNNER_GENERATION_ENV] !== String(generation)) return 'refused';
+  // The kernel kept no evidence of the launcher link for this shape, so the
+  // only question left is whether this process was the one the launcher created
+  // this reservation for. The token answers exactly that and nothing else: it is
+  // unguessable without having been handed over, it is minted per invocation so
+  // it cannot be replayed from a neighbouring one, and it carries no authority
+  // over any other record.
+  if (!ownerTokensEqual(reservation.owner_token, env[RUNNER_OWNER_TOKEN_ENV])) return 'refused';
   return 'declared';
 }
 
@@ -244,7 +260,7 @@ async function claimRunner(
     // with that generation -- including one whose owner was alive and was
     // somebody else entirely. The check is pid plus start time against live
     // `/proc`, never a name.
-    if (verifyReservationOwner(record, agentId, generation, options.env ?? process.env) === 'refused') return;
+    if (verifyReservationOwner(record, options.env ?? process.env) === 'refused') return;
     meta.runner_pid = process.pid;
     meta.runner_start_time = procStartTicks(process.pid);
     meta.runner_reservation = { ...record, state: 'claimed' };

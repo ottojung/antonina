@@ -24,6 +24,16 @@
 //    reparented the runner and no parent link is left to verify. No process
 //    name is read anywhere in that decision, or anywhere else in this package.
 //
+// 3. The owner token. For the reparented shape the kernel kept no evidence of
+//    the launcher link at all, so that verdict fell back to two values the
+//    claimant declared about itself in its own environment -- an agent id and a
+//    generation, either of which it could simply write. The launcher now mints a
+//    cryptographically random token per invocation, persists it in the
+//    reservation, and passes it to the runner through the environment it already
+//    builds; the runner verifies it instead of accepting a declaration. A
+//    genuine token for a *different* invocation does not match, so a runner can
+//    never hold authority over an invocation it was not created for.
+//
 // Test safety, per AGENTS.md: both XDG homes are pointed at throwaway
 // directories, so nothing here can read or write the operator's trust.json or
 // credential.json, and the only processes spawned are the fixture backends,
@@ -47,7 +57,11 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 
-import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
+import {
+  idleMeta,
+  mintRunnerReservationOwnerToken,
+  ownerTokensEqual,
+} from '../dist/packages/agent-runtime/src/metadata.js';
 import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import { runManagedRunner } from '../dist/packages/agent-runtime/src/runner.js';
 import { createAgentDirectory, readMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
@@ -280,6 +294,7 @@ test('a runner cannot claim a reservation owned by another live process', async 
     });
     await runManagedRunner(id, 'new', 7, options);
     const after = readMeta(id, options);
+    if (!after.runner_reservation) console.error('DEBUG', label, JSON.stringify(after));
     assert.equal(after.runner_reservation.state, 'reserved', `${label}: the reservation must stay unclaimed`);
     assert.equal(after.runner_pid, null, `${label}: the claim must not publish this process as the runner`);
     assert.equal(after.active_runner, false, `${label}: no runner may take an unverified reservation`);
@@ -289,15 +304,15 @@ test('a runner cannot claim a reservation owned by another live process', async 
   assert.deepEqual(backendRuns(marker), [], 'no backend process may be spawned off an unverified reservation');
 });
 
-test('a reservation whose owner is gone needs the launcher identity its own reservation was stamped with', async (t) => {
+test('a reservation whose owner is gone needs the owner token minted for that reservation', async (t) => {
   if (!requireProc(t)) return;
-  // The ordinary detached launch has the reserving CLI exit before the runner
-  // reaches its first durable write, and the kernel reparents the runner, so the
-  // owner is genuinely unverifiable by parentage there. What the runtime still
-  // requires is the launcher's own stamp beside the argv it passed, plus this
-  // process having been created after the recorded owner started. A reservation
-  // that a process merely wrote for itself, with no such stamp, is refused --
-  // that is the shape the hand-written reservation in the reproduced bypass had.
+  // The ordinary detached launch: the reserving CLI exits before the runner
+  // reaches its first durable write and the kernel reparents the runner, so
+  // `/proc/self/stat` reads `ppid == 1` and there is no owner identity left for
+  // the kernel to corroborate. The launcher's own token is the only evidence
+  // that remains, and it is what this verdict now requires. A reservation that a
+  // process merely wrote for itself -- no token -- is refused, which is the shape
+  // the hand-written reservation in the reproduced bypass had.
   const marker = join(tmpdir(), `antonina-launch-gate-${process.pid}-reparented.marker`);
   rmSync(marker, { force: true });
   t.after(() => rmSync(marker, { force: true }));
@@ -321,49 +336,92 @@ test('a reservation whose owner is gone needs the launcher identity its own rese
   assert.equal(refused.pending_prompt, 'work');
   assert.deepEqual(backendRuns(marker), [], 'nothing may be launched off a reservation this process cannot tie to a launcher');
 
+  // Same record, plus the token the launcher minted when it wrote it. This is the
+  // legitimate detached shape and it must still run its invocation.
+  const token = mintRunnerReservationOwnerToken();
   const launched = agent(t, options, {
     state: 'running',
     runner_gen: 7,
-    runner_reservation: reservation({ gen: 7, ...deadOwner }),
+    runner_reservation: reservation({ gen: 7, ...deadOwner, owner_token: token }),
     pending_prompt: 'work',
   });
   await runManagedRunner(launched.id, 'new', 7, {
     ...options,
-    env: { ...options.env, ANTONINA_AGENT_ID: launched.id, ANTONINA_RUNNER_GEN: '7' },
+    env: { ...options.env, ANTONINA_RUNNER_OWNER_TOKEN: token },
   });
   const accepted = readMeta(launched.id, options);
   assert.equal(accepted.state, 'succeeded', 'the legitimate detached shape must still run its invocation');
   assert.equal(accepted.invocation_cwd, launched.cwd);
 
-  // And the stamp is read as identity, not as a constant: a stamp for another
-  // front, or for another generation, is not this runner's to claim with.
+  // A record whose token is present but whose runner was handed a different one
+  // is refused: the token is read as this invocation's identity, not as the mere
+  // presence of a value.
+  const other = mintRunnerReservationOwnerToken();
   const mismatched = agent(t, options, {
     state: 'running',
     runner_gen: 7,
-    runner_reservation: reservation({ gen: 7, ...deadOwner }),
+    runner_reservation: reservation({ gen: 7, ...deadOwner, owner_token: token }),
     pending_prompt: 'work',
   });
   await runManagedRunner(mismatched.id, 'new', 7, {
     ...options,
-    env: { ...options.env, ANTONINA_AGENT_ID: 'a196', ANTONINA_RUNNER_GEN: '7' },
-  });
-  const wrongAgent = readMeta(mismatched.id, options);
-  assert.equal(wrongAgent.runner_reservation.state, 'reserved', 'a stamp for another front must not authorize this claim');
-  const wrongGeneration = agent(t, options, {
-    state: 'running',
-    runner_gen: 7,
-    runner_reservation: reservation({ gen: 7, ...deadOwner }),
-    pending_prompt: 'work',
-  });
-  await runManagedRunner(wrongGeneration.id, 'new', 7, {
-    ...options,
-    env: { ...options.env, ANTONINA_AGENT_ID: wrongGeneration.id, ANTONINA_RUNNER_GEN: '6' },
+    env: { ...options.env, ANTONINA_RUNNER_OWNER_TOKEN: other },
   });
   assert.equal(
-    readMeta(wrongGeneration.id, options).runner_reservation.state,
+    readMeta(mismatched.id, options).runner_reservation.state,
     'reserved',
-    'a stamp for another generation must not authorize this claim',
+    'a token for another value must not authorize this claim',
   );
+});
+
+test('a token minted for one invocation cannot be presented by the runner of another', async (t) => {
+  if (!requireProc(t)) return;
+  // The property that actually matters, and the one a forged declaration could
+  // never have: a runner that holds a genuine token -- one this test minted, so
+  // the value is real and correctly formed -- still cannot claim a reservation
+  // that was created for a *different* invocation. Token equality is per
+  // reservation, so authority over one invocation is not authority over any
+  // other, and two tokens are never equal by construction.
+  const marker = join(tmpdir(), `antonina-launch-gate-${process.pid}-cross-token.marker`);
+  rmSync(marker, { force: true });
+  t.after(() => rmSync(marker, { force: true }));
+  const backend = fakeBackend(t, marker);
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const deadOwner = { owner_pid: 999999, owner_start_ticks: 1 };
+
+  // The record carries the token its own launcher minted; the runner presents a
+  // different one. Both are real, correctly formed, independently minted values,
+  // so nothing about the mismatch is a malformed-input artefact.
+  const own = mintRunnerReservationOwnerToken();
+  const ownedReservation = reservation({ gen: 7, ...deadOwner, owner_token: own });
+  // The token is a real capability for its own reservation, not a decoration:
+  // presented against the record it was minted for, the claim succeeds.
+  assert.equal(ownerTokensEqual(ownedReservation.owner_token, own), true);
+  const notOwn = mintRunnerReservationOwnerToken();
+  assert.equal(ownerTokensEqual(ownedReservation.owner_token, notOwn), false);
+
+  for (const [label, presented] of [
+    ["another invocation's token", notOwn],
+    ['a token minted for a third invocation', mintRunnerReservationOwnerToken()],
+    ['an empty value', ''],
+    ['a value of the right shape but one character long', own.slice(0, -1)],
+  ]) {
+    const { id } = agent(t, options, {
+      state: 'running',
+      runner_gen: 7,
+      runner_reservation: { ...ownedReservation },
+      pending_prompt: 'work',
+    });
+    await runManagedRunner(id, 'new', 7, { ...options, env: { ...options.env, ANTONINA_RUNNER_OWNER_TOKEN: presented } });
+    const after = readMeta(id, options);
+    assert.equal(after.runner_reservation.state, 'reserved', `${label}: the reservation must stay unclaimed`);
+    assert.equal(after.runner_pid, null, `${label}: the claim must not publish this process as the runner`);
+    assert.equal(after.active_runner, false, `${label}: no runner may take another invocation's reservation`);
+    assert.equal(after.pending_prompt, 'work', `${label}: an unclaimed reservation keeps its accepted prompt`);
+    assert.equal(after.state, 'running', `${label}: the reservation is still in flight, so the record is not rewritten`);
+  }
+  assert.deepEqual(backendRuns(marker), [], 'no backend process may be spawned off another invocation\'s token');
 });
 
 test('an invocation that finishes before its identity can be captured still records where it ran', async (t) => {

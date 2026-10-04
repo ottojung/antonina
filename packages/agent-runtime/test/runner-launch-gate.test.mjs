@@ -424,6 +424,55 @@ test('a token minted for one invocation cannot be presented by the runner of ano
   assert.deepEqual(backendRuns(marker), [], 'no backend process may be spawned off another invocation\'s token');
 });
 
+test('the owner token is not handed to the backend the runner spawns', async (t) => {
+  if (!requireProc(t)) return;
+  // The token authorises this runner's claim on this reservation and nothing
+  // else. It rides in on the runner's own environment, so it is removed before
+  // that environment is passed on to the backend: a descendant has no business
+  // holding authority over the claim, and `/proc/<pid>/environ` is readable by
+  // anything running as this user.
+  const marker = join(tmpdir(), `antonina-launch-gate-${process.pid}-token-env.marker`);
+  rmSync(marker, { force: true });
+  t.after(() => rmSync(marker, { force: true }));
+  // One line per backend process: whether the token was present, its pid, and the
+  // directory it ran in. The verdict and the observation share a line so that
+  // "ran in the declared directory" and "did not receive the token" are one
+  // record of the same process rather than two records that have to be matched up.
+  const backend = fakeBackend(t, marker, `#!/bin/sh
+if [ -n "\${ANTONINA_RUNNER_OWNER_TOKEN+x}" ]; then verdict=token-present; else verdict=token-absent; fi
+printf '%s %s %s\\n' "$verdict" "$$" "$(pwd -P)" >> ${JSON.stringify(marker)}
+exit 0
+`);
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const token = mintRunnerReservationOwnerToken();
+  const { id, cwd } = agent(t, options, {
+    state: 'running',
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7, owner_pid: 999999, owner_start_ticks: 1, owner_token: token }),
+    pending_prompt: 'work',
+  });
+  await runManagedRunner(id, 'new', 7, {
+    ...options,
+    env: { ...options.env, ANTONINA_RUNNER_OWNER_TOKEN: token },
+  });
+
+  const runs = backendRuns(marker);
+  assert.equal(
+    runs.filter((line) => line.split(' ')[2] === cwd).length,
+    1,
+    `the backend must have run once in ${cwd}; saw ${JSON.stringify(runs)}`,
+  );
+  // Every process this runner started reports the token absent -- the invocation
+  // and the post-run session probe alike -- and none reports it present.
+  assert.deepEqual(
+    runs.filter((line) => !line.startsWith('token-absent ')),
+    [],
+    `every backend process must run without the token; saw ${JSON.stringify(runs)}`,
+  );
+  assert.equal(readMeta(id, options).state, 'succeeded', 'the claim itself is unaffected by what the backend inherits');
+});
+
 test('an invocation that finishes before its identity can be captured still records where it ran', async (t) => {
   if (!requireProc(t)) return;
   // The one branch `recordSpawned` cannot serve: the child is gone from `/proc`

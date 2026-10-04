@@ -3,7 +3,15 @@ import { readFileSync, statSync } from 'node:fs';
 import { constants } from 'node:os';
 import { isAbsolute } from 'node:path';
 
-import { DEFAULT_VARIANT, persistedNativeSessionId, persistedVariant, requiredAgentCwd, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
+import {
+  DEFAULT_VARIANT,
+  RUNNER_OWNER_TOKEN_ENV,
+  persistedNativeSessionId,
+  persistedVariant,
+  requiredAgentCwd,
+  requiredPersistedAgentId,
+  type AgentMetadata,
+} from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
 
 export const AGENT_MODEL = 'opencode/space-bunny-free';
@@ -331,11 +339,27 @@ function parseSessionRows(value: unknown): SessionRow[] | null {
   return rows;
 }
 
+/**
+ * The environment a backend *probe* is handed.
+ *
+ * Board 197: the per-invocation owner token authorises one runner's claim on one
+ * reservation and nothing else, and the probe is not that runner -- it is a short
+ * `models`/`session list` the runtime runs beside the invocation. It is dropped
+ * here rather than at each call site so no probe can be added later that leaks
+ * it by forgetting. `delete` rather than a blank value, so a later spread cannot
+ * reintroduce a copy.
+ */
+function probeEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  const childEnv: Record<string, string | undefined> = { ...process.env, ...env };
+  delete childEnv[RUNNER_OWNER_TOKEN_ENV];
+  return childEnv;
+}
+
 export function discoverSessionId(
   agentId: string,
   env: Record<string, string | undefined> = process.env,
 ): string | null {
-  const childEnv = { ...process.env, ...env };
+  const childEnv = probeEnv(env);
   const result = spawnSync(
     resolveOpencode(childEnv),
     ['session', 'list', '--format', 'json', '--max-count', String(SESSION_LIST_MAX_COUNT)],
@@ -364,7 +388,7 @@ export function discoverSessionId(
 export function configuredModelAvailable(
   env: Record<string, string | undefined> = process.env,
 ): boolean | null {
-  const childEnv = { ...process.env, ...env };
+  const childEnv = probeEnv(env);
   const result = spawnSync(resolveOpencode(childEnv), ['models'], {
     encoding: 'utf8',
     timeout: MODEL_LIST_TIMEOUT_MS,

@@ -31,6 +31,7 @@ import {
   stopLikeOrMalformed,
 } from './lifecycle.js';
 import {
+  RUNNER_OWNER_TOKEN_ENV,
   activeRunnerFlag,
   deletePendingFlag,
   ownerTokensEqual,
@@ -58,19 +59,18 @@ const CONTROL_GRACE_MS = 10_000;
 
 /**
  * The one identity the launcher hands the runner it spawns, beside the argv it
- * already passes, through the environment it already builds.
+ * already passes, through the environment it already builds
+ * (`RUNNER_OWNER_TOKEN_ENV`, declared with its mint in metadata.ts).
  *
- * `ANTONINA_RUNNER_OWNER_TOKEN` is load-bearing: a cryptographically random
- * per-invocation value minted by the launcher when it writes the reservation,
- * so the runner can prove it is the process that reservation was created for
- * even after the kernel has reparented it and no owner identity is left to
- * verify. It is the whole of the evidence in that shape, which is why
- * `verifyReservationOwner` requires it there rather than reading a name. The
- * environment also carries `ANTONINA_AGENT_ID` and `ANTONINA_RUNNER_GEN`, but
- * those are values a claimant could simply write into its own environment, so
- * they are never evidence of anything.
+ * It is load-bearing: a cryptographically random per-invocation value minted by
+ * the launcher when it writes the reservation, so the runner can prove it is the
+ * process that reservation was created for even after the kernel has reparented
+ * it and no owner identity is left to verify. It is the whole of the evidence in
+ * that shape, which is why `verifyReservationOwner` requires it there rather than
+ * reading a name. The environment also carries `ANTONINA_AGENT_ID` and
+ * `ANTONINA_RUNNER_GEN`, but those are values a claimant could simply write into
+ * its own environment, so they are never evidence of anything.
  */
-const RUNNER_OWNER_TOKEN_ENV = 'ANTONINA_RUNNER_OWNER_TOKEN';
 
 export interface RunnerOptions extends StatePathsOptions {
   env?: Record<string, string | undefined>;
@@ -649,7 +649,7 @@ async function runInvocation(
     const fd = openSync(logFile, 'a', 0o600);
     const invocationLogStart = fstatSync(fd).size;
     const oom: OomBracket = { before: readOomCounters(options.capacity), startedAt: Date.now() / 1000 };
-    const env = {
+    const env: Record<string, string | undefined> = {
       ...process.env,
       ...options.env,
       ANTONINA_AGENT_ID: agentId,
@@ -664,6 +664,14 @@ async function runInvocation(
       // `Failed to execute statement`, so the databases must not be shared.
       ...opencodeBackendEnv(meta, options),
     };
+    // Board 197: the owner token authorises *this runner's claim on this
+    // reservation* and nothing else. It is stripped from the backend's
+    // environment, so the secret that decides the claim is not also handed to
+    // every process the backend goes on to spawn -- a descendant has no business
+    // holding authority over the claim, and `/proc/<pid>/environ` is readable by
+    // anything running as this user. Deleting the key rather than blanking it
+    // means an inherited copy cannot be reintroduced by a later spread.
+    delete env[RUNNER_OWNER_TOKEN_ENV];
     let child: ChildProcess;
     try {
       child = spawn(command[0]!, command.slice(1), {

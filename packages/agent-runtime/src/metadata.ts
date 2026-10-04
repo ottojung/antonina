@@ -257,6 +257,18 @@ const OWNER_TOKEN_BYTES = 32;
 const OWNER_TOKEN_HEX = OWNER_TOKEN_BYTES * 2;
 const OWNER_TOKEN_PATTERN = /^[0-9a-f]+$/;
 
+/**
+ * The environment variable the launcher carries the token to the runner in.
+ *
+ * Beside argv on purpose: `/proc/<pid>/cmdline` is world-readable and
+ * `/proc/<pid>/environ` is 0400 and owner-readable, so of the two channels this
+ * runtime already had for handing a runner something, only the environment keeps
+ * it from every process on the host. It is also the channel this package already
+ * uses to carry identity to a process it later has to recognise
+ * (`envHasAgentMarker`, `envHasInvocationMarker` in process.ts).
+ */
+export const RUNNER_OWNER_TOKEN_ENV = 'ANTONINA_RUNNER_OWNER_TOKEN';
+
 export function runnerReservationOwnerToken(value: unknown): string | null {
   if (typeof value !== 'string' || value.length !== OWNER_TOKEN_HEX) return null;
   return OWNER_TOKEN_PATTERN.test(value) ? value : null;

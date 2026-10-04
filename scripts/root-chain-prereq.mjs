@@ -68,6 +68,28 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const PREREQ_SCRIPT = 'prereq:root-test';
 
 /**
+ * The root `typecheck` script the chain declares as its prerequisite. Named here
+ * because the contract asserted below is about *this* script's coverage: it is
+ * the step a landing runs, and the one `.github/workflows/ci.yml` runs in both of
+ * its Typecheck steps, so a source tree it does not compile is a tree whose type
+ * errors no landing gate can see.
+ */
+export const TYPECHECK_SCRIPT = 'typecheck';
+
+/**
+ * The script that typechecks the web app, and the one the root `typecheck` must
+ * name for the web app to be inside the gate.
+ *
+ * Board issue 193. The measured hole, re-derived on this line at base 7565ee11:
+ * `package.json` declared no such script (`grep -c typecheck:web` on the base
+ * tree: 0), so the root `typecheck` compiled `packages/*` and nothing else. The
+ * failure is structural, not accidental: vitest strips types without checking
+ * them, `npm test --prefix web` cannot see a type error, and `web/src` was
+ * compiled only by the web *build*, which no gate step runs.
+ */
+export const WEB_TYPECHECK_SCRIPT = 'typecheck:web';
+
+/**
  * The `tsc` the toolchain steps shell out to. It is reached by a relative path
  * in `package.json`, not through Node resolution, so a worktree that resolves
  * `node_modules` some other way still needs this exact file to exist — which is
@@ -141,6 +163,67 @@ export function resolvePrerequisite(repoRoot, pkg = readPackage(repoRoot)) {
 
 function readPackage(repoRoot) {
   return JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+}
+
+/** `tsc -p <dir>/tsconfig.json`: the directory whose sources that step compiles. */
+const TSC_PROJECT = /\btsc\b[^&|]*\s-p\s+(\S+)/;
+
+/** `npm run <name>`: the script that step runs. */
+const NPM_RUN = /\bnpm\s+run\s+([A-Za-z0-9:_-]+)\b/;
+
+/** `npm run <name> --prefix <dir>`: the directory whose package owns that script. */
+const NPM_PREFIX = /--prefix\s+(\S+)/;
+
+/**
+ * The source trees the root `typecheck` compiles, derived from its command.
+ *
+ * Derived by walking the command rather than by matching a literal, for the same
+ * reason `scripts/root-chain.mjs` expands globs instead of matching chain text:
+ * a guard that reads one command string stops guarding the moment the command is
+ * legitimately rewritten. So the walk follows `npm run` steps into the scripts
+ * they name, reads the `-p` project of every `tsc` step, and attributes every
+ * step that names a `--prefix` directory to that directory.
+ *
+ * The walk is `seen`-guarded, so a nested `npm run <name>` that resolves back to
+ * a script already walked — including the common `npm run typecheck --prefix
+ * web`, whose name collides with this one — terminates instead of recursing.
+ *
+ * @returns {Set<string>} the directories a type error in them cannot reach the
+ * root `typecheck`; `web` is present when the web app is inside the gate.
+ */
+export function typecheckedSources(pkg = readPackage(REPO_ROOT), scriptName = TYPECHECK_SCRIPT) {
+  const roots = new Set();
+  const walk = (name, seen = new Set()) => {
+    if (seen.has(name)) return;
+    seen.add(name);
+    const command = pkg.scripts?.[name];
+    if (typeof command !== 'string') return;
+    for (const rawStep of command.split('&&')) {
+      const step = rawStep.trim();
+      if (step === '') continue;
+      const prefix = NPM_PREFIX.exec(step);
+      if (prefix) roots.add(prefix[1].replace(/\/+$/, ''));
+      const project = TSC_PROJECT.exec(step);
+      if (project) roots.add(project[1].replace(/\/tsconfig[\w.-]*\.json$/, ''));
+      const nested = NPM_RUN.exec(step);
+      if (nested) walk(nested[1], seen);
+    }
+  };
+  walk(scriptName);
+  return roots;
+}
+
+/**
+ * Whether the root `typecheck` — the chain's declared prerequisite, and CI's
+ * Typecheck step — covers the web app's sources.
+ *
+ * Reported as a fact rather than asserted here, so `scripts/root-chain.test.mjs`
+ * can assert it against the real `package.json`, against a synthetic tree with
+ * the web step deleted (the non-vacuity case), and against a tree whose web step
+ * exists but is not named by the root typecheck.
+ */
+export function typecheckCoversWeb(pkg = readPackage(REPO_ROOT)) {
+  return typecheckedSources(pkg).has('web');
 }
 
 /**

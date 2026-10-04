@@ -114,6 +114,30 @@ const RUN_LOG_CURSOR_FIELD = 'run_log_offset';
  */
 const OPENCODE_DB_FIELD = 'opencode_db';
 
+/**
+ * Optional, top-level fields, validated when present and tolerated when absent.
+ *
+ * Every entry was added after canonical records already existed on disk, and a
+ * record written before its field existed must stay canonical rather than being
+ * rejected. The list is named and exported so the closed-schema check in the
+ * tests reads the exemptions from the schema instead of restating them once per
+ * feature, which is how a closed schema stops being closed.
+ *
+ * `invocation_cwd` is an *observation*, not lifecycle authority: it records
+ * where a front was actually launched. Nothing that accepts, refuses, orders or
+ * owns work reads it -- the launch directory is resolved from `cwd` alone, by
+ * {@link requiredAgentCwd} -- and it is written by the runner only once a child
+ * has been spawned. A value here is therefore always a directory a real front
+ * ran in and never one somebody intended a front to enter, which is what makes
+ * the tolerated absence safe: absence reads as "nothing observed", never as a
+ * value synthesised from the declaration.
+ */
+export const OPTIONAL_TOP_LEVEL_FIELDS = [
+  'invocation_cwd',
+  RUN_LOG_CURSOR_FIELD,
+  OPENCODE_DB_FIELD,
+] as const;
+
 export class MalformedPendingPromptMetadataError extends Error {
   constructor() {
     super('persisted pending prompt authority is not canonical');
@@ -247,7 +271,7 @@ function canonicalSteerQueue(value: unknown, sequence: number): boolean {
 }
 
 export function validateAgentMetadata(meta: AgentMetadata): void {
-  if (!exactKeysWithOptional(meta, TOP_LEVEL_FIELDS, [RUN_LOG_CURSOR_FIELD, OPENCODE_DB_FIELD])) {
+  if (!exactKeysWithOptional(meta, TOP_LEVEL_FIELDS, OPTIONAL_TOP_LEVEL_FIELDS)) {
     throw new MalformedAgentMetadataError('managed-agent metadata fields are not canonical');
   }
   if (meta.agent_version !== AGENT_META_VERSION) {
@@ -258,6 +282,7 @@ export function validateAgentMetadata(meta: AgentMetadata): void {
   if (persistedTimestamp(meta.last_activity_at) === null) throw new MalformedAgentMetadataError('managed-agent last_activity_at is malformed');
   if (persistedLifecycleState(meta) === null) throw new MalformedAgentMetadataError('managed-agent state is malformed');
   persistedAgentCwd(meta);
+  persistedInvocationCwd(meta);
   if (!nullableString(meta.title, true)) throw new MalformedAgentMetadataError('managed-agent title is malformed');
   persistedVariant(meta);
   persistedNativeSessionId(meta);
@@ -482,6 +507,36 @@ export function requiredAgentCwd(meta: AgentMetadata): string {
   return value;
 }
 
+/**
+ * The directory the current or most recent invocation was *launched in*, or
+ * `null` when nothing has been observed.
+ *
+ * This is deliberately *not* a second declaration, and the two are written by
+ * different actors at different times. `cwd` is what the operator declared, and
+ * the accepting command writes it in the same durable transaction that accepts
+ * the prompt. `invocation_cwd` is written by the runner, in the same durable
+ * transaction that publishes the spawned process identity, so a value here is
+ * always a directory a real front was actually launched in. On a record that has
+ * run they usually agree; where they can disagree is an invocation that was
+ * accepted and never launched, or a record that has never run at all, and then
+ * this field is the one that is null.
+ *
+ * Absent is a real, canonical state rather than a malformed record: a record
+ * written before this field existed is honestly reporting that nothing was
+ * observed, and nothing is synthesised from the declaration to fill the gap. A
+ * present-but-wrong value is still rejected, and `null` is still a legitimate
+ * present value.
+ */
+export function persistedInvocationCwd(meta: AgentMetadata): string | null {
+  if (!hasOwn(meta, 'invocation_cwd')) return null;
+  const value = meta.invocation_cwd;
+  if (value === null) return null;
+  if (typeof value !== 'string' || value.length === 0 || !isAbsolute(value)) {
+    throw new MalformedAgentMetadataError('managed-agent invocation_cwd is malformed');
+  }
+  return value;
+}
+
 export function requiredPersistedAgentId(meta: AgentMetadata): string {
   const value = persistedAgentId(meta.id);
   if (value === null) throw new MalformedAgentMetadataError('managed-agent id is malformed');
@@ -505,6 +560,9 @@ export function idleMeta(agentId: string, cwd: string | null, title: string | nu
     last_activity_at: now,
     state: 'idle',
     cwd,
+    // Board issue 178. The observation starts null on every new record: an agent
+    // that has never been launched has never run anywhere.
+    invocation_cwd: null,
     title,
     variant: DEFAULT_VARIANT,
     native_session_id: null,

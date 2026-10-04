@@ -8,9 +8,11 @@ import {
 import { resolve } from 'node:path';
 
 import {
+  backendCapabilities,
   configuredModelAvailable,
   describeSignalDeath,
   discoverSessionId,
+  honoursInvocationCwd,
   sanitizeBackendError,
 } from '../../agent-runtime/src/backend.js';
 import {
@@ -50,6 +52,7 @@ import {
   pendingPrompt,
   persistedAgentCwd,
   persistedControlField,
+  persistedInvocationCwd,
   persistedLifecycleState,
   persistedNativeSessionId,
   persistedRunLogOffset,
@@ -201,6 +204,7 @@ function summary(meta: AgentMetadata): {
   finished_at: number | null;
   prompts: number;
   cwd: string | null;
+  invocation_cwd: string | null;
   title: string | null;
 } {
   return {
@@ -208,7 +212,12 @@ function summary(meta: AgentMetadata): {
     last_activity_at: canonicalTimestamp(meta, 'last_activity_at', false)!,
     finished_at: canonicalTimestamp(meta, 'finished_at', true),
     prompts: meta.prompt_count as number,
+    // `cwd` is the declared working directory; `invocation_cwd` is the
+    // directory the current or most recent invocation was launched in. Board
+    // issue 178: reporting only the declaration made `status` a statement
+    // about intent dressed as a location.
     cwd: persistedAgentCwd(meta),
+    invocation_cwd: persistedInvocationCwd(meta),
     title: meta.title as string | null,
   };
 }
@@ -219,6 +228,7 @@ function listEntryJson(agentId: string, state: string, item: ReturnType<typeof s
     state,
     prompts: item.prompts,
     cwd: item.cwd,
+    invocation_cwd: item.invocation_cwd,
     title: item.title,
     created_at: item.created_at,
     last_activity_at: item.last_activity_at,
@@ -247,11 +257,39 @@ function matchesFilters(parsed: Parsed, state: string): boolean {
 }
 
 /**
+ * The single capability gate, used by every entry point that can put a front in
+ * a named directory.
+ *
+ * Backend agnosticism is represented as data rather than as a changed meaning:
+ * a backend that cannot launch an invocation in a directory the operator named
+ * refuses *here*, by name, before any state is written -- never by running the
+ * invocation somewhere else and reporting the declared directory as if it had
+ * honoured it. All four entry points go through this one function, so they
+ * cannot implement four different rules, and the answer is read through
+ * `honoursInvocationCwd`, which fails closed on an unknown or unrecognised
+ * capability rather than reading it as permission.
+ */
+function requireInvocationCwdCapability(command: string, env: Record<string, string | undefined>): void {
+  if (honoursInvocationCwd(backendCapabilities(env))) return;
+  throw new Error(`${command}: the configured backend cannot run an invocation in a different working directory`);
+}
+
+/**
  * A working directory an operator declared, resolved and checked to be an
  * existing directory. Both `new` and `run` declare one, and both refuse a bad
  * one before any state is written.
  */
 function declaredCwd(raw: string, command: string): string {
+  // `--cwd ''` resolves to the invoking shell's directory, because
+  // `resolve('') === process.cwd()`. Accepting it would re-admit, through a
+  // wrapper's `${VAR:-}` or an unset variable passed straight through, exactly
+  // the inheritance this refuses: a front durably attributed to wherever the
+  // shell happened to be. A whitespace-only value is refused for the same
+  // reason. Refused here, in the one function every entry point shares, so it
+  // is refused at all of them at once.
+  if (raw.trim().length === 0) {
+    throw new UsageError(`${command}: --cwd requires a working directory path`);
+  }
   const cwd = resolve(raw);
   if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
     throw new Error(`${command}: working directory does not exist: ${cwd}`);
@@ -271,6 +309,12 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
   // `run` then refuses to launch it until one is declared, rather than
   // inheriting one and reporting it as the front's location.
   const cwd = parsed.values.has('--cwd') ? declaredCwd(parsed.values.get('--cwd')!, 'new') : null;
+  // Declaring a default directory for a front is the same request as running an
+  // invocation in one: the declaration is the value `run` later launches from,
+  // so a backend that cannot place an invocation in a named directory refuses
+  // the declaration too, by name, before any state is written. Without this
+  // `new` would accept a directory `run` refuses.
+  if (cwd !== null) requireInvocationCwdCapability('new', context.env);
   if (!createAgentDirectory(agentId, paths(context))) throw new Error(`new: agent ${agentId} already exists`);
   const meta = idleMeta(agentId, cwd, parsed.values.get('--title') ?? null);
   try {
@@ -323,6 +367,23 @@ async function cmdFork(
   if (sourceId === agentId) throw new UsageError('new: --fork source and --id must be different agents');
   if (parsed.values.has('--cwd')) throw new UsageError('new: --cwd cannot be combined with --fork');
   if (parsed.values.has('--title')) throw new UsageError('new: --title cannot be combined with --fork');
+  // `--fork` refuses `--cwd` above, but it does not thereby declare nothing -- it
+  // *inherits* the source's declared directory verbatim and `forkMetaSnapshot`
+  // keeps it. That is a route to a declaration that never consulted the
+  // capability, so `new --fork` would accept a directory a non-forking `new`
+  // refuses by name and leave a clone launchable with the capability withdrawn.
+  // The gate is the same predicate, applied to the value the clone is about to
+  // record, and it is above `forkAgent`, so a refusal writes nothing.
+  //
+  // The source is read here, and read only. `forkAgent` reads it again inside
+  // its own all-or-nothing region and reports a missing source as
+  // `NotFoundError`, exactly as before: "cannot fork: no managed agent" is the
+  // operator's answer under both readings, and diagnosing it here would give a
+  // different message for the same condition.
+  const source = readMeta(sourceId, paths(context));
+  if (source !== null && persistedAgentCwd(source) !== null) {
+    requireInvocationCwdCapability('new --fork', context.env);
+  }
   let meta: AgentMetadata;
   try {
     meta = forkAgent(sourceId, agentId, paths(context));
@@ -581,6 +642,11 @@ function statusJson(
     pgid: meta.pgid,
     runner_pid: meta.runner_pid,
     cwd: item.cwd,
+    // Board issue 178: where this front actually launched, which is not always
+    // the declared directory, and which for a record written before the
+    // observation existed honestly reports "never observed" rather than
+    // inventing one from the declaration.
+    invocation_cwd: item.invocation_cwd,
     title: item.title,
     created_at: item.created_at,
     started_at: canonicalTimestamp(meta, 'started_at', true),
@@ -629,6 +695,10 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
     // created the agent, so an undeclared agent says so rather than naming a
     // directory nobody chose.
     context.io.stdout(`cwd:        ${shown(status.cwd, 'undeclared')}`);
+    // Where the front actually launched. `never ran` is a fact, not a missing
+    // value: an agent with a declared directory that has never been launched in
+    // it is not the same agent as one that was, and one line cannot say both.
+    context.io.stdout(`ran in:     ${shown(status.invocation_cwd, 'never ran')}`);
     context.io.stdout(`created:    ${shown(status.created_at)}`);
     context.io.stdout(`started:    ${shown(status.started_at)}`);
     context.io.stdout(`finished:   ${shown(status.finished_at)}`);
@@ -809,6 +879,18 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   // runner reservation it would make the record name a directory the front that
   // already exists is not in, so it is refused without writing anything.
   const runCwd = parsed.values.has('--cwd') ? declaredCwd(parsed.values.get('--cwd')!, 'run') : null;
+  // The directory this invocation will actually launch in: the one named on
+  // this command if there is one, otherwise the agent's declared default. The
+  // gate is about *that* value rather than about the flag, because the flag is
+  // not the only route by which a directory reaches a launch -- a directory
+  // declared earlier in durable state is handed to the backend by a later run
+  // that names no `--cwd` of its own, and gating on the flag alone would launch
+  // it ungated by a CLI that had just been told it could not. Computed once,
+  // above `updateMeta`, so every accepting branch is covered -- fresh spawn,
+  // steer onto a live front, steer onto a reservation, busy recovery -- and the
+  // gate writes nothing before it fires.
+  const launchCwd = runCwd ?? recordedCwd;
+  if (launchCwd !== null) requireInvocationCwdCapability('run', context.env);
   if (runCwd !== null) {
     let acceptedPending: string | null;
     try {

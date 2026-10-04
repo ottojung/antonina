@@ -766,3 +766,32 @@ operator's real `trust.json` and `credential.json`. Every process spawned by the
 was reaped before its run ended — confirmed by the clean `git status --porcelain` and absent
 `.antonina-test-tmp` rows in both tables, and by observing that no `node` process from this
 worktree survived either run.
+
+## Addendum: the board-178 `--cwd` delta, measured on `d50e121c`'s successor
+
+Stated rather than folded into the tables above, which are keyed to `65caa73` and are not
+re-measured by this change. The per-package numbers are a `^test(` census over
+`packages/<pkg>/test/*.test.mjs`, so they are a few lower than the counts `node --test` reports
+(it counts generated and repeated cases the census does not see); the deltas are what matter and
+both sides of every delta are counted the same way. Board issue 178's first half adds the `invocation_cwd` observation and
+its second half adds the backend capability gate; together they add **11** `^test(` cases to four
+files and touch no other test file, so the per-package movement is
+**agent-runtime 187 → 190** and **cli 206 → 214**, with core, daemon and web unchanged by
+construction (`git diff --stat 7565ee11..HEAD -- 'packages/*/test/*' web/src` names those four
+files only).
+
+| file | `7565ee11` | head |
+|---|---|---|
+| `packages/agent-runtime/test/backend.test.mjs` | 22 | 24 (**+2**) |
+| `packages/agent-runtime/test/metadata.test.mjs` | 9 | 10 (**+1**) |
+| `packages/agent-runtime/test/fork.test.mjs` | 13 | 13 (changed, no case added) |
+| `packages/cli/test/agent.e2e.test.mjs` | 46 | 53 (**+7**) |
+| `packages/cli/test/agent-fork.test.mjs` | 8 | 9 (**+1**) |
+
+The two `backend.test.mjs` cases are the capability answer's own contract (`backendCapabilities`
+reports the real backend, and only an exact token withdraws a capability) and the fail-closed
+predicate (`honoursInvocationCwd`). The `agent.e2e` cases are the four capability-gate refusals
+(`run` with a directory named now and one declared earlier, `new`, `new --fork`) and the
+empty-or-whitespace `--cwd` refusal at both entry points and the accepted-then-never-launched
+observation; the `agent-fork` case is the fork that reports `never ran`. Counts were observed with `XDG_STATE_HOME` and `XDG_CONFIG_HOME` each on a
+fresh `mktemp -d`.

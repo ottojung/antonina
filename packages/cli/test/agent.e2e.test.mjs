@@ -251,6 +251,10 @@ function metaPath(root, id) {
   return join(root, 'state', 'antonina', 'agents', id, 'meta.json');
 }
 
+function readMetaPath(root, id) {
+  return JSON.parse(readFileSync(metaPath(root, id), 'utf8'));
+}
+
 async function waitFor(root, id, predicate, timeoutMs = 8_000) {
   const path = metaPath(root, id);
   const deadline = Date.now() + timeoutMs;
@@ -1826,6 +1830,286 @@ test('--cwd is refused while a front exists, and changes nothing', async (t) => 
     null,
     'stop must not return while the detached runner can still write into agent state',
   );
+});
+
+// Board issue 178, the observation half. `cwd` is a declaration and
+// `invocation_cwd` is an observation of where a front was actually launched.
+// Reporting only the declaration made `status` a statement about intent dressed
+// as a location, so a declared directory that no front has ever run in must
+// report as such -- which is the only reading under which a later report that
+// names a directory means anything.
+test('a declared directory no front has run in is reported as never ran', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '0b5e', '--cwd', work], env).status, 0);
+
+  const status = run(['agent', 'status', '--id', '0b5e', '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  const parsed = JSON.parse(status.stdout);
+  assert.equal(parsed.cwd, work, 'the declaration is the directory that was declared');
+  assert.equal(
+    parsed.invocation_cwd,
+    null,
+    'nothing has been launched, so nothing may be observed',
+  );
+  assert.match(run(['agent', 'status', '--id', '0b5e'], env).stdout, /^ran in:\s+never ran$/m);
+
+  const listed = run(['agent', 'list', '--page', '1', '--json'], env);
+  assert.equal(listed.status, 0, listed.stderr);
+  const entry = JSON.parse(listed.stdout).agents.find((agent) => agent.id === '0b5e');
+  assert.equal(entry.invocation_cwd, null);
+
+  // And the backend has not run at all, so there is nothing it could have been
+  // launched in.
+  assert.deepEqual(fixtureInvocations(env), []);
+});
+
+// The other half: once a front has actually run, the observation names the
+// directory the *backend itself* reported, not the declaration. This is the
+// assertion that would fail if `ran in:` were reading `cwd`: here the two are
+// written by different actors at different times, and the declaration is
+// rewritten between them by a second run in a different directory.
+test('the observation names the directory the backend actually ran in', async (t) => {
+  const handle = fixture(t);
+  const { root, env } = handle;
+  const first = join(root, 'first-worktree');
+  const second = join(root, 'second-worktree');
+  mkdirSync(first);
+  mkdirSync(second);
+  assert.equal(run(['agent', 'new', '--id', '0b5f', '--cwd', first], env).status, 0);
+
+  assert.equal(
+    run(['agent', 'run', '--id', '0b5f', '--detach', '--prompt', 'one'], env).status,
+    0,
+  );
+  const ran = await waitFor(
+    root,
+    '0b5f',
+    (meta) => meta.state === 'succeeded' && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(ran.prompt_count, 1, 'the prompt must really have been delivered');
+  assert.equal(ran.invocation_cwd, first);
+  // The backend's own account of where it was, from its log, is the control the
+  // record is checked against.
+  assert.match(
+    readFileSync(outputLogPath(root, '0b5f'), 'utf8'),
+    new RegExp(`FAKE_CWD:${first}\\n`),
+  );
+
+  // A second run in a different directory rewrites the declaration, and the
+  // observation follows the real launch rather than being written at acceptance.
+  assert.equal(
+    run(['agent', 'run', '--id', '0b5f', '--cwd', second, '--detach', '--prompt', 'two'], env).status,
+    0,
+  );
+  const moved = await waitFor(
+    root,
+    '0b5f',
+    (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(moved.cwd, second);
+  assert.equal(moved.invocation_cwd, second);
+
+  const parsed = JSON.parse(run(['agent', 'status', '--id', '0b5f', '--json'], env).stdout);
+  assert.equal(parsed.invocation_cwd, second);
+  assert.match(
+    run(['agent', 'status', '--id', '0b5f'], env).stdout,
+    new RegExp(`^ran in:\\s+${second}$`, 'm'),
+  );
+  // Every launch of this front was handed the same directory the backend ran in.
+  for (const call of fixtureInvocations(env)) {
+    assert.ok(
+      call.includes(`--dir ${first} `) || call.includes(`--dir ${second} `),
+      `a launch named a directory the front did not declare: ${JSON.stringify(call)}`,
+    );
+  }
+  assertFixtureInvoked(handle, 'two');
+});
+
+// Board issue 178, the gate half. Backend agnosticism is data, not a changed
+// meaning: a backend that cannot place an invocation in a named directory must
+// refuse by name, before any write, rather than run the invocation somewhere
+// else and report the declared directory as if it had honoured it.
+//
+// These cases run the compiled CLI in a process whose backend reports the
+// capability withdrawn, and assert three things together: the command is refused
+// by name, the record is byte-identical to what it was before (a refusal writes
+// nothing), and the fixture backend was never invoked. The third is the half a
+// prose-only gate would miss.
+function withoutInvocationCwd(env) {
+  return { ...env, ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: '1' };
+}
+
+test('run refuses a launch into a directory the backend cannot honour', async (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '8a7e', '--cwd', work], env).status, 0);
+  const before = readFileSync(metaPath(root, '8a7e'), 'utf8');
+
+  // A directory named on this very invocation.
+  const named = join(root, 'named-here');
+  mkdirSync(named);
+  const refused = run(
+    ['agent', 'run', '--id', '8a7e', '--cwd', named, '--detach', '--prompt', 'no'],
+    withoutInvocationCwd(env),
+  );
+  assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stderr, /backend cannot run an invocation in a different working directory/);
+  assert.equal(readFileSync(metaPath(root, '8a7e'), 'utf8'), before, 'a refused launch must write nothing');
+
+  // And the same launch of a directory declared *earlier*, in durable state,
+// with no `--cwd` on this command at all. This is the case a flag-shaped gate
+  // misses: the backend is handed `--dir <declared>` by a CLI that has just been
+  // told it cannot run an invocation in a named directory.
+  const inherited = run(
+    ['agent', 'run', '--id', '8a7e', '--detach', '--prompt', 'no'],
+    withoutInvocationCwd(env),
+  );
+  assert.equal(inherited.status, 1, `expected a refusal, got: ${inherited.stdout}${inherited.stderr}`);
+  assert.match(inherited.stderr, /backend cannot run an invocation in a different working directory/);
+  assert.equal(readFileSync(metaPath(root, '8a7e'), 'utf8'), before, 'a refused launch must write nothing');
+  assert.deepEqual(fixtureInvocations(env), [], 'the backend must never be invoked for a refused launch');
+
+  // The positive control: the same commands, with the capability present, run.
+  // Without it the cases above would also pass if the gate refused everything.
+  assert.equal(run(['agent', 'run', '--id', '8a7e', '--detach', '--prompt', 'go'], env).status, 0);
+  const launched = await waitFor(
+    root,
+    '8a7e',
+    (meta) => meta.state === 'succeeded' && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(launched.invocation_cwd, work);
+  assert.ok(fixtureInvocations(env).length > 0, 'the launch must happen when the capability is present');
+});
+
+// The same predicate at `new`: declaring a default directory is the same request
+// as running an invocation in one, because the declaration is what `run` later
+// launches from. Without this clause `new` accepted a directory `run` refuses.
+test('new refuses a declared directory the backend cannot honour, and writes nothing', (t) => {
+  const { root, work, env } = fixture(t);
+  const refused = run(['agent', 'new', '--id', '8a7f', '--cwd', work], withoutInvocationCwd(env));
+  assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stderr, /backend cannot run an invocation in a different working directory/);
+  assert.equal(
+    existsSync(metaPath(root, '8a7f')),
+    false,
+    'a refused `new` must create no agent directory at all',
+  );
+
+  // An agent with no directory is still creatable: the gate is about a named
+  // directory, not about the backend's presence.
+  assert.equal(run(['agent', 'new', '--id', '8a80'], withoutInvocationCwd(env)).status, 0);
+});
+
+// And at `new --fork`, which refuses `--cwd` outright but *inherits* the
+// source's declared directory, so it is a route to a declaration that never
+// consulted the capability. The gate runs on the value the clone is about to
+// record, and above `forkAgent`, so a refusal writes nothing.
+test('new --fork refuses to inherit a directory the backend cannot honour', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '8a81', '--cwd', work], env).status, 0);
+
+  const refused = run(['agent', 'new', '--id', '8a82', '--fork', '8a81'], withoutInvocationCwd(env));
+  assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stderr, /backend cannot run an invocation in a different working directory/);
+  assert.equal(
+    existsSync(metaPath(root, '8a82')),
+    false,
+    'a refused fork must create no clone',
+  );
+
+  // A source that declared nothing is still forkable under the same backend: the
+  // clone would record no directory, so there is nothing to honour.
+  assert.equal(run(['agent', 'new', '--id', '8a83'], env).status, 0);
+  assert.equal(run(['agent', 'new', '--id', '8a84', '--fork', '8a83'], withoutInvocationCwd(env)).status, 0);
+  assert.equal(readMetaPath(root, '8a84').cwd, null);
+});
+
+// `--cwd ''` resolves to the invoking shell's directory, because
+// `resolve('') === process.cwd()`, so it passed validation and recorded
+// wherever the shell happened to be -- reopening, through a wrapper's
+// `${VAR:-}`, exactly the inheritance the declared-cwd contract refuses.
+// Board issue 178, the observation half again, from the other side. This is
+// the case the observation's whole rule exists for: a prompt that is accepted
+// and then never launches. The directory disappears between acceptance and the
+// spawn, so the backend is never executed -- and a record that had recorded the
+// declaration at acceptance would name, permanently and in a terminal state, a
+// directory no front was ever in.
+test('a launch that never reached a backend observes nothing', async (t) => {
+  const handle = fixture(t);
+  const { root, env } = handle;
+  const vanishing = join(root, 'vanishing-worktree');
+  mkdirSync(vanishing);
+  assert.equal(run(['agent', 'new', '--id', '8a90', '--cwd', vanishing], env).status, 0);
+
+  // Gone before the run command observes it. `run` re-validates only a
+  // directory named on this command, so a declaration that has since been
+  // removed reaches the spawn and fails there -- which is exactly the gap this
+  // case needs.
+  rmSync(vanishing, { recursive: true, force: true });
+
+  assert.equal(
+    run(['agent', 'run', '--id', '8a90', '--detach', '--prompt', 'never-launched'], env).status,
+    0,
+    'the prompt is accepted; it is the launch that cannot happen',
+  );
+  const done = await waitFor(
+    root,
+    '8a90',
+    (meta) => meta.state === 'failed' && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(done.prompt_count, 1, 'the prompt really was accepted');
+  assert.equal(
+    done.invocation_cwd,
+    null,
+    'a launch that never produced a child must not leave a directory behind',
+  );
+  assert.equal(
+    done.cwd,
+    vanishing,
+    'the declaration is untouched: it is what the front would have been run in',
+  );
+
+  // No backend ever ran, which is the fact the record must not contradict.
+  assert.deepEqual(
+    fixtureInvocations(env).filter((call) => call.includes('never-launched')),
+    [],
+    'the backend must not have been executed for a launch that could not happen',
+  );
+  const parsed = JSON.parse(run(['agent', 'status', '--id', '8a90', '--json'], env).stdout);
+  assert.equal(parsed.invocation_cwd, null);
+  assert.match(run(['agent', 'status', '--id', '8a90'], env).stdout, /^ran in:\s+never ran$/m);
+  assertFixtureInvoked(handle, undefined);
+});
+
+test('an empty or whitespace-only --cwd is refused at every entry point', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '8a85'], env).status, 0);
+
+  for (const value of ['', ' ', '\t', '\n', '   ']) {
+    for (const args of [
+      ['agent', 'new', '--id', '8a86', '--cwd', value],
+      ['agent', 'run', '--id', '8a85', '--cwd', value, '--detach', '--prompt', 'no'],
+    ]) {
+      const refused = run(args, env);
+      assert.equal(
+        refused.status,
+        2,
+        `expected a usage refusal for ${JSON.stringify(value)}, got: ${refused.stdout}${refused.stderr}`,
+      );
+      assert.match(refused.stderr, /--cwd requires a working directory path/);
+    }
+  }
+  // Neither command created or launched anything, and the record never acquired
+  // the shell's directory.
+  assert.equal(existsSync(metaPath(root, '8a86')), false);
+  const after = readMetaPath(root, '8a85');
+  assert.equal(after.cwd, null);
+  assert.equal(after.prompt_count, 0);
+  assert.deepEqual(fixtureInvocations(env), []);
+  assert.notEqual(after.cwd, work);
 });
 
 // run --cwd is a real option, validated exactly as `new --cwd` is: a path that

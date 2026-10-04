@@ -13,6 +13,7 @@ import {
   OPENCODE_BIN_ENV,
   SIGNAL_DEATH_CLASSIFICATION,
   UNRECOGNIZED_BACKEND_FAILURE,
+  backendCapabilities,
   backendRetryDelay,
   buildAgentCommand,
   classifyBackendFailure,
@@ -20,6 +21,7 @@ import {
   configuredModelAvailable,
   describeSignalDeath,
   discoverSessionId,
+  honoursInvocationCwd,
   resolveOpencode,
   sanitizeBackendError,
 } from '../dist/packages/agent-runtime/src/backend.js';
@@ -634,6 +636,59 @@ test('a corrupted signal field is rejected rather than persisted', () => {
       () => validateAgentMetadata(meta),
       /backend_error is malformed/,
       `a signal death carrying ${JSON.stringify(patch)} must be rejected`,
+    );
+  }
+});
+
+// Board issue 178, the gate half. The capability is consulted at every entry
+// point that can put a front in a named directory, which is only testable if
+// the capability can be observed to be false. This pins the test-only override's
+// whole contract -- the real answer, the one token that withdraws it, and that
+// nothing else can -- and the fail-closed predicate the CLI gates on.
+test('backendCapabilities reports the real backend, and only an exact test token withdraws a capability', () => {
+  assert.deepEqual(backendCapabilities({}), { invocation_cwd: true });
+  assert.deepEqual(backendCapabilities(process.env), { invocation_cwd: true });
+  assert.deepEqual(
+    backendCapabilities({ ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: '1' }),
+    { invocation_cwd: false },
+  );
+  for (const value of ['', '0', 'true', 'yes', '2', ' 1', '1 ', '01']) {
+    assert.deepEqual(
+      backendCapabilities({ ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: value }),
+      { invocation_cwd: true },
+      `the override must only answer for the exact token '1', not for ${JSON.stringify(value)}`,
+    );
+  }
+});
+
+// A gate that anything can pass is not a gate. Only the literal boolean `true`
+// is permission; every other shape is a refusal, because the alternative is an
+// invocation running somewhere the operator did not name and reported as though
+// it had been honoured.
+test('an unknown or unrecognised invocation_cwd capability fails closed', () => {
+  assert.equal(honoursInvocationCwd({ invocation_cwd: true }), true);
+
+  for (const answer of [
+    undefined,
+    null,
+    { invocation_cwd: false },
+    { invocation_cwd: null },
+    { invocation_cwd: 'true' },
+    { invocation_cwd: 1 },
+    { invocation_cwd: {} },
+    {},
+    { invocation_dir: true },
+    { future_capability: true },
+    { invocation_cwd: { supported: true } },
+    'true',
+    true,
+    [],
+    [true],
+  ]) {
+    assert.equal(
+      honoursInvocationCwd(answer),
+      false,
+      `an answer that is not the literal boolean true must fail closed: ${JSON.stringify(answer)}`,
     );
   }
 });

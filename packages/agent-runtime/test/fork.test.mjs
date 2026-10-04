@@ -112,6 +112,8 @@ function finishedMeta(agentId, overrides = {}) {
     exit_signal: null,
     error: 'boom',
     run_log_offset: 4_096,
+    // Board issue 178: the source has run, so it has an observation.
+    invocation_cwd: '/srv/work',
     ...overrides,
   };
   validateAgentMetadata(meta);
@@ -190,6 +192,14 @@ test('a fork carries the source work identity and takes a new identity of its ow
   // `output.log` from zero, so it cannot start reading at the source's offset.
   assert.equal(clone.run_log_offset, null);
   assert.equal(readMeta('a1', { env: process.env }).run_log_offset, 4_096);
+  // Board issue 178: `invocation_cwd` is an observation -- "this agent was
+  // launched in that directory" -- and the clone launched nothing, so it is
+  // cleared rather than inherited from the `structuredClone`. Reporting the
+  // source's last launch directory as the clone's own would put a location on a
+  // front that has never been in one. The *declaration* (`cwd`, asserted above)
+  // is a fact about the agent and is inherited; a run's location is not.
+  assert.equal(clone.invocation_cwd, null);
+  assert.equal(readMeta('a1', { env: process.env }).invocation_cwd, '/srv/work');
 
   // Both records are canonical, independently.
   validateAgentMetadata(readMeta('a1', { env: process.env }));

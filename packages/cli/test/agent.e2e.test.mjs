@@ -2030,6 +2030,60 @@ test('new --fork refuses to inherit a directory the backend cannot honour', (t) 
 // `resolve('') === process.cwd()`, so it passed validation and recorded
 // wherever the shell happened to be -- reopening, through a wrapper's
 // `${VAR:-}`, exactly the inheritance the declared-cwd contract refuses.
+// Board issue 178, the observation half again, from the other side. This is
+// the case the observation's whole rule exists for: a prompt that is accepted
+// and then never launches. The directory disappears between acceptance and the
+// spawn, so the backend is never executed -- and a record that had recorded the
+// declaration at acceptance would name, permanently and in a terminal state, a
+// directory no front was ever in.
+test('a launch that never reached a backend observes nothing', async (t) => {
+  const handle = fixture(t);
+  const { root, env } = handle;
+  const vanishing = join(root, 'vanishing-worktree');
+  mkdirSync(vanishing);
+  assert.equal(run(['agent', 'new', '--id', '8a90', '--cwd', vanishing], env).status, 0);
+
+  // Gone before the run command observes it. `run` re-validates only a
+  // directory named on this command, so a declaration that has since been
+  // removed reaches the spawn and fails there -- which is exactly the gap this
+  // case needs.
+  rmSync(vanishing, { recursive: true, force: true });
+
+  assert.equal(
+    run(['agent', 'run', '--id', '8a90', '--detach', '--prompt', 'never-launched'], env).status,
+    0,
+    'the prompt is accepted; it is the launch that cannot happen',
+  );
+  const done = await waitFor(
+    root,
+    '8a90',
+    (meta) => meta.state === 'failed' && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(done.prompt_count, 1, 'the prompt really was accepted');
+  assert.equal(
+    done.invocation_cwd,
+    null,
+    'a launch that never produced a child must not leave a directory behind',
+  );
+  assert.equal(
+    done.cwd,
+    vanishing,
+    'the declaration is untouched: it is what the front would have been run in',
+  );
+
+  // No backend ever ran, which is the fact the record must not contradict.
+  assert.deepEqual(
+    fixtureInvocations(env).filter((call) => call.includes('never-launched')),
+    [],
+    'the backend must not have been executed for a launch that could not happen',
+  );
+  const parsed = JSON.parse(run(['agent', 'status', '--id', '8a90', '--json'], env).stdout);
+  assert.equal(parsed.invocation_cwd, null);
+  assert.match(run(['agent', 'status', '--id', '8a90'], env).stdout, /^ran in:\s+never ran$/m);
+  assertFixtureInvoked(handle, undefined);
+});
+
 test('an empty or whitespace-only --cwd is refused at every entry point', (t) => {
   const { root, work, env } = fixture(t);
   assert.equal(run(['agent', 'new', '--id', '8a85'], env).status, 0);

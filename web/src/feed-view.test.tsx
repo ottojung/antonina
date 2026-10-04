@@ -128,7 +128,7 @@ describe('the feed container, mounted', () => {
     await screen.findByRole('list', { name: 'Board activity, newest first' });
     expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1);
 
-    const more = screen.getByRole('button', { name: FEED_MORE_LABEL });
+    const more = await screen.findByRole('button', { name: FEED_MORE_LABEL });
     await act(async () => { fireEvent.click(more); });
 
     await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1));
@@ -259,9 +259,11 @@ describe('the feed page the address names', () => {
     const report = (next: number) => { reported.push(next); };
 
     const { container, rerender } = render(<AddressedFeed read={read} address={1} report={report} />);
-    await screen.findByRole('list', { name: 'Board activity, newest first' });
-
-    const more = screen.getByRole('button', { name: FEED_MORE_LABEL });
+    // The feed list is rendered before the first read resolves, so finding it is
+    // not a signal that the page has arrived. The button is the first element
+    // that can only exist once the page has, so it is what is awaited: a
+    // `getByRole` here raced the read and failed under host load.
+    const more = await screen.findByRole('button', { name: FEED_MORE_LABEL });
     await act(async () => { fireEvent.click(more); });
 
     // Walking forward reveals the page it just read and reports that page to

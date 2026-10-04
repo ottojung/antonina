@@ -19,7 +19,7 @@
 // this branch.
 
 import { spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, readdirSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -112,11 +112,11 @@ function patchGeneratedModule(dir: string, from: RegExp | string, to: string) {
 
 // How long a single `vite build` may run before the harness kills it.
 //
-// This replaces vitest's inherited 5000 ms default, which was not a threshold but
-// a coin flip: a successful build of this sandbox costs ~3.5 CPU-seconds and a
-// build that fails at `buildStart` costs ~0.4 CPU-seconds (measured on an idle
-// and on a loaded host; board 187 section 2), so 5 s left roughly one second of
-// headroom above work the test genuinely has to do.
+// This is the harness's own deadline for one `vite build`, and it is enforced
+// against a live process (see `build` below) — it is not vitest's clock. A
+// successful build of this sandbox costs ~3.5 CPU-seconds and a build that fails
+// at `buildStart` costs ~0.4 CPU-seconds (measured on an idle and on a loaded
+// host; board 187 section 2).
 //
 // The number is a CPU budget, not a wall-clock observation, so it is not tuned to
 // this host's load. 90 s is ~25x the CPU the build needs. What makes it a real
@@ -130,6 +130,42 @@ const BUILD_TIMEOUT_MS = 90_000;
 // vite and esbuild both handle SIGTERM, so this normally reaps cleanly; the
 // SIGKILL is the backstop that makes reaping unconditional.
 const KILL_GRACE_MS = 5_000;
+
+// This suite's vitest budget, declared here rather than raised globally.
+//
+// Why this suite and not `vite.config.ts`: the tests below are the only ones in
+// the web suite that spawn a real `vite build`, and they spawn one by one. Their
+// cost is a full toolchain startup plus a bundle, measured at 0.28-3.0 s wall on
+// a quiet host and 6-27 s on a loaded one (board 187 sections 2b and 3), against
+// vitest's inherited 5000 ms per-test default. That default is the wrong budget
+// for this work: it is not a statement about the build, it is a coin flip whose
+// outcome depends on whatever else the host is running. Every other test in the
+// web suite is a pure or jsdom unit test that finishes in milliseconds, so
+// raising the budget for all of them would buy nothing and would weaken the one
+// clock that is doing useful work on them.
+//
+// Why this is not "raising a ceiling to hide a hang": nothing here is hidden
+// behind this number, because the hang is caught by a clock that is not this one.
+// `BUILD_TIMEOUT_MS` above is enforced against a live process group and kills it;
+// a hung build therefore fails with the harness's own diagnostic
+// (`vite build exceeded the enforced 90000 ms deadline ... it is hung, not slow`)
+// from `buildOrFail`, in bounded time, long before this budget is reached. The
+// suite budget is deliberately set *above* the enforced deadline plus its kill
+// grace so that a real hang is always reported by the deadline that detected it,
+// and the vitest clock can never be the thing that decides. Vitest's default is
+// kept untouched for the rest of the web suite.
+//
+// If the enforced deadline ever stops killing, that budget stops being
+// irrelevant: the guard case below asserts the kill, and it carries its own,
+// much tighter explicit timeout so the mutant fails in seconds rather than
+// minutes.
+const SUITE_TIMEOUT_MS = BUILD_TIMEOUT_MS + KILL_GRACE_MS + 30_000;
+
+// The guard case drives a build that genuinely never finishes, so it does not get
+// the whole suite budget: its own assertions bound it at
+// 3_000 + KILL_GRACE_MS + 10_000, and this timeout is the vitest-side backstop
+// for the case where the deadline stops killing and nothing is left to observe.
+const DEADLINE_GUARD_TEST_TIMEOUT_MS = 30_000;
 
 interface BuildResult {
   status: number | null;
@@ -257,9 +293,45 @@ async function buildOrFail(
   return result;
 }
 
+/**
+ * Every live pid that is a member of `pgid`, or `'unavailable'` where the
+ * process table cannot be read (no `/proc`, so no portable answer).
+ *
+ * Membership is read from `/proc/<pid>/stat` field 5 (`pgrp`), which is what
+ * `kill(-pgid)` addresses. A build is started `detached`, so its pid is its pgid
+ * and no unrelated process can be a member of it: anything found here was
+ * started by the build.
+ */
+function processGroupMembers(pgid: number): number[] | 'unavailable' {
+  let entries: string[];
+  try {
+    entries = readdirSync('/proc');
+  } catch {
+    return 'unavailable';
+  }
+  const members: number[] = [];
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    let stat: string;
+    try {
+      stat = readFileSync(join('/proc', entry, 'stat'), 'utf8');
+    } catch {
+      // The process exited between the listing and the read, which is the
+      // outcome being asserted, not a failure to inspect.
+      continue;
+    }
+    // `pid (comm) state ...` — comm can contain spaces and parentheses, so the
+    // fields after it are located from the last ')'.
+    const tail = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const group = Number(tail[2]);
+    if (group === pgid) members.push(Number(entry));
+  }
+  return members;
+}
+
 const dist = (dir: string, ...parts: string[]) => join(dir, 'dist', ...parts);
 
-describe('web build identity', () => {
+describe('web build identity', { timeout: SUITE_TIMEOUT_MS }, () => {
   it('the emitted bundle names the revision it was built from', async () => {
     const dir = sandbox();
     const result = await buildOrFail(dir);
@@ -320,15 +392,23 @@ describe('web build identity', () => {
   // group and reap it. Under the previous `spawnSync` harness this was not merely
   // absent but impossible — the blocking call could not be preempted at all, and
   // a hung build held the worker for the full `timeout:` with no handle to kill.
-  it('the deadline kills a hung build and reaps its process group', async () => {
+  it('the deadline kills a hung build and reaps its process group', { timeout: DEADLINE_GUARD_TEST_TIMEOUT_MS }, async () => {
     const dir = sandbox();
     // A plugin whose `buildStart` never settles, holding the event loop open so the
     // process cannot wind down and rollup's beforeExit check cannot rescue it. That
     // makes this a build which genuinely never finishes, not one which fails fast.
-    writeFileSync(join(dir, 'vite.config.ts'), `export default {
+    writeFileSync(join(dir, 'vite.config.ts'), `import { spawn } from 'node:child_process';
+
+export default {
   plugins: [{
     name: 'hang',
     buildStart() {
+      // A grandchild of the test worker, in the build's own process group, so
+      // that "reaps its process group" is a claim about more than the leader.
+      // This is what vite's esbuild service is: a sibling-side process the
+      // deadline must take with it. Signalling the leader alone leaves this
+      // running, and that mutant is measured in the report.
+      spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
       setInterval(() => {}, 1000);
       return new Promise(() => {});
     },
@@ -348,11 +428,25 @@ describe('web build identity', () => {
     // so the assertion is the elapsed bound as much as it is the flags.
     expect(elapsedMs).toBeLessThan(3_000 + 5_000 + 10_000);
 
-    // AGENTS.md: a spawned process must be converged and reaped. The group leader
-    // is the only handle we exposed, so that is what is checked — signalling the
-    // group is what keeps the esbuild service it may have started from surviving.
+    // AGENTS.md: a spawned process must be converged and reaped.
     expect(result.pid).toBeGreaterThan(0);
-    expect(() => process.kill(result.pid as number, 0), 'the build process group outlived the harness')
+    expect(() => process.kill(result.pid as number, 0), 'the build outlived the harness')
       .toThrow();
+
+    // And so must everything it started. Checking the leader alone was not enough
+    // to support the claim the test name makes: signalling only the group leader
+    // kills vite and leaves the esbuild service it spawned running, and that
+    // mutant left this suite green when it was measured. A process group is
+    // addressable, so the whole group is enumerated here rather than assumed.
+    // `/proc` is the only portable-enough way to ask who is in it; where it is not
+    // present this check reports that it could not enumerate, and the leader
+    // assertion above remains the floor.
+    const pgid = result.pid as number;
+    const survivors = processGroupMembers(pgid);
+    if (survivors === 'unavailable') {
+      console.warn(`could not enumerate process group ${pgid}; reaping checked for the leader only`);
+    } else {
+      expect(survivors, `the build process group ${pgid} outlived the harness`).toEqual([]);
+    }
   });
 });

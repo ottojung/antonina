@@ -3,7 +3,7 @@ import { createBrowserBoardApi, targetViews, type BoardFeedEntry, type BoardFeed
 import { resourceState, type BoardIssue, type BoardResource } from './model';
 import { BOARD_VIEWS, DEFAULT_BOARD_URL_STATE, DEFAULT_COMMENT_PAGE, DEFAULT_ISSUE_PAGE, ISSUE_FILTERS, boardHomeState, boardHref, boardUrlFor, issueHref, issueUrlState, parseBoardUrl, tabHref, writeBoardUrl, type BoardUrlState, type BoardView, DEFAULT_RESOURCE_PAGE } from './board-url';
 import { TARGETS_EMPTY, TARGETS_HINT, TARGET_ACCESS_LABEL, TARGET_CLEANUP_LABEL, TARGET_KIND_LABEL, TARGET_PERSISTENCE_LABEL, TARGET_STATUS_LABEL, targetCatalogRows } from './targets';
-import { clampCommentPage, clampIssuePage, COMMENT_PAGE_SIZE, COMMENT_PAGES_LABEL, commentPageRange, hasCommentPages, lastCommentPage, ISSUE_PAGE_NEXT, ISSUE_PAGE_PREVIOUS, ISSUE_PAGE_SIZE, hasIssuePages, issuePage, issuePageCount, issuePageRange, COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, ISSUE_LIST_PAGES_LABEL, accessCallout, appendFeedPage, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, overviewLoaded, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type BoardSummary, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess, clampResourcePage, RESOURCE_LIST_PAGES_LABEL, RESOURCE_PAGE_SIZE, resourcePage } from './ui-state';
+import { clampCommentPage, clampIssuePage, COMMENT_PAGE_SIZE, COMMENT_PAGES_LABEL, commentPageRange, hasCommentPages, lastCommentPage, ISSUE_PAGE_NEXT, ISSUE_PAGE_PREVIOUS, ISSUE_PAGE_SIZE, hasIssuePages, issuePage, issuePageCount, issuePageRange, COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, ISSUE_LIST_PAGES_LABEL, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, overviewLoaded, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, readFeedPage, clampFeedPage, feedPageNextCursor, feedPageEntries, feedPageTotal, hasFeedPages, feedPageRange, FEED_LIST_PAGES_LABEL, FEED_PAGE_PREVIOUS, FEED_PAGE_NEXT, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type BoardSummary, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess, clampResourcePage, RESOURCE_LIST_PAGES_LABEL, RESOURCE_PAGE_SIZE, resourcePage } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -46,7 +46,7 @@ export default function App() {
   // default, and nothing outside `BOARD_URL_KEYS` is ever read or written, so a
   // stale URL cannot blank the board and no credential can ride along.
   const [location, setLocation] = useState<BoardUrlState>(() => parseBoardUrl(window.location.search));
-  const { view, selectedNumber, filter, settingsOpen, page, resourcePage, commentPage } = location;
+  const { view, selectedNumber, filter, settingsOpen, page, resourcePage, commentPage, feedPage } = location;
   const [selectedIssue, setSelectedIssue] = useState<BoardIssue>();
   // The open issue's conversation is held as the ONE bounded page the core read
   // returned, not as a hydrated issue: `IssueCommentPage` carries the issue's own
@@ -425,7 +425,7 @@ export default function App() {
           // which is the truth from here. `antonina board target list
           // --telemetry` is where a host's own numbers come from.
           ? <TargetsView targets={targetViews(board!)} hosts={[]} onOpenIssue={openIssue} hrefForIssue={issueHrefHere} />
-          : <FeedView readFeed={session.readFeed} issues={board!.issues} generation={feedGeneration} onOpenIssue={openIssue} hrefForIssue={issueHrefHere} />}
+          : <FeedView readFeed={session.readFeed} issues={board!.issues} generation={feedGeneration} page={feedPage} onPage={setFeedPageIndex} onOpenIssue={openIssue} hrefForIssue={issueHrefHere} />}
       </aside>
       {view === 'issues' ? selected ? <Thread conversation={selected} page={threadIndex} onPage={setCommentPageIndex} access={access} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.issue.number, body), 'Description updated')} close={() => void run(() => api.close(selected.issue.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.issue.number), 'Issue reopened')} back={() => setSelectedNumber(undefined)} />
         : selectedNumber !== undefined
@@ -792,18 +792,36 @@ function AddDependency({ resource, issues, add }: { resource: BoardResource; iss
  * decides only when to read — on open, on every verified board read, and again
  * when the reader asks for the next page — and the next page is requested with
  * the token the backend returned, never with an offset the browser computed.
+ *
+ * The pages it has been given are held as pages, newest first, so the addressable
+ * `feedPage` field can select one of them: board issue 173 made the feed's page
+ * a URL field, and this is where that field is finally read. `page` is a number
+ * over the pages actually read, never an offset into the feed — the projection
+ * issues the tokens, and this view only chooses which read page to draw.
  */
-export function FeedView({ readFeed, issues, generation, onOpenIssue, hrefForIssue }: {
+export function FeedView({ readFeed, issues, generation, page, onPage, onOpenIssue, hrefForIssue }: {
   readFeed: FeedRead;
   issues: IssueReference[];
   generation: number;
+  /** The addressable feed page, as the query string reported it. */
+  page?: number;
+  /** Reports a chosen page back to the address, which is the only place it lives. */
+  onPage?: (page: number) => void;
   onOpenIssue: (number: number) => void;
   hrefForIssue?: (number: number) => string;
 }) {
-  const [page, setPage] = useState<BoardFeedPage | null>(null);
+  const [walk, setWalk] = useState<BoardFeedPage[]>([]);
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(true);
+  const walked = walk.length;
+  // The page on screen follows the addressable field whenever the address says
+  // otherwise, and otherwise follows the walk: a forward read reveals the page
+  // it just read, and reports that page to the address so a reload, a shared
+  // link and Back return to it.
+  const [chosen, setChosen] = useState(page ?? 1);
+  const index = clampFeedPage(chosen, walked);
   const read = useCallback(readFeed, [readFeed]);
+  useEffect(() => { setChosen(page ?? 1); }, [page]);
   useEffect(() => {
     let live = true;
     setLoading(true);
@@ -811,7 +829,7 @@ export function FeedView({ readFeed, issues, generation, onOpenIssue, hrefForIss
       try {
         const newest = await readFeedFirstPage(read);
         if (!live) return;
-        setPage(newest);
+        setWalk([newest]);
         setError(undefined);
       } catch (cause) {
         if (!live) return;
@@ -822,32 +840,76 @@ export function FeedView({ readFeed, issues, generation, onOpenIssue, hrefForIss
     })();
     return () => { live = false; };
   }, [read, generation]);
+  const token = feedPageNextCursor(walk, index);
+  /** One place that both draws a chosen page and reports it to the address. */
+  function choose(next: number) {
+    setChosen(next);
+    onPage?.(next);
+  }
   async function showMore() {
-    if (page === null || page.nextCursor === null) return;
+    if (token === null) return;
     setLoading(true);
     try {
       // The backend's own token, carried unchanged: it names a stable position
       // in the materialized feed, so this page is the entries committed before
       // it and a walk neither skips nor repeats an entry.
-      setPage(await appendFeedPage(read, page, page.nextCursor));
+      const older = await readFeedPage(read, token);
+      setWalk((current) => [...current, older]);
       setError(undefined);
+      choose(walked + 1);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Older entries could not be read');
     } finally {
       setLoading(false);
     }
   }
-  return <FeedThread
-    entries={page?.entries ?? []}
-    nextCursor={page?.nextCursor ?? null}
-    total={page?.total ?? 0}
-    issues={issues}
-    loading={loading}
-    error={error}
-    onShowMore={() => void showMore()}
-    onOpenIssue={onOpenIssue}
-    hrefForIssue={hrefForIssue}
-  />;
+  return <>
+    <FeedThread
+      entries={feedPageEntries(walk, index)}
+      nextCursor={token}
+      total={feedPageTotal(walk)}
+      issues={issues}
+      loading={loading}
+      error={error}
+      onShowMore={() => void showMore()}
+      onOpenIssue={onOpenIssue}
+      hrefForIssue={hrefForIssue}
+    />
+    <FeedPageNav walked={walked} page={index} onPage={choose} />
+  </>;
+}
+
+/**
+ * The feed's numbered pages, over the pages the projection has actually handed
+ * over. It is a separate control from `IssuePagination` because the numbers are
+ * not the same numbers: those are offsets over entries this browser already
+ * holds, these are pages of a cursor walk. So a page the reader has never been
+ * given is never numbered and never offered — walking past the last page read
+ * is the backend's token, carried by the "show older entries" control, not a
+ * button here that could pretend to jump to a page nobody has read.
+ */
+export function FeedPageNav({ walked, page, onPage }: {
+  walked: number;
+  page: number;
+  onPage?: (page: number) => void;
+}) {
+  if (!hasFeedPages(walked)) return null;
+  const index = clampFeedPage(page, walked);
+  return <nav className="issue-pagination" aria-label={FEED_LIST_PAGES_LABEL}>
+    <button type="button" className="quiet" aria-label={FEED_PAGE_PREVIOUS} disabled={index <= 1} onClick={() => onPage?.(index - 1)}>Previous</button>
+    <p className="issue-page-range" role="status">{feedPageRange(index, walked)}</p>
+    {Array.from({ length: walked }, (_, offset) => offset + 1).map((number) => (
+      <button
+        type="button"
+        key={number}
+        className={number === index ? 'quiet active' : 'quiet'}
+        aria-label={`Feed page ${number}`}
+        aria-current={number === index ? 'page' : undefined}
+        onClick={() => onPage?.(number)}
+      >{number}</button>
+    ))}
+    <button type="button" className="quiet" aria-label={FEED_PAGE_NEXT} disabled={index >= walked} onClick={() => onPage?.(index + 1)}>Next</button>
+  </nav>;
 }
 
 /**

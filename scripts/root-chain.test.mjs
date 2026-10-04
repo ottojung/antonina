@@ -45,9 +45,13 @@ import {
 } from './root-chain.mjs';
 import {
   PREREQ_SCRIPT,
+  TYPECHECK_SCRIPT,
+  WEB_TYPECHECK_SCRIPT,
   formatPrereqNotice,
   inspectBuildState,
   resolvePrerequisite,
+  typecheckCoversWeb,
+  typecheckedSources,
 } from './root-chain-prereq.mjs';
 import { runChain, runWithPrerequisite, summarize } from './root-chain-run.mjs';
 
@@ -468,6 +472,52 @@ test('the root npm test chain declares its prerequisite as data, not as a commen
     `\`${PREREQ_SCRIPT}\` names ${prereq.name}; the chain's declared prerequisite is \`typecheck\`, which is what emits \`packages/*/dist\` and the generated build-identity modules`,
   );
   assert.equal(prereq.command, pkgScripts().typecheck);
+});
+
+test('the declared prerequisite typechecks the web app, not only packages/*', () => {
+  // Board issue 193. The measured hole, re-derived on this line at base 7565ee11:
+  // the root `typecheck` compiled `packages/*` only, so `web/src` was compiled by
+  // nothing a landing gate runs — vitest does not typecheck, and the web build's
+  // own `tsc -b` is not a gate step. A type error under `web/src` therefore left
+  // `npm run typecheck` at 0 and `npm test` at 0 across all seven chain steps,
+  // and read as passing. That is the fail-open shape boards 66, 69 and 108
+  // exist to prevent.
+  //
+  // This asserts coverage of `web` by the root `typecheck`, derived by walking
+  // the command rather than by matching one string, so it survives a legitimate
+  // rewrite of the command and fails if the web app is dropped out of it again.
+  const sources = typecheckedSources({ scripts: pkgScripts() });
+  assert.ok(
+    sources.has('web'),
+    `the root \`${TYPECHECK_SCRIPT}\` compiles ${[...sources].sort().join(', ')} and not \`web\`, so a type error in web/src is invisible to the chain's prerequisite. Run \`npm run ${WEB_TYPECHECK_SCRIPT}\` from it.`,
+  );
+  assert.deepEqual(
+    [...sources].sort(),
+    ['packages/agent-runtime', 'packages/cli', 'packages/core', 'packages/host-daemon', 'web'],
+    'the root `typecheck` no longer covers exactly the five TypeScript roots this repository declares',
+  );
+  // The web step must be the web app's own typecheck, not something named
+  // `typecheck:web` that compiles nothing.
+  assert.equal(pkgScripts()[WEB_TYPECHECK_SCRIPT], 'npm run typecheck --prefix web');
+});
+
+test('the web-coverage check is not vacuous: it fails when the web step is dropped', () => {
+  // A guard that cannot fail is not a guard. Two regressions are covered, because
+  // either one alone reopens board 193: deleting the web step from the root
+  // typecheck, and leaving the step defined but unreferenced. Both must be
+  // reported as "web is not covered" rather than passing quietly.
+  const without = structuredClone(pkgScripts());
+  delete without[WEB_TYPECHECK_SCRIPT];
+  assert.equal(typecheckCoversWeb({ scripts: without }), false, 'removing the web typecheck step left the web app looking covered');
+
+  const unreferenced = structuredClone(pkgScripts());
+  unreferenced[TYPECHECK_SCRIPT] = unreferenced[TYPECHECK_SCRIPT].split('&&').filter((step) => !step.includes(WEB_TYPECHECK_SCRIPT)).join(' && ');
+  assert.equal(typecheckCoversWeb({ scripts: unreferenced }), false, 'a web typecheck step that the root typecheck no longer names still looked like coverage');
+
+  // And the positive control: the real tree is covered. Without this the two cases
+  // above could pass on a resolver that always says "no".
+  assert.equal(typecheckCoversWeb({ scripts: pkgScripts() }), true);
+  assert.ok(typecheckedSources({ scripts: pkgScripts() }).has('web'));
 });
 
 test('the declared prerequisite is not a chain step, and the chain is still exactly the seven suites', () => {

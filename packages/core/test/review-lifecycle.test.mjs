@@ -313,3 +313,90 @@ test('a stored outstanding-block list of null is a named refusal on the mutation
     'the close path must refuse the shape by name too',
   );
 });
+
+// Repair D2 of /workspace/BOARD44-F1REVIEW-1128Z.md. The review read a non-empty
+// `outstandingBlocks` on a closed issue as a second false clear. The branch's own
+// normative text decides it the other way, and this test states which text:
+//
+//   docs/skills/itinerary-antonina.md: "a block is cleared only by an approval
+//   naming a commit that no `request-changes` on that issue has named" and
+//   "... no unresolved review blocker remains";
+//   docs/skills/orchestrator.md, identically in
+//   skills/antonina-orchestrator/SKILL.md: "A `request-changes` verdict is a
+//   blocker: it stops the issue from being closed ... It can only be cleared by
+//   an approval naming a commit no `request-changes` on that issue has named"
+//   and "the board keeps every commit a block named, so no ordering of approvals
+//   and re-blocks can launder one out".
+//
+// Both sentences are about the same workflow and are only jointly consistent if
+// the two fields answer different questions: the verdict says whether the work
+// as it stands is cleared, and `outstandingBlocks` is the permanent record of
+// every commit a block named, which exists so that a later approval of that same
+// commit is still refused. So `request-changes(a)` then `approve(c)` clears the
+// blocker and the issue may close, and the board still names `a` -- which is the
+// record working, not a contradiction. The alternative reading (the review's
+// option (a)), gating the close on a set that never empties, would contradict
+// "cleared only by an approval naming a commit that no request-changes named" and
+// would make completion unreachable after any single block ever existed.
+// `reviewBlocksCompletion` therefore reads the verdict alone, and the field's own
+// comment has been corrected to say so.
+test('the block record is permanent and the verdict is what clears the block', async () => {
+  const server = fakeSkrynia();
+  const client = api(server);
+  await client.initialize();
+  const issue = await client.createIssue('Block, fix, approve the fix');
+  const blocked = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const fixed = 'cccccccccccccccccccccccccccccccccccccccc';
+
+  await client.recordReview({
+    number: issue.number, commit: blocked, verdict: 'request-changes',
+    reviewer: 'independent', rationale: 'recommend no merge',
+  });
+  assert.deepEqual((await client.getIssue(issue.number)).outstandingBlocks, [blocked]);
+  await assert.rejects(() => client.close(issue.number), /unresolved review blocker/);
+
+  await client.recordReview({
+    number: issue.number, commit: fixed, verdict: 'approve',
+    reviewer: 'independent', rationale: 'blocker addressed in a new commit',
+  });
+
+  // The verdict is the completion predicate, so this issue is not blocked.
+  assert.equal(reviewBlocksCompletion({
+    number: issue.number,
+    review: { commit: fixed, verdict: 'approve', reviewer: 'independent', rationale: 'ok', recordedAt: '2026-10-02T22:00:00.000Z' },
+    // The record is not the gate. Asserted directly, so that adding a second
+    // gate here would be caught rather than argued about.
+    outstandingBlocks: [blocked],
+  }), null);
+  assert.equal((await client.close(issue.number)).state, 'closed');
+
+  // And the record is what the override rule reads: the commit a block named
+  // can never become the commit of an approval, whatever else was recorded
+  // since. That is the property "keeps every commit a block named" buys, and it
+  // is what makes the permanent record worth carrying on a closed issue.
+  const later = await client.createIssue('A second issue, to re-block after the close');
+  await client.recordReview({
+    number: later.number, commit: blocked, verdict: 'request-changes',
+    reviewer: 'independent', rationale: 'recommend no merge',
+  });
+  await client.recordReview({
+    number: later.number, commit: fixed, verdict: 'approve',
+    reviewer: 'independent', rationale: 'blocker addressed in a new commit',
+  });
+  assert.deepEqual(
+    (await client.getIssue(later.number)).outstandingBlocks, [blocked],
+    'an approval of a new commit must not launder the earlier block out of the record',
+  );
+  await assert.rejects(
+    () => client.recordReview({
+      number: later.number, commit: blocked, verdict: 'approve',
+      reviewer: 'front', rationale: 'proceed anyway',
+    }),
+    /an approval cannot clear the review blocker recorded against commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/,
+  );
+
+  // The projection carries the same record, or the write path would rebuild a
+  // working issue whose block history has vanished.
+  const [summary] = await client.listIssueSummaries('open');
+  assert.deepEqual(summary.outstandingBlocks, [blocked]);
+});

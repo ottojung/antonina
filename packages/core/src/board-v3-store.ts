@@ -1737,10 +1737,19 @@ export class ShardedBoardStore {
       state: coreValue.state,
       createdAt: coreValue.createdAt,
       updatedAt: coreValue.updatedAt,
-      ...(coreValue.review === undefined || coreValue.review === null
+      // Only an absent key means "this build predates the field". A stored
+      // explicit null is refused by name by the readers below, because reading
+      // it as an absent review is a fail-open parse: it turns a blocked issue
+      // into one that has never been reviewed, which is the read `issue.close`
+      // and the completion predicate then answer "not blocked". No writer here
+      // produces the shape (`coreOf` omits the key) and the model refuses it
+      // (`isIssue` accepts `review` only when it is undefined or `isReview`),
+      // so a stored null is a shard written by something this build does not
+      // understand, and the refusal is the only safe answer.
+      ...(coreValue.review === undefined
         ? {}
         : { review: parseStoredReview(coreValue.review) }),
-      ...(coreValue.outstandingBlocks === undefined || coreValue.outstandingBlocks === null
+      ...(coreValue.outstandingBlocks === undefined
         ? {}
         : { outstandingBlocks: parseStoredOutstandingBlocks(coreValue.outstandingBlocks) }),
     };
@@ -3747,12 +3756,22 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     // blocker into a clear issue.
     const entries = value.entries.map((entry) => {
       if (!isRecord(entry)) throw new ShardedBoardStoreError('Antonina issue list page entry is malformed');
+      // The two fields are destructured out rather than spread and overridden,
+      // because a spread of the whole entry brings the stored value in first and
+      // a conditional override that decides to contribute nothing cannot take it
+      // back out: the entry then carries `review: null` or
+      // `outstandingBlocks: null` into a value typed `BoardReview | undefined`
+      // and `string[] | undefined`, where `issueFromSummary` iterates it and the
+      // mutation path dies of `summary.outstandingBlocks is not iterable`
+      // instead of naming the refusal. A stored null is refused here, exactly
+      // as the issue-snapshot reader refuses it: an absent key is the only
+      // shape that means "no review recorded", and a null is a value that failed
+      // to load, which must never read as one.
+      const { review: storedReview, outstandingBlocks: storedBlocks, ...rest } = entry;
       return {
-        ...(clone(entry) as unknown as IssueListSummary),
-        ...(entry.review === undefined || entry.review === null ? {} : { review: parseStoredReview(entry.review) }),
-        ...(entry.outstandingBlocks === undefined || entry.outstandingBlocks === null
-          ? {}
-          : { outstandingBlocks: parseStoredOutstandingBlocks(entry.outstandingBlocks) }),
+        ...(clone(rest) as unknown as IssueListSummary),
+        ...(storedReview === undefined ? {} : { review: parseStoredReview(storedReview) }),
+        ...(storedBlocks === undefined ? {} : { outstandingBlocks: parseStoredOutstandingBlocks(storedBlocks) }),
       };
     });
     // The stored page carries no revision: a field that differs on every

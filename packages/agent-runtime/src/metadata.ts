@@ -1,3 +1,4 @@
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 
 import { persistedAgentId, persistedInvocationId, persistedProcessInteger } from './process.js';
@@ -235,17 +236,73 @@ function canonicalBackendError(value: unknown): boolean {
   return true;
 }
 
+/**
+ * Board 197: the per-invocation owner token, as it appears in durable state.
+ *
+ * The reservation's `owner_pid`/`owner_start_ticks` are an identity the kernel
+ * can still corroborate only while the launching process is alive. A detached
+ * launch is reparented before the runner reaches its first durable write, so for
+ * that shape the token is the whole of the evidence, and it is therefore
+ * mandatory on the claim path rather than advisory. It is optional *in the
+ * record* only so a reservation written before tokens existed still parses: a
+ * record without one is refused at claim time, which is the fail-closed
+ * outcome, instead of becoming unreadable metadata everywhere.
+ *
+ * Exactly 32 bytes of entropy, lowercase hex, so a token is unguessable by
+ * anything that did not receive it, is not derivable from a pid, a generation or
+ * a process name, and cannot be confused with another invocation's: two
+ * invocations mint independent values.
+ */
+const OWNER_TOKEN_BYTES = 32;
+const OWNER_TOKEN_HEX = OWNER_TOKEN_BYTES * 2;
+const OWNER_TOKEN_PATTERN = /^[0-9a-f]+$/;
+
+/**
+ * The environment variable the launcher carries the token to the runner in.
+ *
+ * Beside argv on purpose: `/proc/<pid>/cmdline` is world-readable and
+ * `/proc/<pid>/environ` is 0400 and owner-readable, so of the two channels this
+ * runtime already had for handing a runner something, only the environment keeps
+ * it from every process on the host. It is also the channel this package already
+ * uses to carry identity to a process it later has to recognise
+ * (`envHasAgentMarker`, `envHasInvocationMarker` in process.ts).
+ */
+export const RUNNER_OWNER_TOKEN_ENV = 'ANTONINA_RUNNER_OWNER_TOKEN';
+
+export function runnerReservationOwnerToken(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length !== OWNER_TOKEN_HEX) return null;
+  return OWNER_TOKEN_PATTERN.test(value) ? value : null;
+}
+
+export function mintRunnerReservationOwnerToken(): string {
+  return randomBytes(OWNER_TOKEN_BYTES).toString('hex');
+}
+
+/**
+ * Compare two owner tokens without letting the answer depend on where the
+ * first differing character sits. Both sides are fixed-width hex by
+ * construction, but the lengths are checked first anyway so a short candidate
+ * cannot be made to run off the end of the buffer.
+ */
+export function ownerTokensEqual(recorded: unknown, presented: string | undefined): boolean {
+  const expected = runnerReservationOwnerToken(recorded);
+  if (expected === null) return false;
+  if (typeof presented !== 'string' || presented.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(expected, 'latin1'), Buffer.from(presented, 'latin1'));
+}
+
 function canonicalReservation(value: unknown): boolean {
   if (value === null) return true;
   if (typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   const fields = ['state', 'gen', 'owner_pid', 'owner_start_ticks', 'reserved_at', 'mode'] as const;
-  if (!exactKeys(record, fields)) return false;
+  if (!exactKeysWithOptional(record, fields, ['owner_token'])) return false;
   if (record.state !== 'reserved' && record.state !== 'claimed') return false;
   if (runnerGeneration(record.gen, 1) === null) return false;
   if (persistedProcessInteger(record.owner_pid, 1) === null) return false;
   if (!nullableInteger(record.owner_start_ticks, 0)) return false;
   if (persistedTimestamp(record.reserved_at) === null) return false;
+  if (record.owner_token !== undefined && runnerReservationOwnerToken(record.owner_token) === null) return false;
   return record.mode === 'new' || record.mode === 'continue';
 }
 

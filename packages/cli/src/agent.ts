@@ -48,6 +48,7 @@ import {
   activeRunnerFlag,
   deletePendingFlag,
   idleMeta,
+  mintRunnerReservationOwnerToken,
   nextPromptCount,
   pendingPrompt,
   persistedAgentCwd,
@@ -793,10 +794,20 @@ function writeRaw(context: AgentCommandContext, text: string): void {
   else context.io.stdout(text.replace(/\n$/, ''));
 }
 
+/**
+ * Board 197: the per-invocation owner token travels to the runner through the
+ * environment this function already builds, not through argv. `/proc/<pid>/cmdline`
+ * is world-readable, `/proc/<pid>/environ` is 0400 and owner-readable, so the
+ * environment is the only one of the two that does not publish the secret to
+ * every process on the host. The value is minted per invocation and is never
+ * reused, so a runner cannot present another invocation's token -- see
+ * `verifyReservationOwner` in packages/agent-runtime/src/runner.ts.
+ */
 function spawnRunner(
   agentId: string,
   mode: 'new' | 'continue',
   generation: number,
+  ownerToken: string,
   context: AgentCommandContext,
 ): void {
   const entryScript = context.entryScript ?? process.argv[1];
@@ -812,6 +823,7 @@ function spawnRunner(
         ...context.env,
         ANTONINA_AGENT_ID: agentId,
         ANTONINA_RUNNER_GEN: String(generation),
+        ANTONINA_RUNNER_OWNER_TOKEN: ownerToken,
       },
     },
   );
@@ -919,6 +931,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     action?: 'busy' | 'spawn' | 'reuse';
     mode?: 'new' | 'continue';
     generation?: number;
+    ownerToken?: string;
     interrupt?: boolean;
     recoverBusy?: boolean;
   } = {};
@@ -994,6 +1007,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
           decision.recoverBusy = true;
         }
         const generation = currentGeneration + 1;
+        const ownerToken = mintRunnerReservationOwnerToken();
         meta.active_runner = true;
         meta.runner_gen = generation;
         meta.runner_reservation = {
@@ -1003,10 +1017,16 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
           owner_start_ticks: currentProcessStartTicks(),
           reserved_at: Date.now() / 1000,
           mode,
+          // Board 197: minted here, in the same durable write that publishes the
+          // reservation, and only on a branch that goes on to spawn. It is the
+          // evidence a runner has of being this reservation's own process once
+          // this process is gone and the kernel has reparented it.
+          owner_token: ownerToken,
         };
         decision.action = 'spawn';
         decision.mode = mode;
         decision.generation = generation;
+        decision.ownerToken = ownerToken;
         return;
       }
       setActiveRunner(meta, false);
@@ -1045,6 +1065,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     beginInvocation(meta, prompt, now, promptCount, { logOffset: logSize(agentId, paths(context)) });
     meta.active_runner = true;
     meta.runner_gen = generation;
+    const ownerToken = mintRunnerReservationOwnerToken();
     meta.runner_reservation = {
       state: 'reserved',
       gen: generation,
@@ -1052,17 +1073,21 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
       owner_start_ticks: currentProcessStartTicks(),
       reserved_at: now,
       mode,
+      owner_token: ownerToken,
     };
     decision.action = 'spawn';
     decision.mode = mode;
     decision.generation = generation;
+    decision.ownerToken = ownerToken;
   }, paths(context));
 
   if (decision.action === 'busy' || decision.action === undefined) {
     throw new Error(`agent ${agentId} is still running; use --steer to redirect it`);
   }
   if (decision.action === 'spawn') {
-    spawnRunner(agentId, decision.mode!, decision.generation!, context);
+    // The token is minted only on the branches that reserve, so a spawn decision
+    // always has one; a reservation written without it could not be claimed.
+    spawnRunner(agentId, decision.mode!, decision.generation!, decision.ownerToken!, context);
     if (decision.recoverBusy) {
       throw new Error(`agent ${agentId} is recovering an already accepted prompt; this prompt was rejected`);
     }

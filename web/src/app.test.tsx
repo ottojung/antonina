@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Test safety: nothing here may read or mutate the operator's Antonina state.
@@ -17,6 +17,7 @@ import type { BoardAccessState } from '../../packages/core/src/api';
 // writes: the newest comment's time, or null when the issue has no comments.
 import { newestCommentAt } from '../../packages/core/src/api';
 import type { BrowserBoardSession } from './api';
+import { FEED_LIST_PAGES_LABEL, FEED_MORE_LABEL } from './ui-state';
 
 const STAMP = '2026-09-27T12:00:00.000Z';
 
@@ -198,6 +199,33 @@ describe('the board app, mounted', () => {
     // The issue pane is the feed pane, not the list pane: the tab really moved.
     expect(screen.getByRole('complementary', { name: 'Board activity feed' })).toBeDefined();
     expect(screen.queryByRole('complementary', { name: 'Shared issue list' })).toBeNull();
+  });
+
+  it('writes the feed page it walks into the address, so the page survives a reload', async () => {
+    // The write half of the same seam, end to end through the real shell: the
+    // feed view reports the page it just revealed, and the address carries it
+    // as `?feed=`. Without this the field parsed and serialized but nothing in
+    // the shell ever put a value there, so `?feed=2` could not be reached by
+    // navigating — only by typing, which no reader does.
+    const first = feedEntry('issue-created', 1);
+    const older = feedEntry('comment-added', 1, { author: 'Lubko', body: 'older note' });
+    session.readFeed.mockResolvedValueOnce(feedPage([first], 'v1.token')).mockResolvedValueOnce(feedPage([older]));
+
+    const container = await mountApp();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'feed' })); });
+    await screen.findByRole('list', { name: 'Board activity, newest first' });
+    expect(window.location.search).toBe('?view=feed');
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: FEED_MORE_LABEL })); });
+
+    await waitFor(() => expect(window.location.search).toBe('?view=feed&feed=2'));
+    expect(session.readFeed).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('older note');
+    // And the numbered control names the page the address just named, so the
+    // position a reader sees and the position a link carries cannot disagree.
+    const nav = screen.getByRole('navigation', { name: FEED_LIST_PAGES_LABEL });
+    expect(within(nav).getByRole('status').textContent).toBe('Page 2 of 2');
+    expect(within(nav).getByRole('button', { name: 'Feed page 2' }).getAttribute('aria-current')).toBe('page');
   });
 
   it('reports a read that failed as the app own error, with a way to retry', async () => {

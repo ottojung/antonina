@@ -711,8 +711,65 @@ export async function readFeedFirstPage(readFeed: FeedRead): Promise<BoardFeedPa
  * exhausted.
  */
 export async function appendFeedPage(readFeed: FeedRead, current: BoardFeedPage, cursor: string): Promise<BoardFeedPage> {
-  const older = await readFeed({ limit: DEFAULT_FEED_LIMIT, cursor });
+  const older = await readFeedPage(readFeed, cursor);
   return { ...older, entries: [...current.entries, ...older.entries] };
+}
+
+/**
+ * One page back, exactly as the projection returned it, unmerged.
+ *
+ * The walk is kept as the pages themselves rather than as one growing array, so
+ * a page the reader has already been given can be shown again by number without
+ * another read. `appendFeedPage` is this read and a merge, and is what a caller
+ * that only wants to walk forward uses.
+ */
+export async function readFeedPage(readFeed: FeedRead, cursor: string): Promise<BoardFeedPage> {
+  return readFeed({ limit: DEFAULT_FEED_LIMIT, cursor });
+}
+
+/** What this run of pages navigates, so the control announces the feed, not the issue list. */
+export const FEED_LIST_PAGES_LABEL = 'Feed pages';
+
+export const FEED_PAGE_PREVIOUS = 'Previous feed page';
+export const FEED_PAGE_NEXT = 'Next feed page';
+
+/**
+ * The feed's page number, made from the addressable field and the pages read.
+ *
+ * The core feed is a cursor stream, not an offset stream, so this is not an
+ * offset: it is clamped to a page the reader has actually been given, because
+ * `?feed=99` on a fresh link names no page and the newest page is the only
+ * honest thing to render.
+ */
+export function clampFeedPage(page: number, walked: number): number {
+  const pages = Math.max(walked, 1);
+  if (!Number.isFinite(page)) return 1;
+  return Math.min(Math.max(Math.trunc(page), 1), pages);
+}
+
+/** The token that continues `page` — the one the projection issued for that page — or `null`. */
+export function feedPageNextCursor(pages: readonly BoardFeedPage[], page: number): string | null {
+  return pages[page - 1]?.nextCursor ?? null;
+}
+
+/** The entries pages 1..`page` hold, newest first, in the order they were read. */
+export function feedPageEntries(pages: readonly BoardFeedPage[], page: number): BoardFeedEntry[] {
+  return pages.slice(0, page).flatMap((each) => each.entries);
+}
+
+/** The whole feed's size, per the newest page the projection returned. */
+export function feedPageTotal(pages: readonly BoardFeedPage[]): number {
+  return pages[0]?.total ?? 0;
+}
+
+/** Whether there is more than one page to number, so a one-page feed draws no control. */
+export function hasFeedPages(walked: number): boolean {
+  return walked > 1;
+}
+
+/** The position line, so paging the feed says where the reader is rather than silently swapping rows. */
+export function feedPageRange(page: number, walked: number): string {
+  return `Page ${page} of ${walked}`;
 }
 
 /**

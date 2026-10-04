@@ -114,24 +114,58 @@ describe('the feed container, mounted', () => {
     expect(screen.queryByText(FEED_EMPTY.title)).toBeNull();
   });
 
-  it('asks for older entries with the token the backend issued and appends what comes back', async () => {
+  it('asks for older entries with the token the backend issued and shows that page alone', async () => {
+    // The read still walks forward by the backend's own token, but the page it
+    // reads back becomes *the* page on screen. The inherited version of this
+    // test asserted two rows after two one-entry pages; that assertion encoded
+    // the accumulation board 173 forbids, and with one-entry pages it could not
+    // have observed the page size at all.
     const first = entry('comment-added', 3);
     const older = entry('issue-created', 2);
     const { read, seen } = reader([page([first], 'v1.token', 2), page([older], null, 2)]);
 
     const { container } = mount(read);
     await screen.findByRole('list', { name: 'Board activity, newest first' });
+    expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1);
 
     const more = screen.getByRole('button', { name: FEED_MORE_LABEL });
     await act(async () => { fireEvent.click(more); });
 
-    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(2));
+    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1));
     expect(seen).toEqual([{ limit: DEFAULT_FEED_LIMIT }, { limit: DEFAULT_FEED_LIMIT, cursor: 'v1.token' }]);
     const rows = Array.from(container.querySelectorAll('[data-feed-id]')).map((row) => row.getAttribute('data-feed-id'));
-    // Appended below what is already shown; nothing is re-sorted, and the
-    // exhausted token takes the control away again.
-    expect(rows).toEqual([first.id, older.id]);
+    // The page just read replaces the one before it: no re-sort, no append, and
+    // the exhausted token takes the forward control away again.
+    expect(rows).toEqual([older.id]);
     expect(screen.queryByRole('button', { name: FEED_MORE_LABEL })).toBeNull();
+  });
+
+  it('never holds more than one real page in the document, however far the walk goes', async () => {
+    // The page size is the board's own: `DEFAULT_FEED_LIMIT` is 50, so pages of
+    // 1 (as the rest of this file's small fixtures use) cannot observe this at
+    // all. Four real 50-entry pages over a 180-entry feed: after walking three
+    // pages forward the document must hold 50 rows, not 150.
+    const realPage = (from: number) => page(
+      Array.from({ length: DEFAULT_FEED_LIMIT }, (_, offset) => entry('issue-created', from - offset)),
+      `v1.page.${from}`,
+      180,
+    );
+    const { read } = reader([realPage(150), realPage(100), realPage(50), realPage(0)]);
+
+    const { container } = render(<AddressedFeed read={read} address={1} report={() => {}} />);
+    await screen.findByRole('list', { name: 'Board activity, newest first' });
+    expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(DEFAULT_FEED_LIMIT);
+
+    for (let step = 0; step < 2; step += 1) {
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: FEED_MORE_LABEL })); });
+      await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(DEFAULT_FEED_LIMIT));
+    }
+
+    expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(DEFAULT_FEED_LIMIT);
+    // Page 3's oldest entry is on screen; page 1's newest entry is not, so the
+    // document is not holding the pages already visited.
+    expect(container.textContent).toContain('Issue 50');
+    expect(container.textContent).not.toContain('Issue 150');
   });
 
   it('re-reads when a verified board read bumps the generation', async () => {
@@ -231,15 +265,18 @@ describe('the feed page the address names', () => {
     await act(async () => { fireEvent.click(more); });
 
     // Walking forward reveals the page it just read and reports that page to
-    // the address, which is what makes `?feed=2` a link a reader can send.
-    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(2));
+    // the address, which is what makes `?feed=2` a link a reader can send. The
+    // page drawn is the one just read, alone: one entry, not both.
+    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1));
     expect(reported).toEqual([2]);
+    expect(container.textContent).toContain('Issue 2');
+    expect(container.textContent).not.toContain('Issue 3');
     // The address now says what the view reported, so the two agree.
     await act(async () => { rerender(<AddressedFeed read={read} address={2} report={report} />); });
-    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(2));
+    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1));
 
     // The field alone: `?feed=1` arrives as a prop change, with no read and no
-    // click. The older entry must leave the document.
+    // click. The older entry must leave the document and the newest return.
     await act(async () => { rerender(<AddressedFeed read={read} address={1} report={report} />); });
     await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1));
     expect(container.textContent).toContain('Issue 3');
@@ -247,9 +284,9 @@ describe('the feed page the address names', () => {
     // And forward again, from the field, with no further read: the pages are
     // already in hand, so choosing a page number is never another read.
     await act(async () => { rerender(<AddressedFeed read={read} address={2} report={report} />); });
-    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(2));
+    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1));
     const rows = Array.from(container.querySelectorAll('[data-feed-id]')).map((row) => row.getAttribute('data-feed-id'));
-    expect(rows).toEqual([newest.id, older.id]);
+    expect(rows).toEqual([older.id]);
     expect(seen).toHaveLength(2);
   });
 
@@ -282,7 +319,9 @@ describe('the feed page the address names', () => {
     // The walk reached the end of what the projection would hand over, so the
     // control takes the forward step away and only going back is left.
     expect((within(nav).getByRole('button', { name: FEED_PAGE_NEXT }) as HTMLButtonElement).disabled).toBe(true);
-    expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(3);
+    expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1);
+    expect(container.textContent).toContain('Issue 2');
+    expect(container.textContent).not.toContain('Issue 4');
   });
 
   it('clamps a page the walk has not reached to the newest page rather than rendering nothing', async () => {

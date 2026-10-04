@@ -752,9 +752,17 @@ export function feedPageNextCursor(pages: readonly BoardFeedPage[], page: number
   return pages[page - 1]?.nextCursor ?? null;
 }
 
-/** The entries pages 1..`page` hold, newest first, in the order they were read. */
+/**
+ * The entries of page `page` alone — one page, never the pages before it.
+ *
+ * Board issue 173 requires one page rendered at a time and forbids the DOM
+ * holding every page already visited. So this selects a single page and nothing
+ * merges: page 3 draws page 3's entries, not pages 1+2+3. A caller that wants
+ * the walk so far is `appendFeedPage`, which merges pages deliberately; the
+ * render path must not use it.
+ */
 export function feedPageEntries(pages: readonly BoardFeedPage[], page: number): BoardFeedEntry[] {
-  return pages.slice(0, page).flatMap((each) => each.entries);
+  return pages[page - 1]?.entries ?? [];
 }
 
 /** The whole feed's size, per the newest page the projection returned. */

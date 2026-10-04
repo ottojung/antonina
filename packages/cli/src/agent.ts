@@ -67,6 +67,7 @@ import {
 } from '../../agent-runtime/src/metadata.js';
 import { normalizeAgentId } from '../../agent-runtime/src/process.js';
 import {
+  MetadataReadError,
   agentDir,
   agentsDir,
   createAgentDirectory,
@@ -171,6 +172,20 @@ function requireMeta(agentId: string, context: AgentCommandContext): AgentMetada
 async function reconcileAgent(agentId: string, context: AgentCommandContext): Promise<AgentMetadata | null> {
   const observed = readMeta(agentId, paths(context));
   if (observed === null) return null;
+  return await reconcileMeta(agentId, observed, context);
+}
+
+/**
+ * The reconcile half of {@link reconcileAgent}, split out so a sweep that has
+ * already read a record does not read it a second time -- and, more to the
+ * point, so the sweep can catch the *read* refusal and still hand an already
+ * validated record here (board 198). Same work either way.
+ */
+async function reconcileMeta(
+  agentId: string,
+  observed: AgentMetadata,
+  context: AgentCommandContext,
+): Promise<AgentMetadata | null> {
   if (persistedLifecycleState(observed) !== 'running') return observed;
   if (!reconcileDeadMeta(observed)) return observed;
   return updateMeta(agentId, (meta) => { reconcileDeadMeta(meta); }, paths(context));
@@ -184,6 +199,57 @@ function agentIds(context: AgentCommandContext): string[] {
       .sort();
   } catch {
     return [];
+  }
+}
+
+type SweepRead =
+  | { readable: true; meta: AgentMetadata | null }
+  | { readable: false; agentId: string; reason: string };
+
+/**
+ * Board 198: one unreadable record must not make the whole inventory unreadable.
+ *
+ * `readMeta` is strict by design and stays strict -- a record this build cannot
+ * validate is never interpreted, never rewritten and never acted on. What
+ * changes is only who absorbs the refusal. A command that acts on *one named
+ * agent* still lets the refusal propagate (`requireMeta`, and every
+ * `reconcileAgent` call in a single-agent command), because there the operator
+ * asked about that agent and the honest answer is that it cannot be answered. A
+ * command that *sweeps every record* (`list`, `clean`) is asking about the
+ * set, and answering about the set from zero of its members because one
+ * directory is unreadable is the defect this isolates: the operator is left
+ * with an inventory that shows nothing and a `clean` that cannot run at all,
+ * and the readable agents become unreachable through the very commands meant
+ * to reach them.
+ *
+ * The refusal is never swallowed. The offending agent is reported by id with
+ * the reason the validator gave, so the inventory names what it could not
+ * read rather than silently dropping it. Nothing here is a schema escape
+ * hatch: `validateAgentMetadata` is unchanged, no field is added to the
+ * tolerated set, and no value from an unvalidated record reaches any output.
+ * Only `MetadataReadError` is absorbed -- a programming error still propagates
+ * instead of being reported as corrupt state.
+ *
+ * Precedent for the shape, in the same product: a sweep whose one member is
+ * malformed does not abort -- `docs/intent-records/hosts.md:45`, "a single
+ * malformed argument never aborts a sweep".
+ */
+function readMetaForSweep(agentId: string, context: AgentCommandContext): SweepRead {
+  try {
+    return { readable: true, meta: readMeta(agentId, paths(context)) };
+  } catch (error) {
+    if (!(error instanceof MetadataReadError)) throw error;
+    return { readable: false, agentId, reason: error.message };
+  }
+}
+
+function reportUnreadableAgents(
+  unreadable: ReadonlyArray<{ agentId: string; reason: string }>,
+  context: AgentCommandContext,
+  verdict: 'is not listed' | 'was retained',
+): void {
+  for (const entry of unreadable) {
+    context.io.stderr(`antonina: agent ${entry.agentId} was not read and ${verdict}: ${entry.reason}`);
   }
 }
 
@@ -426,8 +492,18 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
   if (!parsed.values.has('--page')) throw new UsageError('list: --page is required');
   const page = positiveInteger(parsed.values.get('--page'), '--page');
   const entries: Array<{ agentId: string; meta: AgentMetadata; state: string; summary: ReturnType<typeof summary> }> = [];
+  const unreadable: Array<{ agentId: string; reason: string }> = [];
   for (const agentId of agentIds(context)) {
-    const meta = await reconcileAgent(agentId, context);
+    const read = readMetaForSweep(agentId, context);
+    if (!read.readable) {
+      // Board 198: recorded and named, not thrown. The rest of the inventory
+      // is still this command's job; the unreadable record is still the
+      // operator's to hear about.
+      unreadable.push({ agentId: read.agentId, reason: read.reason });
+      continue;
+    }
+    const observed = read.meta;
+    const meta = observed === null ? null : await reconcileMeta(agentId, observed, context);
     if (meta === null) continue;
     const state = deriveState(meta);
     if (!matchesFilters(parsed, state)) continue;
@@ -439,6 +515,7 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
   if (parsed.flags.has('--json')) {
     context.io.stdout(stableJson({
       agents: selected.map(({ agentId, state, summary: item }) => listEntryJson(agentId, state, item)),
+      unreadable: unreadable.map(({ agentId, reason }) => ({ id: agentId, reason })),
     }));
   } else if (selected.length === 0) {
     context.io.stdout('(no agents)');
@@ -455,6 +532,7 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
       ].join('  '));
     }
   }
+  reportUnreadableAgents(unreadable, context, 'is not listed');
   return EXIT_OK;
 }
 
@@ -1339,8 +1417,21 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
   const configured = parsed.values.get('--days') ?? context.env.ANTONINA_AGENT_RETENTION_DAYS ?? String(DEFAULT_RETENTION_DAYS);
   const days = nonnegativeInteger(configured, '--days');
   const cutoff = Date.now() / 1000 - days * 86_400;
+  // Board 198: the retention sweep reads every record, so it isolates each read
+  // the way `list` does. An unreadable record is *retained and named*, never
+  // deleted: its age is exactly what cannot be established, so a record this
+  // build cannot read is not a record this build may decide has expired. The
+  // sweep therefore fails closed in the only direction that can lose data, and
+  // the operator is told which record was withheld instead of watching the
+  // command abort before it names anything.
+  const unreadable: Array<{ agentId: string; reason: string }> = [];
   const candidates = agentIds(context).filter((agentId) => {
-    const meta = readMeta(agentId, paths(context));
+    const read = readMetaForSweep(agentId, context);
+    if (!read.readable) {
+      unreadable.push({ agentId: read.agentId, reason: read.reason });
+      return false;
+    }
+    const meta = read.meta;
     if (meta === null || !retentionEligibleState(meta)) return false;
     const anchor = retentionAnchor(meta);
     return anchor !== null && anchor < cutoff;
@@ -1376,6 +1467,7 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
     removeAgentDirectory(agentId, paths(context));
     context.io.stdout(`deleted agent ${agentId}`);
   }
+  reportUnreadableAgents(unreadable, context, 'was retained');
   return EXIT_OK;
 }
 

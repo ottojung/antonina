@@ -771,7 +771,7 @@ test('agent ids canonicalize at every CLI boundary and preserve exit-code distin
   assert.equal(run(['agent', 'status', '--id', 'deadbeef', '--json'], env).status, 3);
 });
 
-test('list and status fail closed on malformed or old metadata', (t) => {
+test('status fails closed on malformed or old metadata, and list names the unreadable record', (t) => {
   const { root, work, env } = fixture(t);
   assert.equal(run(['agent', 'new', '--id', 'cab1e', '--cwd', work], env).status, 0);
   const path = metaPath(root, 'cab1e');
@@ -784,9 +784,18 @@ test('list and status fail closed on malformed or old metadata', (t) => {
   assert.equal(status.status, 1);
   assert.match(status.stderr, /created_at is malformed/);
 
+  // Board 198: the record is still refused and is still named with the same
+  // reason, but a sweep no longer dies on one member -- the inventory is
+  // served (exit 0) and the unreadable agent is reported as data rather than
+  // thrown. Before 198 this asserted exit 1, which is the defect: one
+  // unreadable directory made every readable agent unreachable through the
+  // commands meant to reach them.
   const listed = run(['agent', 'list', '--page', '1', '--json'], env);
-  assert.equal(listed.status, 1);
-  assert.match(listed.stderr, /created_at is malformed/);
+  assert.equal(listed.status, 0, listed.stderr);
+  const payload = JSON.parse(listed.stdout);
+  assert.equal(payload.agents.length, 0);
+  assert.deepEqual(payload.unreadable.map((entry) => entry.id), ['cab1e']);
+  assert.match(payload.unreadable[0].reason, /created_at is malformed/);
 
   meta = JSON.parse(readFileSync(path, 'utf8'));
   meta.created_at = 1;

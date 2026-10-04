@@ -411,6 +411,58 @@ export function buildAgentCommand(
 }
 
 
+export interface BackendCapabilities {
+  /**
+   * Whether this backend can launch an invocation in a directory the operator
+   * named. OpenCode can: every invocation is a fresh process, `buildAgentCommand`
+   * tells it `--dir` and the runner spawns it with `spawn({cwd})` on the same
+   * value. A backend that cannot must refuse a declaration *by name*, before
+   * any write, rather than running the invocation somewhere else and reporting
+   * the declared directory as if it had honoured it.
+   */
+  invocation_cwd: boolean;
+}
+
+/**
+ * Test-only override that makes the configured backend report a capability it
+ * does not have, so the refusal path can be driven from outside the package.
+ *
+ * It exists only because `invocation_cwd` is a constant `true`: with one backend
+ * and no way to make the answer differ, no test could reach a refusal, and
+ * "unreachable" is exactly how a divergence between entry points hides.
+ *
+ * Deliberately narrow: only the exact value `'1'` withdraws a capability, and
+ * every other value (including unset) leaves the backend's real answer alone,
+ * so no ordinary environment can reach a different answer. It is a test seam in
+ * the same sense and for the same reason as `ANTONINA_OPENCODE_BIN`: it exists
+ * as a production parameter because there is exactly one backend seam and no
+ * test can reach the other side of it without one. It is not a user setting.
+ */
+const TEST_WITHDRAW_INVOCATION_CWD_ENV = 'ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD';
+
+export function backendCapabilities(
+  env: Record<string, string | undefined> = process.env,
+): BackendCapabilities {
+  if (env[TEST_WITHDRAW_INVOCATION_CWD_ENV] === '1') return { invocation_cwd: false };
+  return { invocation_cwd: true };
+}
+
+/**
+ * Whether a capability answer may be relied on, failing closed.
+ *
+ * Only the literal boolean `true` counts as "this backend can honour a named
+ * directory". Anything else -- absent, `null`, a string, a capability this
+ * runtime does not know the meaning of, a backend that reported a shape it was
+ * never asked for -- is treated as "cannot", because the alternative is to run
+ * an invocation somewhere the operator did not ask for and report the declared
+ * directory as though it had been honoured. An unrecognised capability must
+ * never be read as permission.
+ */
+export function honoursInvocationCwd(capabilities: unknown): boolean {
+  if (typeof capabilities !== 'object' || capabilities === null || Array.isArray(capabilities)) return false;
+  return (capabilities as Record<string, unknown>).invocation_cwd === true;
+}
+
 export function classifyBackendFailure(
   path: string,
   start: number,

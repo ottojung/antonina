@@ -1828,6 +1828,101 @@ test('--cwd is refused while a front exists, and changes nothing', async (t) => 
   );
 });
 
+// Board issue 178, the observation half. `cwd` is a declaration and
+// `invocation_cwd` is an observation of where a front was actually launched.
+// Reporting only the declaration made `status` a statement about intent dressed
+// as a location, so a declared directory that no front has ever run in must
+// report as such -- which is the only reading under which a later report that
+// names a directory means anything.
+test('a declared directory no front has run in is reported as never ran', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '0b5e', '--cwd', work], env).status, 0);
+
+  const status = run(['agent', 'status', '--id', '0b5e', '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  const parsed = JSON.parse(status.stdout);
+  assert.equal(parsed.cwd, work, 'the declaration is the directory that was declared');
+  assert.equal(
+    parsed.invocation_cwd,
+    null,
+    'nothing has been launched, so nothing may be observed',
+  );
+  assert.match(run(['agent', 'status', '--id', '0b5e'], env).stdout, /^ran in:\s+never ran$/m);
+
+  const listed = run(['agent', 'list', '--page', '1', '--json'], env);
+  assert.equal(listed.status, 0, listed.stderr);
+  const entry = JSON.parse(listed.stdout).agents.find((agent) => agent.id === '0b5e');
+  assert.equal(entry.invocation_cwd, null);
+
+  // And the backend has not run at all, so there is nothing it could have been
+  // launched in.
+  assert.deepEqual(fixtureInvocations(env), []);
+});
+
+// The other half: once a front has actually run, the observation names the
+// directory the *backend itself* reported, not the declaration. This is the
+// assertion that would fail if `ran in:` were reading `cwd`: here the two are
+// written by different actors at different times, and the declaration is
+// rewritten between them by a second run in a different directory.
+test('the observation names the directory the backend actually ran in', async (t) => {
+  const handle = fixture(t);
+  const { root, env } = handle;
+  const first = join(root, 'first-worktree');
+  const second = join(root, 'second-worktree');
+  mkdirSync(first);
+  mkdirSync(second);
+  assert.equal(run(['agent', 'new', '--id', '0b5f', '--cwd', first], env).status, 0);
+
+  assert.equal(
+    run(['agent', 'run', '--id', '0b5f', '--detach', '--prompt', 'one'], env).status,
+    0,
+  );
+  const ran = await waitFor(
+    root,
+    '0b5f',
+    (meta) => meta.state === 'succeeded' && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(ran.prompt_count, 1, 'the prompt must really have been delivered');
+  assert.equal(ran.invocation_cwd, first);
+  // The backend's own account of where it was, from its log, is the control the
+  // record is checked against.
+  assert.match(
+    readFileSync(outputLogPath(root, '0b5f'), 'utf8'),
+    new RegExp(`FAKE_CWD:${first}\\n`),
+  );
+
+  // A second run in a different directory rewrites the declaration, and the
+  // observation follows the real launch rather than being written at acceptance.
+  assert.equal(
+    run(['agent', 'run', '--id', '0b5f', '--cwd', second, '--detach', '--prompt', 'two'], env).status,
+    0,
+  );
+  const moved = await waitFor(
+    root,
+    '0b5f',
+    (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(moved.cwd, second);
+  assert.equal(moved.invocation_cwd, second);
+
+  const parsed = JSON.parse(run(['agent', 'status', '--id', '0b5f', '--json'], env).stdout);
+  assert.equal(parsed.invocation_cwd, second);
+  assert.match(
+    run(['agent', 'status', '--id', '0b5f'], env).stdout,
+    new RegExp(`^ran in:\\s+${second}$`, 'm'),
+  );
+  // Every launch of this front was handed the same directory the backend ran in.
+  for (const call of fixtureInvocations(env)) {
+    assert.ok(
+      call.includes(`--dir ${first} `) || call.includes(`--dir ${second} `),
+      `a launch named a directory the front did not declare: ${JSON.stringify(call)}`,
+    );
+  }
+  assertFixtureInvoked(handle, 'two');
+});
+
 // run --cwd is a real option, validated exactly as `new --cwd` is: a path that
 // is not an existing directory is refused before any state is written.
 test('run refuses a --cwd that is not an existing directory', (t) => {

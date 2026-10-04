@@ -50,6 +50,7 @@ import {
   pendingPrompt,
   persistedAgentCwd,
   persistedControlField,
+  persistedInvocationCwd,
   persistedLifecycleState,
   persistedNativeSessionId,
   persistedRunLogOffset,
@@ -201,6 +202,7 @@ function summary(meta: AgentMetadata): {
   finished_at: number | null;
   prompts: number;
   cwd: string | null;
+  invocation_cwd: string | null;
   title: string | null;
 } {
   return {
@@ -208,7 +210,12 @@ function summary(meta: AgentMetadata): {
     last_activity_at: canonicalTimestamp(meta, 'last_activity_at', false)!,
     finished_at: canonicalTimestamp(meta, 'finished_at', true),
     prompts: meta.prompt_count as number,
+    // `cwd` is the declared working directory; `invocation_cwd` is the
+    // directory the current or most recent invocation was launched in. Board
+    // issue 178: reporting only the declaration made `status` a statement
+    // about intent dressed as a location.
     cwd: persistedAgentCwd(meta),
+    invocation_cwd: persistedInvocationCwd(meta),
     title: meta.title as string | null,
   };
 }
@@ -219,6 +226,7 @@ function listEntryJson(agentId: string, state: string, item: ReturnType<typeof s
     state,
     prompts: item.prompts,
     cwd: item.cwd,
+    invocation_cwd: item.invocation_cwd,
     title: item.title,
     created_at: item.created_at,
     last_activity_at: item.last_activity_at,
@@ -581,6 +589,11 @@ function statusJson(
     pgid: meta.pgid,
     runner_pid: meta.runner_pid,
     cwd: item.cwd,
+    // Board issue 178: where this front actually launched, which is not always
+    // the declared directory, and which for a record written before the
+    // observation existed honestly reports "never observed" rather than
+    // inventing one from the declaration.
+    invocation_cwd: item.invocation_cwd,
     title: item.title,
     created_at: item.created_at,
     started_at: canonicalTimestamp(meta, 'started_at', true),
@@ -629,6 +642,10 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
     // created the agent, so an undeclared agent says so rather than naming a
     // directory nobody chose.
     context.io.stdout(`cwd:        ${shown(status.cwd, 'undeclared')}`);
+    // Where the front actually launched. `never ran` is a fact, not a missing
+    // value: an agent with a declared directory that has never been launched in
+    // it is not the same agent as one that was, and one line cannot say both.
+    context.io.stdout(`ran in:     ${shown(status.invocation_cwd, 'never ran')}`);
     context.io.stdout(`created:    ${shown(status.created_at)}`);
     context.io.stdout(`started:    ${shown(status.started_at)}`);
     context.io.stdout(`finished:   ${shown(status.finished_at)}`);

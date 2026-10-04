@@ -4,6 +4,7 @@ import { closeSync, fstatSync, openSync } from 'node:fs';
 import { constants } from 'node:os';
 
 import {
+  backendCapabilities,
   backendRetryDelay,
   buildAgentCommand,
   classifyBackendFailure,
@@ -11,6 +12,7 @@ import {
   describeBackendDeath,
   describeSignalDeath,
   discoverSessionId,
+  honoursInvocationCwd,
   lastLogLineExcerpt,
   type BackendError,
 } from './backend.js';
@@ -40,7 +42,7 @@ import {
   runnerReservationState,
   type AgentMetadata,
 } from './metadata.js';
-import { procStartTicks, signalMarkedInvocationProcesses } from './process.js';
+import { procStartTicks, persistedProcessInteger, signalMarkedInvocationProcesses } from './process.js';
 import {
   logPath,
   logSize,
@@ -53,6 +55,15 @@ import {
 const CONTROL_POLL_MS = 200;
 const CONTROL_GRACE_MS = 10_000;
 
+/**
+ * The identity the launcher stamps on the runner it spawns, beside the argv it
+ * already passes. Read only as corroboration for a reservation whose recorded
+ * owner is no longer live, and never as a substitute for a verified identity
+ * where one is available: see `verifyReservationOwner`.
+ */
+const RUNNER_AGENT_ENV = 'ANTONINA_AGENT_ID';
+const RUNNER_GENERATION_ENV = 'ANTONINA_RUNNER_GEN';
+
 export interface RunnerOptions extends StatePathsOptions {
   env?: Record<string, string | undefined>;
   /**
@@ -63,6 +74,16 @@ export interface RunnerOptions extends StatePathsOptions {
    * launch.
    */
   capacity?: HostCapacityReadOptions;
+  /**
+   * Seam for the `/proc` reading that captures a just-spawned child's identity.
+   * Production leaves it unset so the reading is the real one, which returns
+   * `null` only when the process is genuinely gone from `/proc` by the time the
+   * runner looks. Tests point it at `() => null` to drive the one branch that
+   * is otherwise a race to lose: a backend that finishes before its identity
+   * can be captured. It cannot grant a launch: the value it returns is the
+   * value `recordSpawned` publishes and every later control path verifies.
+   */
+  childStartTicks?: (pid: number) => number | null;
 }
 
 /** The OOM bracket captured around one backend spawn. */
@@ -149,6 +170,58 @@ function childResult(child: ChildProcess, agentId: string, options: RunnerOption
   });
 }
 
+/**
+ * What evidence the claiming runner has that the reservation it is about to
+ * consume was written by whoever launched it.
+ *
+ * `self` -- the reservation names this process as its owner. A pid that
+ * resolves to this very process is this process, so there is no second identity
+ * it could be confused with.
+ *
+ * `parent` -- the reservation names the process that spawned this one, and the
+ * recorded start time matches that live process in `/proc`. Pid plus start time,
+ * never a pid alone (a recycled pid is a different process) and never a process
+ * name (a name is not an identity, and is not consulted anywhere in this
+ * package).
+ *
+ * `declared` -- the recorded owner names a process that is no longer live and
+ * is not this process's parent. This is the ordinary detached launch: the CLI
+ * writes the reservation, spawns the runner detached, and exits, so by the time
+ * the runner reaches its first durable write the kernel has already reparented
+ * it and there is no parent link left to verify. What remains is checked
+ * instead: this runner cannot have existed before the recorded owner started,
+ * and the launcher stamped this agent id and generation on the runner's own
+ * environment beside the argv it passed.
+ *
+ * `refused` -- anything else, including a reservation whose recorded owner is a
+ * *different* live process, a recorded start time that does not match the live
+ * process it names, and any of the `declared` conditions failing.
+ */
+type OwnerIdentityVerdict = 'self' | 'parent' | 'declared' | 'refused';
+
+function verifyReservationOwner(
+  reservation: Record<string, unknown>,
+  agentId: string,
+  generation: number,
+  env: Record<string, string | undefined>,
+): OwnerIdentityVerdict {
+  const ownerPid = persistedProcessInteger(reservation.owner_pid, 1);
+  const ownerStart = persistedProcessInteger(reservation.owner_start_ticks, 0);
+  if (ownerPid === null || ownerStart === null) return 'refused';
+  if (ownerPid === process.pid) return 'self';
+  const selfTicks = procStartTicks(process.pid);
+  if (selfTicks === null) return 'refused';
+  if (ownerPid === process.ppid) {
+    if (ownerStart < 1) return 'refused';
+    return procStartTicks(ownerPid) === ownerStart ? 'parent' : 'refused';
+  }
+  if (procStartTicks(ownerPid) !== null) return 'refused';
+  if (selfTicks <= ownerStart) return 'refused';
+  if (env[RUNNER_AGENT_ENV] !== agentId) return 'refused';
+  if (env[RUNNER_GENERATION_ENV] !== String(generation)) return 'refused';
+  return 'declared';
+}
+
 async function claimRunner(
   agentId: string,
   mode: 'new' | 'continue',
@@ -164,6 +237,14 @@ async function claimRunner(
     const record = reservation as Record<string, unknown>;
     if (runnerGeneration(record.gen, 1) !== generation) return;
     if (runnerReservationMode(record) !== mode) return;
+    // Board 197: a reservation is authority, and authority is claimed against
+    // the identity that wrote it. Before this, a claim checked the
+    // reservation's generation and mode and nothing else, so any process that
+    // could name an agent id and a generation could consume any reservation
+    // with that generation -- including one whose owner was alive and was
+    // somebody else entirely. The check is pid plus start time against live
+    // `/proc`, never a name.
+    if (verifyReservationOwner(record, agentId, generation, options.env ?? process.env) === 'refused') return;
     meta.runner_pid = process.pid;
     meta.runner_start_time = procStartTicks(process.pid);
     meta.runner_reservation = { ...record, state: 'claimed' };
@@ -438,10 +519,63 @@ async function rememberFreshSession(agentId: string, options: RunnerOptions): Pr
   }, options);
 }
 
+interface LaunchAuthorization {
+  allowed: boolean;
+  reason: string | null;
+}
+
+/**
+ * The launch gate, re-decided at the only place a launch can happen.
+ *
+ * The capability gate the CLI applies at acceptance time (`requireInvocationCwdCapability`
+ * in `packages/cli`) is an acceptance-time decision about a *declaration*: at
+ * that moment nothing has been spawned, so a refusal writes nothing and costs
+ * nothing. Board 197 is that the decision was never taken again afterwards. The
+ * spawn path read the record, built a command from the declared directory and
+ * called `spawn`, so a reservation accepted while the capability held could be
+ * launched after it was withdrawn, and the backend ran in a directory whose
+ * invocation-cwd capability no backend had answered for. Reproduced on this head:
+ * with `ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD=1` and a hand-written
+ * reservation, `_runner` exited 0 and recorded `state succeeded` with
+ * `invocation_cwd` set.
+ *
+ * So the acceptance-time answer is not trusted to survive: it is re-decided
+ * here, from the same `backendCapabilities`/`honoursInvocationCwd` pair, and
+ * `honoursInvocationCwd` fails closed on anything it does not recognise. What
+ * spawn will accept is therefore not "a reservation once passed this gate" but
+ * "the backend can still honour the directory this launch names, decided at the
+ * moment of the spawn".
+ *
+ * The gate reads no durable record, and that is deliberate. Ownership of the
+ * launch is already a durable fact re-verified at the only write that publishes
+ * a spawned process (`recordSpawned`), whose rejection kills the process group
+ * and leaves the control path's record whole; adding a second read here would
+ * move the window in which a stop between the runner's read and its write is
+ * observed, and would make this gate a second, weaker copy of an invariant that
+ * is already enforced where it can be enforced atomically. This gate covers the
+ * one thing the durable write cannot: the capability answer, which is not in
+ * the record at all.
+ */
+async function authorizeLaunch(options: RunnerOptions): Promise<LaunchAuthorization> {
+  const refused = (reason: string): LaunchAuthorization => ({ allowed: false, reason });
+  if (!honoursInvocationCwd(backendCapabilities({ ...process.env, ...options.env }))) {
+    return refused(
+      'the configured backend cannot run this invocation in the declared working directory; refusing to spawn',
+    );
+  }
+  // A runner that cannot name its own process in `/proc` cannot be the owner of
+  // anything it then writes, so it does not get to launch.
+  if (procStartTicks(process.pid) === null) {
+    return refused('this runner cannot establish its own process identity; refusing to spawn');
+  }
+  return { allowed: true, reason: null };
+}
+
 async function runInvocation(
   agentId: string,
   prompt: string,
   isContinue: boolean,
+  generation: number,
   options: RunnerOptions,
 ): Promise<boolean> {
   const meta = readMeta(agentId, options);
@@ -481,6 +615,19 @@ async function runInvocation(
 
   let attempt = 0;
   while (true) {
+    // Inside the loop, not above it: a retry is a launch too, so every spawn
+    // this invocation can perform is decided by the same gate against the
+    // record as it stands at that moment. A refusal is a failed invocation with
+    // a stated reason, exactly like the refusals above it, so the accepted
+    // prompt is never left pending behind a front that will not run it.
+    const authorization = await authorizeLaunch(options);
+    if (!authorization.allowed) {
+      await updateMeta(agentId, (current) => {
+        finalizeTerminal(current, 'failed', Date.now() / 1000, null, null, authorization.reason!);
+        setActiveRunner(current, false);
+      }, options);
+      return false;
+    }
     const invocationId = randomBytes(16).toString('hex');
     const logFile = logPath(agentId, options);
     const fd = openSync(logFile, 'a', 0o600);
@@ -527,7 +674,7 @@ async function runInvocation(
       return false;
     }
     const resultPromise = childResult(child, agentId, options);
-    const startTicks = procStartTicks(pid);
+    const startTicks = (options.childStartTicks ?? procStartTicks)(pid);
 
     let result: ChildResult;
     if (startTicks === null) {
@@ -648,7 +795,7 @@ export async function runManagedRunner(
       if (await reclaimOrStop(agentId, options)) continue;
       return;
     }
-    if (!await runInvocation(agentId, prompt, isContinue, options)) return;
+    if (!await runInvocation(agentId, prompt, isContinue, generation, options)) return;
     isContinue = true;
     if (!await reclaimOrStop(agentId, options)) return;
   }

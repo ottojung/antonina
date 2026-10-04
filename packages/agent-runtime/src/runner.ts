@@ -44,6 +44,7 @@ import { procStartTicks, signalMarkedInvocationProcesses } from './process.js';
 import {
   logPath,
   logSize,
+  opencodeBackendEnv,
   readMeta,
   updateMeta,
   type StatePathsOptions,
@@ -415,7 +416,11 @@ async function finalizeInvocation(
 async function rememberFreshSession(agentId: string, options: RunnerOptions): Promise<void> {
   const meta = readMeta(agentId, options);
   if (meta === null || persistedNativeSessionId(meta) !== null) return;
-  const sessionId = discoverSessionId(agentId, options.env);
+  // Board 186: the probe must be given the same database the invocation was
+  // given, or it asks the shared OpenCode database about a session the isolated
+  // invocation wrote somewhere else and answers `null` for a session that
+  // exists.
+  const sessionId = discoverSessionId(agentId, { ...options.env, ...opencodeBackendEnv(meta, options) });
   if (sessionId === null) return;
   await updateMeta(agentId, (current) => {
     if (current.native_session_id === null) {
@@ -434,7 +439,9 @@ async function runInvocation(
   if (meta === null) return false;
   let command: string[] | null;
   try {
-    command = buildAgentCommand(meta, prompt, isContinue, options.env);
+    // The same database the invocation will be spawned with, because
+    // `buildAgentCommand` may itself probe for the session to continue.
+    command = buildAgentCommand(meta, prompt, isContinue, { ...options.env, ...opencodeBackendEnv(meta, options) });
   } catch (error) {
     // A durable record the backend cannot be launched from -- an undeclared
     // working directory, a malformed one -- is a failed invocation with a
@@ -470,6 +477,13 @@ async function runInvocation(
       ANTONINA_INVOCATION_ID: invocationId,
       ANTONINA_PROMPT: prompt,
       NO_COLOR: '1',
+      // Board 186. Spread last, so which database this front's session and
+      // message writes go to is decided by this record and not inherited from
+      // the runner's own environment. This is the whole fix for the
+      // cross-front lock contention: OpenCode hardcodes `busy_timeout = 5000`
+      // and turns a `database is locked` timeout into a fatal
+      // `Failed to execute statement`, so the databases must not be shared.
+      ...opencodeBackendEnv(meta, options),
     };
     let child: ChildProcess;
     try {

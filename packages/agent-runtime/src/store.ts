@@ -3,7 +3,7 @@ import * as nodeFs from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import { validateAgentMetadata, type AgentMetadata } from './metadata.js';
+import { persistedOpencodeDbKey, validateAgentMetadata, type AgentMetadata } from './metadata.js';
 import { persistedAgentId, procStartTicks } from './process.js';
 
 const LOCK_RETRY_MS = 25;
@@ -104,6 +104,133 @@ export function metaPath(agentId: string, options: StatePathsOptions = {}): stri
 
 export function logPath(agentId: string, options: StatePathsOptions = {}): string {
   return join(agentDir(agentId, options), 'output.log');
+}
+
+/**
+ * Board 186. Where the per-agent OpenCode databases live.
+ *
+ * A sibling of `agents/`, not a directory inside an agent's own: a fork's clone
+ * deliberately keeps using the *source's* database (see `forkMetaSnapshot`, which
+ * carries `opencode_db` verbatim because the clone also carries the source's
+ * `native_session_id`), so the file has to outlive the deletion of any single
+ * agent record and cannot live inside one agent's directory.
+ */
+export function opencodeDbDir(options: StatePathsOptions = {}): string {
+  return join(stateRoot(options), 'opencode');
+}
+
+export function opencodeDbPath(key: string, options: StatePathsOptions = {}): string {
+  if (persistedAgentId(key) !== key) throw new Error('opencode database key is malformed');
+  return join(opencodeDbDir(options), `${key}.db`);
+}
+
+/**
+ * Creates the database directory if it is missing.
+ *
+ * This is not optional politeness: OpenCode 1.18.32 opens `OPENCODE_DB` with
+ * `unable to open database file` when the parent directory does not exist, so a
+ * runtime that only names the path produces a backend that dies before it can be
+ * classified. Measured, not assumed (see BOARD186-ISOLATION.md).
+ *
+ * Mode 0700: the database holds the operator's conversation history and message
+ * bodies, and it sits under the state root for the same reason `agents/` does.
+ *
+ * The real filesystem is used rather than the injected `StoreFs` seam, for the
+ * same reason `logSize` uses it: these files are written by the backend process
+ * itself, so no test-owned `fs` owns those bytes. The directory this creates is
+ * Antonina's own, though, so it is best effort: a failure here is reported by the
+ * backend as `unable to open database file`, and turning it into an exception here
+ * would change which failure a caller sees without preventing either.
+ */
+export function ensureOpencodeDbDir(options: StatePathsOptions = {}): void {
+  try {
+    nodeFs.mkdirSync(opencodeDbDir(options), { recursive: true, mode: 0o700 });
+  } catch (error) {
+    if (hasCode(error, 'EEXIST')) return;
+    throw new MetadataWriteError('failed to create the OpenCode database directory', { cause: error });
+  }
+}
+
+/**
+ * The environment fragment that confines an agent's OpenCode invocations to its own
+ * database: `{ OPENCODE_DB: <state>/antonina/opencode/<key>.db }`, or an empty object
+ * for a record that has no dedicated database and therefore keeps the shared one.
+ *
+ * Callers must spread this *after* their own environment, so the value is decided
+ * here rather than inherited: an ambient `OPENCODE_DB` must not silently decide
+ * which database a managed front writes to. That is also why the unkeyed case
+ * returns an explicit `undefined` rather than an empty fragment -- `undefined`
+ * removes the variable from the child's environment (Node's child_process drops
+ * undefined-valued env pairs for both `spawn` and `spawnSync`), whereas `{}`
+ * would leave an ambient `OPENCODE_DB` in place and hand the operator's shell a
+ * say in which database a managed front writes to.
+ */
+export function opencodeBackendEnv(
+  meta: AgentMetadata,
+  options: StatePathsOptions = {},
+): Record<string, string | undefined> {
+  const key = persistedOpencodeDbKey(meta);
+  if (key === null) return { OPENCODE_DB: undefined };
+  ensureOpencodeDbDir(options);
+  return { OPENCODE_DB: opencodeDbPath(key, options) };
+}
+
+/**
+ * Keys of the dedicated databases still named by some agent record other than
+ * `exceptAgentId`.
+ *
+ * Used to decide whether deleting one record may delete a database file. A fork
+ * pair shares one database on purpose, and deleting the source must not take the
+ * conversation out from under the clone that is still continuing it.
+ *
+ * A record that cannot be read is not treated as a reference: it is counted as
+ * absent, which is the same answer a `readdir` of a half-created directory gives,
+ * and the conservative direction here would be to keep the file. Unreadable records
+ * are reported by `agent list`, which is where an operator sees them.
+ */
+export function opencodeDbKeysInUse(
+  exceptAgentId: string,
+  options: StatePathsOptions = {},
+): Set<string> {
+  const keys = new Set<string>();
+  let entries: string[];
+  try {
+    entries = nodeFs.readdirSync(agentsDir(options), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return keys;
+  }
+  for (const agentId of entries) {
+    if (agentId === exceptAgentId || persistedAgentId(agentId) !== agentId) continue;
+    let meta: AgentMetadata | null;
+    try {
+      meta = readMeta(agentId, options);
+    } catch {
+      continue;
+    }
+    if (meta === null) continue;
+    const key = persistedOpencodeDbKey(meta);
+    if (key !== null) keys.add(key);
+  }
+  return keys;
+}
+
+/**
+ * Removes a dedicated OpenCode database and its WAL/SHM siblings, but only when no
+ * other agent record still names that key. Best effort by construction: an operator's
+ * `delete` must not fail because a backend's database file is unremovable, and a
+ * leftover file is inert garbage, not a correctness problem.
+ */
+export function removeOpencodeDatabase(key: string, options: StatePathsOptions = {}): void {
+  if (persistedAgentId(key) !== key) return;
+  if (opencodeDbKeysInUse('', options).has(key)) return;
+  const path = opencodeDbPath(key, options);
+  for (const suffix of ['', '-wal', '-shm']) {
+    try {
+      nodeFs.rmSync(`${path}${suffix}`, { force: true, maxRetries: 5, retryDelay: 20 });
+    } catch {}
+  }
 }
 
 /**
@@ -463,6 +590,14 @@ export function createAgentDirectory(agentId: string, options: StatePathsOptions
 
 export function removeAgentDirectory(agentId: string, options: StatePathsOptions = {}): void {
   const fs = filesystem(options);
+  // Read the record BEFORE the removal below: once the directory is gone the key
+  // is undiscoverable, so reading after would answer `null` and silently leave
+  // every database this change introduces behind as garbage.
+  let doomedKey: string | null = null;
+  try {
+    const doomed = readMeta(agentId, options);
+    if (doomed !== null) doomedKey = persistedOpencodeDbKey(doomed);
+  } catch {}
   try {
     fs.rmSync(agentDir(agentId, options), {
       recursive: true,
@@ -477,5 +612,21 @@ export function removeAgentDirectory(agentId: string, options: StatePathsOptions
   } catch (error) {
     if (error instanceof MetadataWriteError) throw error;
     throw new MetadataWriteError(`failed to remove state directory for agent ${agentId}`, { cause: error });
+  }
+  // The record is gone, so its key is no longer discoverable and the database it
+  // named is now unreferenced garbage under the state root. The key was captured
+  // above; the file is removed here, so the "is another record still using this
+  // key" question is asked about the records that actually remain.
+  //
+  // This lives here rather than at each deletion call site so that `cmdDelete`,
+  // the retention sweep and the rollback of a failed `new`/`fork` cannot each
+  // decide differently. `removeOpencodeDatabase` re-reads every remaining
+  // record and declines when a fork clone still names the same key, and it is
+  // best effort: a leftover file is inert, and an operator's `delete` must not
+  // fail over it.
+  if (doomedKey !== null) {
+    try {
+      removeOpencodeDatabase(doomedKey, options);
+    } catch {}
   }
 }

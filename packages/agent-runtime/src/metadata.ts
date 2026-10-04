@@ -92,6 +92,28 @@ const SIGNAL_DEATH_CLASSIFICATION = 'external_signal_kill';
  */
 const RUN_LOG_CURSOR_FIELD = 'run_log_offset';
 
+/**
+ * Board 186. The key of the OpenCode database this agent's backend invocations are
+ * confined to, which is what stops two concurrent managed fronts from serialising
+ * their session and message writes through one shared SQLite file (the cause of the
+ * 2026-10-03 deaths: `SQLiteError: database is locked` → `LockTimeoutError` →
+ * fatal `Failed to execute statement` inside OpenCode 1.18.32, whose `busy_timeout`
+ * is hardcoded at 5000 with no override).
+ *
+ * Optional and nullable for the same reason `run_log_offset` is: a record written
+ * before this field existed is still a canonical record, and absence has a meaning
+ * rather than being malformed. It means "this record predates database isolation and
+ * keeps using the shared OpenCode database" — a record's sessions already live in that
+ * one file, so moving the record onto a fresh, empty database would strand the
+ * recorded `native_session_id` and break continuation. Migrating such a record is a
+ * separate, explicit front, not something a read path may decide.
+ *
+ * The value is an agent-id-shaped key (`persistedAgentId`), never a path: it is used
+ * to build one, and a record that could carry an arbitrary path could name a database
+ * outside the state root.
+ */
+const OPENCODE_DB_FIELD = 'opencode_db';
+
 export class MalformedPendingPromptMetadataError extends Error {
   constructor() {
     super('persisted pending prompt authority is not canonical');
@@ -225,7 +247,7 @@ function canonicalSteerQueue(value: unknown, sequence: number): boolean {
 }
 
 export function validateAgentMetadata(meta: AgentMetadata): void {
-  if (!exactKeysWithOptional(meta, TOP_LEVEL_FIELDS, [RUN_LOG_CURSOR_FIELD])) {
+  if (!exactKeysWithOptional(meta, TOP_LEVEL_FIELDS, [RUN_LOG_CURSOR_FIELD, OPENCODE_DB_FIELD])) {
     throw new MalformedAgentMetadataError('managed-agent metadata fields are not canonical');
   }
   if (meta.agent_version !== AGENT_META_VERSION) {
@@ -304,6 +326,21 @@ export function validateAgentMetadata(meta: AgentMetadata): void {
   if (persistedRunLogOffset(meta) === null && meta[RUN_LOG_CURSOR_FIELD] !== null && meta[RUN_LOG_CURSOR_FIELD] !== undefined) {
     throw new MalformedAgentMetadataError('managed-agent run_log_offset is malformed');
   }
+  if (persistedOpencodeDbKey(meta) === null && meta[OPENCODE_DB_FIELD] !== null && meta[OPENCODE_DB_FIELD] !== undefined) {
+    throw new MalformedAgentMetadataError('managed-agent opencode_db is malformed');
+  }
+}
+
+/**
+ * The key of the dedicated OpenCode database this agent's invocations are confined
+ * to, or `null` for "no dedicated database" (field absent, explicitly null, or not
+ * a canonical key). `null` is the pre-isolation behaviour, not an error.
+ */
+export function persistedOpencodeDbKey(meta: AgentMetadata): string | null {
+  if (!hasOwn(meta, OPENCODE_DB_FIELD)) return null;
+  const value = meta[OPENCODE_DB_FIELD];
+  if (value === null) return null;
+  return persistedAgentId(value);
 }
 
 /**
@@ -495,6 +532,7 @@ export function idleMeta(agentId: string, cwd: string | null, title: string | nu
     last_prompt: null,
     error: null,
     run_log_offset: null,
+    [OPENCODE_DB_FIELD]: agentId,
     agent_version: AGENT_META_VERSION,
   };
   validateAgentMetadata(meta);

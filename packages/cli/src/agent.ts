@@ -68,6 +68,7 @@ import {
   createAgentDirectory,
   logPath,
   logSize,
+  opencodeBackendEnv,
   readMeta,
   removeAgentDirectory,
   updateMeta,
@@ -824,7 +825,12 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     // the defect this replaces, so the launch is refused and says why.
     throw new Error(`run: agent ${agentId} has no declared working directory; pass --cwd /absolute/path`);
   }
-  if (configuredModelAvailable(context.env) === false) {
+  // Board 186. The model probe has no agent identity of its own, so it is given
+  // the database of the record this command is about to run. It reads the model
+  // list and writes no session row, so it could safely use any database -- but
+  // leaving it on the shared one would keep every `run` touching the file whose
+  // lock contention this change exists to remove.
+  if (configuredModelAvailable({ ...context.env, ...opencodeBackendEnv(observed, paths(context)) }) === false) {
     throw new Error('configured OpenCode model opencode/space-bunny-free is unavailable');
   }
   const decision: {
@@ -937,7 +943,9 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     } else if (persistedLifecycleState(meta) === 'idle' && meta.prompt_count === 0) {
       mode = 'new';
     } else {
-      const recoveredSession = discoverSessionId(agentId, context.env);
+      // Board 186: the same database the invocation will be spawned with, so a
+      // session an isolated invocation recorded is still discoverable here.
+      const recoveredSession = discoverSessionId(agentId, { ...context.env, ...opencodeBackendEnv(meta, paths(context)) });
       if (recoveredSession === null) {
         mode = 'new';
       } else {

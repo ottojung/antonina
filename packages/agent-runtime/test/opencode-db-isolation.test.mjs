@@ -25,6 +25,20 @@
 //   5. the directory must exist before OpenCode is told to open the file
 //   6. a fork must keep the source's database
 //   7. deleting a record must reap its database, and a fork clone must pin it
+//
+// Cases 8-10 were added by board 186's landing front. Cases 1-7 pin the
+// isolation only where it is CALCULATED -- `opencodeBackendEnv` and the store's
+// reap -- and every one of them supplies the environment itself. So the whole
+// question of whether the runner and the CLI actually HAND that environment to
+// OpenCode was unpinned: deleting `...opencodeBackendEnv(meta, options)` from
+// `runner.ts`'s two probe/spawn call sites, or from `agent.ts`'s two call
+// sites, left the whole runtime and cli suites green (reproduced at fce7f02c,
+// both mutations, `test:runtime` 188/0 and `test:cli` 204/0). A refactor could
+// have dropped the isolation without a single test noticing.
+//
+// The cases below close that, by execution and not by reading the source: a
+// fixture backend that behaves differently depending on which OPENCODE_DB it
+// was actually handed, driven through the shipped `runManagedRunner`.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
@@ -36,7 +50,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -45,7 +59,15 @@ import {
   discoverSessionId,
 } from '../dist/packages/agent-runtime/src/backend.js';
 import { forkMetaSnapshot } from '../dist/packages/agent-runtime/src/fork.js';
+import { beginInvocation } from '../dist/packages/agent-runtime/src/lifecycle.js';
 import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
+import {
+  envHasAgentMarker,
+  envHasInvocationMarker,
+  procStartTicks,
+} from '../dist/packages/agent-runtime/src/process.js';
+import { runManagedRunner } from '../dist/packages/agent-runtime/src/runner.js';
+import { boundMs, installSuiteBound, registerCleanup, registerReap } from './support/suite-bound.mjs';
 import {
   agentDir,
   createAgentDirectory,
@@ -58,6 +80,23 @@ import {
 } from '../dist/packages/agent-runtime/src/store.js';
 
 const PROBE_SENTINEL = 'ANTONINA-B186-EXEC-OK';
+
+// Cases 8-10 below drive a real detached backend through `runManagedRunner`, so
+// this file can wedge rather than fail. The per-test timeout turns a wedge into
+// a failure with a number on it; the suite bound is what reaps a wedged *file*,
+// whose `t.after` hooks never run. Every value here is a ceiling an environment
+// may shorten and never lengthen. The timeout is passed in the OPTIONS OBJECT,
+// as the second argument to `test`: a trailing third argument is silently
+// discarded by node, and then the file can wedge with nothing to show for it.
+const CASE_TIMEOUT_MS = boundMs('ANTONINA_TEST_CASE_TIMEOUT_MS', 120_000);
+const SUITE_STALL_MS = boundMs('ANTONINA_TEST_SUITE_STALL_MS', 180_000);
+const SUITE_WALL_MS = boundMs('ANTONINA_TEST_SUITE_BOUND_MS', 300_000);
+
+installSuiteBound({
+  description: 'packages/agent-runtime/test/opencode-db-isolation.test.mjs',
+  suiteMs: SUITE_WALL_MS,
+  stallMs: SUITE_STALL_MS,
+});
 
 function execProbe(parent, name) {
   const dir = mkdtempSync(join(parent, name));
@@ -311,4 +350,246 @@ test('deleting a record reaps its database, and a fork clone pins it', (t) => {
   removeAgentDirectory('b1860c', { env });
   assert.equal(existsSync(key), false, 'the unreferenced database was left behind');
   assert.equal(existsSync(`${key}-wal`), false, 'the unreferenced WAL was left behind');
+});
+// ---------------------------------------------------------------------------
+// Cases 8-10: the runner's own env plumbing, driven through the shipped runner.
+//
+// Everything above supplies the environment itself, which is exactly why it
+// cannot see the coupling being deleted. These three hand the decision to
+// `runner.ts` and observe what the backend was ACTUALLY given.
+const REPO_FIXTURE_PARENT = resolve('.antonina-test-tmp');
+
+// A fixture backend whose ANSWER DEPENDS ON THE DATABASE it was handed, which is
+// the whole point: a probe pointed at the wrong OPENCODE_DB cannot see a session
+// the invocation wrote into the right one, so a runner that dropped the
+// isolation would answer `no session` where it must answer `yes`.
+//
+//   * `run` records a session for the agent into "$OPENCODE_DB.sessions" and
+//     exits 0, so the runner converges on its own and reaps nothing.
+//   * `session list` prints the row only if the sidecar file exists next to the
+//     OPENCODE_DB IT WAS GIVEN, which is how a wrong database answers empty.
+//   * every invocation appends "OPENCODE_DB|argv" to a log, so what each probe
+//     and each spawn was handed is recorded rather than inferred.
+function runnerBackend(t, id, logFile) {
+  const failures = [];
+  for (const parent of [tmpdir(), REPO_FIXTURE_PARENT]) {
+    let root;
+    try {
+      mkdirSync(parent, { recursive: true });
+      root = mkdtempSync(join(parent, 'antonina-b186-runner-'));
+    } catch (error) {
+      failures.push(`${parent}: ${error.message}`);
+      continue;
+    }
+    t.after(() => {
+      rmSync(root, { recursive: true, force: true });
+      try {
+        rmSync(REPO_FIXTURE_PARENT, { recursive: true, force: false });
+      } catch {
+        // A shared fixture parent that is still busy belongs to another case.
+      }
+    });
+    if (!execProbe(root, 'probe-')) continue;
+    const bin = join(root, 'opencode');
+    const sessionId = `ses_${id.replace(/[^A-Za-z0-9]/g, '')}`;
+    writeFileSync(bin, `#!/bin/sh
+printf '%s|%s\\n' "$OPENCODE_DB" "$*" >>'${logFile}'
+case "$1" in
+  run) printf '%s\\n' '${sessionId}' > "$OPENCODE_DB.sessions" ;;
+  session)
+    if [ -f "$OPENCODE_DB.sessions" ]; then
+      printf '[{"id":"%s","title":"antonina-${id}","created":1}]\\n' '${sessionId}'
+    fi
+    ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    return { bin, sessionId };
+  }
+  t.skip(`no exec-capable fixture directory for the fake opencode backend; tried: ${failures.join('; ')}`);
+  return null;
+}
+
+function runnerScratch(t, bin) {
+  const root = mkdtempSync(join(tmpdir(), 'antonina-b186-run-'));
+  const env = {
+    XDG_STATE_HOME: join(root, 'state'),
+    XDG_CONFIG_HOME: join(root, 'config'),
+    [OPENCODE_BIN_ENV]: bin,
+  };
+  mkdirSync(env.XDG_STATE_HOME, { recursive: true });
+  mkdirSync(env.XDG_CONFIG_HOME, { recursive: true });
+  const saved = { ...process.env };
+  Object.assign(process.env, env);
+  t.after(() => {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+    rmSync(root, { recursive: true, force: true });
+  });
+  registerCleanup(`b186 scratch home ${root}`, () => {
+    rmSync(root, { recursive: true, force: true });
+    return 'removed';
+  });
+  return { env };
+}
+
+// A record the runner will actually claim and run: a reserved runner reservation
+// at the generation the caller passes, an accepted prompt, and no recorded
+// native session. Written through `beginInvocation`, which is what `antonina run`
+// writes, so the shape under test is a shape the CLI produces.
+function runnerAgent(t, env, id, mode, overrides = {}) {
+  const cwd = mkdtempSync(join(tmpdir(), 'antonina-b186-runner-cwd-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  assert.equal(createAgentDirectory(id, { env }), true);
+  const meta = idleMeta(id, cwd, null, 1);
+  beginInvocation(meta, 'do the work', 2, 1);
+  meta.runner_gen = 4;
+  meta.active_runner = true;
+  meta.runner_reservation = {
+    state: 'reserved',
+    gen: 4,
+    mode,
+    reserved_at: 2,
+    owner_pid: process.pid,
+    owner_start_ticks: 0,
+  };
+  for (const [key, value] of Object.entries(overrides)) meta[key] = value;
+  writeMeta(id, meta, { env });
+  const options = { env };
+  registerReap(`b186 agent ${id} invocation`, () => reapInvocation(id, options));
+  return { id, cwd, options };
+}
+
+// The product's own identity rule, in order: recorded pid, matching /proc start
+// ticks, this invocation's environ markers. Nothing is found by process name.
+function reapInvocation(id, options) {
+  const live = readMeta(id, options);
+  if (live === null) return 'no durable record, so no identity to signal';
+  const { pid, pgid, start_time: startTime, invocation_id: invocationId } = live;
+  if (!Number.isSafeInteger(pid) || pid <= 0) return 'no recorded invocation pid, so nothing was left running';
+  if (procStartTicks(pid) !== startTime) return `pid ${pid} no longer has the recorded start ticks ${startTime}; not signalled`;
+  if (!envHasAgentMarker(pid, id) || !envHasInvocationMarker(pid, invocationId)) {
+    return `pid ${pid} does not carry this invocation's environ markers; not signalled`;
+  }
+  if (!Number.isSafeInteger(pgid) || pgid <= 0) return 'no process group recorded; not signalled';
+  try {
+    process.kill(-pgid, 'SIGKILL');
+    return `SIGKILLed process group ${pgid} (pid ${pid}, start ticks ${startTime})`;
+  } catch (error) {
+    return `could not SIGKILL process group ${pgid}: ${error && error.code ? error.code : String(error)}`;
+  }
+}
+
+function invocationLog(logFile) {
+  if (!existsSync(logFile)) return [];
+  return readFileSync(logFile, 'utf8').split('\n').filter(Boolean).map((line) => {
+    const at = line.indexOf('|');
+    return { db: line.slice(0, at), argv: line.slice(at + 1) };
+  });
+}
+
+test('the runner spawns the backend in the record database, and reaps it', { timeout: CASE_TIMEOUT_MS }, async (t) => {
+  if (procStartTicks(process.pid) === null) {
+    t.skip('requires /proc/<pid>/stat for runner process identity');
+    return;
+  }
+  const logFile = join(mkdtempSync(join(tmpdir(), 'antonina-b186-log-')), 'runner.log');
+  t.after(() => rmSync(join(logFile, '..'), { recursive: true, force: true }));
+  const fixture = runnerBackend(t, 'b1860d', logFile);
+  if (fixture === null) return;
+  const { env } = runnerScratch(t, fixture.bin);
+  const one = runnerAgent(t, env, 'b1860d', 'new');
+
+  await runManagedRunner(one.id, 'new', 4, one.options);
+
+  const expected = opencodeDbPath('b1860d', { env });
+  const seen = invocationLog(logFile);
+  const spawns = seen.filter((entry) => entry.argv.startsWith('run '));
+  assert.equal(spawns.length, 1, `expected exactly one spawned invocation, saw ${spawns.length}`);
+  // The spawned process was handed this agent's database, not an inherited one.
+  // Asserted on what the child recorded, not on what runner.ts was supposed to
+  // compute: delete the spread at runner.ts:486 and this is empty.
+  assert.equal(spawns[0].db, expected, 'the spawned backend was not given the record database');
+  // And nothing was left running: the fixture exits 0 and the runner awaited it.
+  const after = readMeta(one.id, one.options);
+  assert.equal(after.state, 'succeeded');
+  assert.equal(after.active_runner, false);
+  assert.equal(after.runner_reservation, null);
+  assert.throws(() => process.kill(after.pid, 0), /ESRCH/, 'a backend process was left running');
+});
+
+test('the runner probes for a fresh session in the database it spawned in', { timeout: CASE_TIMEOUT_MS }, async (t) => {
+  if (procStartTicks(process.pid) === null) {
+    t.skip('requires /proc/<pid>/stat for runner process identity');
+    return;
+  }
+  const logFile = join(mkdtempSync(join(tmpdir(), 'antonina-b186-log-')), 'probe.log');
+  t.after(() => rmSync(join(logFile, '..'), { recursive: true, force: true }));
+  const fixture = runnerBackend(t, 'b1860e', logFile);
+  if (fixture === null) return;
+  const { env } = runnerScratch(t, fixture.bin);
+  const one = runnerAgent(t, env, 'b1860e', 'new');
+
+  await runManagedRunner(one.id, 'new', 4, one.options);
+
+  const expected = opencodeDbPath('b1860e', { env });
+  const seen = invocationLog(logFile);
+  // `rememberFreshSession` runs after a first (non-continue) invocation, because
+  // a new session's id is only knowable once the backend has created it. The
+  // fixture writes it into the database it was given, so this probe can only
+  // answer with the session id if it was pointed at the same database.
+  const probes = seen.filter((entry) => entry.argv.startsWith('session list'));
+  assert.ok(probes.length >= 1, `the runner never probed for the fresh session; saw ${JSON.stringify(seen)}`);
+  for (const probe of probes) {
+    assert.equal(probe.db, expected, `a probe was given ${probe.db} instead of ${expected}`);
+  }
+  const after = readMeta(one.id, one.options);
+  assert.equal(
+    after.native_session_id, fixture.sessionId,
+    'the post-invocation probe did not find the session the invocation had just created',
+  );
+});
+
+test('a continuation probes in the record database, and fails without it', { timeout: CASE_TIMEOUT_MS }, async (t) => {
+  if (procStartTicks(process.pid) === null) {
+    t.skip('requires /proc/<pid>/stat for runner process identity');
+    return;
+  }
+  const logFile = join(mkdtempSync(join(tmpdir(), 'antonina-b186-log-')), 'cont.log');
+  t.after(() => rmSync(join(logFile, '..'), { recursive: true, force: true }));
+  const fixture = runnerBackend(t, 'b1860f', logFile);
+  if (fixture === null) return;
+  const { env } = runnerScratch(t, fixture.bin);
+  const one = runnerAgent(t, env, 'b1860f', 'continue');
+
+  // A session that already exists, recorded in the database this record names --
+  // exactly the state an earlier invocation left behind. The record itself knows
+  // no session id, which is why the runner has to probe for one.
+  const expected = opencodeDbPath('b1860f', { env });
+  mkdirSync(opencodeDbDir({ env }), { recursive: true });
+  writeFileSync(`${expected}.sessions`, `${fixture.sessionId}\n`);
+
+  await runManagedRunner(one.id, 'continue', 4, one.options);
+
+  const seen = invocationLog(logFile);
+  const probes = seen.filter((entry) => entry.argv.startsWith('session list'));
+  assert.ok(probes.length >= 1, `continue mode built no probe; saw ${JSON.stringify(seen)}`);
+  for (const probe of probes) {
+    assert.equal(probe.db, expected, `the continuation probe was given ${probe.db} instead of ${expected}`);
+  }
+  const spawns = seen.filter((entry) => entry.argv.startsWith('run '));
+  assert.equal(spawns.length, 1, 'the continuation did not run exactly one invocation');
+  // The continuation ran the session it probed for. If the probe had been given
+  // a different database it would have found nothing, `buildAgentCommand` would
+  // have returned null, and the record would read `failed` with
+  // "cannot continue: underlying session not available" -- so this assertion and
+  // the argv assertion are two views of the same fact.
+  assert.match(spawns[0].argv, new RegExp(`--session ${fixture.sessionId}(\\s|$)`));
+  const after = readMeta(one.id, one.options);
+  // The record still names no session: on the continue path the probed id is
+  // used for the command and is not written back (`rememberFreshSession` runs
+  // only after a first, non-continue invocation). The session id is observable in
+  // the argv the backend was actually launched with, which is asserted above.
+  assert.notEqual(after.state, 'failed', `the continuation failed: ${after.error}`);
+  assert.throws(() => process.kill(after.pid, 0), /ESRCH/, 'a backend process was left running');
 });

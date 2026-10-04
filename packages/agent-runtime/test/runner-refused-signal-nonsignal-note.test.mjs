@@ -91,7 +91,7 @@ for (const intent of ['stop', 'kill']) {
       assert.equal(createAgentDirectory(id, options), true);
       const meta = idleMeta(id, cwd, null, 1);
       meta.runner_gen = 7;
-      meta.runner_reservation = { state: 'reserved', gen: 7, mode: 'new', reserved_at: 1, owner_pid: process.pid, owner_start_ticks: 0 };
+      meta.runner_reservation = { state: 'reserved', gen: 7, mode: 'new', reserved_at: 1, owner_pid: process.pid, owner_start_ticks: procStartTicks(process.pid) };
       meta.pending_prompt = 'work';
       writeMeta(id, meta, options);
 

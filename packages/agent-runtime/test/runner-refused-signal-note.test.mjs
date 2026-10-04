@@ -138,7 +138,7 @@ function reservation(overrides = {}) {
     mode: 'new',
     reserved_at: 1,
     owner_pid: process.pid,
-    owner_start_ticks: 0,
+    owner_start_ticks: procStartTicks(process.pid),
     ...overrides,
   };
 }

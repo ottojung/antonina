@@ -34,6 +34,20 @@
 //    genuine token for a *different* invocation does not match, so a runner can
 //    never hold authority over an invocation it was not created for.
 //
+// 4. The `self` verdict. A reservation that names the claiming process's own
+//    pid used to be believed on the pid alone, so a record whose recorded
+//    `owner_start_ticks` was demonstrably not that process's own start time
+//    still published the claim and launched the backend. The `self` shape is
+//    now pid plus start time, like `parent`, and the case below is the one that
+//    would have failed before -- the head review's A4, which the old
+//    `owner_start_ticks: 0` fixture could not have caught.
+//
+// 5. The two paths the head review found unpinned. The launch gate's
+//    self-identity guard, and the fact that a *retry* re-decides the gate rather
+//    than inheriting the first attempt's answer. Both need a seam the product
+//    does not otherwise expose, and both seams are declared in `RunnerOptions`
+//    next to the identity seam above; neither can authorise anything.
+//
 // Test safety, per AGENTS.md: both XDG homes are pointed at throwaway
 // directories, so nothing here can read or write the operator's trust.json or
 // credential.json, and the only processes spawned are the fixture backends,
@@ -156,13 +170,19 @@ function scratch(t, backend, extraEnv = {}) {
 }
 
 function reservation(overrides = {}) {
+  // `owner_start_ticks` is this process's own real start time, not `0`. The
+  // default owner is this very process -- the launcher-shaped reservation -- and
+  // the claim is now decided on pid *and* start time, so a fixture that left
+  // the start time at zero was not exercising the shape it claimed to: three
+  // cases that are not about ownership were relying on the loose `self` verdict,
+  // which is exactly what hid the defect this head was reviewed for.
   return {
     state: 'reserved',
     gen: 7,
     mode: 'new',
     reserved_at: 1,
     owner_pid: process.pid,
-    owner_start_ticks: 0,
+    owner_start_ticks: procStartTicks(process.pid) ?? 0,
     ...overrides,
   };
 }
@@ -512,6 +532,149 @@ test('an invocation that finishes before its identity can be captured still reco
   // No partial identity is invented for a process that is already gone.
   assert.equal(after.start_time, null);
   assert.equal(after.state, 'succeeded');
+  assert.equal(after.active_runner, false);
+  assert.equal(after.runner_reservation, null);
+});
+test('the launcher-shaped reservation is claimed against this process own start time, not its pid alone', async (t) => {
+  if (!requireProc(t)) return;
+  const marker = join(tmpdir(), `antonina-launch-gate-${process.pid}-self-owner.marker`);
+  rmSync(marker, { force: true });
+  t.after(() => rmSync(marker, { force: true }));
+  const backend = fakeBackend(t, marker);
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const selfTicks = procStartTicks(process.pid);
+
+  // Each recorded start time that is not this process's own. `real + 424242`
+  // is strictly greater than the real start time, so it cannot be the start
+  // time of any process that is claiming; `real - 1` is the near miss; `0` is
+  // the value the old fixture helper carried on every case in this file.
+  for (const [label, ownerStart] of [
+    ['a start time later than this process own', selfTicks + 424242],
+    ['a start time one tick earlier than this process own', selfTicks - 1],
+    ['no recorded start time at all', 0],
+  ]) {
+    const { id, cwd } = agent(t, options, {
+      runner_gen: 7,
+      runner_reservation: reservation({ gen: 7, owner_pid: process.pid, owner_start_ticks: ownerStart }),
+      pending_prompt: 'work',
+    });
+
+    await runManagedRunner(id, 'new', 7, options);
+
+    const after = readMeta(id, options);
+    assert.equal(after.runner_reservation.state, 'reserved', `${label}: the reservation must stay unclaimed`);
+    assert.equal(after.runner_pid, null, `${label}: the claim must not publish this process as the runner`);
+    assert.equal(after.active_runner, false, `${label}: an unverified claim leaves no active runner`);
+    assert.equal(after.state, 'idle', `${label}: a refused claim writes nothing else`);
+    assert.equal(after.invocation_cwd, null, `${label}: nothing ran`);
+    assert.equal(after.cwd, cwd);
+    assert.deepEqual(
+      backendRuns(marker).filter((line) => line.split(' ')[1] === cwd),
+      [],
+      `${label}: a record whose owner identity is false must not launch a backend`,
+    );
+  }
+
+  // The control, in the same run with the same fixture: the identical record
+  // with this process's real start time is claimed and launched. Without it, a
+  // check that refused everything would pass the loop above.
+  const { id, cwd } = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7, owner_pid: process.pid, owner_start_ticks: selfTicks }),
+    pending_prompt: 'work',
+  });
+  await runManagedRunner(id, 'new', 7, options);
+  assert.equal(
+    backendRuns(marker).filter((line) => line.split(' ')[1] === cwd).length,
+    1,
+    'the real start time must still be accepted, or the case above proves nothing',
+  );
+  assert.equal(readMeta(id, options).state, 'succeeded');
+});
+
+test('a runner that cannot name itself in /proc refuses the launch, with the capability intact', async (t) => {
+  if (!requireProc(t)) return;
+  // The launch gate's second guard. Before the case existed, making it
+  // unreachable left this whole file green: it is load-bearing prose with no
+  // test behind it. Driven through the declared seam rather than by needing a
+  // host whose `/proc/<pid>/stat` is unreadable, which is not a thing a test
+  // can arrange. The capability is *intact* here, so a gate that refused
+  // everything would pass this case; the refusal has to be the identity.
+  const marker = join(tmpdir(), `antonina-launch-gate-${process.pid}-no-self.marker`);
+  rmSync(marker, { force: true });
+  t.after(() => rmSync(marker, { force: true }));
+  const backend = fakeBackend(t, marker);
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const { id } = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    pending_prompt: 'work',
+  });
+
+  await runManagedRunner(id, 'new', 7, { ...options, selfStartTicks: () => null });
+
+  assert.deepEqual(backendRuns(marker), [], 'a runner with no readable identity must not spawn anything');
+  const after = readMeta(id, options);
+  assert.equal(after.state, 'failed');
+  assert.match(after.error, /cannot establish its own process identity/);
+  assert.equal(after.invocation_cwd, null);
+  assert.equal(after.pid, null);
+  assert.equal(after.active_runner, false);
+  assert.equal(after.runner_reservation, null);
+});
+
+test('a retry re-decides the launch gate, so a capability withdrawn after the first attempt refuses the second', async (t) => {
+  if (!requireProc(t)) return;
+  // The retry half of the guarantee. The gate lives inside the attempt loop, so
+  // a second attempt is a second launch with its own decision; hoisting the
+  // gate above the loop would let this backend run twice in the declared
+  // directory. As shipped the classifier marks every backend failure as not
+  // automatically retry-safe, so this branch is unreachable without the
+  // declared retry seam -- which is why no assertion in the tree could fail if
+  // the gate were hoisted. The seam only adds an attempt; the flip below is the
+  // capability being withdrawn from the runner's own environment in the window
+  // between the two attempts, which is the situation a gate evaluated once
+  // would get wrong.
+  const marker = join(tmpdir(), `antonina-launch-gate-${process.pid}-retry.marker`);
+  rmSync(marker, { force: true });
+  t.after(() => rmSync(marker, { force: true }));
+  const backend = fakeBackend(t, marker, `#!/bin/sh\nprintf '%s %s\\n' "$$" "$(pwd -P)" >> ${JSON.stringify(marker)}\nprintf '%s\\n' 'Unexpected server error'\nexit 1\n`);
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const { id, cwd } = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7 }),
+    pending_prompt: 'work',
+  });
+  const retryable = { ...options };
+  let retryDelayRequests = 0;
+
+  await runManagedRunner(id, 'new', 7, {
+    ...retryable,
+    retryDelayMs: (attempt) => {
+      retryDelayRequests += 1;
+      if (attempt !== 0) return null;
+      // Withdraw the capability in the runner's own environment, exactly as a
+      // host change between the two attempts would. `authorizeLaunch` reads
+      // `{ ...process.env, ...options.env }` at each decision.
+      retryable.env.ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD = '1';
+      return 1;
+    },
+  });
+
+  assert.equal(
+    backendRuns(marker).filter((line) => line.split(' ')[1] === cwd).length,
+    1,
+    `exactly one attempt may have launched in ${cwd}; saw ${JSON.stringify(backendRuns(marker))}`,
+  );
+  assert.equal(retryDelayRequests, 1, 'the retry branch must actually have been taken');
+  const after = readMeta(id, options);
+  assert.equal(after.state, 'failed');
+  assert.match(after.error, /backend cannot run this invocation in the declared working directory/);
+  // Coherent stop/kill/delete state after a refused retry: the claim is
+  // released, exactly as after a refused first attempt.
   assert.equal(after.active_runner, false);
   assert.equal(after.runner_reservation, null);
 });

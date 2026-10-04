@@ -149,7 +149,10 @@ function agent(t, options, overrides = {}) {
     mode: 'new',
     reserved_at: 1,
     owner_pid: process.pid,
-    owner_start_ticks: 0,
+    // The launcher that would really have written this reservation names
+    // itself, so it names its own real start time. Zero is not a start
+    // time and would be refused by the `self` verdict.
+    owner_start_ticks: procStartTicks(process.pid),
   };
   meta.pending_prompt = 'work';
   for (const [key, value] of Object.entries(overrides)) meta[key] = value;

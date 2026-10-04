@@ -92,6 +92,28 @@ export interface RunnerOptions extends StatePathsOptions {
    * value `recordSpawned` publishes and every later control path verifies.
    */
   childStartTicks?: (pid: number) => number | null;
+  /**
+   * Seam for the `/proc` reading that names *this* runner, the one the launch
+   * gate asks whether it can complete at all. Production leaves it unset so the
+   * reading is the real one, which returns null only on a host whose
+   * `/proc/<pid>/stat` is unreadable. Tests point it at `() => null` to drive
+   * the refusal that would otherwise need such a host. It can only refuse a
+   * launch: no value it returns can authorise anything, and the spawn below
+   * still happens in the declared directory of a record that says so.
+   */
+  selfStartTicks?: (pid: number) => number | null;
+  /**
+   * Seam for the decision to retry a failed backend spawn. Production leaves it
+   * unset so `backendRetryDelay` decides, and today that classifier marks every
+   * backend failure as not automatically retry-safe, so no retry is reachable
+   * as shipped. Tests point it at a function that returns a delay in order to
+   * drive the retry branch at all, which is the only way to pin that the launch
+   * gate is re-decided for a retry rather than decided once per invocation. It
+   * can only add an attempt, never authorise one: every attempt still goes
+   * through `authorizeLaunch` from scratch, and the refusal below writes a
+   * terminal record exactly as a first-attempt refusal does.
+   */
+  retryDelayMs?: (attempt: number) => number | null;
 }
 
 /** The OOM bracket captured around one backend spawn. */
@@ -182,9 +204,16 @@ function childResult(child: ChildProcess, agentId: string, options: RunnerOption
  * What evidence the claiming runner has that the reservation it is about to
  * consume was written by whoever launched it.
  *
- * `self` -- the reservation names this process as its owner. A pid that
- * resolves to this very process is this process, so there is no second identity
- * it could be confused with.
+ * `self` -- the reservation names this process as its owner, and the recorded
+ * start time is this process's own start time as `/proc` reports it. A pid that
+ * resolves to this very process already leaves no second *process* it could be
+ * confused with, but it does not make the recorded identity true: this is the
+ * one shape whose evidence is a durable field the claimant can satisfy by
+ * pointing it at itself, so a record naming this pid with a start time that is
+ * not this process's own is refused rather than believed. Pid plus start time
+ * here exactly as on the `parent` shape, for the same reason: the doc comment's
+ * promise is a promise about all three shapes, and a pid alone is not an
+ * identity.
  *
  * `parent` -- the reservation names the process that spawned this one, and the
  * recorded start time matches that live process in `/proc`. Pid plus start time,
@@ -206,9 +235,22 @@ function childResult(child: ChildProcess, agentId: string, options: RunnerOption
  * self-declared names, and a token minted for a different invocation does not
  * match, so one invocation can never be confused for another.
  *
+ * What this decision is *not*, recorded here so a later reader does not read
+ * "the claim is authenticated" as "the record is authenticated": it is
+ * authority over a `meta.json`, and it is only as strong as that file's
+ * integrity. A process that can write `meta.json` can author a reservation and
+ * its owner token together and claim it, because the token is compared against
+ * the record it is meant to authenticate. That is not a hole this function can
+ * close -- such a writer could write `state: succeeded` outright -- and
+ * `AGENTS.md` puts the durable state directory in the user's own hands by
+ * design. What closes the *board 197* defect regardless is the launch gate:
+ * a forged claim still cannot make a launch happen after the invocation-cwd
+ * capability is withdrawn. Recorded as a scope boundary, not repaired here.
+ *
  * `refused` -- anything else, including a reservation whose recorded owner is a
  * *different* live process, a recorded start time that does not match the live
- * process it names, and any of the `declared` conditions failing.
+ * process it names -- on the `self` shape as well as the `parent` one -- and any
+ * of the `declared` conditions failing.
  */
 type OwnerIdentityVerdict = 'self' | 'parent' | 'declared' | 'refused';
 
@@ -219,7 +261,10 @@ function verifyReservationOwner(
   const ownerPid = persistedProcessInteger(reservation.owner_pid, 1);
   const ownerStart = persistedProcessInteger(reservation.owner_start_ticks, 0);
   if (ownerPid === null || ownerStart === null) return 'refused';
-  if (ownerPid === process.pid) return 'self';
+  if (ownerPid === process.pid) {
+    if (ownerStart < 1) return 'refused';
+    return procStartTicks(ownerPid) === ownerStart ? 'self' : 'refused';
+  }
   const selfTicks = procStartTicks(process.pid);
   if (selfTicks === null) return 'refused';
   if (ownerPid === process.ppid) {
@@ -581,7 +626,7 @@ async function authorizeLaunch(options: RunnerOptions): Promise<LaunchAuthorizat
   }
   // A runner that cannot name its own process in `/proc` cannot be the owner of
   // anything it then writes, so it does not get to launch.
-  if (procStartTicks(process.pid) === null) {
+  if ((options.selfStartTicks ?? procStartTicks)(process.pid) === null) {
     return refused('this runner cannot establish its own process identity; refusing to spawn');
   }
   return { allowed: true, reason: null };
@@ -780,7 +825,9 @@ async function runInvocation(
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);
     const backendError = classifyBackendFailure(logFile, invocationLogStart, code, isContinue);
-    const retryDelay = backendRetryDelay(backendError, attempt);
+    const retryDelay = options.retryDelayMs !== undefined
+      ? options.retryDelayMs(attempt)
+      : backendRetryDelay(backendError, attempt);
     if (retryDelay !== null) {
       await updateMeta(agentId, (current) => {
         current.backend_error = backendError;

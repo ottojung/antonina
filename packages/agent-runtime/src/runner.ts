@@ -204,8 +204,9 @@ function childResult(child: ChildProcess, agentId: string, options: RunnerOption
  * What evidence the claiming runner has that the reservation it is about to
  * consume was written by whoever launched it.
  *
- * `self` -- the reservation names this process as its owner, and the recorded
- * start time is this process's own start time as `/proc` reports it. A pid that
+ * `self` -- the reservation names this process as its owner, the recorded start
+ * time is this process's own start time as `/proc` reports it, *and* the
+ * claimant holds the owner token minted for that reservation. A pid that
  * resolves to this very process already leaves no second *process* it could be
  * confused with, but it does not make the recorded identity true: this is the
  * one shape whose evidence is a durable field the claimant can satisfy by
@@ -214,6 +215,22 @@ function childResult(child: ChildProcess, agentId: string, options: RunnerOption
  * here exactly as on the `parent` shape, for the same reason: the doc comment's
  * promise is a promise about all three shapes, and a pid alone is not an
  * identity.
+ *
+ * The token is what makes this shape distinct from the rule it used to follow,
+ * and the reason is the same one that puts a token on `declared`: when the
+ * recorded owner *is* the claimant there is no second process the kernel can
+ * corroborate the record against, so pid plus start time is not evidence that
+ * anybody wrote the reservation -- it is a fact about this process that the
+ * writer of the record read out of `/proc` and copied in. Measured on this head
+ * (board 197's residual R2): a process holding nothing but write access to
+ * `meta.json` wrote a reservation naming the claiming pid with that pid's own
+ * true start time, published the claim and had the backend run in the declared
+ * directory. So this shape is the kernel-evidence-free shape, and the rule this
+ * function already follows -- kernel evidence first, and the token wherever the
+ * kernel kept none -- applies to it exactly as it applies to `declared`. The
+ * product mints a token on *every* reservation it writes (`packages/cli/src/agent.ts`),
+ * so requiring one here costs the launcher nothing and closes the last shape in
+ * which a metadata write could establish its own ownership.
  *
  * `parent` -- the reservation names the process that spawned this one, and the
  * recorded start time matches that live process in `/proc`. Pid plus start time,
@@ -239,13 +256,19 @@ function childResult(child: ChildProcess, agentId: string, options: RunnerOption
  * "the claim is authenticated" as "the record is authenticated": it is
  * authority over a `meta.json`, and it is only as strong as that file's
  * integrity. A process that can write `meta.json` can author a reservation and
- * its owner token together and claim it, because the token is compared against
- * the record it is meant to authenticate. That is not a hole this function can
- * close -- such a writer could write `state: succeeded` outright -- and
- * `AGENTS.md` puts the durable state directory in the user's own hands by
- * design. What closes the *board 197* defect regardless is the launch gate:
- * a forged claim still cannot make a launch happen after the invocation-cwd
- * capability is withdrawn. Recorded as a scope boundary, not repaired here.
+ * an owner token together and claim it, because the token is compared against
+ * the record it is meant to authenticate. Requiring the token on the `self`
+ * shape closed the one case where the *file alone* was enough, so a write is no
+ * longer self-authorising on any shape; what remains is a writer that also
+ * supplies the token to the claimant, which means supplying that claimant's
+ * environment -- a strictly larger capability than writing metadata, and one
+ * such a writer does not need this function to obtain, since it could write
+ * `state: succeeded` outright. This runtime has no trust anchor outside its own
+ * state directory to compare a token against, so that limit is not closable
+ * here, and `AGENTS.md` puts the durable state directory in the user's own
+ * hands by design. What closes the *board 197* defect regardless is the launch
+ * gate: a forged claim still cannot make a launch happen after the
+ * invocation-cwd capability is withdrawn.
  *
  * `refused` -- anything else, including a reservation whose recorded owner is a
  * *different* live process, a recorded start time that does not match the live
@@ -263,7 +286,14 @@ function verifyReservationOwner(
   if (ownerPid === null || ownerStart === null) return 'refused';
   if (ownerPid === process.pid) {
     if (ownerStart < 1) return 'refused';
-    return procStartTicks(ownerPid) === ownerStart ? 'self' : 'refused';
+    if (procStartTicks(ownerPid) !== ownerStart) return 'refused';
+    // No second process exists for the kernel to corroborate this record
+    // against, so the token is the whole of the evidence -- the same rule the
+    // `declared` shape below follows, applied to the shape that had none. A
+    // metadata write on its own cannot name its own authority: it would also
+    // have to be holding the token the launcher minted for this invocation.
+    if (!ownerTokensEqual(reservation.owner_token, env[RUNNER_OWNER_TOKEN_ENV])) return 'refused';
+    return 'self';
   }
   const selfTicks = procStartTicks(process.pid);
   if (selfTicks === null) return 'refused';

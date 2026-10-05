@@ -117,8 +117,8 @@ export interface ReviewRecordInput {
   rationale: string;
 }
 
-export const MAX_ISSUE_BODY_CHARACTERS = 1_000;
-export const MAX_COMMENT_BODY_CHARACTERS = 1_000;
+export const MAX_ISSUE_BODY_CHARACTERS = 10_000;
+export const MAX_COMMENT_BODY_CHARACTERS = 10_000;
 
 function characterCount(value: string): number {
   return Array.from(value).length;

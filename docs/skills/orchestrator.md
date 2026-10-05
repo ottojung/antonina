@@ -42,7 +42,7 @@ Collection reads never choose a page implicitly. The following commands require 
 
 When a pass needs more than the first page, increment the page number explicitly until enough state has been read or an empty page is reached. `board show --id NUMBER --page 1` returns the issue description plus the newest comment page; increment `--page` to read older comments when the current state is not yet clear. If the pass mutates queue membership or order while scanning — for example by closing, reopening, creating, or reordering issues — restart any priority-sensitive scan at page 1 before making further scheduling decisions. Other single-record reads such as `board target show --id ID` and `agent status --id ID` remain unpaginated.
 
-New issue bodies and new comments are capped at 1,000 Unicode characters. Keep orchestrator comments compact and put large diagnostics, reviews, transcripts, or generated reports in a durable artifact, then link or name that artifact from the comment instead of pasting it into the board. Historical oversized content is still returned in full by single-record reads.
+New issue bodies and new comments are capped at 10,000 Unicode characters. Keep orchestrator comments compact and put large diagnostics, reviews, transcripts, or generated reports in a durable artifact, then link or name that artifact from the comment instead of pasting it into the board. Historical oversized content is still returned in full by single-record reads.
 
 The board trust anchor and credential come from Antonina's config directory. Never print, copy into comments, or otherwise expose credentials, private keys, tokens, or other secrets.
 

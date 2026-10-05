@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   AGENT_META_VERSION,
+  DEFAULT_VARIANT,
   activeRunnerFlag,
   deletePendingFlag,
   idleMeta,
@@ -25,6 +26,11 @@ import {
 } from '../dist/packages/agent-runtime/src/metadata.js';
 
 const badAuthority = [123, true, 1.5, [], {}, ''];
+
+test('new managed agents default to the high OpenCode variant', () => {
+  assert.equal(DEFAULT_VARIANT, 'high');
+  assert.equal(idleMeta('a11d', '/tmp', null, 1).variant, 'high');
+});
 
 test('missing authority never receives a legacy default', () => {
   assert.throws(() => pendingPrompt({}), /not canonical/);

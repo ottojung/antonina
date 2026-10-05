@@ -407,7 +407,12 @@ export function buildAgentCommand(
 ): string[] | null {
   const agentId = requiredPersistedAgentId(meta);
   const cwd = requiredAgentCwd(meta);
-  const variant = persistedVariant(meta) || DEFAULT_VARIANT;
+  // The durable field is still validated so malformed or old records fail closed,
+  // but Antonina's backend variant is a product-level setting rather than a
+  // per-agent override. Legacy records may still say `low`; every invocation
+  // launched by this build uses the current Antonina default.
+  persistedVariant(meta);
+  const variant = DEFAULT_VARIANT;
   const executable = resolveOpencode(env);
   if (isContinue) {
     const recorded = persistedNativeSessionId(meta);

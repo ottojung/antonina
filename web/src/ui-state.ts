@@ -8,9 +8,19 @@ import type {
   FeedRead,
   IssueListSummary,
 } from './api';
+import { compareIssueActivity, newestCommentAt } from './api';
 import type { BoardIssue, BoardResource, VerifiedBoardState } from './model';
 
 export type IssueFilter = 'open' | 'closed' | 'all';
+
+/**
+ * What the issue order needs to see: identity and state for the queue and closed
+ * orders, plus the two fields the activity order keys on. Widening this bound is
+ * the whole of the All Issues change -- `openQueueOrder` and `closedIssueOrder`
+ * still constrain themselves to identity and state, so they keep working on
+ * callers that hold no timestamps at all.
+ */
+type ActivitySortable = Pick<BoardIssue, 'number' | 'state'> & Pick<IssueListSummary, 'createdAt' | 'lastActivityAt'>;
 
 /**
  * A loaded board carries its shared priority order beside it. There is no
@@ -143,6 +153,7 @@ function summarizeIssue(issue: BoardIssue): IssueListSummary {
     updatedAt: issue.updatedAt,
     closedAt: issue.state === 'closed' ? issue.updatedAt : null,
     messageCount: issue.messages.length,
+    lastActivityAt: newestCommentAt(issue.messages),
     hasBody: issue.body.length > 0,
   };
 }
@@ -275,16 +286,33 @@ export function closedIssueOrder<T extends Pick<BoardIssue, 'number' | 'state'>>
 }
 
 /**
- * The issues a filter shows. `open` is the shared queue, `closed` is the
- * unqueued tail, and `all` is the queue first with the closed tail after it, so
- * the open work a reader came for is always at the top in priority order.
+ * Every issue, most recently active first.
+ *
+ * This is the All Issues order, and it is the only place an issue's timestamps
+ * decide its position. `open` keeps the shared queue and `closed` keeps its own
+ * stable order, both of which the board commits to; All Issues is the view a
+ * reader opens to ask "what moved recently", and answering that by issue number,
+ * by creation order or by closing time answers a different question.
+ *
+ * Open and closed issues interleave here. That is the point: an issue that was
+ * just commented on is the most recent activity on the board whether or not it
+ * has been closed.
  */
-export function visibleIssues<T extends Pick<BoardIssue, 'number' | 'state'>>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
+export function activityIssueOrder<T extends ActivitySortable>(issues: readonly T[]): T[] {
+  return [...issues].sort(compareIssueActivity);
+}
+
+/**
+ * The issues a filter shows. `open` is the shared queue, `closed` is the
+ * unqueued tail, and `all` is every issue by last activity.
+ */
+export function visibleIssues<T extends ActivitySortable>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
+  if (filter === 'all') return activityIssueOrder(issues);
   const byNumber = new Map(issues.map((issue) => [issue.number, issue]));
   const open = openQueueOrder(issues, queue).map((number) => byNumber.get(number)!);
   if (filter === 'open') return open;
   const closed = closedIssueOrder(issues).map((number) => byNumber.get(number)!);
-  return filter === 'closed' ? closed : [...open, ...closed];
+  return closed;
 }
 
 /**
@@ -332,7 +360,9 @@ export function clampIssuePage(page: number, total: number, pageSize = ISSUE_PAG
  * The one page of an already-ordered list, clamped the same way. Pagination is a
  * slice of the semantic order `visibleIssues` produced and never a second sort:
  * open issues stay in the board's queue order, closed issues keep their stable
- * order, and `all` is still open-first. Only the window onto that order moves.
+ * order, and `all` keeps the last-activity order `visibleIssues` produced --
+ * issues with no recorded activity falling back to their creation time. Only the
+ * window onto that order moves.
  */
 export function issuePage<T>(items: readonly T[], page: number, pageSize = ISSUE_PAGE_SIZE): T[] {
   const index = clampIssuePage(page, items.length, pageSize);
@@ -359,6 +389,153 @@ export function hasIssuePages(total: number, pageSize = ISSUE_PAGE_SIZE): boolea
 export const ISSUE_PAGE_PREVIOUS = 'Previous page';
 
 export const ISSUE_PAGE_NEXT = 'Next page';
+
+/**
+ * How many resources one page of the Resources view holds.
+ *
+ * 50 for the same reason `ISSUE_PAGE_SIZE` is 50: it is the page size the CLI
+ * already uses for board collections (`DEFAULT_COLLECTION_PAGE_SIZE`, defined in
+ * `packages/cli/src/board.ts` and applied by that file's `pageSlice`, which
+ * `board resource list --page` slices with), so the browser's page and the
+ * CLI's page are the same chunk and cannot
+ * drift apart into two different definitions of a page.
+ *
+ * What this paging is, precisely: a window onto what the browser already holds.
+ * It is NOT a bounded read, and it does not make one. The board's resources are
+ * not paged in storage — they live inline in the board's single catalog shard,
+ * which `BoardStore.readOverview` returns whole and which
+ * `BoardApi.listResources` in `packages/core/src/api.ts` also reads whole via
+ * `loadBoard()` before `resourceViews` filters it. So
+ * `antonina board resource list --page N` slices after fetching everything, and
+ * this view slices after an overview that already carried everything. What that
+ * buys is 50 rendered cards instead of all of them, and a page number in the
+ * URL; what it does not buy is fewer bytes. A true bounded read needs the
+ * catalog itself sharded into resource pages — a storage-format change, not a UI
+ * change, and deliberately out of scope here.
+ */
+export const RESOURCE_PAGE_SIZE = 50;
+
+// There is deliberately no `resourcePageCount` here.
+//
+// The Resources view's paging IS the Issues list's paging: `RESOURCE_PAGE_SIZE`
+// is the page size, and the count, the clamp, the range line and the "is there
+// more than one page" question are answered by `issuePageCount`,
+// `clampIssuePage` (through `clampResourcePage`), `issuePageRange` and
+// `hasIssuePages` inside the shared `IssuePagination` control. A resource-scoped
+// copy of the count was here once, exported, and called by nothing in `web/src`
+// but its own four assertions in `resources-pagination.test.tsx`: the control
+// derives the same number from the same total and the same 50, so the copy was
+// a second answer to a question the control already answers, free to drift from
+// the Issues list's, and those four assertions restated the four assertions
+// `issuePageCount` already has in `issues-pagination.test.tsx`. What is asserted
+// about resources is asserted where it is true — the drawn rows, the position
+// line, and the Previous/Next boundaries — not about a helper's existence.
+
+/**
+ * The page the Resources view may actually be showing, given the page that was
+ * asked for. Out of range moves down onto the last existing page, exactly as
+ * `clampIssuePage` does: registering a resource lengthens the list, removing a
+ * dependency shortens it, and both are the same event to a reader.
+ *
+ * What moves is the VIEW, deliberately not the ADDRESS. The clamp here is what
+ * `resourcePage` slices on and what the position line and the controls describe,
+ * so the screen never claims a page it is not drawing; the URL is left naming the
+ * page the reader asked for, because normalising it would rewrite user-visible
+ * address-bar state on a background board poll — which is the same reason
+ * `clampIssuePage` is not a writer, and rewriting it here would fight that
+ * contract rather than keep it. A reader who shares or reloads the address gets
+ * the same clamp applied again to the collection as it stands then.
+ */
+export function clampResourcePage(page: number, total: number, pageSize = RESOURCE_PAGE_SIZE): number {
+  return clampIssuePage(page, total, pageSize);
+}
+
+/**
+ * The one page of the board's resources, in the order the board holds them.
+ *
+ * Pagination is a window onto the board's own resource order and never a second
+ * sort of it: grouping still happens afterwards and still sorts hosts and paths
+ * inside the page (`groupResources`), exactly as it does for an unpaged board.
+ * So a page that happens to hold two hosts draws two host sections, and a host
+ * whose resources straddle a page boundary appears on both pages rather than
+ * being pulled onto one of them.
+ */
+export function resourcePage<T>(resources: readonly T[], page: number, pageSize = RESOURCE_PAGE_SIZE): T[] {
+  const index = clampResourcePage(page, resources.length, pageSize);
+  return resources.slice((index - 1) * pageSize, index * pageSize);
+}
+
+/**
+ * There is deliberately no `resourcePageRange` or `hasResourcePages` beside
+ * these.
+ *
+ * The Resources view draws its position line and its Previous/Next boundaries
+ * through the shared `IssuePagination` control, which already answers both
+ * questions with `issuePageRange` and `hasIssuePages` — and its position line
+ * reads `1–50 of 126` without naming a noun, so it is exactly as true of
+ * resources as it is of issues. A resource-specific copy of those two helpers
+ * would be a second answer to a question the list already answers, free to drift
+ * from the Issues list's.
+ */
+
+/** What the Issues list's own Previous/Next control announces itself as paging. */
+export const ISSUE_LIST_PAGES_LABEL = 'Issue list pages';
+
+/** What the Resources view's own Previous/Next control announces itself as paging. */
+export const RESOURCE_LIST_PAGES_LABEL = 'Resource list pages';
+
+/**
+ * How many comments one page of a conversation holds.
+ *
+ * 50 for the same reason `ISSUE_PAGE_SIZE` is 50, and it is the number the
+ * board's comment shards already use, so a page in the browser is exactly one
+ * shard on the wire and the two cannot drift into a page that straddles two.
+ */
+export const COMMENT_PAGE_SIZE = 50;
+
+/**
+ * The conversation's paging, as the same model the Issues list uses.
+ *
+ * These are the helpers above applied to a message count rather than an issue
+ * count, with the comment page size. They are not a second implementation: the
+ * count, the clamp, the range line and the "is there more than one page"
+ * question are all answered by `issuePageCount`, `clampIssuePage`,
+ * `issuePageRange` and `hasIssuePages`, so the Issues list and an issue's
+ * conversation cannot disagree about what a page number means or what happens
+ * to one that no longer exists.
+ */
+export function commentPageCount(total: number, pageSize = COMMENT_PAGE_SIZE): number {
+  return issuePageCount(total, pageSize);
+}
+
+/**
+ * The page a conversation may actually be showing, given the page that was asked
+ * for. Out of range moves down onto the last existing page, exactly as
+ * `clampIssuePage` does for the list, so a post that made the thread longer and
+ * a delete that made it shorter are both the same event to a reader: the list
+ * got longer or shorter.
+ */
+export function clampCommentPage(page: number, total: number, pageSize = COMMENT_PAGE_SIZE): number {
+  return clampIssuePage(page, total, pageSize);
+}
+
+/** Which comments are on screen out of how many the thread holds. */
+export function commentPageRange(total: number, page: number, pageSize = COMMENT_PAGE_SIZE): string {
+  return issuePageRange(total, page, pageSize);
+}
+
+/** Whether the conversation is long enough to be worth paging at all. */
+export function hasCommentPages(total: number, pageSize = COMMENT_PAGE_SIZE): boolean {
+  return hasIssuePages(total, pageSize);
+}
+
+/** The page after a post, which is where a newly written comment lands. */
+export function lastCommentPage(total: number, pageSize = COMMENT_PAGE_SIZE): number {
+  return commentPageCount(total, pageSize);
+}
+
+/** What a conversation's Previous/Next control announces itself as paging. */
+export const COMMENT_PAGES_LABEL = 'Issue conversation pages';
 
 /**
  * Moves one queued issue to another slot, returning the whole reordered queue.
@@ -534,8 +711,73 @@ export async function readFeedFirstPage(readFeed: FeedRead): Promise<BoardFeedPa
  * exhausted.
  */
 export async function appendFeedPage(readFeed: FeedRead, current: BoardFeedPage, cursor: string): Promise<BoardFeedPage> {
-  const older = await readFeed({ limit: DEFAULT_FEED_LIMIT, cursor });
+  const older = await readFeedPage(readFeed, cursor);
   return { ...older, entries: [...current.entries, ...older.entries] };
+}
+
+/**
+ * One page back, exactly as the projection returned it, unmerged.
+ *
+ * The walk is kept as the pages themselves rather than as one growing array, so
+ * a page the reader has already been given can be shown again by number without
+ * another read. `appendFeedPage` is this read and a merge, and is what a caller
+ * that only wants to walk forward uses.
+ */
+export async function readFeedPage(readFeed: FeedRead, cursor: string): Promise<BoardFeedPage> {
+  return readFeed({ limit: DEFAULT_FEED_LIMIT, cursor });
+}
+
+/** What this run of pages navigates, so the control announces the feed, not the issue list. */
+export const FEED_LIST_PAGES_LABEL = 'Feed pages';
+
+export const FEED_PAGE_PREVIOUS = 'Previous feed page';
+export const FEED_PAGE_NEXT = 'Next feed page';
+
+/**
+ * The feed's page number, made from the addressable field and the pages read.
+ *
+ * The core feed is a cursor stream, not an offset stream, so this is not an
+ * offset: it is clamped to a page the reader has actually been given, because
+ * `?feed=99` on a fresh link names no page and the newest page is the only
+ * honest thing to render.
+ */
+export function clampFeedPage(page: number, walked: number): number {
+  const pages = Math.max(walked, 1);
+  if (!Number.isFinite(page)) return 1;
+  return Math.min(Math.max(Math.trunc(page), 1), pages);
+}
+
+/** The token that continues `page` — the one the projection issued for that page — or `null`. */
+export function feedPageNextCursor(pages: readonly BoardFeedPage[], page: number): string | null {
+  return pages[page - 1]?.nextCursor ?? null;
+}
+
+/**
+ * The entries of page `page` alone — one page, never the pages before it.
+ *
+ * Board issue 173 requires one page rendered at a time and forbids the DOM
+ * holding every page already visited. So this selects a single page and nothing
+ * merges: page 3 draws page 3's entries, not pages 1+2+3. A caller that wants
+ * the walk so far is `appendFeedPage`, which merges pages deliberately; the
+ * render path must not use it.
+ */
+export function feedPageEntries(pages: readonly BoardFeedPage[], page: number): BoardFeedEntry[] {
+  return pages[page - 1]?.entries ?? [];
+}
+
+/** The whole feed's size, per the newest page the projection returned. */
+export function feedPageTotal(pages: readonly BoardFeedPage[]): number {
+  return pages[0]?.total ?? 0;
+}
+
+/** Whether there is more than one page to number, so a one-page feed draws no control. */
+export function hasFeedPages(walked: number): boolean {
+  return walked > 1;
+}
+
+/** The position line, so paging the feed says where the reader is rather than silently swapping rows. */
+export function feedPageRange(page: number, walked: number): string {
+  return `Page ${page} of ${walked}`;
 }
 
 /**

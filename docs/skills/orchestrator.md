@@ -104,6 +104,14 @@ Runtime capacity is entirely outside orchestration. Do not inspect it, estimate 
 
 Development can often proceed concurrently even when integration must later serialize. Separate branches or worktrees may be safe to implement in parallel and then merge into a shared release branch one at a time.
 
+## Release-branch authority
+
+When the target repository instructions designate an active release or integration branch, treat that branch as agent-owned unless those instructions explicitly say otherwise. After required implementation, validation, and review, the orchestrator must integrate the work into that branch and push the resulting branch state to its remote. Do not invent a human approval step between a reviewed issue branch and its release branch.
+
+A pull request can be used as a review mechanism when tooling and credentials are available, but it is not itself an authority boundary. Missing GitHub PR/API credentials do not make release integration human-only when normal Git credentials can merge and push the designated release branch.
+
+A repository may reserve promotion from its release branch into its default branch for a human. That restriction applies only to the default-branch promotion; never reinterpret it as a prohibition on agents merging or pushing the release branch itself.
+
 Do not manufacture work merely to stay busy.
 
 ## Actionability
@@ -257,6 +265,8 @@ Do not equate "agent stopped", "tests passed", "PR opened", or "code written" wi
 
 Derive the completion predicate from the issue plus the target repository's instructions. It normally includes the requested result, required validation, required review/integration state, and absence of unresolved blockers.
 
+Record a review verdict on the board when a review of the issue's work has concluded, with `antonina board review --id NUMBER --verdict request-changes|approve --rationale TEXT [--commit SHA] [--reviewer NAME]`. The verdict names the exact commit it is about, because it is what a later read compares against, and that commit must be the full 40-character lowercase object id: an abbreviation, a digest in another case, or a branch name is refused as malformed at record time rather than stored as some other commit. A `request-changes` verdict is a blocker: it stops the issue from being closed, and the refusal names the blocker. It can only be cleared by an approval naming a commit no `request-changes` on that issue has named, since a fix is a new commit and a re-reading of the same one is not a fix; the board keeps every commit a block named, so no ordering of approvals and re-blocks can launder one out. A block that named no commit is cleared by the first approval that names one. An approval that itself names no commit clears nothing and is refused while a block is outstanding. An issue with no recorded verdict is not blocked, which is a different statement from being approved.
+
 Before closing an issue:
 
 1. reconcile the claimed result with objective repository/execution state;
@@ -265,7 +275,7 @@ Before closing an issue:
 4. close the issue with `antonina board close --id NUMBER`;
 5. verify that the issue is closed and no longer appears in the queue.
 
-Use `handoff` for a human-only action only when the remaining action genuinely cannot be delegated — for example, the issue explicitly reserves the decision to a human, required credentials or permissions are unavailable to agents, a physical/third-party action is required, or a material ambiguity has no governing criteria. Name the exact human action and why an agent cannot perform it. If you cannot name such a reason, continue the issue instead of inventing an approval step.
+Use `handoff` for a human-only action only when the remaining action genuinely cannot be delegated — for example, the issue explicitly reserves the decision to a human, required credentials or permissions for every permitted completion path are unavailable to agents, a physical/third-party action is required, or a material ambiguity has no governing criteria. Missing credentials for an optional mechanism such as creating a GitHub pull request do not qualify when the required repository state can still be reached through ordinary Git integration and push. Name the exact human action and why an agent cannot perform it. If you cannot name such a reason, continue the issue instead of inventing an approval step.
 
 ## Failure behavior
 
@@ -292,6 +302,7 @@ antonina board comment --id NUMBER --body BODY --author NAME
 
 # issue lifecycle
 antonina board create --title TITLE --body BODY
+antonina board review --id NUMBER --verdict VERDICT --rationale TEXT --commit SHA
 antonina board close --id NUMBER
 antonina board reopen --id NUMBER
 

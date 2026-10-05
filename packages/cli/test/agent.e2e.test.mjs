@@ -251,6 +251,10 @@ function metaPath(root, id) {
   return join(root, 'state', 'antonina', 'agents', id, 'meta.json');
 }
 
+function readMetaPath(root, id) {
+  return JSON.parse(readFileSync(metaPath(root, id), 'utf8'));
+}
+
 async function waitFor(root, id, predicate, timeoutMs = 8_000) {
   const path = metaPath(root, id);
   const deadline = Date.now() + timeoutMs;
@@ -767,7 +771,7 @@ test('agent ids canonicalize at every CLI boundary and preserve exit-code distin
   assert.equal(run(['agent', 'status', '--id', 'deadbeef', '--json'], env).status, 3);
 });
 
-test('list and status fail closed on malformed or old metadata', (t) => {
+test('status fails closed on malformed or old metadata, and list names the unreadable record', (t) => {
   const { root, work, env } = fixture(t);
   assert.equal(run(['agent', 'new', '--id', 'cab1e', '--cwd', work], env).status, 0);
   const path = metaPath(root, 'cab1e');
@@ -780,9 +784,18 @@ test('list and status fail closed on malformed or old metadata', (t) => {
   assert.equal(status.status, 1);
   assert.match(status.stderr, /created_at is malformed/);
 
+  // Board 198: the record is still refused and is still named with the same
+  // reason, but a sweep no longer dies on one member -- the inventory is
+  // served (exit 0) and the unreadable agent is reported as data rather than
+  // thrown. Before 198 this asserted exit 1, which is the defect: one
+  // unreadable directory made every readable agent unreachable through the
+  // commands meant to reach them.
   const listed = run(['agent', 'list', '--page', '1', '--json'], env);
-  assert.equal(listed.status, 1);
-  assert.match(listed.stderr, /created_at is malformed/);
+  assert.equal(listed.status, 0, listed.stderr);
+  const payload = JSON.parse(listed.stdout);
+  assert.equal(payload.agents.length, 0);
+  assert.deepEqual(payload.unreadable.map((entry) => entry.id), ['cab1e']);
+  assert.match(payload.unreadable[0].reason, /created_at is malformed/);
 
   meta = JSON.parse(readFileSync(path, 'utf8'));
   meta.created_at = 1;
@@ -872,6 +885,87 @@ test('attached prompt streams output and returns invocation status', (t) => {
   assert.equal(prompt.status, 0, prompt.stderr);
   assert.match(prompt.stdout, /FAKE:attached/);
   assertFixtureInvoked(handle, 'attached');
+});
+
+// Board issue 177: run scope. An attached run reports the output of the
+// invocation it accepted, not the transcript every earlier run accumulated.
+// The two markers below are per-run: the fixture prints `FAKE:<last prompt>`, so
+// `FAKE:first` exists only because the first run happened and `FAKE:second` only
+// because the second did. That is what makes the exclusion assertion
+// non-vacuous -- the excluded text is proven to exist in the same log the third
+// command still reads.
+test('a second run reports only its own output while agent log keeps the whole history', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '177a', '--cwd', work], env).status, 0);
+
+  const first = run(['agent', 'run', '--id', '177a', '--prompt', 'first'], env);
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /FAKE:first/);
+
+  const second = run(['agent', 'run', '--id', '177a', '--prompt', 'second'], env);
+  assert.equal(second.status, 0, second.stderr);
+  // Its own progress is still surfaced...
+  assert.match(second.stdout, /FAKE:second/);
+  // ...and the earlier run's output is not.
+  assert.doesNotMatch(
+    second.stdout,
+    /FAKE:first/,
+    'a second run replayed the first run\'s output instead of its own',
+  );
+
+  // Non-vacuity: both runs really did produce output, both really are in the
+  // durable log, and both really did reach the backend.
+  const durable = readFileSync(join(root, 'state', 'antonina', 'agents', '177a', 'output.log'), 'utf8');
+  assert.match(durable, /FAKE:first/);
+  assert.match(durable, /FAKE:second/);
+  const meta = JSON.parse(readFileSync(metaPath(root, '177a'), 'utf8'));
+  assert.equal(meta.prompt_count, 2);
+
+  // The accumulated history is still `agent log`'s, unchanged.
+  const log = run(['agent', 'log', '--id', '177a', '--lines', '500'], env);
+  assert.equal(log.status, 0, log.stderr);
+  assert.match(log.stdout, /FAKE:first/, 'agent log no longer reports the first run');
+  assert.match(log.stdout, /FAKE:second/, 'agent log no longer reports the second run');
+});
+
+// The same boundary across a steer. An attached `--steer` command must not
+// replay the invocation it interrupted, and the cursor the runtime records when
+// the runner drains the queued prompt must scope the run that follows: the third
+// run reports its own output only, though two invocations preceded it.
+test('run scope survives a steer: neither the steer nor the next run replays earlier output', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', 'a11d', '--cwd', work], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', 'a11d', '--detach', '--prompt', 'slow'], env).status, 0);
+  await waitFor(root, 'a11d', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
+
+  const steer = run(['agent', 'run', '--id', 'a11d', '--steer', '--prompt', 'redirect'], env);
+  assert.ok(
+    steer.status === 0 || steer.status === 1,
+    `a steer run did not reach a lifecycle outcome: ${steer.status} ${steer.stderr}`,
+  );
+  assert.doesNotMatch(steer.stdout, /slow-start/, 'a steer run replayed the interrupted invocation');
+  await waitFor(root, 'a11d', (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false, 12_000);
+
+  // Non-vacuity: the interrupted invocation and the drained continuation both
+  // really did write, so the markers excluded below really do exist.
+  const durable = readFileSync(join(root, 'state', 'antonina', 'agents', 'a11d', 'output.log'), 'utf8');
+  assert.match(durable, /slow-start/);
+  assert.match(durable, /FAKE:redirect/);
+
+  const third = run(['agent', 'run', '--id', 'a11d', '--prompt', 'third'], env);
+  assert.equal(third.status, 0, third.stderr);
+  assert.match(third.stdout, /FAKE:third/);
+  assert.doesNotMatch(third.stdout, /slow-start/, 'a run replayed the interrupted invocation');
+  assert.doesNotMatch(third.stdout, /FAKE:redirect/, 'a run replayed the drained steer continuation');
+
+  const log = run(['agent', 'log', '--id', 'a11d', '--lines', '500'], env);
+  assert.equal(log.status, 0, log.stderr);
+  assert.match(log.stdout, /slow-start/, 'agent log no longer reports the interrupted invocation');
+  assert.match(log.stdout, /FAKE:redirect/, 'agent log no longer reports the drained continuation');
+  assert.match(log.stdout, /FAKE:third/, 'agent log no longer reports the third run');
+  assertFixtureInvoked(handle, 'redirect');
+  assertFixtureInvoked(handle, 'third');
 });
 
 test('graceful stop and wait timeout expose stable lifecycle results', async (t) => {
@@ -1484,6 +1578,141 @@ test('e. a signal-killed agent is reported as an external kill through status', 
   assert.equal(body.backend_error.signal_name, 'SIGKILL');
   assert.ok(['observed', 'unavailable'].includes(body.backend_error.oom_evidence));
   assertFixtureInvoked(handle, 'die-by-signal');
+
+  // ---------------------------------------------------------------- BOARD 166
+  // The runtime wrote a death note into `meta.error` and no surface showed it.
+  // Two things are asserted here, and only because both are separately
+  // falsifiable.
+  //
+  // First, that the note reached the machine surface at all: `body.last_error` is
+  // present and non-null. A status document with no such key satisfies every
+  // other assertion in this test.
+  assert.ok('last_error' in body, 'agent status --json must carry a `last_error` key');
+  assert.equal(
+    typeof body.last_error,
+    'string',
+    `recorded note was not surfaced: ${JSON.stringify(body.last_error)}`,
+  );
+  // Second, that it is the note the runtime actually recorded, unmodified. The
+  // comparison is against the durable record, not against a re-derivation of it:
+  // this proves the display passed the runtime's own sentence through rather
+  // than showing something plausible in its place.
+  const recorded = JSON.parse(readFileSync(metaPath(root, 'ca94'), 'utf8'));
+  assert.equal(typeof recorded.error, 'string', 'this death recorded no note, so there is nothing to surface');
+  assert.equal(body.last_error, recorded.error);
+  // And it is the sentence `describeSignalDeath` writes for a signal death, in
+  // either of its two shapes: counters observed, or no counters exposed.
+  assert.match(
+    body.last_error,
+    /^killed by SIGKILL \(signal 9\); (?:cgroup memory\.events rose by oom \d+ and oom_kill \d+|the kernel exposed no cgroup OOM counters)/,
+  );
+
+  // The human surface carries the same note, on the same record. The label is
+  // `last error:` and not `error:` because `finalizeTerminal` never clears
+  // `meta.error` -- the staleness case is pinned by the test below -- and an
+  // `error:` line under `exit code:` would read as this run's cause.
+  const human = run(['agent', 'status', '--id', 'ca94'], env);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /^last error: killed by SIGKILL \(signal 9\); /m);
+
+  // The negative case, which the positive cases cannot supply on their own: an
+  // agent that ended cleanly has no note recorded, and the human surface must
+  // then be silent about it rather than printing a placeholder. A status that
+  // always printed a `last error:` line would satisfy every assertion above.
+  assert.equal(run(['agent', 'new', '--id', 'ca96', '--cwd', work], env).status, 0);
+  const clean = run(['agent', 'run', '--id', 'ca96', '--detach', '--prompt', 'ok'], env);
+  assert.equal(clean.status, 0, clean.stderr);
+  await waitFor(root, 'ca96', (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
+  const cleanHuman = run(['agent', 'status', '--id', 'ca96'], env);
+  assert.equal(cleanHuman.status, 0, cleanHuman.stderr);
+  assert.doesNotMatch(cleanHuman.stdout, /^last error:/m);
+  const cleanJson = run(['agent', 'status', '--id', 'ca96', '--json'], env);
+  assert.equal(cleanJson.status, 0, cleanJson.stderr);
+  assert.equal(JSON.parse(cleanJson.stdout).last_error, null);
+  // `cwd:` and the rest of the surface are untouched by this change: a clean
+  // agent still reports the directory its front ran in.
+  assert.match(cleanHuman.stdout, /^cwd: {8}/m);
+});
+
+// ------------------------------------------------------------------ BOARD 166
+// The staleness case the fresh-agent negative case above cannot reach.
+//
+// `finalizeTerminal` writes `meta.error` only when it is given a note, and a
+// clean exit is given none, so the note from a failed run is still in the record
+// after a later successful run on the same agent. Surfacing the note made that
+// visible for the first time. This pins the answer this issue chose (option
+// (iii): display the recorded note and say plainly that it is a *last* note, not
+// this run's), against the two answers it rejected: clearing `meta.error` would
+// make a state record less than it does today, and suppressing the line for
+// non-`failed` states would hide a note the runtime genuinely recorded.
+//
+// What makes this falsifiable: a fresh agent id has `meta.error === null` from
+// creation, so an implementation that printed the last known note forever, or one
+// that cleared it, both pass every other case in this file. Only one agent that
+// fails and then succeeds can tell them apart.
+test('a note from an earlier failed run is never presented as this run\'s error', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', 'ca97', '--cwd', work], env).status, 0);
+
+  // Run one: killed from outside, so the runtime records a note.
+  const failed = run(['agent', 'run', '--id', 'ca97', '--detach', '--prompt', 'die-by-signal'], env);
+  assert.equal(failed.status, 0, failed.stderr);
+  const firstFailure = await waitFor(
+    root,
+    'ca97',
+    (meta) => meta.state === 'failed' && meta.active_runner === false,
+    30_000,
+  );
+  const staleNote = firstFailure.error;
+  assert.equal(typeof staleNote, 'string', 'the first run recorded no note to go stale');
+  assert.match(staleNote, /^killed by SIGKILL \(signal 9\); /);
+  const firstStatus = JSON.parse(run(['agent', 'status', '--id', 'ca97', '--json'], env).stdout);
+  assert.equal(firstStatus.last_error, staleNote, 'the first run\'s note must be displayed while it is the current one');
+
+  // Run two, on the same agent, to success. A clean exit records no note, so
+  // nothing on the runtime's side clears the first run's.
+  const succeeded = run(['agent', 'run', '--id', 'ca97', '--detach', '--prompt', 'ok'], env);
+  assert.equal(succeeded.status, 0, succeeded.stderr);
+  await waitFor(root, 'ca97', (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
+
+  // The record itself is unchanged by the second run: the note is still there.
+  // Asserted so the assertions below cannot be satisfied by something that
+  // quietly dropped it -- the runtime did not clear it, and this change did not
+  // make it clear it.
+  const afterSuccess = JSON.parse(readFileSync(metaPath(root, 'ca97'), 'utf8'));
+  assert.equal(afterSuccess.error, staleNote, 'the runtime cleared the earlier note');
+
+  // What the second status shows. The run succeeded...
+  const second = run(['agent', 'status', '--id', 'ca97', '--json'], env);
+  assert.equal(second.status, 0, second.stderr);
+  const body = JSON.parse(second.stdout);
+  assert.equal(body.state, 'succeeded');
+  assert.equal(body.exit_code, 0);
+  assert.equal(body.exit_signal, null);
+  // ...so nothing on the surface may present the earlier note as this run's
+  // cause. The key is `last_error`, not `error`: a consumer reading `error`
+  // beside `exit_code: 0` would be told the successful run failed.
+  assert.ok(!('error' in body), 'the status document must not offer the earlier note as `error`');
+  // The earlier note is genuinely no longer displayable, and the display says
+  // so rather than quoting it. The reason is the allowlist working, not a bug:
+  // the successful run replaced `meta.backend_error`, so the note no longer
+  // matches a sentence derived from *this* record's own backend record, and a
+  // note that cannot be re-derived from the record it sits in is not one this
+  // display will quote. Before this change nothing was shown at all here; the
+  // withheld marker is the honest report of "a note is recorded and the display
+  // declines to quote it", and it says nothing about which run wrote it.
+  assert.equal(body.last_error, 'a note is recorded but is not displayable here');
+
+  // The human surface makes the same distinction in words, and the outcome
+  // fields it prints are the successful ones.
+  const human = run(['agent', 'status', '--id', 'ca97'], env);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /^state: {6}succeeded$/m);
+  assert.match(human.stdout, /^exit code: {2}0$/m);
+  assert.doesNotMatch(human.stdout, /^error:/m, 'the earlier note was labelled as this run\'s error');
+  assert.doesNotMatch(human.stdout, /^last error: killed by SIGKILL/m);
+  assert.match(human.stdout, /^last error: a note is recorded but is not displayable here$/m);
 });
 
 // ------------------------------------------------------------------ BOARD 122
@@ -1610,6 +1839,286 @@ test('--cwd is refused while a front exists, and changes nothing', async (t) => 
     null,
     'stop must not return while the detached runner can still write into agent state',
   );
+});
+
+// Board issue 178, the observation half. `cwd` is a declaration and
+// `invocation_cwd` is an observation of where a front was actually launched.
+// Reporting only the declaration made `status` a statement about intent dressed
+// as a location, so a declared directory that no front has ever run in must
+// report as such -- which is the only reading under which a later report that
+// names a directory means anything.
+test('a declared directory no front has run in is reported as never ran', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '0b5e', '--cwd', work], env).status, 0);
+
+  const status = run(['agent', 'status', '--id', '0b5e', '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  const parsed = JSON.parse(status.stdout);
+  assert.equal(parsed.cwd, work, 'the declaration is the directory that was declared');
+  assert.equal(
+    parsed.invocation_cwd,
+    null,
+    'nothing has been launched, so nothing may be observed',
+  );
+  assert.match(run(['agent', 'status', '--id', '0b5e'], env).stdout, /^ran in:\s+never ran$/m);
+
+  const listed = run(['agent', 'list', '--page', '1', '--json'], env);
+  assert.equal(listed.status, 0, listed.stderr);
+  const entry = JSON.parse(listed.stdout).agents.find((agent) => agent.id === '0b5e');
+  assert.equal(entry.invocation_cwd, null);
+
+  // And the backend has not run at all, so there is nothing it could have been
+  // launched in.
+  assert.deepEqual(fixtureInvocations(env), []);
+});
+
+// The other half: once a front has actually run, the observation names the
+// directory the *backend itself* reported, not the declaration. This is the
+// assertion that would fail if `ran in:` were reading `cwd`: here the two are
+// written by different actors at different times, and the declaration is
+// rewritten between them by a second run in a different directory.
+test('the observation names the directory the backend actually ran in', async (t) => {
+  const handle = fixture(t);
+  const { root, env } = handle;
+  const first = join(root, 'first-worktree');
+  const second = join(root, 'second-worktree');
+  mkdirSync(first);
+  mkdirSync(second);
+  assert.equal(run(['agent', 'new', '--id', '0b5f', '--cwd', first], env).status, 0);
+
+  assert.equal(
+    run(['agent', 'run', '--id', '0b5f', '--detach', '--prompt', 'one'], env).status,
+    0,
+  );
+  const ran = await waitFor(
+    root,
+    '0b5f',
+    (meta) => meta.state === 'succeeded' && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(ran.prompt_count, 1, 'the prompt must really have been delivered');
+  assert.equal(ran.invocation_cwd, first);
+  // The backend's own account of where it was, from its log, is the control the
+  // record is checked against.
+  assert.match(
+    readFileSync(outputLogPath(root, '0b5f'), 'utf8'),
+    new RegExp(`FAKE_CWD:${first}\\n`),
+  );
+
+  // A second run in a different directory rewrites the declaration, and the
+  // observation follows the real launch rather than being written at acceptance.
+  assert.equal(
+    run(['agent', 'run', '--id', '0b5f', '--cwd', second, '--detach', '--prompt', 'two'], env).status,
+    0,
+  );
+  const moved = await waitFor(
+    root,
+    '0b5f',
+    (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(moved.cwd, second);
+  assert.equal(moved.invocation_cwd, second);
+
+  const parsed = JSON.parse(run(['agent', 'status', '--id', '0b5f', '--json'], env).stdout);
+  assert.equal(parsed.invocation_cwd, second);
+  assert.match(
+    run(['agent', 'status', '--id', '0b5f'], env).stdout,
+    new RegExp(`^ran in:\\s+${second}$`, 'm'),
+  );
+  // Every launch of this front was handed the same directory the backend ran in.
+  for (const call of fixtureInvocations(env)) {
+    assert.ok(
+      call.includes(`--dir ${first} `) || call.includes(`--dir ${second} `),
+      `a launch named a directory the front did not declare: ${JSON.stringify(call)}`,
+    );
+  }
+  assertFixtureInvoked(handle, 'two');
+});
+
+// Board issue 178, the gate half. Backend agnosticism is data, not a changed
+// meaning: a backend that cannot place an invocation in a named directory must
+// refuse by name, before any write, rather than run the invocation somewhere
+// else and report the declared directory as if it had honoured it.
+//
+// These cases run the compiled CLI in a process whose backend reports the
+// capability withdrawn, and assert three things together: the command is refused
+// by name, the record is byte-identical to what it was before (a refusal writes
+// nothing), and the fixture backend was never invoked. The third is the half a
+// prose-only gate would miss.
+function withoutInvocationCwd(env) {
+  return { ...env, ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: '1' };
+}
+
+test('run refuses a launch into a directory the backend cannot honour', async (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '8a7e', '--cwd', work], env).status, 0);
+  const before = readFileSync(metaPath(root, '8a7e'), 'utf8');
+
+  // A directory named on this very invocation.
+  const named = join(root, 'named-here');
+  mkdirSync(named);
+  const refused = run(
+    ['agent', 'run', '--id', '8a7e', '--cwd', named, '--detach', '--prompt', 'no'],
+    withoutInvocationCwd(env),
+  );
+  assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stderr, /backend cannot run an invocation in a different working directory/);
+  assert.equal(readFileSync(metaPath(root, '8a7e'), 'utf8'), before, 'a refused launch must write nothing');
+
+  // And the same launch of a directory declared *earlier*, in durable state,
+// with no `--cwd` on this command at all. This is the case a flag-shaped gate
+  // misses: the backend is handed `--dir <declared>` by a CLI that has just been
+  // told it cannot run an invocation in a named directory.
+  const inherited = run(
+    ['agent', 'run', '--id', '8a7e', '--detach', '--prompt', 'no'],
+    withoutInvocationCwd(env),
+  );
+  assert.equal(inherited.status, 1, `expected a refusal, got: ${inherited.stdout}${inherited.stderr}`);
+  assert.match(inherited.stderr, /backend cannot run an invocation in a different working directory/);
+  assert.equal(readFileSync(metaPath(root, '8a7e'), 'utf8'), before, 'a refused launch must write nothing');
+  assert.deepEqual(fixtureInvocations(env), [], 'the backend must never be invoked for a refused launch');
+
+  // The positive control: the same commands, with the capability present, run.
+  // Without it the cases above would also pass if the gate refused everything.
+  assert.equal(run(['agent', 'run', '--id', '8a7e', '--detach', '--prompt', 'go'], env).status, 0);
+  const launched = await waitFor(
+    root,
+    '8a7e',
+    (meta) => meta.state === 'succeeded' && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(launched.invocation_cwd, work);
+  assert.ok(fixtureInvocations(env).length > 0, 'the launch must happen when the capability is present');
+});
+
+// The same predicate at `new`: declaring a default directory is the same request
+// as running an invocation in one, because the declaration is what `run` later
+// launches from. Without this clause `new` accepted a directory `run` refuses.
+test('new refuses a declared directory the backend cannot honour, and writes nothing', (t) => {
+  const { root, work, env } = fixture(t);
+  const refused = run(['agent', 'new', '--id', '8a7f', '--cwd', work], withoutInvocationCwd(env));
+  assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stderr, /backend cannot run an invocation in a different working directory/);
+  assert.equal(
+    existsSync(metaPath(root, '8a7f')),
+    false,
+    'a refused `new` must create no agent directory at all',
+  );
+
+  // An agent with no directory is still creatable: the gate is about a named
+  // directory, not about the backend's presence.
+  assert.equal(run(['agent', 'new', '--id', '8a80'], withoutInvocationCwd(env)).status, 0);
+});
+
+// And at `new --fork`, which refuses `--cwd` outright but *inherits* the
+// source's declared directory, so it is a route to a declaration that never
+// consulted the capability. The gate runs on the value the clone is about to
+// record, and above `forkAgent`, so a refusal writes nothing.
+test('new --fork refuses to inherit a directory the backend cannot honour', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '8a81', '--cwd', work], env).status, 0);
+
+  const refused = run(['agent', 'new', '--id', '8a82', '--fork', '8a81'], withoutInvocationCwd(env));
+  assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stderr, /backend cannot run an invocation in a different working directory/);
+  assert.equal(
+    existsSync(metaPath(root, '8a82')),
+    false,
+    'a refused fork must create no clone',
+  );
+
+  // A source that declared nothing is still forkable under the same backend: the
+  // clone would record no directory, so there is nothing to honour.
+  assert.equal(run(['agent', 'new', '--id', '8a83'], env).status, 0);
+  assert.equal(run(['agent', 'new', '--id', '8a84', '--fork', '8a83'], withoutInvocationCwd(env)).status, 0);
+  assert.equal(readMetaPath(root, '8a84').cwd, null);
+});
+
+// `--cwd ''` resolves to the invoking shell's directory, because
+// `resolve('') === process.cwd()`, so it passed validation and recorded
+// wherever the shell happened to be -- reopening, through a wrapper's
+// `${VAR:-}`, exactly the inheritance the declared-cwd contract refuses.
+// Board issue 178, the observation half again, from the other side. This is
+// the case the observation's whole rule exists for: a prompt that is accepted
+// and then never launches. The directory disappears between acceptance and the
+// spawn, so the backend is never executed -- and a record that had recorded the
+// declaration at acceptance would name, permanently and in a terminal state, a
+// directory no front was ever in.
+test('a launch that never reached a backend observes nothing', async (t) => {
+  const handle = fixture(t);
+  const { root, env } = handle;
+  const vanishing = join(root, 'vanishing-worktree');
+  mkdirSync(vanishing);
+  assert.equal(run(['agent', 'new', '--id', '8a90', '--cwd', vanishing], env).status, 0);
+
+  // Gone before the run command observes it. `run` re-validates only a
+  // directory named on this command, so a declaration that has since been
+  // removed reaches the spawn and fails there -- which is exactly the gap this
+  // case needs.
+  rmSync(vanishing, { recursive: true, force: true });
+
+  assert.equal(
+    run(['agent', 'run', '--id', '8a90', '--detach', '--prompt', 'never-launched'], env).status,
+    0,
+    'the prompt is accepted; it is the launch that cannot happen',
+  );
+  const done = await waitFor(
+    root,
+    '8a90',
+    (meta) => meta.state === 'failed' && meta.active_runner === false,
+    20_000,
+  );
+  assert.equal(done.prompt_count, 1, 'the prompt really was accepted');
+  assert.equal(
+    done.invocation_cwd,
+    null,
+    'a launch that never produced a child must not leave a directory behind',
+  );
+  assert.equal(
+    done.cwd,
+    vanishing,
+    'the declaration is untouched: it is what the front would have been run in',
+  );
+
+  // No backend ever ran, which is the fact the record must not contradict.
+  assert.deepEqual(
+    fixtureInvocations(env).filter((call) => call.includes('never-launched')),
+    [],
+    'the backend must not have been executed for a launch that could not happen',
+  );
+  const parsed = JSON.parse(run(['agent', 'status', '--id', '8a90', '--json'], env).stdout);
+  assert.equal(parsed.invocation_cwd, null);
+  assert.match(run(['agent', 'status', '--id', '8a90'], env).stdout, /^ran in:\s+never ran$/m);
+  assertFixtureInvoked(handle, undefined);
+});
+
+test('an empty or whitespace-only --cwd is refused at every entry point', (t) => {
+  const { root, work, env } = fixture(t);
+  assert.equal(run(['agent', 'new', '--id', '8a85'], env).status, 0);
+
+  for (const value of ['', ' ', '\t', '\n', '   ']) {
+    for (const args of [
+      ['agent', 'new', '--id', '8a86', '--cwd', value],
+      ['agent', 'run', '--id', '8a85', '--cwd', value, '--detach', '--prompt', 'no'],
+    ]) {
+      const refused = run(args, env);
+      assert.equal(
+        refused.status,
+        2,
+        `expected a usage refusal for ${JSON.stringify(value)}, got: ${refused.stdout}${refused.stderr}`,
+      );
+      assert.match(refused.stderr, /--cwd requires a working directory path/);
+    }
+  }
+  // Neither command created or launched anything, and the record never acquired
+  // the shell's directory.
+  assert.equal(existsSync(metaPath(root, '8a86')), false);
+  const after = readMetaPath(root, '8a85');
+  assert.equal(after.cwd, null);
+  assert.equal(after.prompt_count, 0);
+  assert.deepEqual(fixtureInvocations(env), []);
+  assert.notEqual(after.cwd, work);
 });
 
 // run --cwd is a real option, validated exactly as `new --cwd` is: a path that

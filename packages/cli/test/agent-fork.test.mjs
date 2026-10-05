@@ -114,6 +114,50 @@ test('a fork of a plain idle agent continues the same work identity', (t) => {
   assert.equal(clone.prompt_count, 0);
 });
 
+// Board issue 178. `invocation_cwd` is an *observation*: the directory a front
+// was actually launched in. A fork is a fresh agent with its own identity that
+// launched nothing, so it must report `never ran`. `forkMetaSnapshot` is a
+// `structuredClone` of the source, which carried the source's last launch
+// directory across as the clone's own -- so `agent status` on a never-run agent
+// printed `ran in: <the source's directory>`.
+//
+// The source's observation is seeded by writing it into the record directly
+// rather than by launching a backend, for the reason this file launches none:
+// the fork decision is `forkMetaSnapshot`'s, and a test that had to run a
+// backend to produce an input would test the backend instead.
+test('a fork of a front that has run reports never ran, not the source directory', (t) => {
+  const { root, env, work } = world(t);
+  const source = seed(root, env, work, 'a1');
+  assert.equal(source.invocation_cwd, null, 'a front that has not run observes nothing');
+
+  const ranElsewhere = join(root, 'source-worktree');
+  mkdirSync(ranElsewhere, { recursive: true });
+  const seeded = readMeta(root, 'a1');
+  seeded.invocation_cwd = ranElsewhere;
+  writeFileSync(metaPath(root, 'a1'), JSON.stringify(seeded));
+
+  const forked = run(['agent', 'new', '--id', 'b2', '--fork', 'a1'], env);
+  assert.equal(forked.status, EXIT_OK, forked.stderr);
+
+  const clone = readMeta(root, 'b2');
+  assert.equal(
+    clone.invocation_cwd,
+    null,
+    'the clone launched nothing, so it must observe nothing',
+  );
+  // The declaration is inherited: it is a fact about the agent, not about a run.
+  assert.equal(clone.cwd, work);
+  // The source is untouched by being read.
+  assert.equal(readMeta(root, 'a1').invocation_cwd, ranElsewhere);
+
+  const status = run(['agent', 'status', '--id', 'b2', '--json'], env);
+  assert.equal(status.status, EXIT_OK, status.stderr);
+  assert.equal(JSON.parse(status.stdout).invocation_cwd, null);
+  const human = run(['agent', 'status', '--id', 'b2'], env);
+  assert.equal(human.status, EXIT_OK, human.stderr);
+  assert.match(human.stdout, /^ran in:\s+never ran$/m);
+});
+
 test('forking an unknown agent id fails clearly with the not-found exit code', (t) => {
   const { root, env, work } = world(t);
   seed(root, env, work, 'a1');

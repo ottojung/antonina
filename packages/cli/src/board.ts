@@ -43,6 +43,9 @@ import {
   type ExecutionTargetKind,
   type ExecutionTargetPersistence,
   type ExecutionTargetStatus,
+  parseReviewVerdict,
+  reviewBlocksCompletion,
+  type BoardReview,
   type IssueState,
   type ResourceView,
   type TargetRequest,
@@ -110,6 +113,7 @@ type CommandValue =
   | BoardResource
   | BoardResource[]
   | BoardDispatch
+  | BoardReview
   | BoardExecutionTarget
   | ResourceView[]
   | TargetView[]
@@ -134,6 +138,8 @@ interface ParsedCommand {
 interface CommandResult {
   mode: string;
   value: CommandValue;
+  /** The issue number a result is about, for the modes that print one line. */
+  number?: number;
   /**
    * The host-local daemon views a `target list --telemetry` asked for, or
    * `null` when it did not. It rides on the result rather than being a second
@@ -463,6 +469,31 @@ async function execute(
         ),
       };
     }
+    case 'review': {
+      const verdictOption = option(parsed.args, '--verdict');
+      const commitOption = option(verdictOption.rest, '--commit');
+      const reviewerOption = option(commitOption.rest, '--reviewer');
+      const rationaleOption = option(reviewerOption.rest, '--rationale');
+      if (rationaleOption.rest.length !== 1 || rationaleOption.value === undefined) {
+        throw new AntoninaApiError('review requires NUMBER --verdict VERDICT --rationale TEXT [--commit SHA] [--reviewer NAME]');
+      }
+      const verdict = verdictOption.value;
+      if (verdict === undefined) throw new AntoninaApiError('review requires --verdict request-changes or approve');
+      const reviewer = reviewerOption.value ?? context.env[BOARD_AUTHOR_ENV];
+      if (!reviewer) throw new AntoninaApiError('Review reviewer is required; use --reviewer or ' + BOARD_AUTHOR_ENV);
+      const number = parsePositiveInteger(rationaleOption.rest[0], 'NUMBER');
+      return {
+        mode: 'review',
+        number,
+        value: await client.recordReview({
+          number,
+          commit: commitOption.value ?? '',
+          verdict: parseReviewVerdict(verdict),
+          reviewer,
+          rationale: rationaleOption.value,
+        }),
+      };
+    }
     case 'close':
     case 'reopen': {
       if (parsed.args.length !== 1) throw new AntoninaApiError(parsed.command + ' requires NUMBER');
@@ -493,6 +524,18 @@ async function execute(
           : parsePositiveInteger(issueOption.value, '--issue');
         return {
           mode: 'resources',
+          // NOT a bounded read, and deliberately still not one. `--page` bounds
+          // what is PRINTED, never what is FETCHED: `listResources` is
+          // `resourceViews(await this.loadBoard())` in `packages/core/src/api.ts`,
+          // and per `docs/intent-records/board.md` the resource catalog is one
+          // materialized object (unlike issue summaries, which ARE paged in
+          // storage), so the whole collection crosses the wire before `pageSlice`
+          // takes one 50-row window of it. A true bounded read means sharding the
+          // catalog into resource pages — a storage-format and migration change,
+          // not a CLI or UI one, and out of scope here. The web Resources tab
+          // states the same limit rather than implying the UI alone fixes
+          // scaling; see the note above `RESOURCE_PAGE_SIZE` in
+          // `web/src/ui-state.ts`.
           value: pageSlice(await client.listResources(hostOption.value, issueNumber), pageNumber(pageOption.value)),
         };
       }
@@ -717,6 +760,19 @@ async function execute(
 
 function humanIssue(issue: BoardIssue): string {
   const lines = ['#' + issue.number + ' [' + issue.state + '] ' + issue.title, 'Description:', issue.body];
+  // The recorded verdict is printed next to the issue rather than only in the
+  // thread, because it is the one line that says whether the issue can be closed
+  // right now, and `close` refuses while a blocker stands.
+  if (issue.review !== undefined) {
+    lines.push(
+      'Review: ' + issue.review.verdict
+        + ' [' + issue.review.reviewer + ' @ ' + issue.review.recordedAt + ']',
+      '  about ' + (issue.review.commit === '' ? 'no named commit' : issue.review.commit),
+      '  ' + issue.review.rationale,
+    );
+  }
+  const blocker = reviewBlocksCompletion(issue);
+  if (blocker !== null) lines.push('Completion blocked:', blocker);
   for (const message of issue.messages) lines.push(message.author + ' @ ' + message.createdAt, message.body);
   return lines.join('\n');
 }
@@ -1095,6 +1151,14 @@ function humanLines(result: CommandResult): string[] {
   if (result.mode === 'dispatch') {
     const dispatch = result.value as BoardDispatch;
     return ['Dispatched #' + dispatch.issueNumber + ' to ' + dispatch.targetId + '; ' + dispatch.rationale];
+  }
+  if (result.mode === 'review') {
+    const review = result.value as BoardReview;
+    return [
+      'Review #' + result.number + ' ' + review.verdict + ' by ' + review.reviewer
+        + ' about ' + (review.commit === '' ? 'no named commit' : review.commit),
+      '  ' + review.rationale,
+    ];
   }
 
   const value = result.value;

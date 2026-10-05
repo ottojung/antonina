@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import {
+  type Dirent,
   existsSync,
   readdirSync,
   readFileSync,
@@ -7,7 +8,14 @@ import {
 } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { configuredModelAvailable, discoverSessionId, sanitizeBackendError } from '../../agent-runtime/src/backend.js';
+import {
+  backendCapabilities,
+  configuredModelAvailable,
+  describeSignalDeath,
+  discoverSessionId,
+  honoursInvocationCwd,
+  sanitizeBackendError,
+} from '../../agent-runtime/src/backend.js';
 import {
   beginInvocation,
   beginStopLike,
@@ -41,12 +49,15 @@ import {
   activeRunnerFlag,
   deletePendingFlag,
   idleMeta,
+  mintRunnerReservationOwnerToken,
   nextPromptCount,
   pendingPrompt,
   persistedAgentCwd,
   persistedControlField,
+  persistedInvocationCwd,
   persistedLifecycleState,
   persistedNativeSessionId,
+  persistedRunLogOffset,
   persistedTimestamp,
   persistedVariant,
   requiredPersistedAgentId,
@@ -57,10 +68,13 @@ import {
 } from '../../agent-runtime/src/metadata.js';
 import { normalizeAgentId } from '../../agent-runtime/src/process.js';
 import {
+  MetadataReadError,
   agentDir,
   agentsDir,
   createAgentDirectory,
   logPath,
+  logSize,
+  opencodeBackendEnv,
   readMeta,
   removeAgentDirectory,
   updateMeta,
@@ -149,6 +163,13 @@ function requireAgentId(raw: string | undefined, command: string): string {
 
 class UsageError extends Error {}
 class NotFoundError extends Error {}
+/**
+ * The state root the inventory is read from could not be read at all. A
+ * distinct class so the refusal is identifiable as the root-sweep refusal and
+ * not mistaken for a per-record one; it exits `EXIT_ERROR` like every other
+ * validator refusal, with the OS reason in its message.
+ */
+class InventoryUnreadableError extends Error {}
 
 function requireMeta(agentId: string, context: AgentCommandContext): AgentMetadata {
   const meta = readMeta(agentId, paths(context));
@@ -159,19 +180,150 @@ function requireMeta(agentId: string, context: AgentCommandContext): AgentMetada
 async function reconcileAgent(agentId: string, context: AgentCommandContext): Promise<AgentMetadata | null> {
   const observed = readMeta(agentId, paths(context));
   if (observed === null) return null;
+  return await reconcileMeta(agentId, observed, context);
+}
+
+/**
+ * The reconcile half of {@link reconcileAgent}, split out so a sweep that has
+ * already read a record does not read it a second time -- and, more to the
+ * point, so the sweep can catch the *read* refusal and still hand an already
+ * validated record here (board 198). Same work either way.
+ */
+async function reconcileMeta(
+  agentId: string,
+  observed: AgentMetadata,
+  context: AgentCommandContext,
+): Promise<AgentMetadata | null> {
   if (persistedLifecycleState(observed) !== 'running') return observed;
   if (!reconcileDeadMeta(observed)) return observed;
   return updateMeta(agentId, (meta) => { reconcileDeadMeta(meta); }, paths(context));
 }
 
-function agentIds(context: AgentCommandContext): string[] {
+/**
+ * Board 198 R2: the *sweep itself* must fail closed, one level above the
+ * per-record isolation a518fb86 landed.
+ *
+ * That landing made one malformed `meta.json` not abort the sweep, and kept
+ * naming the record it could not read. It left the root of the sweep behind a
+ * bare `catch { return []; }`: an agents state root that could not be read --
+ * absent, wrong type, a `readdir` that raises -- became an inventory of zero
+ * agents, printed as `(no agents)` or `{"agents":[]}`, exit 0, nothing on
+ * stderr. An orchestrator polling `list` was told, confidently and
+ * successfully, that this machine has no managed agents. Per-record isolation
+ * makes the sweep robust; it cannot make a sweep that never ran report an
+ * answer.
+ *
+ * So the refusal is not absorbed here at all: it is thrown, named after the
+ * path and the OS reason, and it propagates out of both callers.
+ *
+ *   - `list` exits 1 (`EXIT_ERROR`, the same code every validator refusal
+ *     already uses) and writes no inventory to stdout at all, in either the
+ *     human table or `--json`. A machine reader sees a failed command, not an
+ *     empty array it would have to guess about.
+ *   - `clean` exits 1 having deleted nothing, because the enumeration is the
+ *     first thing the sweep does. Deleting on the strength of a read that
+ *     failed is the one direction in which this bug could lose data; refusing
+ *     to sweep at all costs the operator a retry, which costs nothing.
+ *
+ * The refusal is deliberately identical in shape to the single-agent one: a
+ * command asked a question whose honest answer is "it cannot be answered", and
+ * the answer carries the reason. Nothing else about validation changes --
+ * `validateAgentMetadata` is untouched, no state is interpreted from an
+ * unreadable root, no schema field is added to any tolerated set, and the
+ * single-agent commands (`status`, `log`, `wait`, `stop`, `kill`, `delete`,
+ * `run`) keep failing closed on their own validator's reason through
+ * `requireMeta`/`reconcileAgent` exactly as a518fb86 left them.
+ *
+ * Absence is included on purpose. A machine on which no managed agent has ever
+ * been created has no agents directory, and `agent list` there now exits 1
+ * with a named reason instead of printing `(no agents)`. That is the cost of
+ * this choice, and it is the safe one: it is the only shape in which the
+ * command never reports an inventory it did not read.
+ *
+ * Read through the real filesystem, like `logSize` and the opencode-db
+ * helpers in `agent-runtime`: this is an enumeration of the operator's durable
+ * state root, not a rewrite of one record, and the injected `StoreFs` seam
+ * covers only the per-record read/write path.
+ */
+function agentIds(context: AgentCommandContext, command: string): string[] {
+  const root = agentsDir(paths(context));
+  let entries: Dirent[];
   try {
-    return readdirSync(agentsDir(paths(context)), { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-      .sort();
-  } catch {
-    return [];
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch (error) {
+    throw new InventoryUnreadableError(
+      `${command}: refused to read the managed-agent state root ${root}, so no inventory is reported: ${errnoReason(error)}`,
+    );
+  }
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+}
+
+/**
+ * The OS-level reason a `readdir` of the state root was refused, kept as the
+ * errno code when there is one so the refusal names `EACCES`, `ENOTDIR` or
+ * `ENOENT` rather than a wrapper's prose. Falls back to the error's own text
+ * when a failure carries no code.
+ */
+function errnoReason(error: unknown): string {
+  if (error instanceof Error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (typeof code === 'string' && code.length > 0) return code;
+    return error.message;
+  }
+  return String(error);
+}
+
+type SweepRead =
+  | { readable: true; meta: AgentMetadata | null }
+  | { readable: false; agentId: string; reason: string };
+
+/**
+ * Board 198: one unreadable record must not make the whole inventory unreadable.
+ *
+ * `readMeta` is strict by design and stays strict -- a record this build cannot
+ * validate is never interpreted, never rewritten and never acted on. What
+ * changes is only who absorbs the refusal. A command that acts on *one named
+ * agent* still lets the refusal propagate (`requireMeta`, and every
+ * `reconcileAgent` call in a single-agent command), because there the operator
+ * asked about that agent and the honest answer is that it cannot be answered. A
+ * command that *sweeps every record* (`list`, `clean`) is asking about the
+ * set, and answering about the set from zero of its members because one
+ * directory is unreadable is the defect this isolates: the operator is left
+ * with an inventory that shows nothing and a `clean` that cannot run at all,
+ * and the readable agents become unreachable through the very commands meant
+ * to reach them.
+ *
+ * The refusal is never swallowed. The offending agent is reported by id with
+ * the reason the validator gave, so the inventory names what it could not
+ * read rather than silently dropping it. Nothing here is a schema escape
+ * hatch: `validateAgentMetadata` is unchanged, no field is added to the
+ * tolerated set, and no value from an unvalidated record reaches any output.
+ * Only `MetadataReadError` is absorbed -- a programming error still propagates
+ * instead of being reported as corrupt state.
+ *
+ * Precedent for the shape, in the same product: a sweep whose one member is
+ * malformed does not abort -- `docs/intent-records/hosts.md:45`, "a single
+ * malformed argument never aborts a sweep".
+ */
+function readMetaForSweep(agentId: string, context: AgentCommandContext): SweepRead {
+  try {
+    return { readable: true, meta: readMeta(agentId, paths(context)) };
+  } catch (error) {
+    if (!(error instanceof MetadataReadError)) throw error;
+    return { readable: false, agentId, reason: error.message };
+  }
+}
+
+function reportUnreadableAgents(
+  unreadable: ReadonlyArray<{ agentId: string; reason: string }>,
+  context: AgentCommandContext,
+  verdict: 'is not listed' | 'was retained',
+): void {
+  for (const entry of unreadable) {
+    context.io.stderr(`antonina: agent ${entry.agentId} was not read and ${verdict}: ${entry.reason}`);
   }
 }
 
@@ -193,6 +345,7 @@ function summary(meta: AgentMetadata): {
   finished_at: number | null;
   prompts: number;
   cwd: string | null;
+  invocation_cwd: string | null;
   title: string | null;
 } {
   return {
@@ -200,7 +353,12 @@ function summary(meta: AgentMetadata): {
     last_activity_at: canonicalTimestamp(meta, 'last_activity_at', false)!,
     finished_at: canonicalTimestamp(meta, 'finished_at', true),
     prompts: meta.prompt_count as number,
+    // `cwd` is the declared working directory; `invocation_cwd` is the
+    // directory the current or most recent invocation was launched in. Board
+    // issue 178: reporting only the declaration made `status` a statement
+    // about intent dressed as a location.
     cwd: persistedAgentCwd(meta),
+    invocation_cwd: persistedInvocationCwd(meta),
     title: meta.title as string | null,
   };
 }
@@ -211,6 +369,7 @@ function listEntryJson(agentId: string, state: string, item: ReturnType<typeof s
     state,
     prompts: item.prompts,
     cwd: item.cwd,
+    invocation_cwd: item.invocation_cwd,
     title: item.title,
     created_at: item.created_at,
     last_activity_at: item.last_activity_at,
@@ -239,11 +398,39 @@ function matchesFilters(parsed: Parsed, state: string): boolean {
 }
 
 /**
+ * The single capability gate, used by every entry point that can put a front in
+ * a named directory.
+ *
+ * Backend agnosticism is represented as data rather than as a changed meaning:
+ * a backend that cannot launch an invocation in a directory the operator named
+ * refuses *here*, by name, before any state is written -- never by running the
+ * invocation somewhere else and reporting the declared directory as if it had
+ * honoured it. All four entry points go through this one function, so they
+ * cannot implement four different rules, and the answer is read through
+ * `honoursInvocationCwd`, which fails closed on an unknown or unrecognised
+ * capability rather than reading it as permission.
+ */
+function requireInvocationCwdCapability(command: string, env: Record<string, string | undefined>): void {
+  if (honoursInvocationCwd(backendCapabilities(env))) return;
+  throw new Error(`${command}: the configured backend cannot run an invocation in a different working directory`);
+}
+
+/**
  * A working directory an operator declared, resolved and checked to be an
  * existing directory. Both `new` and `run` declare one, and both refuse a bad
  * one before any state is written.
  */
 function declaredCwd(raw: string, command: string): string {
+  // `--cwd ''` resolves to the invoking shell's directory, because
+  // `resolve('') === process.cwd()`. Accepting it would re-admit, through a
+  // wrapper's `${VAR:-}` or an unset variable passed straight through, exactly
+  // the inheritance this refuses: a front durably attributed to wherever the
+  // shell happened to be. A whitespace-only value is refused for the same
+  // reason. Refused here, in the one function every entry point shares, so it
+  // is refused at all of them at once.
+  if (raw.trim().length === 0) {
+    throw new UsageError(`${command}: --cwd requires a working directory path`);
+  }
   const cwd = resolve(raw);
   if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
     throw new Error(`${command}: working directory does not exist: ${cwd}`);
@@ -263,6 +450,12 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
   // `run` then refuses to launch it until one is declared, rather than
   // inheriting one and reporting it as the front's location.
   const cwd = parsed.values.has('--cwd') ? declaredCwd(parsed.values.get('--cwd')!, 'new') : null;
+  // Declaring a default directory for a front is the same request as running an
+  // invocation in one: the declaration is the value `run` later launches from,
+  // so a backend that cannot place an invocation in a named directory refuses
+  // the declaration too, by name, before any state is written. Without this
+  // `new` would accept a directory `run` refuses.
+  if (cwd !== null) requireInvocationCwdCapability('new', context.env);
   if (!createAgentDirectory(agentId, paths(context))) throw new Error(`new: agent ${agentId} already exists`);
   const meta = idleMeta(agentId, cwd, parsed.values.get('--title') ?? null);
   try {
@@ -315,6 +508,23 @@ async function cmdFork(
   if (sourceId === agentId) throw new UsageError('new: --fork source and --id must be different agents');
   if (parsed.values.has('--cwd')) throw new UsageError('new: --cwd cannot be combined with --fork');
   if (parsed.values.has('--title')) throw new UsageError('new: --title cannot be combined with --fork');
+  // `--fork` refuses `--cwd` above, but it does not thereby declare nothing -- it
+  // *inherits* the source's declared directory verbatim and `forkMetaSnapshot`
+  // keeps it. That is a route to a declaration that never consulted the
+  // capability, so `new --fork` would accept a directory a non-forking `new`
+  // refuses by name and leave a clone launchable with the capability withdrawn.
+  // The gate is the same predicate, applied to the value the clone is about to
+  // record, and it is above `forkAgent`, so a refusal writes nothing.
+  //
+  // The source is read here, and read only. `forkAgent` reads it again inside
+  // its own all-or-nothing region and reports a missing source as
+  // `NotFoundError`, exactly as before: "cannot fork: no managed agent" is the
+  // operator's answer under both readings, and diagnosing it here would give a
+  // different message for the same condition.
+  const source = readMeta(sourceId, paths(context));
+  if (source !== null && persistedAgentCwd(source) !== null) {
+    requireInvocationCwdCapability('new --fork', context.env);
+  }
   let meta: AgentMetadata;
   try {
     meta = forkAgent(sourceId, agentId, paths(context));
@@ -356,8 +566,21 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
   if (!parsed.values.has('--page')) throw new UsageError('list: --page is required');
   const page = positiveInteger(parsed.values.get('--page'), '--page');
   const entries: Array<{ agentId: string; meta: AgentMetadata; state: string; summary: ReturnType<typeof summary> }> = [];
-  for (const agentId of agentIds(context)) {
-    const meta = await reconcileAgent(agentId, context);
+  const unreadable: Array<{ agentId: string; reason: string }> = [];
+  // Board 198 R2: the sweep root is read before anything is printed. If it
+  // cannot be read this throws, so neither the human table nor `--json` can
+  // present an inventory this command never read.
+  for (const agentId of agentIds(context, 'list')) {
+    const read = readMetaForSweep(agentId, context);
+    if (!read.readable) {
+      // Board 198: recorded and named, not thrown. The rest of the inventory
+      // is still this command's job; the unreadable record is still the
+      // operator's to hear about.
+      unreadable.push({ agentId: read.agentId, reason: read.reason });
+      continue;
+    }
+    const observed = read.meta;
+    const meta = observed === null ? null : await reconcileMeta(agentId, observed, context);
     if (meta === null) continue;
     const state = deriveState(meta);
     if (!matchesFilters(parsed, state)) continue;
@@ -369,6 +592,7 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
   if (parsed.flags.has('--json')) {
     context.io.stdout(stableJson({
       agents: selected.map(({ agentId, state, summary: item }) => listEntryJson(agentId, state, item)),
+      unreadable: unreadable.map(({ agentId, reason }) => ({ id: agentId, reason })),
     }));
   } else if (selected.length === 0) {
     context.io.stdout('(no agents)');
@@ -385,6 +609,7 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
       ].join('  '));
     }
   }
+  reportUnreadableAgents(unreadable, context, 'is not listed');
   return EXIT_OK;
 }
 
@@ -409,6 +634,150 @@ function hostCapacityJson(capacity: HostCapacity): Record<string, unknown> {
   };
 }
 
+/**
+ * Board issue 166: the recorded death note (`meta.error`) is surfaced here.
+ *
+ * This is a visibility change only. Nothing in the runtime's recording is
+ * altered: which states carry a note, and which note, is decided entirely by
+ * `finalizeTerminal`'s callers in `packages/agent-runtime`, which this file does
+ * not touch. Issue 167 is a separate question about *which* states record a
+ * note, and nothing below answers it.
+ *
+ * ## Why the note cannot simply be printed
+ *
+ * `meta.error` is free text, and `sanitizeBackendError` — the discipline this
+ * change is required to follow — cannot be applied to it: that function accepts
+ * a structured `BackendError` record and returns `null` for anything that is
+ * not one, so handing it a string would yield `null` unconditionally and the
+ * note would never appear. The note needs its own sanitiser, and it needs one
+ * with the same shape as the existing one: validate, and substitute a neutral
+ * description for anything not positively known to be safe. Never scrub by
+ * removing suspicious substrings.
+ *
+ * The reason this is an allowlist rather than a pattern is that on this head the
+ * note is not guaranteed to be operator-safe. The producers are not all in one
+ * file: on this head `finalizeTerminal` receives a note from seven call sites in
+ * `packages/agent-runtime/src/runner.ts` and one in
+ * `packages/agent-runtime/src/lifecycle.ts` (see the enumeration below). Two of
+ * the eight are free text, and one of those — the `spawn(...)` failure path,
+ * which records `String(error)` — can carry whatever Node put in the spawn
+ * error, including the resolved absolute path of the backend executable. A
+ * denylist cannot be shown not to leak a credential; an allowlist of exactly the
+ * sentences this repository itself writes can.
+ *
+ * A note is displayed only when it is *byte-identical* to one of:
+ *
+ *   - the fixed literals passed to `finalizeTerminal` on this head, each of which
+ *     is a constant in its own source file and contains no interpolation, so
+ *     equality is proof rather than a guess. Six of the eight note-passing call
+ *     sites write such a literal, and `DISPLAYABLE_AGENT_ERRORS` below carries
+ *     all six: four from `runner.ts` and two more, one of them from
+ *     `lifecycle.ts`, which is why that file is named here rather than only
+ *     `runner.ts`;
+ *   - `describeSignalDeath(sanitizeBackendError(meta.backend_error))`, which is
+ *     the sentence the runtime itself generates for a signal death from bounded
+ *     integers and an OS signal name, and which already went through
+ *     `sanitizeBackendError`'s field-by-field validation.
+ *
+ * The complete enumeration of the eight note-passing call sites on this head,
+ * found by grepping `finalizeTerminal` across the `packages` sources and then
+ * reading each site:
+ *
+ *   | site | note | displayed? |
+ *   | --- | --- | --- |
+ *   | `runner.ts:244` `releaseUnrecordedSpawn` | fixed literal | yes |
+ *   | `runner.ts:313` `finalizeInvocation` | `describeSignalDeath(death)` | via the derivation branch |
+ *   | `runner.ts:347` `buildAgentCommand` threw | `error.message` | no — free text |
+ *   | `runner.ts:354` no underlying session | fixed literal | yes |
+ *   | `runner.ts:387` `spawn(...)` threw | `String(error)` | no — can carry the resolved executable path |
+ *   | `runner.ts:396` no pid | fixed literal | yes |
+ *   | `runner.ts:423` no `/proc` identity | fixed literal | yes |
+ *   | `lifecycle.ts:250` `reconcileDeadMeta` | fixed literal | yes |
+ *
+ * The two `finalizeTerminal` call sites that pass *no* note
+ * (`packages/cli/src/agent.ts`, the `stop` and `kill` paths) are not producers
+ * and appear nowhere above.
+ *
+ * Anything else is reported as withheld. That is deliberately visible rather
+ * than silent: an operator who sees "a note is recorded but is not displayable"
+ * learns that the record exists and that the display declines to quote it, which
+ * is the honest report. A note from a producer added later will not be quoted
+ * until it is added to `DISPLAYABLE_AGENT_ERRORS` here — the cost of that
+ * conservatism is deliberate and is recorded on the issue.
+ */
+const DISPLAYABLE_AGENT_ERRORS: readonly string[] = [
+  // runner.ts: the spawn identity could not be persisted, so the process was
+  // killed and never recorded.
+  'could not persist the spawned OpenCode process identity; the process was killed and never recorded',
+  // runner.ts: a continuation was requested with no underlying session.
+  'cannot continue: underlying session not available',
+  // runner.ts: the backend process produced no pid.
+  'OpenCode process had no pid',
+  // runner.ts: /proc identity could not be established for a live process.
+  'could not establish canonical OpenCode process identity',
+  // lifecycle.ts: `reconcileDeadMeta` found a `running` record whose process is
+  // gone with no captured exit status. Reached from `agent status` and
+  // `agent list`, so it is an ordinary sight, not a corner case.
+  'runner/model process disappeared without a captured exit status',
+];
+
+/**
+ * What `agent status` says in place of a recorded note it will not quote.
+ *
+ * Named rather than empty so that "no note was recorded" and "a note was
+ * recorded and withheld" stay distinguishable in both output forms.
+ */
+export const AGENT_ERROR_WITHHELD = 'a note is recorded but is not displayable here';
+
+/**
+ * The note to display for a managed agent, or `null` when there is nothing to
+ * display.
+ *
+ * `null` means no note was recorded. A note that was recorded but is not
+ * displayable returns {@link AGENT_ERROR_WITHHELD} instead, so that "nothing was
+ * recorded" and "something was recorded and the display declines to quote it"
+ * stay distinguishable in both output forms.
+ *
+ * ## Freshness: this function is deliberately state-blind
+ *
+ * `finalizeTerminal` writes `meta.error` conditionally and never clears it
+ * (`packages/agent-runtime/src/lifecycle.ts`, `if (note) meta.error = note;`),
+ * and a clean exit passes no note. So the note belongs to *a* run, not
+ * necessarily to the run the current state describes: an agent that failed once
+ * and then succeeded still carries the first run's note. Both surfaces say so
+ * where they print it -- the JSON key is `last_error`, the human line reads
+ * `last error:` -- rather than gating on the state, because:
+ *
+ *  - gating the display on `failed` would hide a note the runtime genuinely
+ *    recorded, and would bake the "which states carry a meaningful note"
+ *    question -- a recording policy, and board issue 167's, not this issue's --
+ *    into a display function;
+ *  - clearing `meta.error` when no note is passed would make a state record less
+ *    than it does today, which is exactly what a visibility change must not do.
+ *
+ * Both of those were available and both were rejected on those grounds. What this
+ * function does is state-blind on purpose: it answers "what did the runtime last
+ * record?", never "why did this run end?".
+ *
+ * One consequence, observed rather than assumed. A later run *replaces*
+ * `meta.backend_error` (`finalizeInvocation` assigns it on every terminal run),
+ * so a note inherited from an earlier run stops matching a sentence derived from
+ * the record it now sits in and falls through to {@link AGENT_ERROR_WITHHELD}.
+ * That is the allowlist working, and it is the truthful answer: the note really
+ * is no longer derivable, and the marker discloses nothing about which run wrote
+ * it. It is also why the surfaces must not call the value `error` -- under
+ * `exit code: 0` that word would be a false statement about the current run,
+ * and the note beside it is not even quotable.
+ */
+export function displayableAgentError(meta: AgentMetadata): string | null {
+  const note = meta.error;
+  if (typeof note !== 'string' || note.length === 0) return null;
+  if (DISPLAYABLE_AGENT_ERRORS.includes(note)) return note;
+  const derived = describeSignalDeath(sanitizeBackendError(meta.backend_error));
+  if (derived !== null && derived === note) return note;
+  return AGENT_ERROR_WITHHELD;
+}
+
 function statusJson(
   agentId: string,
   meta: AgentMetadata,
@@ -429,6 +798,11 @@ function statusJson(
     pgid: meta.pgid,
     runner_pid: meta.runner_pid,
     cwd: item.cwd,
+    // Board issue 178: where this front actually launched, which is not always
+    // the declared directory, and which for a record written before the
+    // observation existed honestly reports "never observed" rather than
+    // inventing one from the declaration.
+    invocation_cwd: item.invocation_cwd,
     title: item.title,
     created_at: item.created_at,
     started_at: canonicalTimestamp(meta, 'started_at', true),
@@ -436,6 +810,12 @@ function statusJson(
     last_activity_at: item.last_activity_at,
     exit_code: meta.exit_code,
     exit_signal: meta.exit_signal,
+    // The note the runtime last recorded, if it is displayable. Named
+    // `last_error`, not `error`, because `meta.error` is never cleared: on an
+    // agent that failed once and then succeeded, this is the *earlier* run's
+    // note, and a key called `error` beside `exit_code: 0` would read as the
+    // current run's cause. See `displayableAgentError`.
+    last_error: displayableAgentError(meta),
     prompts: item.prompts,
     steers_pending: steers.length,
     next_steer: steers.length > 0 ? steers[0]!.prompt.split('\n', 1)[0] : null,
@@ -471,10 +851,24 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
     // created the agent, so an undeclared agent says so rather than naming a
     // directory nobody chose.
     context.io.stdout(`cwd:        ${shown(status.cwd, 'undeclared')}`);
+    // Where the front actually launched. `never ran` is a fact, not a missing
+    // value: an agent with a declared directory that has never been launched in
+    // it is not the same agent as one that was, and one line cannot say both.
+    context.io.stdout(`ran in:     ${shown(status.invocation_cwd, 'never ran')}`);
     context.io.stdout(`created:    ${shown(status.created_at)}`);
     context.io.stdout(`started:    ${shown(status.started_at)}`);
     context.io.stdout(`finished:   ${shown(status.finished_at)}`);
     context.io.stdout(`exit code:  ${shown(status.exit_code)}`);
+    // The note the runtime last recorded, next to the exit code. Only printed
+    // when there is one, so a run that never recorded a note is unchanged, and
+    // only ever the sanitised form -- see `displayableAgentError`. Labelled
+    // `last error` rather than `error` because the runtime never clears
+    // `meta.error`: on an agent that failed and then succeeded, this line is
+    // the earlier failure's note, and calling it `error` under `exit code: 0`
+    // would state it was this run's cause.
+    if (status.last_error !== null) {
+      context.io.stdout(`last error: ${String(status.last_error)}`);
+    }
     // Host memory as reported by the kernel, so a pass can see the state a
     // death happened in rather than inferring it from an empty log.
     const capacity = status.host_capacity as Record<string, unknown>;
@@ -555,10 +949,20 @@ function writeRaw(context: AgentCommandContext, text: string): void {
   else context.io.stdout(text.replace(/\n$/, ''));
 }
 
+/**
+ * Board 197: the per-invocation owner token travels to the runner through the
+ * environment this function already builds, not through argv. `/proc/<pid>/cmdline`
+ * is world-readable, `/proc/<pid>/environ` is 0400 and owner-readable, so the
+ * environment is the only one of the two that does not publish the secret to
+ * every process on the host. The value is minted per invocation and is never
+ * reused, so a runner cannot present another invocation's token -- see
+ * `verifyReservationOwner` in packages/agent-runtime/src/runner.ts.
+ */
 function spawnRunner(
   agentId: string,
   mode: 'new' | 'continue',
   generation: number,
+  ownerToken: string,
   context: AgentCommandContext,
 ): void {
   const entryScript = context.entryScript ?? process.argv[1];
@@ -574,15 +978,23 @@ function spawnRunner(
         ...context.env,
         ANTONINA_AGENT_ID: agentId,
         ANTONINA_RUNNER_GEN: String(generation),
+        ANTONINA_RUNNER_OWNER_TOKEN: ownerToken,
       },
     },
   );
   child.unref();
 }
 
-async function followAttached(agentId: string, context: AgentCommandContext): Promise<number> {
+async function followAttached(
+  agentId: string,
+  context: AgentCommandContext,
+  startOffset: number,
+): Promise<number> {
   const path = logPath(agentId, paths(context));
-  let offset = 0;
+  // `startOffset` is where this invocation's output begins, so an attached run
+  // reports its own progress and not the accumulated transcript of every earlier
+  // run. `agent log` remains the command that reads that history.
+  let offset = startOffset;
   let terminalSince: number | null = null;
   while (true) {
     if (existsSync(path)) {
@@ -634,6 +1046,18 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   // runner reservation it would make the record name a directory the front that
   // already exists is not in, so it is refused without writing anything.
   const runCwd = parsed.values.has('--cwd') ? declaredCwd(parsed.values.get('--cwd')!, 'run') : null;
+  // The directory this invocation will actually launch in: the one named on
+  // this command if there is one, otherwise the agent's declared default. The
+  // gate is about *that* value rather than about the flag, because the flag is
+  // not the only route by which a directory reaches a launch -- a directory
+  // declared earlier in durable state is handed to the backend by a later run
+  // that names no `--cwd` of its own, and gating on the flag alone would launch
+  // it ungated by a CLI that had just been told it could not. Computed once,
+  // above `updateMeta`, so every accepting branch is covered -- fresh spawn,
+  // steer onto a live front, steer onto a reservation, busy recovery -- and the
+  // gate writes nothing before it fires.
+  const launchCwd = runCwd ?? recordedCwd;
+  if (launchCwd !== null) requireInvocationCwdCapability('run', context.env);
   if (runCwd !== null) {
     let acceptedPending: string | null;
     try {
@@ -650,17 +1074,26 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     // the defect this replaces, so the launch is refused and says why.
     throw new Error(`run: agent ${agentId} has no declared working directory; pass --cwd /absolute/path`);
   }
-  if (configuredModelAvailable(context.env) === false) {
+  // Board 186. The model probe has no agent identity of its own, so it is given
+  // the database of the record this command is about to run. It reads the model
+  // list and writes no session row, so it could safely use any database -- but
+  // leaving it on the shared one would keep every `run` touching the file whose
+  // lock contention this change exists to remove.
+  if (configuredModelAvailable({ ...context.env, ...opencodeBackendEnv(observed, paths(context)) }) === false) {
     throw new Error('configured OpenCode model opencode/space-bunny-free is unavailable');
   }
   const decision: {
     action?: 'busy' | 'spawn' | 'reuse';
     mode?: 'new' | 'continue';
     generation?: number;
+    ownerToken?: string;
     interrupt?: boolean;
     recoverBusy?: boolean;
   } = {};
   const steer = parsed.flags.has('--steer');
+  // Observed before this command accepts anything, so it bounds the history it
+  // did not cause even on the paths that accept no new invocation of their own.
+  const historyLength = logSize(agentId, paths(context));
   await updateMeta(agentId, (meta) => {
     const lifecycle = persistedLifecycleState(meta);
     const active = activeRunnerFlag(meta);
@@ -729,6 +1162,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
           decision.recoverBusy = true;
         }
         const generation = currentGeneration + 1;
+        const ownerToken = mintRunnerReservationOwnerToken();
         meta.active_runner = true;
         meta.runner_gen = generation;
         meta.runner_reservation = {
@@ -738,10 +1172,16 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
           owner_start_ticks: currentProcessStartTicks(),
           reserved_at: Date.now() / 1000,
           mode,
+          // Board 197: minted here, in the same durable write that publishes the
+          // reservation, and only on a branch that goes on to spawn. It is the
+          // evidence a runner has of being this reservation's own process once
+          // this process is gone and the kernel has reparented it.
+          owner_token: ownerToken,
         };
         decision.action = 'spawn';
         decision.mode = mode;
         decision.generation = generation;
+        decision.ownerToken = ownerToken;
         return;
       }
       setActiveRunner(meta, false);
@@ -760,7 +1200,9 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     } else if (persistedLifecycleState(meta) === 'idle' && meta.prompt_count === 0) {
       mode = 'new';
     } else {
-      const recoveredSession = discoverSessionId(agentId, context.env);
+      // Board 186: the same database the invocation will be spawned with, so a
+      // session an isolated invocation recorded is still discoverable here.
+      const recoveredSession = discoverSessionId(agentId, { ...context.env, ...opencodeBackendEnv(meta, paths(context)) });
       if (recoveredSession === null) {
         mode = 'new';
       } else {
@@ -775,9 +1217,10 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     // else: a transaction that ends in `busy` records nothing at all, so a
     // rejected prompt cannot leave a cwd behind that no front ever ran in.
     if (runCwd !== null) meta.cwd = runCwd;
-    beginInvocation(meta, prompt, now, promptCount);
+    beginInvocation(meta, prompt, now, promptCount, { logOffset: logSize(agentId, paths(context)) });
     meta.active_runner = true;
     meta.runner_gen = generation;
+    const ownerToken = mintRunnerReservationOwnerToken();
     meta.runner_reservation = {
       state: 'reserved',
       gen: generation,
@@ -785,17 +1228,21 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
       owner_start_ticks: currentProcessStartTicks(),
       reserved_at: now,
       mode,
+      owner_token: ownerToken,
     };
     decision.action = 'spawn';
     decision.mode = mode;
     decision.generation = generation;
+    decision.ownerToken = ownerToken;
   }, paths(context));
 
   if (decision.action === 'busy' || decision.action === undefined) {
     throw new Error(`agent ${agentId} is still running; use --steer to redirect it`);
   }
   if (decision.action === 'spawn') {
-    spawnRunner(agentId, decision.mode!, decision.generation!, context);
+    // The token is minted only on the branches that reserve, so a spawn decision
+    // always has one; a reservation written without it could not be claimed.
+    spawnRunner(agentId, decision.mode!, decision.generation!, decision.ownerToken!, context);
     if (decision.recoverBusy) {
       throw new Error(`agent ${agentId} is recovering an already accepted prompt; this prompt was rejected`);
     }
@@ -803,6 +1250,15 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     const current = readMeta(agentId, paths(context));
     if (current !== null) signalInvocation(current, 'SIGTERM');
   }
+
+  // A front this command accepted owns the cursor the runtime recorded for it.
+  // A `--steer` command owns no invocation of its own -- the runner begins the
+  // drained continuation, and sets its cursor at that moment -- so for it the
+  // boundary is the log as this command found it. A record with no usable cursor
+  // (written before cursors existed) falls back to that same observation, which
+  // is what the durable cursor would have been.
+  const accepted = decision.action === 'spawn' ? readMeta(agentId, paths(context)) : null;
+  const startOffset = persistedRunLogOffset(accepted ?? {}) ?? historyLength;
 
   if (parsed.flags.has('--detach')) {
     if (parsed.flags.has('--json')) {
@@ -812,7 +1268,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     }
     return EXIT_OK;
   }
-  return followAttached(agentId, context);
+  return followAttached(agentId, context, startOffset);
 }
 
 async function waitForRunnerGone(
@@ -1038,8 +1494,27 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
   const configured = parsed.values.get('--days') ?? context.env.ANTONINA_AGENT_RETENTION_DAYS ?? String(DEFAULT_RETENTION_DAYS);
   const days = nonnegativeInteger(configured, '--days');
   const cutoff = Date.now() / 1000 - days * 86_400;
-  const candidates = agentIds(context).filter((agentId) => {
-    const meta = readMeta(agentId, paths(context));
+  // Board 198: the retention sweep reads every record, so it isolates each read
+  // the way `list` does. An unreadable record is *retained and named*, never
+  // deleted: its age is exactly what cannot be established, so a record this
+  // build cannot read is not a record this build may decide has expired. The
+  // sweep therefore fails closed in the only direction that can lose data, and
+  // the operator is told which record was withheld instead of watching the
+  // command abort before it names anything.
+  // Board 198 R2: an unreadable state root is a refusal to sweep, and this
+  // enumeration is deliberately the first statement of the sweep so that the
+  // refusal arrives before anything at all has been deleted. `clean` must
+  // never remove a record on the strength of a read that failed: the set it
+  // would act on is exactly the set it could not establish, and "no records
+  // were eligible" is not something this run observed.
+  const unreadable: Array<{ agentId: string; reason: string }> = [];
+  const candidates = agentIds(context, 'clean').filter((agentId) => {
+    const read = readMetaForSweep(agentId, context);
+    if (!read.readable) {
+      unreadable.push({ agentId: read.agentId, reason: read.reason });
+      return false;
+    }
+    const meta = read.meta;
     if (meta === null || !retentionEligibleState(meta)) return false;
     const anchor = retentionAnchor(meta);
     return anchor !== null && anchor < cutoff;
@@ -1075,6 +1550,7 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
     removeAgentDirectory(agentId, paths(context));
     context.io.stdout(`deleted agent ${agentId}`);
   }
+  reportUnreadableAgents(unreadable, context, 'was retained');
   return EXIT_OK;
 }
 

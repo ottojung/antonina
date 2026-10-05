@@ -93,13 +93,39 @@ export function setActiveRunner(meta: AgentMetadata, value: boolean): void {
   if (!value) meta.runner_reservation = null;
 }
 
-export function beginInvocation(meta: AgentMetadata, prompt: string, now: number, promptCount: number): void {
+export interface BeginInvocationOptions {
+  /**
+   * Byte offset into `output.log` at which this invocation's output begins,
+   * i.e. the length of the log at the instant this invocation is accepted. The
+   * caller passes it because only the caller knows which agent's log is meant;
+   * omitting it records no cursor and leaves any inherited one alone, which is
+   * what a caller that cannot observe the log must do rather than invent one.
+   */
+  logOffset?: number;
+}
+
+export function beginInvocation(
+  meta: AgentMetadata,
+  prompt: string,
+  now: number,
+  promptCount: number,
+  options: BeginInvocationOptions = {},
+): void {
   meta.state = 'running';
   meta.started_at = now;
   meta.last_activity_at = now;
   meta.finished_at = null;
   meta.exit_code = null;
   meta.exit_signal = null;
+  // `meta.error` is deliberately not reset here. A note recorded for one
+  // invocation stays on the record until some invocation replaces it, and every
+  // field that would give it a run to belong to is reset above: `exit_code`,
+  // `exit_signal` and `stop_reason` are null while this invocation is live, so
+  // an inherited note cannot be read as this invocation's outcome. Consumers
+  // that show the note are required to label it as a *last* recorded note rather
+  // than this run's cause; see `displayableAgentError` in packages/cli/src/agent.ts.
+  // Board issue 167 owns the recording policy and resolved it as persistence,
+  // so clearing here is out of scope for a visibility change.
   meta.intent = null;
   meta.stop_reason = null;
   meta.pid = null;
@@ -109,6 +135,13 @@ export function beginInvocation(meta: AgentMetadata, prompt: string, now: number
   meta.pending_prompt = prompt;
   meta.last_prompt = prompt.slice(0, 500);
   meta.prompt_count = promptCount;
+  // Run scope: the bytes before this cursor belong to earlier invocations. It is
+  // recorded in the same write that accepts the prompt, so no reader can observe
+  // an accepted prompt whose cursor is missing.
+  const logOffset = options.logOffset;
+  if (typeof logOffset === 'number' && Number.isSafeInteger(logOffset) && logOffset >= 0) {
+    meta.run_log_offset = logOffset;
+  }
 }
 
 export function finalizeTerminal(
@@ -177,7 +210,11 @@ export function queueSteer(meta: AgentMetadata, prompt: string, now: number): bo
   return true;
 }
 
-export function popSteerIntoPending(meta: AgentMetadata, now: number): string | null {
+export function popSteerIntoPending(
+  meta: AgentMetadata,
+  now: number,
+  options: BeginInvocationOptions = {},
+): string | null {
   const count = nextPromptCount(meta);
   const sequence = steerSequence(meta);
   const queue = steerQueue(meta, sequence);
@@ -185,7 +222,7 @@ export function popSteerIntoPending(meta: AgentMetadata, now: number): string | 
   const item = queue.shift();
   if (!item) return null;
   meta.steer_queue = queue;
-  beginInvocation(meta, item.prompt, now, count);
+  beginInvocation(meta, item.prompt, now, count, options);
   return item.prompt;
 }
 

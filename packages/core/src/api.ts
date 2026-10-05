@@ -1,4 +1,5 @@
-import type { BoardOverview, IssueListSummary } from './board-v3-store.js';
+import type { BoardOverview, IssueCommentPage, IssueListSummary } from './board-v3-store.js';
+import { newestCommentAt } from './board-v3-store.js';
 import {
   ANTONINA_NAMESPACE,
   BoardDeletedError,
@@ -53,6 +54,8 @@ import {
   type BoardExecutionTarget,
   type BoardIssue,
   type BoardResource,
+  type BoardReview,
+  type ReviewVerdict,
   type ExecutionTargetAccessMethod,
   type ExecutionTargetBackend,
   type ExecutionTargetCapability,
@@ -104,6 +107,15 @@ export {
 };
 
 export class AntoninaApiError extends Error {}
+
+export interface ReviewRecordInput {
+  number: number;
+  /** The exact commit reviewed, or empty when the review named none. */
+  commit: string;
+  verdict: ReviewVerdict;
+  reviewer: string;
+  rationale: string;
+}
 
 export const MAX_ISSUE_BODY_CHARACTERS = 1_000;
 export const MAX_COMMENT_BODY_CHARACTERS = 1_000;
@@ -437,6 +449,7 @@ export class BoardApi {
               updatedAt: issue.updatedAt,
               closedAt: issue.state === 'closed' ? issue.updatedAt : null,
               messageCount: issue.messages.length,
+              lastActivityAt: newestCommentAt(issue.messages),
               hasBody: issue.body.length > 0,
             }))
             .sort((left, right) => left.number - right.number);
@@ -492,6 +505,25 @@ export class BoardApi {
     const issue = await this.store.getIssuePage(credential, number, page, this.rememberedHead);
     if (issue === null) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
     return clone(issue);
+  }
+
+  /**
+   * One bounded page of an issue's conversation: the issue's core fields with
+   * its `messages` empty, plus the 50 messages of the requested page and the
+   * whole thread's total count and page count.
+   *
+   * This exists beside `getIssue` and does not replace it. `getIssue` is the
+   * whole issue — every message — and its callers (the CLI's issue view,
+   * `listIssues`) ask for that. A client paging through a conversation does not,
+   * and reassembling a 5,000-message thread to draw 50 of them is the cost this
+   * read removes: it fetches the issue's own shard and at most the one comment
+   * shard holding the page, and a page past the end fetches none at all.
+   */
+  async getIssueCommentPage(number: number, page: number): Promise<IssueCommentPage> {
+    const credential = await this.fastReadCredential();
+    const read = await this.store.readIssueCommentPage(credential, number, page);
+    if (read === null) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
+    return clone(read);
   }
 
   /**
@@ -569,6 +601,37 @@ export class BoardApi {
       { number, title: null, body: body.trim() },
     );
     return clone(this.requireIssue(committed.state.board.issues, number));
+  }
+
+  /**
+   * Records one review verdict about one exact commit of an issue's work.
+   *
+   * This is the board-side half of the review step in
+   * docs/skills/itinerary-antonina.md: the verdict is a signed board operation
+   * rather than a sentence in a comment, because {@link close} has to be able to
+   * refuse a blocked issue without reading anybody's prose. An approval that
+   * names the commit a block was recorded against is refused rather than stored,
+   * so the override this repository has a documented history of cannot be
+   * expressed as a state the board accepts.
+   */
+  async recordReview(input: ReviewRecordInput): Promise<BoardReview> {
+    const reviewer = input.reviewer.trim();
+    const rationale = input.rationale.trim();
+    if (!reviewer) throw new AntoninaApiError('Review reviewer is required');
+    if (!rationale) throw new AntoninaApiError('Review rationale is required');
+    const committed = await this.append(
+      'review.record',
+      {
+        number: input.number,
+        commit: input.commit.trim(),
+        verdict: input.verdict,
+        reviewer,
+        rationale,
+      },
+    );
+    const review = this.requireIssue(committed.state.board.issues, input.number).review;
+    if (review === undefined) throw new AntoninaApiError('Antonina review record disappeared after mutation');
+    return clone(review);
   }
 
   async listResources(host?: string, issueNumber?: number): Promise<ResourceView[]> {
@@ -907,8 +970,11 @@ export type {
   BoardImportReport,
   BoardOverview,
   BoardSweepReport,
+  IssueCommentPage,
+  IssueListPage,
   IssueListSummary,
 } from './board-v3-store.js';
+export { compareIssueActivity, issueLastActivityOf, newestCommentAt } from './board-v3-store.js';
 export {
   EXECUTION_TARGET_ACCESS_METHODS,
   EXECUTION_TARGET_BACKENDS,

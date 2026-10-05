@@ -172,6 +172,15 @@ export function forkMetaSnapshot(
   // `last_prompt`. Copying a terminal state instead would claim the clone had
   // finished a run it never started.
   clone.state = 'idle';
+  // Observation: not copied. `invocation_cwd` means "this agent was launched in
+  // that directory", and the clone was launched nowhere. A `structuredClone`
+  // carried it across, so a fresh agent with its own identity, no process and no
+  // launch would report the source's last launch directory as its own, and
+  // `agent status` would print it as `ran in:`. The clone inherits the source's
+  // history (`exit_code`, `finished_at`, `last_prompt`, and the declared `cwd`,
+  // which is a fact about the agent rather than about a run); the directory a
+  // past run of a *different* agent used is not the clone's history.
+  clone.invocation_cwd = null;
   // Process identity: not copied. A pid means "this agent launched and owns
   // that process"; the clone launched nothing.
   clone.pid = null;
@@ -196,6 +205,12 @@ export function forkMetaSnapshot(
   clone.intent = null;
   clone.stop_reason = null;
   clone.delete_pending = false;
+  // A run cursor is a byte offset into the agent's own `output.log`, and a fork
+  // writes a fresh log for the clone rather than copying the source's. Inheriting
+  // the source's offset would point the clone's first run past the end of its own
+  // log and print nothing until that file grew beyond a byte count that belongs
+  // to another agent's history.
+  clone.run_log_offset = null;
   clone.agent_version = AGENT_META_VERSION;
   validateAgentMetadata(clone);
   return clone;

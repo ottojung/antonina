@@ -3,7 +3,15 @@ import { readFileSync, statSync } from 'node:fs';
 import { constants } from 'node:os';
 import { isAbsolute } from 'node:path';
 
-import { DEFAULT_VARIANT, persistedNativeSessionId, persistedVariant, requiredAgentCwd, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
+import {
+  DEFAULT_VARIANT,
+  RUNNER_OWNER_TOKEN_ENV,
+  persistedNativeSessionId,
+  persistedVariant,
+  requiredAgentCwd,
+  requiredPersistedAgentId,
+  type AgentMetadata,
+} from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
 
 export const AGENT_MODEL = 'opencode/space-bunny-free';
@@ -141,6 +149,41 @@ export function describeSignalDeath(error: BackendError | null): string | null {
   return `${head}; cgroup memory.events rose by oom ${oom} and oom_kill ${kills}${window}${kills > 0 ? ', so the OOM killer fired inside the agent lifetime' : ', with no OOM kill recorded inside the agent lifetime'}`;
 }
 
+/**
+ * A one-line reason for a non-signal, non-zero backend exit, for the `error`
+ * note that `agent status` and the board carry.
+ *
+ * Its job is to make the durable record say *which* of the two very different
+ * things happened: the backend itself failed (this), or the runtime lost the
+ * invocation before any exit status existed (`reconcileDeadMeta`'s note, which
+ * carries no exit code at all). Before board 159 both produced a bare `failed`.
+ */
+export function describeBackendDeath(
+  error: BackendError | null,
+  excerpt: string | null,
+  operatorSignalRefused = false,
+): string | null {
+  if (operatorSignalRefused) {
+    // The operator asked for this invocation to end and the runtime tried, but
+    // `signalInvocation` refused: the durable identity no longer resolved, or
+    // the pid/start-time/marker checks failed against live `/proc`, or the
+    // signal itself failed. Nothing reached the backend process group. Say
+    // exactly that, rather than saying the operator stopped the backend.
+    const base = describeBackendDeath(error, excerpt);
+    return `${base ?? 'the backend process ended unsuccessfully'}; this runtime did not deliver a signal to the backend process group for that request`;
+  }
+  if (error === null) {
+    const tail = excerpt === null ? '' : `; the last line it wrote was: ${excerpt}`;
+    return `the backend process exited unsuccessfully without writing a diagnostic this runtime could read${tail}`;
+  }
+  if (error.classification === SIGNAL_DEATH_CLASSIFICATION) return describeSignalDeath(error);
+  if (error.classification === UNRECOGNIZED_BACKEND_FAILURE) {
+    const tail = excerpt === null ? '' : `; the last line it wrote was: ${excerpt}`;
+    return `the backend process exited unsuccessfully and this runtime does not recognise the failure${tail}`;
+  }
+  return `the backend process reported ${error.classification}${excerpt === null ? '' : `; the last line it wrote was: ${excerpt}`}`;
+}
+
 interface BackendFailureRule {
   marker: string;
   classification: string;
@@ -157,7 +200,83 @@ const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
     transient: true,
     automaticRetrySafe: false,
   },
+  // Board 159. The backend prints this and exits non-zero at the end of an
+  // otherwise complete turn; observed in three managed agents on 2026-10-02
+  // (`agents/94d01`, `agents/92a01`, `agents/136d`), all three of which had
+  // already done their work. The cause is upstream of this repository, so all
+  // the runtime can do is name the failure class rather than leave the terminal
+  // record blank. Deliberately not `transient`: nothing here says the same
+  // request would succeed next time, and a retry would re-run a completed turn.
+  {
+    marker: 'Failed to execute statement',
+    classification: 'backend_statement_execution_error',
+    provider: 'opencode',
+    transient: false,
+    automaticRetrySafe: false,
+  },
 ];
+
+/**
+ * Classification for a non-zero backend exit that matched no rule.
+ *
+ * Before this existed, `classifyBackendFailure` returned null for every
+ * unrecognised non-zero exit, so `finalizeInvocation` recorded the turn as
+ * `failed` with `exit_code 1`, `backend_error null` and `error null`: a
+ * terminal state with no reason at all, and therefore indistinguishable in
+ * durable state from a record in which the runtime lost track of the
+ * invocation. A bare non-zero exit *is* a fact about the backend, so it gets a
+ * classification of its own.
+ */
+export const UNRECOGNIZED_BACKEND_FAILURE = 'unrecognized_backend_failure';
+
+const EXCERPT_MAX_CHARS = 200;
+
+/**
+ * Strips the backend's terminal ANSI styling and collapses the line, so the
+ * excerpt a human reads is the sentence rather than the escape codes.
+ */
+// eslint-disable-next-line no-control-regex
+const ANSI = /\u001B\[[0-9;?]*[ -/]*[@-~]/g;
+// Token-shaped runs are replaced rather than truncated: the point of an excerpt
+// is to name the failure, and a credential-shaped run is not part of the name.
+const SECRET_PATTERNS: readonly RegExp[] = [
+  /\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g,
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{8,}/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{8,}/g,
+  /\bBearer\s+\S+/gi,
+  /\b[A-Fa-f0-9]{32,}\b/g,
+];
+
+export function redactLogExcerpt(line: string): string {
+  let out = line.replace(ANSI, '');
+  for (const pattern of SECRET_PATTERNS) out = out.replace(pattern, '[redacted]');
+  return out.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * The last non-empty line the backend wrote inside this invocation, redacted
+ * and length-capped, or null when there is none.
+ *
+ * Read from the invocation's own log window only (`start`), so a resumed
+ * transcript cannot attribute an earlier invocation's last words to this one.
+ */
+export function lastLogLineExcerpt(path: string, start: number): string | null {
+  let data: Buffer;
+  let size: number;
+  try {
+    size = statSync(path).size;
+    const begin = Math.max(start, size - BACKEND_DIAGNOSTIC_MAX_BYTES);
+    data = readFileSync(path).subarray(begin, size);
+  } catch {
+    return null;
+  }
+  const lines = data.toString('utf8').split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const excerpt = redactLogExcerpt(lines[index] ?? '');
+    if (excerpt.length > 0) return excerpt.slice(0, EXCERPT_MAX_CHARS);
+  }
+  return null;
+}
 
 interface SessionRow {
   id: string;
@@ -220,11 +339,27 @@ function parseSessionRows(value: unknown): SessionRow[] | null {
   return rows;
 }
 
+/**
+ * The environment a backend *probe* is handed.
+ *
+ * Board 197: the per-invocation owner token authorises one runner's claim on one
+ * reservation and nothing else, and the probe is not that runner -- it is a short
+ * `models`/`session list` the runtime runs beside the invocation. It is dropped
+ * here rather than at each call site so no probe can be added later that leaks
+ * it by forgetting. `delete` rather than a blank value, so a later spread cannot
+ * reintroduce a copy.
+ */
+function probeEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  const childEnv: Record<string, string | undefined> = { ...process.env, ...env };
+  delete childEnv[RUNNER_OWNER_TOKEN_ENV];
+  return childEnv;
+}
+
 export function discoverSessionId(
   agentId: string,
   env: Record<string, string | undefined> = process.env,
 ): string | null {
-  const childEnv = { ...process.env, ...env };
+  const childEnv = probeEnv(env);
   const result = spawnSync(
     resolveOpencode(childEnv),
     ['session', 'list', '--format', 'json', '--max-count', String(SESSION_LIST_MAX_COUNT)],
@@ -253,7 +388,7 @@ export function discoverSessionId(
 export function configuredModelAvailable(
   env: Record<string, string | undefined> = process.env,
 ): boolean | null {
-  const childEnv = { ...process.env, ...env };
+  const childEnv = probeEnv(env);
   const result = spawnSync(resolveOpencode(childEnv), ['models'], {
     encoding: 'utf8',
     timeout: MODEL_LIST_TIMEOUT_MS,
@@ -300,13 +435,69 @@ export function buildAgentCommand(
 }
 
 
+export interface BackendCapabilities {
+  /**
+   * Whether this backend can launch an invocation in a directory the operator
+   * named. OpenCode can: every invocation is a fresh process, `buildAgentCommand`
+   * tells it `--dir` and the runner spawns it with `spawn({cwd})` on the same
+   * value. A backend that cannot must refuse a declaration *by name*, before
+   * any write, rather than running the invocation somewhere else and reporting
+   * the declared directory as if it had honoured it.
+   */
+  invocation_cwd: boolean;
+}
+
+/**
+ * Test-only override that makes the configured backend report a capability it
+ * does not have, so the refusal path can be driven from outside the package.
+ *
+ * It exists only because `invocation_cwd` is a constant `true`: with one backend
+ * and no way to make the answer differ, no test could reach a refusal, and
+ * "unreachable" is exactly how a divergence between entry points hides.
+ *
+ * Deliberately narrow: only the exact value `'1'` withdraws a capability, and
+ * every other value (including unset) leaves the backend's real answer alone,
+ * so no ordinary environment can reach a different answer. It is a test seam in
+ * the same sense and for the same reason as `ANTONINA_OPENCODE_BIN`: it exists
+ * as a production parameter because there is exactly one backend seam and no
+ * test can reach the other side of it without one. It is not a user setting.
+ */
+const TEST_WITHDRAW_INVOCATION_CWD_ENV = 'ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD';
+
+export function backendCapabilities(
+  env: Record<string, string | undefined> = process.env,
+): BackendCapabilities {
+  if (env[TEST_WITHDRAW_INVOCATION_CWD_ENV] === '1') return { invocation_cwd: false };
+  return { invocation_cwd: true };
+}
+
+/**
+ * Whether a capability answer may be relied on, failing closed.
+ *
+ * Only the literal boolean `true` counts as "this backend can honour a named
+ * directory". Anything else -- absent, `null`, a string, a capability this
+ * runtime does not know the meaning of, a backend that reported a shape it was
+ * never asked for -- is treated as "cannot", because the alternative is to run
+ * an invocation somewhere the operator did not ask for and report the declared
+ * directory as though it had been honoured. An unrecognised capability must
+ * never be read as permission.
+ */
+export function honoursInvocationCwd(capabilities: unknown): boolean {
+  if (typeof capabilities !== 'object' || capabilities === null || Array.isArray(capabilities)) return false;
+  return (capabilities as Record<string, unknown>).invocation_cwd === true;
+}
+
 export function classifyBackendFailure(
   path: string,
   start: number,
   exitCode: number,
   isContinue = false,
 ): BackendError | null {
-  if (exitCode === 0 || !Number.isSafeInteger(start) || start < 0) return null;
+  // A negative code is the runner's encoding of a signal death (`-signum`),
+  // not an exit status, and a signal death is classified by
+  // `classifySignalDeath`. It must not be read here as a backend failure: an
+  // operator's own SIGTERM would then be recorded as the backend dying.
+  if (exitCode === 0 || exitCode < 0 || !Number.isSafeInteger(start) || start < 0) return null;
   let data: Buffer;
   let size: number;
   try {
@@ -318,7 +509,28 @@ export function classifyBackendFailure(
   }
   const text = data.toString('utf8');
   const rule = BACKEND_FAILURE_RULES.find((candidate) => text.includes(candidate.marker));
-  if (!rule) return null;
+  if (rule === undefined) {
+    // An empty window is not an unrecognised failure: a spawn that never
+    // produced a byte (`child.once('error')` yields exit 127) also exits
+    // non-zero, and calling that a backend failure would misattribute it. The
+    // runner already has a stated reason for that case.
+    if (text.trim().length === 0) return null;
+    // A non-zero exit with a readable log window is still a fact about the
+    // backend, and it gets a classification. Returning null here is what left
+    // the 2026-10-02 deaths recorded as `failed` with no reason anywhere.
+    return {
+      classification: UNRECOGNIZED_BACKEND_FAILURE,
+      provider: null,
+      model: AGENT_MODEL,
+      request_boundary: isContinue ? 'continuation' : 'fresh_session',
+      reference: null,
+      transient: false,
+      automatic_retry_safe: false,
+      fresh_session_useful: null,
+      backend_scope: 'unknown',
+      diagnostic_bytes: Math.min(Math.max(0, size - start), BACKEND_DIAGNOSTIC_MAX_BYTES),
+    };
+  }
   const match = /"ref"\s*:\s*"([^"\r\n]+)"/.exec(text);
   return {
     classification: rule.classification,

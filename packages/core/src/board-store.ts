@@ -29,6 +29,7 @@ import {
   type BoardImportReport,
   type BoardSweepReport,
   type BoardOverview,
+  type IssueCommentPage,
   type IssueListPage,
 } from './board-v3-store.js';
 
@@ -400,7 +401,7 @@ export class SignedBoardStore {
     }
   }
 
-  async getIssuePage(
+async getIssuePage(
     credentialValue: BoardCredential,
     number: number,
     page: number,
@@ -410,6 +411,35 @@ export class SignedBoardStore {
     await this.ensureMaterialized(credential, previouslyAcceptedHead);
     try {
       return await this.sharded.getIssuePage(credential, number, page);
+    } catch (error) {
+      if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
+      throw error;
+    }
+  }
+
+  /**
+   * One bounded page of an issue's conversation.
+   *
+   * This is the read a reader who is paging through a thread wants, and it is a
+   * separate method from `getIssue` rather than a flag on it: `getIssue` means
+   * "the whole issue, every message" to its existing callers — the CLI's
+   * `board issue show`, `BoardApi.listIssues` — and narrowing it would change
+   * what an existing method returns without saying so. This one fetches the
+   * issue's own shard and at most the one comment shard the page needs, and
+   * reports the thread's total message count alongside.
+   *
+   * `null` means the issue does not exist, which is the same answer `getIssue`
+   * gives for it.
+   */
+  async readIssueCommentPage(
+    credentialValue: BoardCredential,
+    number: number,
+    page: number,
+  ): Promise<IssueCommentPage | null> {
+    const credential = await verifyBoardCredential(credentialValue);
+    await this.ensureMaterialized(credential);
+    try {
+      return await this.sharded.readIssueCommentPage(credential, number, page);
     } catch (error) {
       if (error instanceof ShardedBoardStoreError) throw fromShardedError(error);
       throw error;

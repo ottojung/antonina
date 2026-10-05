@@ -1,3 +1,4 @@
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 
 import { persistedAgentId, persistedInvocationId, persistedProcessInteger } from './process.js';
@@ -81,6 +82,62 @@ const BACKEND_SIGNAL_FIELDS = [
 ] as const;
 
 const SIGNAL_DEATH_CLASSIFICATION = 'external_signal_kill';
+
+/**
+ * Optional byte cursor into `output.log`: the offset at which the output of the
+ * currently accepted invocation begins. It is validated when present and allowed
+ * to be absent, exactly like `BACKEND_SIGNAL_FIELDS`, because a record written
+ * before this field existed has no run-scoped cursor and must still be a
+ * canonical record. `null` and absence both mean "no invocation has been
+ * accepted yet", not a malformed record.
+ */
+const RUN_LOG_CURSOR_FIELD = 'run_log_offset';
+
+/**
+ * Board 186. The key of the OpenCode database this agent's backend invocations are
+ * confined to, which is what stops two concurrent managed fronts from serialising
+ * their session and message writes through one shared SQLite file (the cause of the
+ * 2026-10-03 deaths: `SQLiteError: database is locked` → `LockTimeoutError` →
+ * fatal `Failed to execute statement` inside OpenCode 1.18.32, whose `busy_timeout`
+ * is hardcoded at 5000 with no override).
+ *
+ * Optional and nullable for the same reason `run_log_offset` is: a record written
+ * before this field existed is still a canonical record, and absence has a meaning
+ * rather than being malformed. It means "this record predates database isolation and
+ * keeps using the shared OpenCode database" — a record's sessions already live in that
+ * one file, so moving the record onto a fresh, empty database would strand the
+ * recorded `native_session_id` and break continuation. Migrating such a record is a
+ * separate, explicit front, not something a read path may decide.
+ *
+ * The value is an agent-id-shaped key (`persistedAgentId`), never a path: it is used
+ * to build one, and a record that could carry an arbitrary path could name a database
+ * outside the state root.
+ */
+const OPENCODE_DB_FIELD = 'opencode_db';
+
+/**
+ * Optional, top-level fields, validated when present and tolerated when absent.
+ *
+ * Every entry was added after canonical records already existed on disk, and a
+ * record written before its field existed must stay canonical rather than being
+ * rejected. The list is named and exported so the closed-schema check in the
+ * tests reads the exemptions from the schema instead of restating them once per
+ * feature, which is how a closed schema stops being closed.
+ *
+ * `invocation_cwd` is an *observation*, not lifecycle authority: it records
+ * where a front was actually launched. Nothing that accepts, refuses, orders or
+ * owns work reads it -- the launch directory is resolved from `cwd` alone, by
+ * {@link requiredAgentCwd} -- and it is written by the runner only once a child
+ * has been spawned. A value here is therefore always a directory a real front
+ * ran in and never one somebody intended a front to enter, which is what makes
+ * the tolerated absence safe: absence reads as "nothing observed", never as a
+ * value synthesised from the declaration.
+ */
+export const OPTIONAL_TOP_LEVEL_FIELDS = [
+  'invocation_cwd',
+  RUN_LOG_CURSOR_FIELD,
+  OPENCODE_DB_FIELD,
+] as const;
 
 export class MalformedPendingPromptMetadataError extends Error {
   constructor() {
@@ -179,17 +236,73 @@ function canonicalBackendError(value: unknown): boolean {
   return true;
 }
 
+/**
+ * Board 197: the per-invocation owner token, as it appears in durable state.
+ *
+ * The reservation's `owner_pid`/`owner_start_ticks` are an identity the kernel
+ * can still corroborate only while the launching process is alive. A detached
+ * launch is reparented before the runner reaches its first durable write, so for
+ * that shape the token is the whole of the evidence, and it is therefore
+ * mandatory on the claim path rather than advisory. It is optional *in the
+ * record* only so a reservation written before tokens existed still parses: a
+ * record without one is refused at claim time, which is the fail-closed
+ * outcome, instead of becoming unreadable metadata everywhere.
+ *
+ * Exactly 32 bytes of entropy, lowercase hex, so a token is unguessable by
+ * anything that did not receive it, is not derivable from a pid, a generation or
+ * a process name, and cannot be confused with another invocation's: two
+ * invocations mint independent values.
+ */
+const OWNER_TOKEN_BYTES = 32;
+const OWNER_TOKEN_HEX = OWNER_TOKEN_BYTES * 2;
+const OWNER_TOKEN_PATTERN = /^[0-9a-f]+$/;
+
+/**
+ * The environment variable the launcher carries the token to the runner in.
+ *
+ * Beside argv on purpose: `/proc/<pid>/cmdline` is world-readable and
+ * `/proc/<pid>/environ` is 0400 and owner-readable, so of the two channels this
+ * runtime already had for handing a runner something, only the environment keeps
+ * it from every process on the host. It is also the channel this package already
+ * uses to carry identity to a process it later has to recognise
+ * (`envHasAgentMarker`, `envHasInvocationMarker` in process.ts).
+ */
+export const RUNNER_OWNER_TOKEN_ENV = 'ANTONINA_RUNNER_OWNER_TOKEN';
+
+export function runnerReservationOwnerToken(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length !== OWNER_TOKEN_HEX) return null;
+  return OWNER_TOKEN_PATTERN.test(value) ? value : null;
+}
+
+export function mintRunnerReservationOwnerToken(): string {
+  return randomBytes(OWNER_TOKEN_BYTES).toString('hex');
+}
+
+/**
+ * Compare two owner tokens without letting the answer depend on where the
+ * first differing character sits. Both sides are fixed-width hex by
+ * construction, but the lengths are checked first anyway so a short candidate
+ * cannot be made to run off the end of the buffer.
+ */
+export function ownerTokensEqual(recorded: unknown, presented: string | undefined): boolean {
+  const expected = runnerReservationOwnerToken(recorded);
+  if (expected === null) return false;
+  if (typeof presented !== 'string' || presented.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(expected, 'latin1'), Buffer.from(presented, 'latin1'));
+}
+
 function canonicalReservation(value: unknown): boolean {
   if (value === null) return true;
   if (typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   const fields = ['state', 'gen', 'owner_pid', 'owner_start_ticks', 'reserved_at', 'mode'] as const;
-  if (!exactKeys(record, fields)) return false;
+  if (!exactKeysWithOptional(record, fields, ['owner_token'])) return false;
   if (record.state !== 'reserved' && record.state !== 'claimed') return false;
   if (runnerGeneration(record.gen, 1) === null) return false;
   if (persistedProcessInteger(record.owner_pid, 1) === null) return false;
   if (!nullableInteger(record.owner_start_ticks, 0)) return false;
   if (persistedTimestamp(record.reserved_at) === null) return false;
+  if (record.owner_token !== undefined && runnerReservationOwnerToken(record.owner_token) === null) return false;
   return record.mode === 'new' || record.mode === 'continue';
 }
 
@@ -215,7 +328,7 @@ function canonicalSteerQueue(value: unknown, sequence: number): boolean {
 }
 
 export function validateAgentMetadata(meta: AgentMetadata): void {
-  if (!exactKeys(meta, TOP_LEVEL_FIELDS)) {
+  if (!exactKeysWithOptional(meta, TOP_LEVEL_FIELDS, OPTIONAL_TOP_LEVEL_FIELDS)) {
     throw new MalformedAgentMetadataError('managed-agent metadata fields are not canonical');
   }
   if (meta.agent_version !== AGENT_META_VERSION) {
@@ -226,6 +339,7 @@ export function validateAgentMetadata(meta: AgentMetadata): void {
   if (persistedTimestamp(meta.last_activity_at) === null) throw new MalformedAgentMetadataError('managed-agent last_activity_at is malformed');
   if (persistedLifecycleState(meta) === null) throw new MalformedAgentMetadataError('managed-agent state is malformed');
   persistedAgentCwd(meta);
+  persistedInvocationCwd(meta);
   if (!nullableString(meta.title, true)) throw new MalformedAgentMetadataError('managed-agent title is malformed');
   persistedVariant(meta);
   persistedNativeSessionId(meta);
@@ -291,6 +405,36 @@ export function validateAgentMetadata(meta: AgentMetadata): void {
   if (meta.error !== null && (typeof meta.error !== 'string' || meta.error.length === 0)) {
     throw new MalformedAgentMetadataError('managed-agent error is malformed');
   }
+  if (persistedRunLogOffset(meta) === null && meta[RUN_LOG_CURSOR_FIELD] !== null && meta[RUN_LOG_CURSOR_FIELD] !== undefined) {
+    throw new MalformedAgentMetadataError('managed-agent run_log_offset is malformed');
+  }
+  if (persistedOpencodeDbKey(meta) === null && meta[OPENCODE_DB_FIELD] !== null && meta[OPENCODE_DB_FIELD] !== undefined) {
+    throw new MalformedAgentMetadataError('managed-agent opencode_db is malformed');
+  }
+}
+
+/**
+ * The key of the dedicated OpenCode database this agent's invocations are confined
+ * to, or `null` for "no dedicated database" (field absent, explicitly null, or not
+ * a canonical key). `null` is the pre-isolation behaviour, not an error.
+ */
+export function persistedOpencodeDbKey(meta: AgentMetadata): string | null {
+  if (!hasOwn(meta, OPENCODE_DB_FIELD)) return null;
+  const value = meta[OPENCODE_DB_FIELD];
+  if (value === null) return null;
+  return persistedAgentId(value);
+}
+
+/**
+ * The byte offset into `output.log` where the currently accepted invocation's
+ * output begins, or `null` when no invocation has been accepted (absent field,
+ * an explicit `null`, or a malformed value).
+ */
+export function persistedRunLogOffset(meta: AgentMetadata): number | null {
+  if (!hasOwn(meta, RUN_LOG_CURSOR_FIELD)) return null;
+  const value = meta[RUN_LOG_CURSOR_FIELD];
+  if (value === null) return null;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 export function persistedLifecycleState(meta: AgentMetadata): PersistedAgentState | null {
@@ -420,6 +564,36 @@ export function requiredAgentCwd(meta: AgentMetadata): string {
   return value;
 }
 
+/**
+ * The directory the current or most recent invocation was *launched in*, or
+ * `null` when nothing has been observed.
+ *
+ * This is deliberately *not* a second declaration, and the two are written by
+ * different actors at different times. `cwd` is what the operator declared, and
+ * the accepting command writes it in the same durable transaction that accepts
+ * the prompt. `invocation_cwd` is written by the runner, in the same durable
+ * transaction that publishes the spawned process identity, so a value here is
+ * always a directory a real front was actually launched in. On a record that has
+ * run they usually agree; where they can disagree is an invocation that was
+ * accepted and never launched, or a record that has never run at all, and then
+ * this field is the one that is null.
+ *
+ * Absent is a real, canonical state rather than a malformed record: a record
+ * written before this field existed is honestly reporting that nothing was
+ * observed, and nothing is synthesised from the declaration to fill the gap. A
+ * present-but-wrong value is still rejected, and `null` is still a legitimate
+ * present value.
+ */
+export function persistedInvocationCwd(meta: AgentMetadata): string | null {
+  if (!hasOwn(meta, 'invocation_cwd')) return null;
+  const value = meta.invocation_cwd;
+  if (value === null) return null;
+  if (typeof value !== 'string' || value.length === 0 || !isAbsolute(value)) {
+    throw new MalformedAgentMetadataError('managed-agent invocation_cwd is malformed');
+  }
+  return value;
+}
+
 export function requiredPersistedAgentId(meta: AgentMetadata): string {
   const value = persistedAgentId(meta.id);
   if (value === null) throw new MalformedAgentMetadataError('managed-agent id is malformed');
@@ -443,6 +617,9 @@ export function idleMeta(agentId: string, cwd: string | null, title: string | nu
     last_activity_at: now,
     state: 'idle',
     cwd,
+    // Board issue 178. The observation starts null on every new record: an agent
+    // that has never been launched has never run anywhere.
+    invocation_cwd: null,
     title,
     variant: DEFAULT_VARIANT,
     native_session_id: null,
@@ -469,6 +646,8 @@ export function idleMeta(agentId: string, cwd: string | null, title: string | nu
     pending_prompt: null,
     last_prompt: null,
     error: null,
+    run_log_offset: null,
+    [OPENCODE_DB_FIELD]: agentId,
     agent_version: AGENT_META_VERSION,
   };
   validateAgentMetadata(meta);

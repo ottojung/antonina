@@ -14,6 +14,8 @@ import {
   MetadataWriteError,
   agentDir,
   createAgentDirectory,
+  logPath,
+  logSize,
   readMeta,
   stateRoot,
   updateMeta,
@@ -94,6 +96,19 @@ function deadChild(t) {
 test('state root follows XDG_STATE_HOME with home fallback', () => {
   assert.equal(stateRoot({ env: { XDG_STATE_HOME: '/x/state' }, home: '/home/u' }), '/x/state/antonina');
   assert.equal(stateRoot({ env: {}, home: '/home/u' }), '/home/u/.local/state/antonina');
+});
+
+test('log size is the append point, and an unwritten log is zero bytes', (t) => {
+  const options = root(t);
+  assert.equal(createAgentDirectory('a11d', options), true);
+  // No log yet: zero bytes is a real cursor, not an error.
+  assert.equal(logSize('a11d', options), 0);
+  nodeFs.writeFileSync(logPath('a11d', options), 'hello\n', { mode: 0o600 });
+  assert.equal(logSize('a11d', options), 6);
+  nodeFs.appendFileSync(logPath('a11d', options), 'again\n');
+  assert.equal(logSize('a11d', options), 12);
+  // An agent with no directory at all is zero bytes rather than a throw.
+  assert.equal(logSize('nope', options), 0);
 });
 
 test('metadata round-trips and mismatched durable identity fails closed', (t) => {

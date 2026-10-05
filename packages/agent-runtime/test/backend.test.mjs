@@ -12,6 +12,8 @@ import {
   DEFAULT_OPENCODE_BIN,
   OPENCODE_BIN_ENV,
   SIGNAL_DEATH_CLASSIFICATION,
+  UNRECOGNIZED_BACKEND_FAILURE,
+  backendCapabilities,
   backendRetryDelay,
   buildAgentCommand,
   classifyBackendFailure,
@@ -19,6 +21,7 @@ import {
   configuredModelAvailable,
   describeSignalDeath,
   discoverSessionId,
+  honoursInvocationCwd,
   resolveOpencode,
   sanitizeBackendError,
 } from '../dist/packages/agent-runtime/src/backend.js';
@@ -141,7 +144,21 @@ test('ordinary task failure is not misclassified and continuation stays explicit
   const root = fixture(t);
   const log = join(root, 'output.log');
   writeFileSync(log, 'deterministic task failure\n');
-  assert.equal(classifyBackendFailure(log, 0, 1), null);
+  // Board 159: an unmodelled non-zero exit is no longer a null verdict, because
+  // a null verdict left the durable record with no reason in it at all. What
+  // this test guards -- that an ordinary failure is not read as the modelled
+  // server error -- is unchanged, and is asserted as a classification and its
+  // flags rather than as a null.
+  const ordinary = classifyBackendFailure(log, 0, 1);
+  assert.equal(ordinary?.classification, UNRECOGNIZED_BACKEND_FAILURE);
+  assert.notEqual(ordinary?.classification, 'transient_backend_server_error');
+  assert.equal(ordinary?.transient, false);
+  assert.equal(ordinary?.automatic_retry_safe, false);
+
+  // An empty window is still declined: a spawn that produced no bytes also
+  // exits non-zero, and that is not a backend failure.
+  writeFileSync(log, '');
+  assert.equal(classifyBackendFailure(log, 0, 127), null);
 
   writeFileSync(log, 'Unexpected server error\n');
   const continuation = classifyBackendFailure(log, 0, 1, true);
@@ -168,7 +185,13 @@ test('a prior invocation server error is never attributed to the next invocation
   // the cap clamps neither.
   assert.ok(size < BACKEND_DIAGNOSTIC_MAX_BYTES, 'fixture must be small enough that the cap is not load-bearing');
 
-  assert.equal(classifyBackendFailure(log, start, 1, false), null);
+  // Board 159: not null any more, but still not the prior invocation's verdict.
+  // The subject of this case is confinement to the window, and that is asserted
+  // by the classification being the generic unrecognised one rather than the
+  // prior invocation's `transient_backend_server_error`.
+  const confined = classifyBackendFailure(log, start, 1, false);
+  assert.equal(confined?.classification, UNRECOGNIZED_BACKEND_FAILURE);
+  assert.notEqual(confined?.classification, 'transient_backend_server_error');
 
   // The same confinement governs the byte count: diagnostics describe this
   // invocation's own output, not everything the file has ever held.
@@ -613,6 +636,59 @@ test('a corrupted signal field is rejected rather than persisted', () => {
       () => validateAgentMetadata(meta),
       /backend_error is malformed/,
       `a signal death carrying ${JSON.stringify(patch)} must be rejected`,
+    );
+  }
+});
+
+// Board issue 178, the gate half. The capability is consulted at every entry
+// point that can put a front in a named directory, which is only testable if
+// the capability can be observed to be false. This pins the test-only override's
+// whole contract -- the real answer, the one token that withdraws it, and that
+// nothing else can -- and the fail-closed predicate the CLI gates on.
+test('backendCapabilities reports the real backend, and only an exact test token withdraws a capability', () => {
+  assert.deepEqual(backendCapabilities({}), { invocation_cwd: true });
+  assert.deepEqual(backendCapabilities(process.env), { invocation_cwd: true });
+  assert.deepEqual(
+    backendCapabilities({ ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: '1' }),
+    { invocation_cwd: false },
+  );
+  for (const value of ['', '0', 'true', 'yes', '2', ' 1', '1 ', '01']) {
+    assert.deepEqual(
+      backendCapabilities({ ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: value }),
+      { invocation_cwd: true },
+      `the override must only answer for the exact token '1', not for ${JSON.stringify(value)}`,
+    );
+  }
+});
+
+// A gate that anything can pass is not a gate. Only the literal boolean `true`
+// is permission; every other shape is a refusal, because the alternative is an
+// invocation running somewhere the operator did not name and reported as though
+// it had been honoured.
+test('an unknown or unrecognised invocation_cwd capability fails closed', () => {
+  assert.equal(honoursInvocationCwd({ invocation_cwd: true }), true);
+
+  for (const answer of [
+    undefined,
+    null,
+    { invocation_cwd: false },
+    { invocation_cwd: null },
+    { invocation_cwd: 'true' },
+    { invocation_cwd: 1 },
+    { invocation_cwd: {} },
+    {},
+    { invocation_dir: true },
+    { future_capability: true },
+    { invocation_cwd: { supported: true } },
+    'true',
+    true,
+    [],
+    [true],
+  ]) {
+    assert.equal(
+      honoursInvocationCwd(answer),
+      false,
+      `an answer that is not the literal boolean true must fail closed: ${JSON.stringify(answer)}`,
     );
   }
 });

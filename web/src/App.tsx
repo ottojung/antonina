@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { createBrowserBoardApi, targetViews, type BoardFeedEntry, type BoardFeedPage, type DaemonHostView, type IssueListSummary, type TargetView } from './api';
+import { createBrowserBoardApi, targetViews, type BoardFeedEntry, type BoardFeedPage, type DaemonHostView, type IssueCommentPage, type IssueListSummary, type TargetView } from './api';
 import { resourceState, type BoardIssue, type BoardResource } from './model';
-import { BOARD_VIEWS, DEFAULT_BOARD_URL_STATE, DEFAULT_ISSUE_PAGE, ISSUE_FILTERS, boardHomeState, boardHref, boardUrlFor, issueHref, parseBoardUrl, tabHref, writeBoardUrl, type BoardUrlState, type BoardView } from './board-url';
+import { BOARD_VIEWS, DEFAULT_BOARD_URL_STATE, DEFAULT_COMMENT_PAGE, DEFAULT_ISSUE_PAGE, ISSUE_FILTERS, boardHomeState, boardHref, boardUrlFor, issueHref, issueUrlState, parseBoardUrl, tabHref, writeBoardUrl, type BoardUrlState, type BoardView, DEFAULT_RESOURCE_PAGE } from './board-url';
 import { TARGETS_EMPTY, TARGETS_HINT, TARGET_ACCESS_LABEL, TARGET_CLEANUP_LABEL, TARGET_KIND_LABEL, TARGET_PERSISTENCE_LABEL, TARGET_STATUS_LABEL, targetCatalogRows } from './targets';
-import { clampIssuePage, ISSUE_PAGE_NEXT, ISSUE_PAGE_PREVIOUS, ISSUE_PAGE_SIZE, hasIssuePages, issuePage, issuePageCount, issuePageRange, COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, accessCallout, appendFeedPage, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, overviewLoaded, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type BoardSummary, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess } from './ui-state';
+import { clampCommentPage, clampIssuePage, COMMENT_PAGE_SIZE, COMMENT_PAGES_LABEL, commentPageRange, hasCommentPages, lastCommentPage, ISSUE_PAGE_NEXT, ISSUE_PAGE_PREVIOUS, ISSUE_PAGE_SIZE, hasIssuePages, issuePage, issuePageCount, issuePageRange, COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, ISSUE_LIST_PAGES_LABEL, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, overviewLoaded, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, readFeedPage, clampFeedPage, feedPageNextCursor, feedPageEntries, feedPageTotal, hasFeedPages, feedPageRange, FEED_LIST_PAGES_LABEL, FEED_PAGE_PREVIOUS, FEED_PAGE_NEXT, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type BoardSummary, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess, clampResourcePage, RESOURCE_LIST_PAGES_LABEL, RESOURCE_PAGE_SIZE, resourcePage } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -46,8 +46,16 @@ export default function App() {
   // default, and nothing outside `BOARD_URL_KEYS` is ever read or written, so a
   // stale URL cannot blank the board and no credential can ride along.
   const [location, setLocation] = useState<BoardUrlState>(() => parseBoardUrl(window.location.search));
-  const { view, selectedNumber, filter, settingsOpen, page } = location;
+  const { view, selectedNumber, filter, settingsOpen, page, resourcePage, commentPage, feedPage } = location;
   const [selectedIssue, setSelectedIssue] = useState<BoardIssue>();
+  // The open issue's conversation is held as the ONE bounded page the core read
+  // returned, not as a hydrated issue: `IssueCommentPage` carries the issue's own
+  // fields (with an empty `messages` array) plus this page's messages and the
+  // thread's total. Board issue 174 removed the whole-thread read from this path,
+  // so nothing here can render a message that was never fetched.
+  const [conversation, setConversation] = useState<IssueCommentPage>();
+  /** Counts conversation reads in the order they were asked; see the read effect. */
+  const commentRequest = useRef(0);
   const [displayName, setDisplayName] = useState(() => window.localStorage.getItem(DISPLAY_NAME_KEY) ?? '');
   const [access, setAccess] = useState<BoardAccess>('read-only');
   const [credentialInput, setCredentialInput] = useState('');
@@ -72,7 +80,12 @@ export default function App() {
   // away the page they chose.
   const setView = useCallback((next: View) => {
     setLocation((current) => boardUrlFor(
-      current.view === next ? { view: next, selectedNumber: undefined } : { view: next, selectedNumber: undefined, page: DEFAULT_ISSUE_PAGE },
+      // A real tab change resets every page number, and a click and the tab's
+      // own href have to land on the same screen: arriving at a tab means page 1,
+      // not whatever page of it this reader left open earlier. The Resources page
+      // is one of those numbers, and it is independent of the Issues page, so
+      // paging Resources must not renumber the list behind it.
+      current.view === next ? { view: next, selectedNumber: undefined } : { view: next, selectedNumber: undefined, page: DEFAULT_ISSUE_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE },
       current,
     ));
   }, []);
@@ -116,6 +129,25 @@ export default function App() {
   // about, and a reload or a Back would silently undo the reader's paging.
   // The name is the one issue 140's `onPage` wiring already reads as.
   const setIssuePageIndex = useCallback((next: number) => { navigate({ page: next }); }, [navigate]);
+  // The Resources page number, out of the same address and written back through
+  // the same `navigate`, for the same reason there is no second `useState` for
+  // the Issues list's page: a page number the URL does not know about does not
+  // survive a reload, a shared link or Back. It is a separate field from `page`
+  // because it pages a different screen.
+  const setResourcePageIndex = useCallback((next: number) => { navigate({ resourcePage: next }); }, [navigate]);
+  // The conversation's page number, out of the same address and written back
+  // through the same `navigate`, for the same reason there is no second
+  // `useState` for the Issues list's page: a page number the URL does not know
+  // about does not survive a reload, a shared link or Back. It is a separate
+  // field from `page` because it pages a different screen — a thread does not
+  // renumber the list it was opened from, and the list does not renumber it.
+  const setCommentPageIndex = useCallback((next: number) => { navigate({ commentPage: next }); }, [navigate]);
+  // The feed's page number, out of the same address and written back through the
+  // same `navigate`, for the same reason there is no second `useState` for the
+  // Issues list's page or the conversation's. Board issue 173: the feed's page
+  // survives a reload, a shared link and Back, which is what makes `?view=feed`
+  // with a page a link a reader can send someone.
+  const setFeedPageIndex = useCallback((next: number) => { navigate({ feedPage: next }); }, [navigate]);
 
   const refresh = useCallback(async () => {
     try {
@@ -173,34 +205,75 @@ export default function App() {
   // address, so the address and the rows cannot drift apart in either direction.
   const pageIndex = clampIssuePage(page, visible.length);
   const paged = useMemo(() => issuePage(visible, pageIndex), [visible, pageIndex]);
+  // The Resources view's page is the same shape of thing as the Issues list's:
+  // one number out of the address, clamped onto a page that exists, and a slice
+  // of the board's own resource order. `ResourcesView` is handed the slice and
+  // the controls, so it draws one page and never the whole collection.
+  const resourceIndex = clampResourcePage(resourcePage, board?.resources.length ?? 0);
   const counts = issueCounts(board?.issues ?? []);
   const hasWriteAccess = access === 'editable';
   const empty = emptyIssueList(filter, hasWriteAccess);
-  const selected = selectedIssue?.number === selectedNumber ? selectedIssue : undefined;
+  const selected = conversation?.issue.number === selectedNumber ? conversation : undefined;
+  // The page the thread may actually be showing. An address can name a page that
+  // no longer exists — a stale link, a thread that got shorter — and the clamp
+  // moves down onto the last page that does rather than throwing the reader to
+  // the top. It is the same rule the Issues list uses, applied to the thread's
+  // own total.
+  const threadIndex = clampCommentPage(selected?.page ?? commentPage, selected?.total ?? 0);
+  useEffect(() => {
+    // The address has to name the screen, so an out-of-range `thread` is written
+    // back once the read has said how many pages there are. Until then nothing is
+    // rewritten, because only the read knows the thread's real length.
+    // Only a read OF the page the address names may correct the address. A read
+    // of some other page is in flight behind a navigation, and correcting from it
+    // would undo the navigation the reader just made.
+    if (selected !== undefined && selected.page === commentPage && threadIndex !== commentPage) {
+      setCommentPageIndex(threadIndex);
+    }
+  }, [selected, threadIndex, commentPage, setCommentPageIndex]);
   useEffect(() => {
     // Only a board that has been read can say an issue is not there. Before the
-    // first read `visible` is empty, and clearing then would drop the issue a
-    // direct link named before the board had a chance to answer. A link to an
-    // issue the board does not hold is still cleared — once the read is in, and
+    // first read `ready.board.issues` is empty, and clearing then would drop the
+    // issue a direct link named before the board had a chance to answer. A link to
+    // an issue the board does not hold is still cleared — once the read is in, and
     // the URL is rewritten to the list, so a stale link lands on the board.
+    //
+    // Board issue 172: existence is asked of the WHOLE issue set, open and closed
+    // together, and never of `visible`. `visible` is the list under the current
+    // filter, and the filter is a list control, so asking it about issue identity
+    // made a bare `?issue=N` naming a closed issue clear itself — the default
+    // filter is `open`, so every closed issue was unopenable by its own link
+    // unless the link also carried `&filter=closed`. Identity belongs to the
+    // board; the filter only decides which rows the list draws.
     if (ready === undefined || selectedNumber === undefined) return;
-    if (!visible.some((issue) => issue.number === selectedNumber)) setSelectedNumber(undefined);
-  }, [ready, selectedNumber, visible]);
+    if (!ready.board.issues.some((issue) => issue.number === selectedNumber)) setSelectedNumber(undefined);
+  }, [ready, selectedNumber]);
   useEffect(() => {
     if (selectedNumber === undefined || ready === undefined
         || !ready.board.issues.some((issue) => issue.number === selectedNumber)) {
-      setSelectedIssue(undefined);
+      setConversation(undefined);
       return;
     }
     let live = true;
-    setSelectedIssue((current) => current?.number === selectedNumber ? current : undefined);
-    void api.getIssue(selectedNumber).then((issue) => {
-      if (live) setSelectedIssue(issue);
+    // One bounded page per read: the issue's core fields and the 50 messages of
+    // the page the address names. Opening an issue no longer reassembles its
+    // thread, and pressing Next reads the next page rather than re-reading the
+    // whole conversation and slicing it here.
+    setConversation((current) => current?.issue.number === selectedNumber ? current : undefined);
+    // A read is identified by the order it was asked in, so a slower earlier read
+    // cannot land after a later one and put an older page on screen: the effect's
+    // `live` flag only knows about cleanup, and a navigation that re-reads the
+    // same issue leaves two resolutions free to race.
+    const request = ++commentRequest.current;
+    void api.getIssueCommentPage(selectedNumber, commentPage).then((read) => {
+      if (live && request === commentRequest.current) setConversation(read);
     }).catch((cause) => {
-      if (live) setError(cause instanceof Error ? cause.message : 'The issue could not be loaded');
+      if (live && request === commentRequest.current) {
+        setError(cause instanceof Error ? cause.message : 'The issue could not be loaded');
+      }
     });
     return () => { live = false; };
-  }, [api, selectedNumber, ready?.head]);
+  }, [api, selectedNumber, commentPage, ready?.head]);
 
   const clearOutcome = useCallback(() => clearBothOutcomes(() => setError(undefined), () => setNotice(undefined)), []);
   /** Every write goes through the one commit path, so callers only say what to send. */
@@ -220,9 +293,20 @@ export default function App() {
   async function postComment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!selected || !displayName.trim()) return;
     const form = event.currentTarget; const body = (form.elements.namedItem('body') as HTMLTextAreaElement).value;
-    const result = await run(() => api.comment(selected.number, displayName, body), 'Message posted'); if (result) form.reset();
+    const result = await run(() => api.comment(selected.issue.number, displayName, body), 'Message posted');
+    if (!result) return;
+    form.reset();
+    // A comment is appended to the end of the thread, so it lands on the page
+    // after the last one the reader could see. Following it there is what makes
+    // a post visible instead of apparently swallowed: a reader on page 1 of a
+    // three-page thread moves to the page the comment is actually on, and a
+    // reader whose post stayed on the current page does not move at all.
+    setCommentPageIndex(lastCommentPage(selected.total + 1));
   }
-  function openIssue(number: number) { setLocation((current) => boardUrlFor({ view: 'issues', selectedNumber: number, filter: 'all' }, current)); }
+  // Opening an issue is `issueUrlState`, the same transition the hrefs already
+  // advertise, so a click and a copied link both land on that issue's first
+  // conversation page.
+  function openIssue(number: number) { setLocation((current) => issueUrlState(number, current)); }
   function saveDisplayName(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault(); const clean = displayName.trim(); if (!clean) return;
     window.localStorage.setItem(DISPLAY_NAME_KEY, clean); setDisplayName(clean); setNotice('Display name saved in this browser');
@@ -240,7 +324,7 @@ export default function App() {
     session.clearCredential();
     setAccess('read-only');
     setSelectedNumber(undefined);
-    setSelectedIssue(undefined);
+    setConversation(undefined);
     setSettingsOpen(false);
     setLoad({ status: 'untrusted' });
     setNotice(undefined);
@@ -332,7 +416,7 @@ export default function App() {
           <div className="issue-list" aria-label="Issues"><IssueQueue issues={visible} page={paged} queue={load.queue} hasWriteAccess={hasWriteAccess} selectedNumber={selectedNumber} onSelect={setSelectedNumber} onReorder={reorderQueue} empty={empty} /></div>
           <IssuePagination total={visible.length} page={pageIndex} onPage={setIssuePageIndex} />
         </>           : view === 'resources'
-          ? <ResourcesView board={board!} issues={board!.issues} access={access} onOpenIssue={openIssue} onAdd={(host, path, number) => run(() => api.addResourceDependency(host, path, number), 'Resource dependency added')} onRemove={(resource, number) => run(() => api.removeResourceDependency(resource.host, resource.path, number), resource.issueNumbers.length === 1 ? 'Dependency removed; resource unregistered' : 'Resource dependency removed')} onEnableEditing={() => setSettingsOpen(true)} hrefForIssue={issueHrefHere} />
+          ? <ResourcesView resources={board!.resources} issues={board!.issues} access={access} page={resourceIndex} onPage={setResourcePageIndex} onOpenIssue={openIssue} onAdd={(host, path, number) => run(() => api.addResourceDependency(host, path, number), 'Resource dependency added')} onRemove={(resource, number) => run(() => api.removeResourceDependency(resource.host, resource.path, number), resource.issueNumbers.length === 1 ? 'Dependency removed; resource unregistered' : 'Resource dependency removed')} onEnableEditing={() => setSettingsOpen(true)} hrefForIssue={issueHrefHere} />
           : view === 'targets'
           // The browser cannot read a host's daemon report: those are files on
           // the operator's own machine, and a page that fetched them would be
@@ -341,9 +425,9 @@ export default function App() {
           // which is the truth from here. `antonina board target list
           // --telemetry` is where a host's own numbers come from.
           ? <TargetsView targets={targetViews(board!)} hosts={[]} onOpenIssue={openIssue} hrefForIssue={issueHrefHere} />
-          : <FeedView readFeed={session.readFeed} issues={board!.issues} generation={feedGeneration} onOpenIssue={openIssue} hrefForIssue={issueHrefHere} />}
+          : <FeedView readFeed={session.readFeed} issues={board!.issues} generation={feedGeneration} page={feedPage} onPage={setFeedPageIndex} onOpenIssue={openIssue} hrefForIssue={issueHrefHere} />}
       </aside>
-      {view === 'issues' ? selected ? <Thread issue={selected} access={access} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.number, body), 'Description updated')} close={() => void run(() => api.close(selected.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.number), 'Issue reopened')} back={() => setSelectedNumber(undefined)} />
+      {view === 'issues' ? selected ? <Thread conversation={selected} page={threadIndex} onPage={setCommentPageIndex} access={access} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.issue.number, body), 'Description updated')} close={() => void run(() => api.close(selected.issue.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.issue.number), 'Issue reopened')} back={() => setSelectedNumber(undefined)} />
         : selectedNumber !== undefined
           ? <section className="thread welcome"><div className="welcome-mark" aria-hidden="true">A</div><p className="eyebrow">Issue #{selectedNumber}</p><h2>Loading issue…</h2></section>
           : <section className="thread welcome"><div className="welcome-mark" aria-hidden="true">A</div><p className="eyebrow">Shared issue board</p><h2>Choose an issue to join the conversation.</h2></section> : null}
@@ -581,16 +665,23 @@ function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSel
  * paging announces the new range instead of silently swapping the rows under the
  * reader.
  */
-export function IssuePagination({ total, page, pageSize = ISSUE_PAGE_SIZE, onPage }: {
+export function IssuePagination({ total, page, pageSize = ISSUE_PAGE_SIZE, onPage, label = ISSUE_LIST_PAGES_LABEL }: {
   total: number;
   page: number;
   pageSize?: number;
   onPage: (page: number) => void;
+  /**
+   * What this run of pages navigates. It defaults to the Issues list and is
+   * overridden for the Resources view or for an issue's conversation, so the
+   * same control announces what it is paging rather than always claiming to page
+   * the list.
+   */
+  label?: string;
 }) {
   if (!hasIssuePages(total, pageSize)) return null;
   const index = clampIssuePage(page, total, pageSize);
   const pages = issuePageCount(total, pageSize);
-  return <nav className="issue-pagination" aria-label="Issue list pages">
+  return <nav className="issue-pagination" aria-label={label}>
     <button type="button" className="quiet" aria-label={ISSUE_PAGE_PREVIOUS} disabled={index <= 1} onClick={() => onPage(index - 1)}>Previous</button>
     <p className="issue-page-range" role="status">{issuePageRange(total, index, pageSize)}</p>
     <button type="button" className="quiet" aria-label={ISSUE_PAGE_NEXT} disabled={index >= pages} onClick={() => onPage(index + 1)}>Next</button>
@@ -664,15 +755,32 @@ function AccessNotice({ access, readOnly, className, onAction }: { access: ReadO
   return <div className={className}><div><strong>{callout.title}</strong><p>{callout.body}</p></div><button onClick={onAction}>{callout.action}</button></div>;
 }
 
-function ResourcesView({ board, issues, access, onOpenIssue, onAdd, onRemove, onEnableEditing, hrefForIssue }: { board: BoardSummary; issues: IssueReference[]; access: BoardAccess; onOpenIssue: (number: number) => void; hrefForIssue?: (number: number) => string; onAdd: (host: string, path: string, number: number) => Promise<unknown>; onRemove: (resource: BoardResource, number: number) => Promise<unknown>; onEnableEditing: () => void }) {
-  const grouped = groupResources(board.resources);
+/**
+ * The Resources tab.
+ *
+ * Paging changed what is drawn, not what a resource is. The view is handed the
+ * board's resources and the page number, takes that page of them, and groups
+ * exactly what it was handed: `groupResources` is the same call over the same
+ * `BoardResource` values, so hosts are still sorted by name and paths by path,
+ * and a dependency chip, its state label, its remove control and its
+ * add-dependency form are the same controls over the same issues as before.
+ * The register form, the access notice and the empty state are untouched.
+ */
+function ResourcesView({ resources, issues, access, page, onPage, onOpenIssue, onAdd, onRemove, onEnableEditing, hrefForIssue }: { resources: BoardResource[]; issues: IssueReference[]; access: BoardAccess; page: number; onPage: (page: number) => void; onOpenIssue: (number: number) => void; hrefForIssue?: (number: number) => string; onAdd: (host: string, path: string, number: number) => Promise<unknown>; onRemove: (resource: BoardResource, number: number) => Promise<unknown>; onEnableEditing: () => void }) {
+  // The page is a slice of the board's own resource order, and the total the
+  // controls clamp against is the whole collection rather than the slice — so
+  // the position line and the disabled boundaries describe the board, not the
+  // window. Grouping happens after the slice, so a page may hold several hosts.
+  const paged = resourcePage(resources, page);
+  const grouped = groupResources(paged);
   async function add(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await onAdd(String(data.get('host')), String(data.get('path')), Number(data.get('issue'))); if (result) form.reset(); }
   return <div className="resources-view">
     {access === 'editable' && <form className="resource-form" onSubmit={add}><h2>Register a resource</h2><p>Add a host and path, protected by at least one open issue.</p><label htmlFor="resource-host">Lubko host</label><input id="resource-host" name="host" placeholder="lubko://server-name" required /><label htmlFor="resource-path">Absolute path</label><input id="resource-path" name="path" placeholder="/registered/path" required /><label htmlFor="resource-issue">Open issue</label><select id="resource-issue" name="issue" required><option value="">Choose an issue</option>{issues.filter((issue) => issue.state === 'open').map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add dependency</button></form>}
     {access !== 'editable' && <AccessNotice access={access} className="access-callout" onAction={onEnableEditing} />}
 
-    {grouped.map(([host, resources]) => <section className="resource-host" key={host}><h2>{host}</h2>{resources.map((resource) => <article className="resource-card" key={resource.path}><header><code>{resource.path}</code><span className={`resource-state ${resourceState(resource, issues)}`}>{resourceState(resource, issues)}</span></header><div className="dependency-chips">{resource.issueNumbers.map((number) => { const issue = issues.find((entry) => entry.number === number)!; return <span className="dependency-chip" key={number}><a role="button" href={hrefForIssue?.(number)} onClick={issueLinkClick(onOpenIssue, number)}>#{number} {issue.title}</a><span className={`state-label ${issue.state}`}>{issue.state}</span>{access === 'editable' && <button aria-label={`Remove issue ${number}`} onClick={() => void onRemove(resource, number)}>×</button>}</span>; })}</div>{access === 'editable' && <AddDependency resource={resource} issues={issues} add={onAdd} />}</article>)}</section>)}
-    {!board.resources.length && <div className="empty-state"><h2>No resources registered</h2><p>Registered paths appear here grouped by Lubko host.</p></div>}
+    {grouped.map(([host, entries]) => <section className="resource-host" key={host}><h2>{host}</h2>{entries.map((resource) => <article className="resource-card" key={resource.path}><header><code>{resource.path}</code><span className={`resource-state ${resourceState(resource, issues)}`}>{resourceState(resource, issues)}</span></header><div className="dependency-chips">{resource.issueNumbers.map((number) => { const issue = issues.find((entry) => entry.number === number)!; return <span className="dependency-chip" key={number}><a role="button" href={hrefForIssue?.(number)} onClick={issueLinkClick(onOpenIssue, number)}>#{number} {issue.title}</a><span className={`state-label ${issue.state}`}>{issue.state}</span>{access === 'editable' && <button aria-label={`Remove issue ${number}`} onClick={() => void onRemove(resource, number)}>×</button>}</span>; })}</div>{access === 'editable' && <AddDependency resource={resource} issues={issues} add={onAdd} />}</article>)}</section>)}
+    {!resources.length && <div className="empty-state"><h2>No resources registered</h2><p>Registered paths appear here grouped by Lubko host.</p></div>}
+    <IssuePagination total={resources.length} page={page} pageSize={RESOURCE_PAGE_SIZE} onPage={onPage} label={RESOURCE_LIST_PAGES_LABEL} />
   </div>;
 }
 function AddDependency({ resource, issues, add }: { resource: BoardResource; issues: IssueReference[]; add: (host: string, path: string, number: number) => Promise<unknown> }) { const options = issues.filter((issue) => issue.state === 'open' && !resource.issueNumbers.includes(issue.number)); if (!options.length) return null; return <form className="dependency-add" onSubmit={async (event) => { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await add(resource.host, resource.path, Number(data.get('issue'))); if (result) form.reset(); }}><select name="issue" required defaultValue=""><option value="" disabled>Add open issue dependency…</option>{options.map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add</button></form>; }
@@ -684,18 +792,36 @@ function AddDependency({ resource, issues, add }: { resource: BoardResource; iss
  * decides only when to read — on open, on every verified board read, and again
  * when the reader asks for the next page — and the next page is requested with
  * the token the backend returned, never with an offset the browser computed.
+ *
+ * The pages it has been given are held as pages, newest first, so the addressable
+ * `feedPage` field can select one of them: board issue 173 made the feed's page
+ * a URL field, and this is where that field is finally read. `page` is a number
+ * over the pages actually read, never an offset into the feed — the projection
+ * issues the tokens, and this view only chooses which read page to draw.
  */
-export function FeedView({ readFeed, issues, generation, onOpenIssue, hrefForIssue }: {
+export function FeedView({ readFeed, issues, generation, page, onPage, onOpenIssue, hrefForIssue }: {
   readFeed: FeedRead;
   issues: IssueReference[];
   generation: number;
+  /** The addressable feed page, as the query string reported it. */
+  page?: number;
+  /** Reports a chosen page back to the address, which is the only place it lives. */
+  onPage?: (page: number) => void;
   onOpenIssue: (number: number) => void;
   hrefForIssue?: (number: number) => string;
 }) {
-  const [page, setPage] = useState<BoardFeedPage | null>(null);
+  const [walk, setWalk] = useState<BoardFeedPage[]>([]);
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(true);
+  const walked = walk.length;
+  // The page on screen follows the addressable field whenever the address says
+  // otherwise, and otherwise follows the walk: a forward read reveals the page
+  // it just read, and reports that page to the address so a reload, a shared
+  // link and Back return to it.
+  const [chosen, setChosen] = useState(page ?? 1);
+  const index = clampFeedPage(chosen, walked);
   const read = useCallback(readFeed, [readFeed]);
+  useEffect(() => { setChosen(page ?? 1); }, [page]);
   useEffect(() => {
     let live = true;
     setLoading(true);
@@ -703,7 +829,7 @@ export function FeedView({ readFeed, issues, generation, onOpenIssue, hrefForIss
       try {
         const newest = await readFeedFirstPage(read);
         if (!live) return;
-        setPage(newest);
+        setWalk([newest]);
         setError(undefined);
       } catch (cause) {
         if (!live) return;
@@ -714,32 +840,76 @@ export function FeedView({ readFeed, issues, generation, onOpenIssue, hrefForIss
     })();
     return () => { live = false; };
   }, [read, generation]);
+  const token = feedPageNextCursor(walk, index);
+  /** One place that both draws a chosen page and reports it to the address. */
+  function choose(next: number) {
+    setChosen(next);
+    onPage?.(next);
+  }
   async function showMore() {
-    if (page === null || page.nextCursor === null) return;
+    if (token === null) return;
     setLoading(true);
     try {
       // The backend's own token, carried unchanged: it names a stable position
       // in the materialized feed, so this page is the entries committed before
       // it and a walk neither skips nor repeats an entry.
-      setPage(await appendFeedPage(read, page, page.nextCursor));
+      const older = await readFeedPage(read, token);
+      setWalk((current) => [...current, older]);
       setError(undefined);
+      choose(walked + 1);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Older entries could not be read');
     } finally {
       setLoading(false);
     }
   }
-  return <FeedThread
-    entries={page?.entries ?? []}
-    nextCursor={page?.nextCursor ?? null}
-    total={page?.total ?? 0}
-    issues={issues}
-    loading={loading}
-    error={error}
-    onShowMore={() => void showMore()}
-    onOpenIssue={onOpenIssue}
-    hrefForIssue={hrefForIssue}
-  />;
+  return <>
+    <FeedThread
+      entries={feedPageEntries(walk, index)}
+      nextCursor={token}
+      total={feedPageTotal(walk)}
+      issues={issues}
+      loading={loading}
+      error={error}
+      onShowMore={() => void showMore()}
+      onOpenIssue={onOpenIssue}
+      hrefForIssue={hrefForIssue}
+    />
+    <FeedPageNav walked={walked} page={index} onPage={choose} />
+  </>;
+}
+
+/**
+ * The feed's numbered pages, over the pages the projection has actually handed
+ * over. It is a separate control from `IssuePagination` because the numbers are
+ * not the same numbers: those are offsets over entries this browser already
+ * holds, these are pages of a cursor walk. So a page the reader has never been
+ * given is never numbered and never offered — walking past the last page read
+ * is the backend's token, carried by the "show older entries" control, not a
+ * button here that could pretend to jump to a page nobody has read.
+ */
+export function FeedPageNav({ walked, page, onPage }: {
+  walked: number;
+  page: number;
+  onPage?: (page: number) => void;
+}) {
+  if (!hasFeedPages(walked)) return null;
+  const index = clampFeedPage(page, walked);
+  return <nav className="issue-pagination" aria-label={FEED_LIST_PAGES_LABEL}>
+    <button type="button" className="quiet" aria-label={FEED_PAGE_PREVIOUS} disabled={index <= 1} onClick={() => onPage?.(index - 1)}>Previous</button>
+    <p className="issue-page-range" role="status">{feedPageRange(index, walked)}</p>
+    {Array.from({ length: walked }, (_, offset) => offset + 1).map((number) => (
+      <button
+        type="button"
+        key={number}
+        className={number === index ? 'quiet active' : 'quiet'}
+        aria-label={`Feed page ${number}`}
+        aria-current={number === index ? 'page' : undefined}
+        onClick={() => onPage?.(number)}
+      >{number}</button>
+    ))}
+    <button type="button" className="quiet" aria-label={FEED_PAGE_NEXT} disabled={index >= walked} onClick={() => onPage?.(index + 1)}>Next</button>
+  </nav>;
 }
 
 /**
@@ -863,13 +1033,46 @@ export function TargetsView({ targets, hosts, onOpenIssue, hrefForIssue }: {
   </div>;
 }
 
-function Thread({ issue, access, displayName, setDisplayName, saveDisplayName, openSettings, comment, editBody, close, reopen, back }: { issue: BoardIssue; access: BoardAccess; displayName: string; setDisplayName: (value: string) => void; saveDisplayName: (event?: FormEvent<HTMLFormElement>) => void; openSettings: () => void; comment: (event: FormEvent<HTMLFormElement>) => Promise<void>; editBody: (body: string) => Promise<unknown>; close: () => void; reopen: () => void; back: () => void }) {
+/**
+ * One issue, drawn as one page of its conversation.
+ *
+ * `conversation` is the bounded read, not a hydrated issue: the issue's own
+ * fields plus the messages of one 50-message page and the thread's total. The
+ * thread draws `conversation.messages` and nothing else, so a message the page
+ * did not contain cannot appear here — there is no second copy of the thread in
+ * this component to fall back to.
+ *
+ * `page` is the page the address names and `onPage` moves it, both handed in from
+ * `App`, which owns the one `BoardUrlState` every navigation goes through. This
+ * component holds no page number of its own.
+ */
+function Thread({ conversation, page, onPage, access, displayName, setDisplayName, saveDisplayName, openSettings, comment, editBody, close, reopen, back }: { conversation: IssueCommentPage; page: number; onPage: (page: number) => void; access: BoardAccess; displayName: string; setDisplayName: (value: string) => void; saveDisplayName: (event?: FormEvent<HTMLFormElement>) => void; openSettings: () => void; comment: (event: FormEvent<HTMLFormElement>) => Promise<void>; editBody: (body: string) => Promise<unknown>; close: () => void; reopen: () => void; back: () => void }) {
+  const issue = conversation.issue;
+  const messages = conversation.messages;
+  const total = conversation.total;
   const [editing, setEditing] = useState(false); const [body, setBody] = useState(issue.body);
   useEffect(() => { setBody(issue.body); setEditing(false); }, [issue.body, issue.number]);
   const date = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-  return <article className="thread"><button className="back-button" onClick={back}><span aria-hidden="true">←</span> All issues</button><header className="thread-header"><div className="thread-title"><p className="eyebrow">Issue #{issue.number} <span className={`state-label ${issue.state}`}>{issue.state}</span></p><h1>{issue.title}</h1><p>Updated {formatUpdatedAt(issue.updatedAt)} · {issue.messages.length} messages</p></div>{access === 'editable' ? <button className={`state-action ${issue.state}`} onClick={issue.state === 'open' ? close : reopen}>{issue.state === 'open' ? 'Close issue' : 'Reopen issue'}</button> : <span className="read-only-label">Read-only view</span>}</header>
+  return <article className="thread"><button className="back-button" onClick={back}><span aria-hidden="true">←</span> All issues</button><header className="thread-header"><div className="thread-title"><p className="eyebrow">Issue #{issue.number} <span className={`state-label ${issue.state}`}>{issue.state}</span></p><h1>{issue.title}</h1><p>Updated {formatUpdatedAt(issue.updatedAt)} · {total} {total === 1 ? 'message' : 'messages'}</p></div>{access === 'editable' ? <button className={`state-action ${issue.state}`} onClick={issue.state === 'open' ? close : reopen}>{issue.state === 'open' ? 'Close issue' : 'Reopen issue'}</button> : <span className="read-only-label">Read-only view</span>}</header>
     <section className="issue-description"><div className="description-heading"><h2>Description</h2>{access === 'editable' && issue.state === 'open' && !editing && <button onClick={() => setEditing(true)}>Edit description</button>}</div>{editing ? <form onSubmit={async (event) => { event.preventDefault(); const result = await editBody(body); if (result) setEditing(false); }}><textarea value={body} onChange={(event) => setBody(event.target.value)} maxLength={10_000} aria-label="Issue description" /><div><button type="submit">Save description</button><button type="button" onClick={() => { setBody(issue.body); setEditing(false); }}>Cancel</button></div></form> : issue.body ? <p>{issue.body}</p> : <p className="empty-description">No description was provided.</p>}</section>
-    <section className="messages" aria-label="Issue conversation"><h2>Conversation</h2>{issue.messages.length ? issue.messages.map((message) => <article className="message" key={message.id}><div className="message-meta"><span className="avatar" aria-hidden="true">{message.author.slice(0, 1).toUpperCase()}</span><div><strong>{message.author}</strong><time dateTime={message.createdAt}>{date.format(new Date(message.createdAt))}</time></div></div><p>{message.body}</p></article>) : <div className="conversation-empty"><h2>No conversation yet</h2><p>Add the first message to share context or ask a question.</p></div>}</section>
+    {/* The conversation is a page of a longer thread, so the section says which
+        page it is out of how many and offers the two ways out of it. Both
+        controls are the Issues list's own pagination helpers applied to the
+        thread's total, so a thread of one page is never given dead controls and a
+        thread of three pages offers exactly two. */}
+    <section className="messages" aria-label="Issue conversation"><h2>Conversation</h2>{messages.length ? messages.map((message) => <article className="message" key={message.id}><div className="message-meta"><span className="avatar" aria-hidden="true">{message.author.slice(0, 1).toUpperCase()}</span><div><strong>{message.author}</strong><time dateTime={message.createdAt}>{date.format(new Date(message.createdAt))}</time></div></div><p>{message.body}</p></article>) : total === 0
+        // "No conversation yet" is a claim about the whole thread, so it is only
+        // ever made when the thread really is empty. A page that holds no
+        // messages of a thread that has some says that instead, and never
+        // borrows the empty thread's wording.
+        ? <div className="conversation-empty"><h2>No conversation yet</h2><p>Add the first message to share context or ask a question.</p></div>
+        : <p className="conversation-page-empty">No messages on this page.</p>}
+      {hasCommentPages(total) && <p className="comment-page-position">Page {page} of {lastCommentPage(total)} · {commentPageRange(total, page)}</p>}
+      {/* The list's own control, not a second implementation of it: it takes the
+          thread's total and the conversation's page size, and it renders nothing
+          at all for a thread short enough to need no paging. */}
+      <IssuePagination total={total} page={page} pageSize={COMMENT_PAGE_SIZE} onPage={onPage} label={COMMENT_PAGES_LABEL} />
+    </section>
     <div className="composer-area">{access !== 'editable' ? <AccessNotice access={access} readOnly={COMPOSER_READ_ONLY_CALLOUT} className="composer-access" onAction={openSettings} /> : !displayName.trim() ? <form className="name-prompt" onSubmit={saveDisplayName}><label htmlFor="composer-name">Before you post, tell everyone who you are</label><div><input id="composer-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} required /><button type="submit">Save name</button></div></form> : <CommentComposer displayName={displayName} comment={comment} />}</div>
   </article>;
 }

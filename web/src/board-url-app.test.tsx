@@ -16,7 +16,10 @@ const NEXT_PAGE = ISSUE_PAGE_NEXT;
 const PREVIOUS_PAGE = ISSUE_PAGE_PREVIOUS;
 import { DEFAULT_FEED_LIMIT, type BoardFeedPage, type BoardFeedRequest } from './api';
 import type { BoardIssue } from './model';
-import type { BoardAccessState, BoardOverview } from '../../packages/core/src/api';
+import type { BoardAccessState, BoardOverview, IssueCommentPage } from '../../packages/core/src/api';
+// Board issue 180's All Issues key, so this fixture mirrors what core's store
+// writes: the newest comment's time, or null when the issue has no comments.
+import { newestCommentAt } from '../../packages/core/src/api';
 import type { BrowserBoardSession } from './api';
 
 /**
@@ -40,6 +43,22 @@ const allIssues = new Map<number, BoardIssue>();
 const session = {
   api: {
     accessState: (): BoardAccessState => ({ boardId: 'board-1', keyId: null, rootKeyId: 'root-1', capabilities: [], credentialRejection: null, storageRejected: false, canEdit: false }),
+    // The conversation is read one bounded page at a time (board issue 174), so
+    // the stub answers the same way for page 1 of a one-page thread: the issue's
+    // own fields plus that page's messages.
+    getIssueCommentPage: async (number: number, page: number): Promise<IssueCommentPage> => {
+      const found = allIssues.get(number);
+      if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
+      return {
+        schemaVersion: 2,
+        boardId: 'board-1',
+        issue: { ...found, messages: [] },
+        page,
+        pageCount: 1,
+        total: found.messages.length,
+        messages: found.messages,
+      };
+    },
     getIssue: async (number: number): Promise<BoardIssue> => {
       const found = allIssues.get(number);
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
@@ -86,6 +105,7 @@ function overview(issues: BoardIssue[]): BoardOverview {
       updatedAt: each.updatedAt,
       closedAt: each.state === 'closed' ? each.updatedAt : null,
       messageCount: each.messages.length,
+      lastActivityAt: newestCommentAt(each.messages),
       hasBody: each.body.length > 0,
     })),
     resources: [],
@@ -256,6 +276,63 @@ describe('the board addressed by URL, mounted', () => {
     await openAt('/board?issue=2&filter=all');
     expect(await screen.findByRole('heading', { name: 'Issue 2' })).toBeDefined();
     expect(screen.getByText('Body of issue 2')).toBeDefined();
+  });
+
+  it('opens a CLOSED issue from a bare link, with no filter in the URL', async () => {
+    // Board issue 172. Issue 3 is closed and the default filter is `open`, so its
+    // row is not in the list this link draws — but the link names the issue, and
+    // the filter is a list control, not part of the issue's identity. Validating
+    // the parsed selection against the filtered list made every closed issue
+    // unopenable by its own bare link; the address bar was rewritten to `''` and
+    // the reader landed on a list that does not contain the issue they were sent
+    // to. A mounted app, not a parser test: `parseBoardUrl` was never wrong here.
+    const container = await openAt('/board?issue=3');
+    expect(await screen.findByRole('heading', { name: 'Issue 3' })).toBeDefined();
+    expect(screen.getByText('Body of issue 3')).toBeDefined();
+    // The address still names the issue, so a refresh reopens the same screen.
+    expect(search()).toBe('?issue=3');
+    expect(container.querySelector('.workspace')?.className).toContain('has-selection');
+    // And the filter still governs the LIST only: the closed row is still not
+    // drawn behind the conversation.
+    expect(drawnRows(container)).not.toContain(3);
+    expect(drawnRows(container)).toEqual([1, 2]);
+  });
+
+  it('opens a closed issue from a bare link and keeps it open across a reload', async () => {
+    // The bare link is the one a reader gets from a mention, a CI comment or a
+    // copied tab, so it has to survive the reload they press out of habit.
+    await openAt('/board?issue=3');
+    expect(await screen.findByRole('heading', { name: 'Issue 3' })).toBeDefined();
+
+    const reloaded = await reload();
+    expect(await screen.findByRole('heading', { name: 'Issue 3' })).toBeDefined();
+    expect(search()).toBe('?issue=3');
+    expect(reloaded.querySelector('.workspace')?.className).toContain('has-selection');
+  });
+
+  it('still opens a closed issue from the `?issue=N&filter=closed` link form', async () => {
+    // The pre-existing 139 behaviour, kept green: adding `filter=closed` was the
+    // workaround that made this work, and the fix must not regress it.
+    await openAt('/board?issue=3&filter=closed');
+    expect(await screen.findByRole('heading', { name: 'Issue 3' })).toBeDefined();
+    expect(search()).toBe('?issue=3&filter=closed');
+    expect(drawnRows(document.body)).toContain(3);
+  });
+
+  it('clears a bare link to an issue the board does not hold, and lands on the list', async () => {
+    // The other half of 172: making existence a question about the whole issue
+    // set must not turn every unknown number into a permanently open selection.
+    // "Sane" here means the same thing the `?issue=404&filter=all` case already
+    // meant — no thread, no error page, and the dead selector rewritten out of the
+    // address so a refresh does not repeat it — now expressed at the bare URL, so
+    // the rewrite lands on the default filter rather than the one the link named.
+    await openAt('/board?issue=404');
+    expect(await screen.findByRole('complementary', { name: 'Shared issue list' })).toBeDefined();
+    await waitFor(() => expect(search()).toBe(''));
+    expect(screen.queryByRole('heading', { name: 'Issue 404' })).toBeNull();
+    expect(screen.getByText('Choose an issue to join the conversation.')).toBeDefined();
+    // A stale number does not select a neighbour, or the first row by accident.
+    expect(drawnRows(document.body)).toEqual([1, 2]);
   });
 
   it('links to an issue from the feed, with the issue route in the href', async () => {

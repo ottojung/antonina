@@ -155,6 +155,13 @@ function scratch(t, backend, extraEnv = {}) {
     XDG_STATE_HOME: stateHome,
     XDG_CONFIG_HOME: configHome,
     ANTONINA_OPENCODE_BIN: backend,
+    // The launcher-shaped reservation below names this very process as its
+    // owner, and the `self` verdict now requires the owner token minted for that
+    // reservation -- the launcher hands it over on every reservation the product
+    // writes, so this is what the product does, not a licence invented for the
+    // fixture. The cases that are about the token pass their own value in
+    // `extraEnv` or override `options.env` and so are unaffected.
+    ANTONINA_RUNNER_OWNER_TOKEN: LAUNCHER_TOKEN,
     ...extraEnv,
   };
   const saved = { ...process.env };
@@ -169,13 +176,24 @@ function scratch(t, backend, extraEnv = {}) {
   return { env };
 }
 
+// The token this file's launcher-shaped reservations are written with, and the
+// one the runner is given. Minted once, from the product's own mint, so the value
+// is real and correctly formed; nothing here invents a shape the runtime would
+// not produce.
+const LAUNCHER_TOKEN = mintRunnerReservationOwnerToken();
+
 function reservation(overrides = {}) {
   // `owner_start_ticks` is this process's own real start time, not `0`. The
   // default owner is this very process -- the launcher-shaped reservation -- and
-  // the claim is now decided on pid *and* start time, so a fixture that left
-  // the start time at zero was not exercising the shape it claimed to: three
-  // cases that are not about ownership were relying on the loose `self` verdict,
-  // which is exactly what hid the defect this head was reviewed for.
+  // the claim is now decided on pid *and* start time *and* the owner token, so a
+  // fixture that left the start time at zero was not exercising the shape it
+  // claimed to: three cases that are not about ownership were relying on the
+  // loose `self` verdict, which is exactly what hid the defect this head was
+  // reviewed for.
+  //
+  // The token is here for the same reason and the same direction: the product
+  // mints one on every reservation it writes, and a `self`-shaped claim is not
+  // establishable by the write alone. See the case named after board 197's R2.
   return {
     state: 'reserved',
     gen: 7,
@@ -183,11 +201,21 @@ function reservation(overrides = {}) {
     reserved_at: 1,
     owner_pid: process.pid,
     owner_start_ticks: procStartTicks(process.pid) ?? 0,
+    owner_token: LAUNCHER_TOKEN,
     ...overrides,
   };
 }
 
 let agentCounter = 0;
+
+// A reservation as it was before the launcher minted a token for it: the same
+// record with the optional field absent, not set to `undefined`, because the
+// metadata validator distinguishes the two.
+function withoutOwnerToken(record) {
+  const copy = { ...record };
+  delete copy.owner_token;
+  return copy;
+}
 
 function agent(t, options, overrides = {}) {
   // A unique id per call: several cases below need more than one record, and a
@@ -345,7 +373,10 @@ test('a reservation whose owner is gone needs the owner token minted for that re
   const unlaunched = agent(t, options, {
     state: 'running',
     runner_gen: 7,
-    runner_reservation: reservation({ gen: 7, ...deadOwner }),
+    // No token: the shared fixture carries one, because the launcher hands it
+    // over, and this sub-case is precisely the one where it was never handed
+    // over at all.
+    runner_reservation: withoutOwnerToken(reservation({ gen: 7, ...deadOwner })),
     pending_prompt: 'work',
   });
   await runManagedRunner(unlaunched.id, 'new', 7, options);
@@ -589,6 +620,109 @@ test('the launcher-shaped reservation is claimed against this process own start 
     backendRuns(marker).filter((line) => line.split(' ')[1] === cwd).length,
     1,
     'the real start time must still be accepted, or the case above proves nothing',
+  );
+  assert.equal(readMeta(id, options).state, 'succeeded');
+});
+
+test('a metadata write cannot establish its own ownership, on board 197 residual R2', async (t) => {
+  if (!requireProc(t)) return;
+  // Board 197's R2, reproduced on the head that carried the F1 repair: the
+  // reservation's `owner_pid` may name the claiming process, but a record that
+  // says so is not thereby true, and pid plus start time is not evidence that
+  // anybody wrote it. Measured before the repair against the shipped binary
+  // through the live `_runner` namespace: a process holding nothing but write
+  // access to `meta.json` wrote a reservation naming the claiming pid with that
+  // pid's own true `/proc` start time -- both public on this host -- and the
+  // claim published and the backend ran in the declared directory. No token, no
+  // secret, no second process to corroborate anything: the write asserted its
+  // own authority and the assertion was believed.
+  //
+  // The rule the repair applies is the one this function already documented for
+  // every other shape: kernel evidence where there is any, and the owner token
+  // where there is none. When the recorded owner *is* the claimant there is no
+  // second process for the kernel to corroborate the record against, so the
+  // token is the whole of the evidence -- exactly as on the reparented shape.
+  const marker = join(tmpdir(), `antonina-launch-gate-${process.pid}-r2-selfauth.marker`);
+  rmSync(marker, { force: true });
+  t.after(() => rmSync(marker, { force: true }));
+  const backend = fakeBackend(t, marker);
+  if (backend === null) return;
+  const options = scratch(t, backend);
+  const selfTicks = procStartTicks(process.pid);
+  // A second, independent genuine token: the case below needs a real value that
+  // is simply not this invocation's, and not a malformed one.
+  const foreign = mintRunnerReservationOwnerToken();
+
+  for (const [label, overrides, presented] of [
+    [
+      'no token at all: the write alone asserts the ownership',
+      { owner_token: undefined },
+      undefined,
+    ],
+    [
+      'a token in the record that the runner was never handed',
+      { owner_token: LAUNCHER_TOKEN },
+      undefined,
+    ],
+    [
+      'a token in the record the runner holds a different one of',
+      { owner_token: foreign },
+      LAUNCHER_TOKEN,
+    ],
+  ]) {
+    const built = reservation({ gen: 7, owner_pid: process.pid, owner_start_ticks: selfTicks, ...overrides });
+    const record = overrides.owner_token === undefined ? withoutOwnerToken(built) : built;
+    const { id, cwd } = agent(t, options, {
+      runner_gen: 7,
+      runner_reservation: record,
+      pending_prompt: 'work',
+    });
+    // The runner's environment is exactly what the launcher handed it: `scratch`
+    // seeds `LAUNCHER_TOKEN`, and a case that hands over nothing must hand over
+    // nothing rather than inherit it.
+    const env = { ...options.env };
+    if (presented === undefined) delete env.ANTONINA_RUNNER_OWNER_TOKEN;
+    else env.ANTONINA_RUNNER_OWNER_TOKEN = presented;
+
+    await runManagedRunner(id, 'new', 7, { ...options, env });
+
+    const after = readMeta(id, options);
+    // The state is read through a null check rather than a property access: a
+    // claim that *was* accepted clears the reservation, so the mutation this
+    // case exists to catch shows up as this assertion failing with a stated
+    // reason rather than as a `TypeError` on `null`.
+    assert.equal(
+      after.runner_reservation === null ? 'consumed' : after.runner_reservation.state,
+      'reserved',
+      `${label}: the reservation must stay unclaimed`,
+    );
+    assert.equal(after.runner_pid, null, `${label}: the claim must not publish this process as the runner`);
+    assert.equal(after.active_runner, false, `${label}: an unverified claim leaves no active runner`);
+    assert.equal(after.pending_prompt, 'work', `${label}: a refused claim keeps its accepted prompt`);
+    assert.equal(after.state, 'idle', `${label}: a refused claim writes nothing else`);
+    assert.equal(after.invocation_cwd, null, `${label}: nothing ran`);
+    assert.equal(after.cwd, cwd);
+    assert.deepEqual(
+      backendRuns(marker).filter((line) => line.split(' ')[1] === cwd),
+      [],
+      `${label}: a write that authorizes itself must not launch a backend`,
+    );
+  }
+
+  // The control, in the same run with the same fixture: the launcher hands the
+  // token over with the reservation, which is what the product does on every
+  // reservation it writes, and the claim is made. Without this a check that
+  // refused everything would pass the loop above.
+  const { id, cwd } = agent(t, options, {
+    runner_gen: 7,
+    runner_reservation: reservation({ gen: 7, owner_pid: process.pid, owner_start_ticks: selfTicks, owner_token: LAUNCHER_TOKEN }),
+    pending_prompt: 'work',
+  });
+  await runManagedRunner(id, 'new', 7, options);
+  assert.equal(
+    backendRuns(marker).filter((line) => line.split(' ')[1] === cwd).length,
+    1,
+    'the launcher holding its own token must still be able to claim its own reservation',
   );
   assert.equal(readMeta(id, options).state, 'succeeded');
 });

@@ -305,7 +305,7 @@ test('the probe path and the spawn path are given the same database', (t) => {
   assert.ok(command !== null, 'continue mode built no command');
   assert.deepEqual(command?.slice(1), [
     'run', '--auto', '--session', 'ses_b18608', '--model', 'opencode/space-bunny-free',
-    '--variant', 'low', '--thinking', '--dir', command[command.length - 2], 'work',
+    '--variant', 'high', '--thinking', '--dir', command[command.length - 2], 'work',
   ]);
 
   assert.equal(discoverSessionId('b18608', backendEnv), 'ses_b18608');

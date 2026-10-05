@@ -314,6 +314,16 @@ export function opencodeDbKeysInUse(
  * report, and the operator finds an unreadable record through `agent list`,
  * which names it (see `opencodeDbKeysInUse` for the full predicate and its
  * accepted costs).
+ *
+ * What the inventory read does NOT establish, and must not be described as
+ * establishing: no record names this key at the end of the unlink. The read and
+ * the `rmSync` below are two acts, no lock is held across them, and a record
+ * published inside that interval naming this key is not seen. POSIX offers no
+ * compare-and-unlink, so the interval is not closable with ordinary Node/POSIX;
+ * it is stated in docs/intent-records/agent.md ("Collecting a shared
+ * conversation database reads then unlinks, and the interval is stated") rather
+ * than traded for a longer unstated one, the same standard hosts.md applies to
+ * the stale-lock reclaim window.
  */
 export function removeOpencodeDatabase(key: string, options: StatePathsOptions = {}): void {
   if (persistedAgentId(key) !== key) return;
@@ -715,9 +725,16 @@ export function removeAgentDirectory(agentId: string, options: StatePathsOptions
   // This lives here rather than at each deletion call site so that `cmdDelete`,
   // the retention sweep and the rollback of a failed `new`/`fork` cannot each
   // decide differently. `removeOpencodeDatabase` re-reads every remaining
-  // record and declines when a fork clone still names the same key, and it is
-  // best effort: a leftover file is inert, and an operator's `delete` must not
-  // fail over it.
+  // record and declines when one of them names the same key at the instant of
+  // that read; it does not claim no record names it, because the unlink that
+  // follows the read is a separate act and a clone published between the two is
+  // not observed. That residual interval is a property of the primitives rather
+  // than of this code -- POSIX offers no compare-and-unlink and no lock is held
+  // across the read -- and it is stated rather than traded for a longer unstated
+  // one, in the same register as the stale-lock reclaim window in
+  // docs/intent-records/hosts.md and in the collection-window record in
+  // docs/intent-records/agent.md. Separately, this is best effort: a leftover
+  // file is inert, and an operator's `delete` must not fail over it.
   if (doomedKey !== null) {
     try {
       removeOpencodeDatabase(doomedKey, options);

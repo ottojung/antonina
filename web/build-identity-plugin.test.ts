@@ -543,4 +543,69 @@ export default {
       expect(survivors, `the build process group ${pgid} outlived the harness`).toEqual([]);
     }
   });
+
+  // The same escape path as the case above, with the timing taken out of it.
+  //
+  // There, the member that outlived the harness was one that had not finished
+  // dying when the leader's `'close'` arrived, so whether the old harness was
+  // caught depended on how fast the machine reaped it — a genuine defect behind
+  // an intermittent test. Here the member ignores `SIGTERM` outright, so the
+  // signal the deadline sends cannot end it and only the `SIGKILL` backstop can.
+  // The old harness called `clearTimers()` at the leader's `'close'`, which
+  // disarmed exactly that backstop, so this member was abandoned for good and
+  // survived with `PPid: 1`. There is no timing in this case at all: it either
+  // reaps or it does not, on every run and on every machine. That is what makes
+  // it the load-bearing check on `waitForGroupGone` rather than a second reading
+  // of the same race.
+  it('the deadline reaps a group member that ignores SIGTERM', { timeout: DEADLINE_GUARD_TEST_TIMEOUT_MS }, async () => {
+    const dir = sandbox();
+    // Identical to the case above except for the grandchild's `SIGTERM` handler.
+    writeFileSync(join(dir, 'vite.config.ts'), `import { spawn } from 'node:child_process';
+
+export default {
+  plugins: [{
+    name: 'hang',
+    buildStart() {
+      // \`process.on('SIGTERM', ...)\` with an empty handler: the default action
+      // is replaced, so only SIGKILL can end this process.
+      spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 60000)"], { stdio: 'ignore' });
+      setInterval(() => {}, 1000);
+      return new Promise(() => {});
+    },
+  }],
+};
+`);
+
+    const startedAt = process.hrtime.bigint();
+    const result = await build(dir, { timeoutMs: 3_000 });
+    const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+
+    expect(result.timedOut, 'a build that never resolves must be reported as timed out').toBe(true);
+    expect(result.signal, 'the build must be killed, not left running').not.toBeNull();
+
+    // Bounded, and now necessarily *longer* than the case above: the member can
+    // only be removed by the SIGKILL that `waitForGroupGone` sends
+    // GROUP_EXIT_GRACE_MS after the leader died, so settling before then would
+    // mean this await returned with the member still alive.
+    //
+    // Both edges are asserted rather than left as prose. The lower edge is the
+    // one that would otherwise be taken on trust: it is what makes "the wait did
+    // not resolve before it sent the SIGKILL" a checked claim instead of a
+    // comment. It is deterministic rather than timing-sensitive — the member
+    // ignores SIGTERM, so the group cannot empty before that signal goes out,
+    // and the wait is driven by that timer.
+    expect(elapsedMs).toBeGreaterThanOrEqual(3_000 + GROUP_EXIT_GRACE_MS);
+    expect(elapsedMs).toBeLessThan(3_000 + 5_000 + 10_000);
+
+    // The assertion that carries the whole case: if the `SIGKILL` backstop were
+    // disarmed again, or `waitForGroupGone` resolved before sending it, this
+    // member is still here, reparented to init, and this fails.
+    const pgid = result.pid as number;
+    const survivors = processGroupMembers(pgid);
+    if (survivors === 'unavailable') {
+      console.warn(`could not enumerate process group ${pgid}; reaping checked for the leader only`);
+    } else {
+      expect(survivors, `the build process group ${pgid} outlived the harness`).toEqual([]);
+    }
+  });
 });

@@ -176,55 +176,159 @@ export function opencodeBackendEnv(
 }
 
 /**
- * Keys of the dedicated databases still named by some agent record other than
- * `exceptAgentId`.
+ * The answer to "is this OpenCode database key still named by some OTHER agent
+ * record?", together with whether that answer could be established at all.
+ *
+ * `complete` is the part that matters. A key set that could not be read is not
+ * evidence of absence; it is the absence of evidence, and this path uses it to
+ * decide whether to unlink a conversation.
+ */
+export interface OpencodeDbInventory {
+  /** Keys named by a record that was actually read. */
+  keys: Set<string>;
+  /**
+   * Whether every agent record that could name a key was actually read.
+   *
+   * `false` when the agents state root could not be enumerated for any reason
+   * other than its absence, or when any record in it could not be read. When it
+   * is `false`, `keys` is a lower bound: the true set is a superset of it.
+   */
+  complete: boolean;
+}
+
+/**
+ * Board 198 R3. The keys of dedicated databases still named by an agent record
+ * other than `exceptAgentId`, and whether that inventory was successfully read.
  *
  * Used to decide whether deleting one record may delete a database file. A fork
- * pair shares one database on purpose, and deleting the source must not take the
- * conversation out from under the clone that is still continuing it.
+ * pair shares one database on purpose (see `opencodeDbDir`), and deleting the
+ * source must not take the conversation out from under the clone that is still
+ * continuing it. This is therefore a *destructive* query: the answer licenses an
+ * unlink, so the only safe answer to "I could not read" is "keep the file".
  *
- * A record that cannot be read is not treated as a reference: it is counted as
- * absent, which is the same answer a `readdir` of a half-created directory gives,
- * and the conservative direction here would be to keep the file. Unreadable records
- * are reported by `agent list`, which is where an operator sees them.
+ * THE PREDICATE, stated once:
+ *
+ *   a key is in use iff some record other than `exceptAgentId`, whose directory
+ *   was enumerated and whose `meta.json` was read without error, names it -- and
+ *   the inventory is complete iff the root was either absent or enumerated in
+ *   full and every well-formed agent record under it was read without error.
+ *
+ * `removeOpencodeDatabase` unlinks only when `complete` is true *and* the key is
+ * absent from `keys`. Each half is load-bearing:
+ *
+ *   - The root could not be enumerated (`EACCES`, `ENOTDIR`, `EIO`, ...): not
+ *     complete. The key might be named by a record nobody managed to list.
+ *   - A record's `meta.json` could not be read, is missing, or does not
+ *     validate: not complete. It might name this key. Note this is the whole
+ *     point -- `readMeta` refuses a record it cannot fully validate rather than
+ *     guessing, and this function must not turn that refusal into permission to
+ *     delete. The a518fb86 per-record isolation is *reporting* isolation for the
+ *     inventory commands; here the same record has to be a reason to stop, not a
+ *     reason to proceed.
+ *   - The root is absent (`ENOENT`): complete, and empty. Absence is the one
+ *     shape in which no record exists that could name the key, so it is the one
+ *     unreadable-looking state that still permits deletion. It is deliberately
+ *     NOT collapsed with the denied case above: "this machine has no agents
+ *     directory" and "this machine will not let me read its agents directory"
+ *     are different facts and the previous code answered both as "keep nothing".
+ *   - A readable record that names a different key, or names none at all: it
+ *     does not block deletion, and it does not spoil completeness.
+ *   - A directory whose name is not a well-formed agent id: skipped, and
+ *     completeness is unaffected. Such a directory cannot be a record -- ids are
+ *     canonical hex by `persistedAgentId`, and `writeMeta` cannot have produced
+ *     anything else -- so it cannot name a key, and treating it as an
+ *     unreadable record would make a stray `agents/scratch/` keep every database
+ *     on the machine forever.
+ *
+ * THE ACCEPTED COST, honestly: a machine whose agents root has been removed out
+ * of band (or that has never had one) is reported as an empty inventory, so a
+ * database file left behind by that removal is still deleted on the next
+ * `delete`. That is the residual of permitting deletion without a successful
+ * enumeration, and it is the cost that makes a never-used installation work at
+ * all. Everything that is present-but-unreadable -- which is the case that
+ * actually loses a conversation -- keeps the file. The other cost is a
+ * permanently stuck database: one unreadable sibling record anywhere in the root
+ * keeps *every* database alive, with no command that clears it, because the
+ * fix for that is an operator repairing their own state, not Antonina
+ * deleting on a weaker question.
+ *
+ * Read through the real filesystem, like `logSize` and the other opencode-db
+ * helpers: this enumerates the operator's durable state root, and the injected
+ * `StoreFs` seam covers only the per-record read/write path.
  */
 export function opencodeDbKeysInUse(
   exceptAgentId: string,
   options: StatePathsOptions = {},
-): Set<string> {
+): OpencodeDbInventory {
   const keys = new Set<string>();
   let entries: string[];
   try {
     entries = nodeFs.readdirSync(agentsDir(options), { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name);
-  } catch {
-    return keys;
+  } catch (error) {
+    // Absent means empty -- nothing exists that could name a key. Any other
+    // refusal means the enumeration itself failed, and the key set below would
+    // be a guess. ENOENT is the only code that licenses an empty answer.
+    return { keys, complete: hasCode(error, 'ENOENT') };
   }
+  let complete = true;
   for (const agentId of entries) {
     if (agentId === exceptAgentId || persistedAgentId(agentId) !== agentId) continue;
     let meta: AgentMetadata | null;
     try {
       meta = readMeta(agentId, options);
     } catch {
+      // This record might name the key. Refusing to know must not read as
+      // permission to delete; it only stops the inventory from being complete.
+      complete = false;
       continue;
     }
-    if (meta === null) continue;
+    if (meta === null) {
+      // The directory vanished between the enumeration and the read. There is
+      // no record left to name the key, but the run did not observe that.
+      complete = false;
+      continue;
+    }
     const key = persistedOpencodeDbKey(meta);
     if (key !== null) keys.add(key);
   }
-  return keys;
+  return { keys, complete };
 }
 
 /**
- * Removes a dedicated OpenCode database and its WAL/SHM siblings, but only when no
- * other agent record still names that key. Best effort by construction: an operator's
- * `delete` must not fail because a backend's database file is unremovable, and a
- * leftover file is inert garbage, not a correctness problem.
+ * Removes a dedicated OpenCode database and its WAL/SHM siblings, but only when
+ * the inventory of records naming that key was read successfully AND it does not
+ * name the key. Best effort by construction: an operator's `delete` must not
+ * fail because a backend's database file is unremovable, and a leftover file is
+ * inert garbage, not a correctness problem.
+ *
+ * Board 198 R3: "the inventory could not be read" and "the inventory was read and
+ * does not name this key" are now different answers, and only the second one
+ * unlinks. The previous `opencodeDbKeysInUse('').has(key)` guard was false
+ * whenever the agents root could not be enumerated or a sibling record could not
+ * be read -- an unreadable inventory reading as an empty one -- so a fork pair's
+ * shared conversation was destroyed by a `delete` that was told nothing about
+ * the clone still continuing it. A refused inventory now leaves the file in
+ * place, silently, exactly as an in-use key already did: the leftover is the
+ * report, and the operator finds an unreadable record through `agent list`,
+ * which names it (see `opencodeDbKeysInUse` for the full predicate and its
+ * accepted costs).
+ *
+ * What the inventory read does NOT establish, and must not be described as
+ * establishing: no record names this key at the end of the unlink. The read and
+ * the `rmSync` below are two acts, no lock is held across them, and a record
+ * published inside that interval naming this key is not seen. POSIX offers no
+ * compare-and-unlink, so the interval is not closable with ordinary Node/POSIX;
+ * it is stated in docs/intent-records/agent.md ("Collecting a shared
+ * conversation database reads then unlinks, and the interval is stated") rather
+ * than traded for a longer unstated one, the same standard hosts.md applies to
+ * the stale-lock reclaim window.
  */
 export function removeOpencodeDatabase(key: string, options: StatePathsOptions = {}): void {
   if (persistedAgentId(key) !== key) return;
-  if (opencodeDbKeysInUse('', options).has(key)) return;
+  const inventory = opencodeDbKeysInUse('', options);
+  if (!inventory.complete || inventory.keys.has(key)) return;
   const path = opencodeDbPath(key, options);
   for (const suffix of ['', '-wal', '-shm']) {
     try {
@@ -621,9 +725,16 @@ export function removeAgentDirectory(agentId: string, options: StatePathsOptions
   // This lives here rather than at each deletion call site so that `cmdDelete`,
   // the retention sweep and the rollback of a failed `new`/`fork` cannot each
   // decide differently. `removeOpencodeDatabase` re-reads every remaining
-  // record and declines when a fork clone still names the same key, and it is
-  // best effort: a leftover file is inert, and an operator's `delete` must not
-  // fail over it.
+  // record and declines when one of them names the same key at the instant of
+  // that read; it does not claim no record names it, because the unlink that
+  // follows the read is a separate act and a clone published between the two is
+  // not observed. That residual interval is a property of the primitives rather
+  // than of this code -- POSIX offers no compare-and-unlink and no lock is held
+  // across the read -- and it is stated rather than traded for a longer unstated
+  // one, in the same register as the stale-lock reclaim window in
+  // docs/intent-records/hosts.md and in the collection-window record in
+  // docs/intent-records/agent.md. Separately, this is best effort: a leftover
+  // file is inert, and an operator's `delete` must not fail over it.
   if (doomedKey !== null) {
     try {
       removeOpencodeDatabase(doomedKey, options);

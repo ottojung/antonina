@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import {
+  type Dirent,
   existsSync,
   readdirSync,
   readFileSync,
@@ -162,6 +163,13 @@ function requireAgentId(raw: string | undefined, command: string): string {
 
 class UsageError extends Error {}
 class NotFoundError extends Error {}
+/**
+ * The state root the inventory is read from could not be read at all. A
+ * distinct class so the refusal is identifiable as the root-sweep refusal and
+ * not mistaken for a per-record one; it exits `EXIT_ERROR` like every other
+ * validator refusal, with the OS reason in its message.
+ */
+class InventoryUnreadableError extends Error {}
 
 function requireMeta(agentId: string, context: AgentCommandContext): AgentMetadata {
   const meta = readMeta(agentId, paths(context));
@@ -191,15 +199,81 @@ async function reconcileMeta(
   return updateMeta(agentId, (meta) => { reconcileDeadMeta(meta); }, paths(context));
 }
 
-function agentIds(context: AgentCommandContext): string[] {
+/**
+ * Board 198 R2: the *sweep itself* must fail closed, one level above the
+ * per-record isolation a518fb86 landed.
+ *
+ * That landing made one malformed `meta.json` not abort the sweep, and kept
+ * naming the record it could not read. It left the root of the sweep behind a
+ * bare `catch { return []; }`: an agents state root that could not be read --
+ * absent, wrong type, a `readdir` that raises -- became an inventory of zero
+ * agents, printed as `(no agents)` or `{"agents":[]}`, exit 0, nothing on
+ * stderr. An orchestrator polling `list` was told, confidently and
+ * successfully, that this machine has no managed agents. Per-record isolation
+ * makes the sweep robust; it cannot make a sweep that never ran report an
+ * answer.
+ *
+ * So the refusal is not absorbed here at all: it is thrown, named after the
+ * path and the OS reason, and it propagates out of both callers.
+ *
+ *   - `list` exits 1 (`EXIT_ERROR`, the same code every validator refusal
+ *     already uses) and writes no inventory to stdout at all, in either the
+ *     human table or `--json`. A machine reader sees a failed command, not an
+ *     empty array it would have to guess about.
+ *   - `clean` exits 1 having deleted nothing, because the enumeration is the
+ *     first thing the sweep does. Deleting on the strength of a read that
+ *     failed is the one direction in which this bug could lose data; refusing
+ *     to sweep at all costs the operator a retry, which costs nothing.
+ *
+ * The refusal is deliberately identical in shape to the single-agent one: a
+ * command asked a question whose honest answer is "it cannot be answered", and
+ * the answer carries the reason. Nothing else about validation changes --
+ * `validateAgentMetadata` is untouched, no state is interpreted from an
+ * unreadable root, no schema field is added to any tolerated set, and the
+ * single-agent commands (`status`, `log`, `wait`, `stop`, `kill`, `delete`,
+ * `run`) keep failing closed on their own validator's reason through
+ * `requireMeta`/`reconcileAgent` exactly as a518fb86 left them.
+ *
+ * Absence is included on purpose. A machine on which no managed agent has ever
+ * been created has no agents directory, and `agent list` there now exits 1
+ * with a named reason instead of printing `(no agents)`. That is the cost of
+ * this choice, and it is the safe one: it is the only shape in which the
+ * command never reports an inventory it did not read.
+ *
+ * Read through the real filesystem, like `logSize` and the opencode-db
+ * helpers in `agent-runtime`: this is an enumeration of the operator's durable
+ * state root, not a rewrite of one record, and the injected `StoreFs` seam
+ * covers only the per-record read/write path.
+ */
+function agentIds(context: AgentCommandContext, command: string): string[] {
+  const root = agentsDir(paths(context));
+  let entries: Dirent[];
   try {
-    return readdirSync(agentsDir(paths(context)), { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-      .sort();
-  } catch {
-    return [];
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch (error) {
+    throw new InventoryUnreadableError(
+      `${command}: refused to read the managed-agent state root ${root}, so no inventory is reported: ${errnoReason(error)}`,
+    );
   }
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+}
+
+/**
+ * The OS-level reason a `readdir` of the state root was refused, kept as the
+ * errno code when there is one so the refusal names `EACCES`, `ENOTDIR` or
+ * `ENOENT` rather than a wrapper's prose. Falls back to the error's own text
+ * when a failure carries no code.
+ */
+function errnoReason(error: unknown): string {
+  if (error instanceof Error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (typeof code === 'string' && code.length > 0) return code;
+    return error.message;
+  }
+  return String(error);
 }
 
 type SweepRead =
@@ -493,7 +567,10 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
   const page = positiveInteger(parsed.values.get('--page'), '--page');
   const entries: Array<{ agentId: string; meta: AgentMetadata; state: string; summary: ReturnType<typeof summary> }> = [];
   const unreadable: Array<{ agentId: string; reason: string }> = [];
-  for (const agentId of agentIds(context)) {
+  // Board 198 R2: the sweep root is read before anything is printed. If it
+  // cannot be read this throws, so neither the human table nor `--json` can
+  // present an inventory this command never read.
+  for (const agentId of agentIds(context, 'list')) {
     const read = readMetaForSweep(agentId, context);
     if (!read.readable) {
       // Board 198: recorded and named, not thrown. The rest of the inventory
@@ -1424,8 +1501,14 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
   // sweep therefore fails closed in the only direction that can lose data, and
   // the operator is told which record was withheld instead of watching the
   // command abort before it names anything.
+  // Board 198 R2: an unreadable state root is a refusal to sweep, and this
+  // enumeration is deliberately the first statement of the sweep so that the
+  // refusal arrives before anything at all has been deleted. `clean` must
+  // never remove a record on the strength of a read that failed: the set it
+  // would act on is exactly the set it could not establish, and "no records
+  // were eligible" is not something this run observed.
   const unreadable: Array<{ agentId: string; reason: string }> = [];
-  const candidates = agentIds(context).filter((agentId) => {
+  const candidates = agentIds(context, 'clean').filter((agentId) => {
     const read = readMetaForSweep(agentId, context);
     if (!read.readable) {
       unreadable.push({ agentId: read.agentId, reason: read.reason });

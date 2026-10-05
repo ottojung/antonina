@@ -41,8 +41,26 @@ const SOURCES = [
 
 const sandboxes: string[] = [];
 
+// Every process group `build` has started, so that a *failing* assertion cannot
+// leave an orphan behind. `build` converges its own group before it settles, but
+// once it has settled it has returned control to the runner, and a test that
+// leaks on its own failure path breaks the same AGENTS.md rule as one that leaks
+// on its success path — and does so exactly when the suite is already in trouble.
+// This is a backstop, not the mechanism: it is only reached when a group outlived
+// the harness, so the pgid is still that group's own and cannot have been recycled
+// onto an unrelated process while the group exists.
+const spawnedGroups = new Set<number>();
+
 afterEach(() => {
   for (const dir of sandboxes.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const pgid of spawnedGroups) {
+    const members = processGroupMembers(pgid);
+    if (members === 'unavailable') continue;
+    for (const pid of members) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+  }
+  spawnedGroups.clear();
 });
 
 // The sandbox is laid out as a repository root rather than as a bare app
@@ -215,6 +233,7 @@ function build(
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    if (child.pid !== undefined) spawnedGroups.add(child.pid);
 
     let stdout = '';
     let stderr = '';

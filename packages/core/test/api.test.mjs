@@ -463,7 +463,7 @@ test('new issue bodies and comments are limited to 10000 Unicode characters', as
 
   const bodyAtLimit = '🙂'.repeat(10000);
   const created = await client.createIssue('At the limit', bodyAtLimit);
-  assert.equal(Array.from(created.body).length, 1000);
+  assert.equal(Array.from(created.body).length, 10000);
 
   const beforeRejectedIssue = server.signed.revision;
   await assert.rejects(
@@ -472,9 +472,9 @@ test('new issue bodies and comments are limited to 10000 Unicode characters', as
   );
   assert.equal(server.signed.revision, beforeRejectedIssue, 'a rejected issue body must not mutate storage');
 
-  const commentAtLimit = 'λ'.repeat(1000);
+  const commentAtLimit = 'λ'.repeat(10000);
   const commented = await client.comment(created.number, 'root', commentAtLimit);
-  assert.equal(Array.from(commented.messages.at(-1).body).length, 1000);
+  assert.equal(Array.from(commented.messages.at(-1).body).length, 10000);
 
   const beforeRejectedComment = server.signed.revision;
   await assert.rejects(

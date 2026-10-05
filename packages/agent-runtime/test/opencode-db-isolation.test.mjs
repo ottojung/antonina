@@ -60,7 +60,7 @@ import {
 } from '../dist/packages/agent-runtime/src/backend.js';
 import { forkMetaSnapshot } from '../dist/packages/agent-runtime/src/fork.js';
 import { beginInvocation } from '../dist/packages/agent-runtime/src/lifecycle.js';
-import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
+import { idleMeta, mintRunnerReservationOwnerToken } from '../dist/packages/agent-runtime/src/metadata.js';
 import {
   envHasAgentMarker,
   envHasInvocationMarker,
@@ -111,9 +111,23 @@ function execProbe(parent, name) {
 // write the operator's real trust.json or credential.json (AGENTS.md, Test
 // safety). The databases this front names land under that same throwaway state
 // root, never in the operator's real `~/.local/share/opencode`.
+// The launcher-shaped reservations below name this process as their owner, and
+// the `self` verdict now requires the owner token minted for the reservation as
+// well as pid plus start time: a record cannot establish its own ownership. The
+// product mints a token on every reservation it writes and hands it to the
+// runner, so these fixtures carry and present one -- which is what the product
+// does, not a licence invented for the test.
+const LAUNCHER_TOKEN = mintRunnerReservationOwnerToken();
+
 function scratch(t) {
   const root = mkdtempSync(join(tmpdir(), 'antonina-b186-'));
-  const env = { XDG_STATE_HOME: join(root, 'state'), XDG_CONFIG_HOME: join(root, 'config') };
+  const env = {
+    XDG_STATE_HOME: join(root, 'state'),
+    XDG_CONFIG_HOME: join(root, 'config'),
+    // The launcher hands the runner the token it minted for the reservation it
+    // just wrote, which is what `runnerAgent` below writes into the record.
+    ANTONINA_RUNNER_OWNER_TOKEN: LAUNCHER_TOKEN,
+  };
   mkdirSync(env.XDG_STATE_HOME, { recursive: true });
   mkdirSync(env.XDG_CONFIG_HOME, { recursive: true });
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -416,6 +430,10 @@ function runnerScratch(t, bin) {
     XDG_STATE_HOME: join(root, 'state'),
     XDG_CONFIG_HOME: join(root, 'config'),
     [OPENCODE_BIN_ENV]: bin,
+    // The launcher hands the runner the token it minted for the reservation
+    // `runnerAgent` below writes, which is what the product does on every
+    // reservation it writes.
+    ANTONINA_RUNNER_OWNER_TOKEN: LAUNCHER_TOKEN,
   };
   mkdirSync(env.XDG_STATE_HOME, { recursive: true });
   mkdirSync(env.XDG_CONFIG_HOME, { recursive: true });
@@ -455,6 +473,9 @@ function runnerAgent(t, env, id, mode, overrides = {}) {
     // itself, so it names its own real start time. Zero is not a start
     // time and would be refused by the `self` verdict.
     owner_start_ticks: procStartTicks(process.pid),
+    // ...and the token the launcher minted for it, which the `self` verdict now
+    // requires as well: see runner-launch-gate.test.mjs.
+    owner_token: LAUNCHER_TOKEN,
   };
   for (const [key, value] of Object.entries(overrides)) meta[key] = value;
   writeMeta(id, meta, { env });

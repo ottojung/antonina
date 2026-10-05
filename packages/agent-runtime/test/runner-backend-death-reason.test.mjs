@@ -42,7 +42,7 @@ import test from 'node:test';
 
 import * as backendModule from '../dist/packages/agent-runtime/src/backend.js';
 import { reconcileDeadMeta } from '../dist/packages/agent-runtime/src/lifecycle.js';
-import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
+import { idleMeta, mintRunnerReservationOwnerToken } from '../dist/packages/agent-runtime/src/metadata.js';
 import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import { runManagedRunner } from '../dist/packages/agent-runtime/src/runner.js';
 import { createAgentDirectory, readMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
@@ -117,13 +117,21 @@ function requireProc(t) {
   return true;
 }
 
+// The launcher-shaped reservations below name this process as their owner, and
+// the `self` verdict now requires the owner token minted for the reservation as
+// well as pid plus start time: a record cannot establish its own ownership. The
+// product mints a token on every reservation it writes and hands it to the
+// runner, so these fixtures carry and present one -- which is what the product
+// does, not a licence invented for the test.
+const LAUNCHER_TOKEN = mintRunnerReservationOwnerToken();
+
 function scratch(t, backend) {
   const root = mkdtempSync(join(tmpdir(), 'antonina-b159-'));
   const stateHome = join(root, 'state');
   const configHome = join(root, 'config');
   mkdirSync(stateHome);
   mkdirSync(configHome);
-  const env = { XDG_STATE_HOME: stateHome, XDG_CONFIG_HOME: configHome, ANTONINA_OPENCODE_BIN: backend };
+  const env = { XDG_STATE_HOME: stateHome, XDG_CONFIG_HOME: configHome, ANTONINA_OPENCODE_BIN: backend, ANTONINA_RUNNER_OWNER_TOKEN: LAUNCHER_TOKEN };
   const saved = { ...process.env };
   Object.assign(process.env, env);
   t.after(() => {
@@ -153,6 +161,9 @@ function agent(t, options, overrides = {}) {
     // itself, so it names its own real start time. Zero is not a start
     // time and would be refused by the `self` verdict.
     owner_start_ticks: procStartTicks(process.pid),
+    // ...and the token the launcher minted for it, which the `self` verdict now
+    // requires as well: see runner-launch-gate.test.mjs.
+    owner_token: LAUNCHER_TOKEN,
   };
   meta.pending_prompt = 'work';
   for (const [key, value] of Object.entries(overrides)) meta[key] = value;

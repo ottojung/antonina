@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 
-import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
+import { idleMeta, mintRunnerReservationOwnerToken } from '../dist/packages/agent-runtime/src/metadata.js';
 import { envHasAgentMarker, envHasInvocationMarker, procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import { runManagedRunner } from '../dist/packages/agent-runtime/src/runner.js';
 import { createAgentDirectory, readMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
@@ -114,6 +114,7 @@ function scratch(t, backendBin) {
     XDG_STATE_HOME: stateHome,
     XDG_CONFIG_HOME: configHome,
     ANTONINA_OPENCODE_BIN: backendBin,
+    ANTONINA_RUNNER_OWNER_TOKEN: LAUNCHER_TOKEN,
   };
   const saved = { ...process.env };
   Object.assign(process.env, env);
@@ -131,6 +132,14 @@ function scratch(t, backendBin) {
   return { env };
 }
 
+// The launcher-shaped reservations below name this process as their owner, and
+// the `self` verdict now requires the owner token minted for the reservation as
+// well as pid plus start time: a record cannot establish its own ownership. The
+// product mints a token on every reservation it writes and hands it to the
+// runner, so these fixtures carry and present one -- which is what the product
+// does, not a licence invented for the test.
+const LAUNCHER_TOKEN = mintRunnerReservationOwnerToken();
+
 function reservation(overrides = {}) {
   return {
     state: 'reserved',
@@ -139,6 +148,7 @@ function reservation(overrides = {}) {
     reserved_at: 1,
     owner_pid: process.pid,
     owner_start_ticks: procStartTicks(process.pid),
+    owner_token: LAUNCHER_TOKEN,
     ...overrides,
   };
 }

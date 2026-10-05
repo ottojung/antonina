@@ -439,10 +439,12 @@ printf '%s\\n' '${JSON.stringify(rows)}'
   assert.deepEqual(recordedInvocations(escapes), [], 'a non-fixture opencode was executed via PATH');
 });
 
-test('continuation command uses persisted session and configured variant', () => {
+test('continuation command uses persisted session and the current Antonina variant', () => {
   const meta = idleMeta('a11d', '/tmp', null, 1);
   meta.native_session_id = 'ses_123';
-  meta.variant = 'high';
+  // Legacy records may still carry the old setting. They remain valid durable
+  // state, but must not downgrade a newly launched invocation.
+  meta.variant = 'low';
   assert.deepEqual(buildAgentCommand(meta, 'continue work', true, {}), [
     'opencode', 'run', '--auto',
     '--session', 'ses_123',

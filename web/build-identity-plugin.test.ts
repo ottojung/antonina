@@ -131,6 +131,15 @@ const BUILD_TIMEOUT_MS = 90_000;
 // SIGKILL is the backstop that makes reaping unconditional.
 const KILL_GRACE_MS = 5_000;
 
+// How long the group is given to converge after the *leader* has been reaped,
+// and how long after the SIGKILL has been sent to the group. See `build`.
+const GROUP_EXIT_GRACE_MS = KILL_GRACE_MS;
+const GROUP_EXIT_BOUND_MS = 2 * KILL_GRACE_MS;
+
+// How often the group is re-read while converging. Ten milliseconds of polling is
+// invisible against the seconds-scale budgets above and costs a `/proc` read.
+const GROUP_EXIT_POLL_MS = 10;
+
 // This suite's vitest budget, declared here rather than raised globally.
 //
 // Why this suite and not `vite.config.ts`: the tests below are the only ones in
@@ -192,7 +201,8 @@ interface BuildResult {
  * would orphan the bundler. Both the deadline and the caller's own `AbortSignal`
  * converge through the same path, and this function does not settle until the
  * child has actually been reaped — `spawnSync` gave no such promise, and AGENTS.md
- * requires every spawned process to be converged and reaped.
+ * requires every spawned process to be converged and reaped. Reaped means the
+ * whole group, so settling waits on `waitForGroupGone` and not on the leader.
  */
 function build(
   dir: string,
@@ -216,8 +226,9 @@ function build(
     // `detached` makes the child a process-group leader, so its pid is its pgid
     // and the negative form reaches vite *and* the esbuild service it started.
     // Signalling the leader alone is what leaves an esbuild behind.
-    const signalGroup = (sig: NodeJS.Signals) => {
-      if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+    const signalGroup = (sig: NodeJS.Signals, { force = false }: { force?: boolean } = {}) => {
+      if (child.pid === undefined) return;
+      if (!force && (child.exitCode !== null || child.signalCode !== null)) return;
       try {
         process.kill(-child.pid, sig);
       } catch {
@@ -256,9 +267,8 @@ function build(
     child.stderr.on('data', (chunk: string) => { stderr += chunk; });
 
     // 'close', not 'exit': it fires after the child's stdio pipes are drained, so
-    // the output collected above is complete. Resolving here is also the only
-    // place this function can settle, which is what makes the reaping guarantee
-    // unconditional rather than a convention.
+    // the output collected above is complete. It is also the point at which the
+    // group is converged before this function settles — see `waitForGroupGone`.
     child.on('error', (err) => {
       if (settled) return;
       settled = true;
@@ -269,12 +279,89 @@ function build(
       if (settled) return;
       settled = true;
       clearTimers();
-      if (aborted) {
-        rejectPromise(new Error('vite build was aborted by the caller'));
+      const deliver = () => {
+        if (aborted) {
+          rejectPromise(new Error('vite build was aborted by the caller'));
+          return;
+        }
+        resolvePromise({ status, signal: sig, stdout, stderr, timedOut, pid: child.pid });
+      };
+      const pgid = child.pid;
+      if (pgid === undefined) {
+        deliver();
         return;
       }
-      resolvePromise({ status, signal: sig, stdout, stderr, timedOut, pid: child.pid });
+      waitForGroupGone(pgid, signalGroup).then(deliver, deliver);
     });
+  });
+}
+
+/**
+ * Resolves once nothing is left in `pgid`, or once the bound expires.
+ *
+ * The leader's exit is not the group's exit, and this is where that difference
+ * was decided wrongly. The promise used to settle on the leader's `'close'`, and
+ * `clearTimers()` there cancelled the `SIGKILL` backstop — so any process in the
+ * group that had not finished dying at that instant was disarmed and abandoned:
+ * no further signal was ever sent to it, and it stayed in the process table. That
+ * is two separate races, both of which the guard test observes as live pids:
+ *
+ *  - *Teardown in flight.* `kill(-pgid)` is delivered to every member at once, but
+ *    a member's death is not synchronous with the delivery. The leader is `wait`ed
+ *    for by this process and reported through `'close'` as soon as it dies, while a
+ *    sibling in the group may still be a step behind in its own exit path (a Node
+ *    process handles `SIGTERM` on its event loop, and under a loaded runner that
+ *    step is not free).
+ *  - *Reaping lag.* A member that has exited is still an entry in `/proc/<pid>`
+ *    with the same `pgrp` until its parent — the leader, which just died — has
+ *    been reaped and `init` reaps the orphan. Sampling the group table the instant
+ *    `'close'` arrives counts that entry, and `kill(pid, 0)` on a zombie succeeds,
+ *    so "alive" and "not yet reaped" are indistinguishable from the outside.
+ *
+ * So the group is polled until it is empty, and the `SIGKILL` backstop stays
+ * armed across the wait instead of being cancelled at the leader's exit: it goes
+ * out `GROUP_EXIT_GRACE_MS` after the leader died — long enough for an orderly
+ * teardown and for `init` to reap, and after any member that mishandles `SIGTERM`
+ * has had the same grace the leader got. `force: true` is required because
+ * `signalGroup`'s guard exists to avoid signalling a group whose leader has
+ * already exited, which is precisely the case being handled here.
+ *
+ * The bound is what keeps this honest rather than open-ended: if something in the
+ * group is unkillable (uninterruptible sleep) the wait returns anyway, and the
+ * caller still sees it — `result.pid` is unchanged, and the guard test enumerates
+ * the group itself, so an abandoned member fails there rather than being absorbed
+ * here.
+ *
+ * Recycling the pgid is not a way for the wait to act on a stranger's process.
+ * The `SIGKILL` below is only ever sent when `members.length > 0` — the loop
+ * returns first on an empty group — and a non-empty result means some process
+ * currently carries that `pgrp`, so the number is allocated and cannot be handed
+ * out twice at once. (The leader itself is reaped just before `'close'`, so the
+ * pgid is technically free at that point; what makes the `SIGKILL` safe is the
+ * membership check, not the leader's reap.)
+ */
+function waitForGroupGone(
+  pgid: number,
+  signalGroup: (sig: NodeJS.Signals, options?: { force?: boolean }) => void,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const startedAt = Date.now();
+    let killed = false;
+    const poll = () => {
+      const members = processGroupMembers(pgid);
+      // `unavailable` means there is no process table to read, which is the same
+      // situation as before this wait existed: the leader's reap is all there is.
+      if (members === 'unavailable' || members.length === 0 || Date.now() - startedAt >= GROUP_EXIT_BOUND_MS) {
+        resolve();
+        return;
+      }
+      if (!killed && Date.now() - startedAt >= GROUP_EXIT_GRACE_MS) {
+        killed = true;
+        signalGroup('SIGKILL', { force: true });
+      }
+      setTimeout(poll, GROUP_EXIT_POLL_MS);
+    };
+    poll();
   });
 }
 
@@ -441,6 +528,13 @@ export default {
     // `/proc` is the only portable-enough way to ask who is in it; where it is not
     // present this check reports that it could not enumerate, and the leader
     // assertion above remains the floor.
+    //
+    // This enumeration is deliberately the test's own and not something `build`
+    // reports back, so it stays a check on the state of the machine rather than
+    // on the harness's account of it. `build` now waits for the group to empty
+    // before it settles (see `waitForGroupGone`), and this assertion is what
+    // holds that wait to its claim: if it gave up at its bound with a member
+    // still there, or if it were removed, this fails.
     const pgid = result.pid as number;
     const survivors = processGroupMembers(pgid);
     if (survivors === 'unavailable') {

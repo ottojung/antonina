@@ -31,6 +31,7 @@ import {
   stopLikeOrMalformed,
 } from './lifecycle.js';
 import {
+  DEFAULT_VARIANT,
   RUNNER_OWNER_TOKEN_ENV,
   activeRunnerFlag,
   deletePendingFlag,
@@ -403,6 +404,10 @@ async function recordSpawned(
   let accepted = false;
   await updateMeta(agentId, (meta) => {
     if (deletePendingFlag(meta) !== false || stopLikeOrMalformed(meta)) return;
+    // The command builder always launches the current Antonina variant. Once
+    // the child exists, make durable status name the variant that actually ran;
+    // this also upgrades legacy records that still carried `low`.
+    meta.variant = DEFAULT_VARIANT;
     // Board issue 178: the observation is written here, in the same durable
     // write that publishes the spawned process identity, and nowhere earlier.
     // Everything that can precede a spawn -- accepting the prompt, queueing a

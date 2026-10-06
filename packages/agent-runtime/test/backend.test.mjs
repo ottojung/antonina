@@ -257,7 +257,7 @@ exit 70
   writeFileSync(bin, `#!/bin/sh
 printf '%s %s\\n' "$0" "$*" >>'${calls}'
 if [ "$1" = models ]; then
-  printf "%s\\n" other/model opencode/long-cat-free
+  printf "%s\\n" other/model opencode/longcat-2.0-free
   exit 0
 fi
 exit 2

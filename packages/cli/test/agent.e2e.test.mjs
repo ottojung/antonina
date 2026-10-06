@@ -114,7 +114,7 @@ exit 70
 printf '%s %s\\n' "$0" "$*" >>'${invocations}'
 case "$1" in
   models)
-    echo "opencode/long-cat-free"
+    echo "opencode/longcat-2.0-free"
     exit 0
     ;;
   session)
@@ -185,7 +185,7 @@ esac
     0,
     `fake opencode fixture ${opencode} is not runnable here: ${direct.error?.code ?? direct.stderr}`,
   );
-  assert.match(direct.stdout, /opencode\/long-cat-free/);
+  assert.match(direct.stdout, /opencode\/longcat-2.0-free/);
   // Negative control: a bare `opencode` lookup in this environment hits the
   // trap, so any PATH fall-through is recorded instead of reaching a real host
   // backend.

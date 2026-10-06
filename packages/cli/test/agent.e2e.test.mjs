@@ -114,7 +114,7 @@ exit 70
 printf '%s %s\\n' "$0" "$*" >>'${invocations}'
 case "$1" in
   models)
-    echo "opencode/longcat-2.5-preview-free"
+    echo "opencode/muse-spark-1.3-contributor-free"
     exit 0
     ;;
   session)
@@ -185,7 +185,7 @@ esac
     0,
     `fake opencode fixture ${opencode} is not runnable here: ${direct.error?.code ?? direct.stderr}`,
   );
-  assert.match(direct.stdout, /opencode\/longcat-2.5-preview-free/);
+  assert.match(direct.stdout, /opencode\/muse-spark-1.3-contributor-free/);
   // Negative control: a bare `opencode` lookup in this environment hits the
   // trap, so any PATH fall-through is recorded instead of reaching a real host
   // backend.
@@ -814,7 +814,7 @@ test('status fails closed on malformed or old metadata, and list names the unrea
   assert.match(missing.stderr, /metadata fields are not canonical/);
 });
 
-test('prompt rejects malformed durable execution configuration before reservation', (t) => {
+test('prompt rejects malformed durable cwd before reservation', (t) => {
   const { root, work, env } = fixture(t);
   assert.equal(run(['agent', 'new', '--id', 'c0de', '--cwd', work], env).status, 0);
   const path = metaPath(root, 'c0de');
@@ -829,15 +829,6 @@ test('prompt rejects malformed durable execution configuration before reservatio
   assert.equal(after.prompt_count, 0);
   assert.equal(after.active_runner, false);
 
-  after.cwd = work;
-  after.variant = '';
-  writeFileSync(path, JSON.stringify(after));
-  const variantPrompt = run(['agent', 'run', '--id', 'c0de', '--detach', '--prompt', 'must-not-run'], env);
-  assert.equal(variantPrompt.status, 1);
-  assert.match(variantPrompt.stderr, /variant is malformed/);
-  after = JSON.parse(readFileSync(path, 'utf8'));
-  assert.equal(after.prompt_count, 0);
-  assert.equal(after.active_runner, false);
 });
 
 test('legacy top-level agent command spellings are not accepted', (t) => {

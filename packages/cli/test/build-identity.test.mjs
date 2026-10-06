@@ -36,10 +36,12 @@ function runCli(args, { env = {} } = {}) {
 test('--version prints the identity and exits 0', () => {
   const result = runCli(['--version']);
   assert.equal(result.status, 0, `--version must exit 0, got ${result.status}: ${result.stderr}`);
-  assert.match(result.stdout, /^antonina \d+\.\d+\.\d+ \(/m);
+  assert.match(result.stdout, /^antonina \S+$/m);
   // The full object name, not only the short one. A 12-character prefix is a
   // prefix; matching a rollback record needs the commit itself.
   assert.match(result.stdout, /^commit [0-9a-f]{40}$/m, result.stdout);
+  assert.match(result.stdout, /^commit-time \d{4}\/\d{2}\/\d{2} \d{2}:\d{2} \(.+ ago\)$/m, result.stdout);
+  assert.match(result.stdout, /^deploy-time \d{4}\/\d{2}\/\d{2} \d{2}:\d{2} \(.+ ago\)$/m, result.stdout);
   assert.equal(result.stderr, '');
 });
 
@@ -47,7 +49,8 @@ test('-V is the short form and behaves identically', () => {
   const long = runCli(['--version']);
   const short = runCli(['-V']);
   assert.equal(short.status, 0, `-V must exit 0, got ${short.status}: ${short.stderr}`);
-  assert.equal(short.stdout, long.stdout);
+  const stripAges = (text) => text.replace(/ \([^\n]+ ago\)$/gm, '');
+  assert.equal(stripAges(short.stdout), stripAges(long.stdout));
 });
 
 test('--version --json emits a machine-readable identity and exits 0', () => {
@@ -60,6 +63,10 @@ test('--version --json emits a machine-readable identity and exits 0', () => {
   assert.ok(parsed.commit.startsWith(parsed.shortCommit));
   assert.equal(typeof parsed.dirty, 'boolean');
   assert.ok(['git', 'env'].includes(parsed.commitSource));
+  assert.equal(typeof parsed.describe, 'string');
+  assert.ok(parsed.describe.length > 0);
+  assert.ok(Number.isFinite(Date.parse(parsed.commitTime)));
+  assert.ok(Number.isFinite(Date.parse(parsed.deployTime)));
   // The text and JSON forms must agree, or an operator reading one and a script
   // reading the other are told different things.
   assert.equal(parsed.version, runCli(['--version']).stdout.match(/^version (\S+)$/m)[1]);
@@ -90,6 +97,8 @@ test('the reported commit is this checkout\'s commit, not a stored constant', ()
   const reported = JSON.parse(runCli(['--version', '--json']).stdout);
   assert.equal(reported.commit, head);
   assert.equal(reported.commitSource, 'git');
+  const described = spawnSync('git', ['describe'], { cwd: repoRoot, encoding: 'utf8' }).stdout.trim();
+  assert.equal(reported.describe, described);
 });
 
 test('--help still exits 0 and is unaffected by the version branch', () => {

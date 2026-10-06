@@ -3,7 +3,6 @@ import test from 'node:test';
 
 import {
   AGENT_META_VERSION,
-  DEFAULT_VARIANT,
   activeRunnerFlag,
   deletePendingFlag,
   idleMeta,
@@ -17,7 +16,6 @@ import {
   persistedOpencodeDbKey,
   persistedRunLogOffset,
   persistedTimestamp,
-  persistedVariant,
   runnerGeneration,
   runnerReservationMode,
   runnerReservationState,
@@ -27,10 +25,6 @@ import {
 
 const badAuthority = [123, true, 1.5, [], {}, ''];
 
-test('new managed agents default to the high OpenCode variant', () => {
-  assert.equal(DEFAULT_VARIANT, 'high');
-  assert.equal(idleMeta('a11d', '/tmp', null, 1).variant, 'high');
-});
 
 test('missing authority never receives a legacy default', () => {
   assert.throws(() => pendingPrompt({}), /not canonical/);
@@ -40,7 +34,6 @@ test('missing authority never receives a legacy default', () => {
   assert.equal(persistedLifecycleState({}), null);
   assert.deepEqual(persistedControlField({}, 'intent'), { value: null, malformed: true });
   assert.throws(() => persistedNativeSessionId({}), /missing/);
-  assert.throws(() => persistedVariant({}), /missing/);
   assert.equal(runnerReservationState(undefined), 'malformed');
 });
 
@@ -100,8 +93,6 @@ test('scalar continuation authority rejects coercion and non-finite time', () =>
   assert.equal(persistedNativeSessionId({ native_session_id: 'ses_abc' }), 'ses_abc');
   assert.throws(() => persistedNativeSessionId({ native_session_id: '' }), /malformed/);
 
-  assert.equal(persistedVariant({ variant: 'high' }), 'high');
-  assert.throws(() => persistedVariant({ variant: '' }), /malformed/);
 });
 
 test('idle metadata is a complete authoritative version-4 record', () => {

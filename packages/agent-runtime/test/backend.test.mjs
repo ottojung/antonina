@@ -439,25 +439,9 @@ printf '%s\\n' '${JSON.stringify(rows)}'
   assert.deepEqual(recordedInvocations(escapes), [], 'a non-fixture opencode was executed via PATH');
 });
 
-test('continuation command uses persisted session and the current Antonina variant', () => {
-  const meta = idleMeta('a11d', '/tmp', null, 1);
-  meta.native_session_id = 'ses_123';
-  // Legacy records may still carry the old setting. They remain valid durable
-  // state, but must not downgrade a newly launched invocation.
-  meta.variant = 'low';
-  assert.deepEqual(buildAgentCommand(meta, 'continue work', true, {}), [
-    'opencode', 'run', '--auto',
-    '--session', 'ses_123',
-    '--model', AGENT_MODEL,
-    '--variant', 'high',
-    '--thinking',
-    '--dir', '/tmp',
-    'continue work',
-  ]);
-});
 
 
-test('agent command rejects malformed durable cwd and variant', () => {
+test('agent command rejects malformed durable cwd', () => {
   for (const cwd of ['', 0, false, [], 'relative', './relative', '../relative']) {
     const meta = idleMeta('a11d', '/tmp', null, 1);
     meta.cwd = cwd;
@@ -470,11 +454,6 @@ test('agent command rejects malformed durable cwd and variant', () => {
   const undeclared = idleMeta('a11d', null, null, 1);
   assert.equal(validateAgentMetadata(undeclared), undefined);
   assert.throws(() => buildAgentCommand(undeclared, 'work', false, {}), /cwd is undeclared/);
-  for (const variant of [null, '', 0, 123, true, false, 1.5, [], {}]) {
-    const meta = idleMeta('a11d', '/tmp', null, 1);
-    meta.variant = variant;
-    assert.throws(() => buildAgentCommand(meta, 'work', false, {}), /variant is malformed/);
-  }
 });
 
 test('e. a signal death is classified as an external kill, not a backend failure', () => {

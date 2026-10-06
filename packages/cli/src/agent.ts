@@ -821,7 +821,7 @@ function statusJson(
     next_steer: steers.length > 0 ? steers[0]!.prompt.split('\n', 1)[0] : null,
     steer_preempting: intent.value === 'steer',
     steer_metadata_error: null,
-    model: 'opencode/longcat-2.0-free',
+    model: 'opencode/longcat-2.5-preview-free',
     variant: persistedVariant(meta),
     backend_error: sanitizeBackendError(meta.backend_error),
     host_capacity: hostCapacityJson(readHostCapacity()),
@@ -1080,7 +1080,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   // leaving it on the shared one would keep every `run` touching the file whose
   // lock contention this change exists to remove.
   if (configuredModelAvailable({ ...context.env, ...opencodeBackendEnv(observed, paths(context)) }) === false) {
-    throw new Error('configured OpenCode model opencode/longcat-2.0-free is unavailable');
+    throw new Error('configured OpenCode model opencode/longcat-2.5-preview-free is unavailable');
   }
   const decision: {
     action?: 'busy' | 'spawn' | 'reuse';

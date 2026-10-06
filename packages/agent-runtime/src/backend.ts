@@ -14,7 +14,7 @@ import {
 } from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
 
-export const AGENT_MODEL = 'opencode/longcat-2.0-free';
+export const AGENT_MODEL = 'opencode/longcat-2.5-preview-free';
 export const OPENCODE_TITLE_PREFIX = 'antonina-';
 export const DEFAULT_OPENCODE_BIN = 'opencode';
 export const OPENCODE_BIN_ENV = 'ANTONINA_OPENCODE_BIN';

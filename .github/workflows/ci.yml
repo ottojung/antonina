@@ -49,7 +49,7 @@ jobs:
           #!/bin/sh
           case "$1" in
             models)
-              echo "opencode/longcat-2.0-free"
+              echo "opencode/longcat-2.5-preview-free"
               ;;
             session)
               echo '[{"id":"ses_pkg","title":"antonina-a11d","created":100}]'

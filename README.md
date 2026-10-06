@@ -6,7 +6,7 @@ An Antonina host is a provisioned execution environment that can access the boar
 
 ## Current implementation
 
-Antonina uses TypeScript/Node.js for its CLI, managed-agent runtime, shared board core, and web application. The repository currently includes a local managed-agent runtime built around OpenCode. Managed Antonina agents use `opencode/longcat-2.0-free` with OpenCode `--variant high`; legacy records carrying the old `low` value do not downgrade new invocations. That runtime is an implementation available to hosts, not the product boundary of Antonina.
+Antonina uses TypeScript/Node.js for its CLI, managed-agent runtime, shared board core, and web application. The repository currently includes a local managed-agent runtime built around OpenCode. Managed Antonina agents use `opencode/longcat-2.5-preview-free` with OpenCode `--variant high`; legacy records carrying the old `low` value do not downgrade new invocations. That runtime is an implementation available to hosts, not the product boundary of Antonina.
 
 ## Requirements
 

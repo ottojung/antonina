@@ -45,7 +45,7 @@ import test from 'node:test';
 
 const CLI = resolve('packages/cli/dist/packages/cli/src/main.js');
 const OPENCODE_BIN_ENV = 'ANTONINA_OPENCODE_BIN';
-const MODEL = 'opencode/space-bunny-free';
+const MODEL = 'opencode/long-cat-free';
 const REPO_FIXTURE_PARENT = resolve('.antonina-test-tmp');
 const PROBE_SENTINEL = 'ANTONINA-B186-CLI-EXEC-OK';
 const CONVERGE_MS = 20_000;
@@ -225,7 +225,7 @@ test('the model probe is run against the record database', (t) => {
     ran.status, 0,
     `agent run refused: ${ran.stderr}\nA probe handed a database other than ${expectedDb(handle.env, id)} cannot see the model.`,
   );
-  assert.doesNotMatch(ran.stderr + ran.stdout, /model opencode\/space-bunny-free is unavailable/);
+  assert.doesNotMatch(ran.stderr + ran.stdout, /model opencode\/long-cat-free is unavailable/);
 
   const models = invocationLog(logFile).filter((entry) => entry.argv.startsWith('models'));
   assert.ok(models.length >= 1, 'no model probe was recorded at all');

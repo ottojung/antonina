@@ -8,7 +8,7 @@ The immediate goals are:
 
 - run OpenClaw on an Antonina-compatible host;
 - use the existing OpenCode installation as the coding-agent runtime;
-- constrain OpenCode to `opencode/space-bunny-free`;
+- constrain OpenCode to `opencode/long-cat-free`;
 - prove that OpenClaw can spawn and manage OpenCode work through ACP/ACPX;
 - later turn the successful procedure into a deterministic provisioning script.
 
@@ -83,7 +83,7 @@ The preferred integration path is:
 OpenClaw
   -> ACPX
   -> OpenCode ACP server
-  -> opencode/space-bunny-free
+  -> opencode/long-cat-free
 ```
 
 This is preferable to making Antonina own another long-running coding-agent process
@@ -112,9 +112,9 @@ A dedicated OpenCode configuration is used for OpenClaw:
 
 Its intent is:
 
-- primary model: `opencode/space-bunny-free`;
-- small model: `opencode/space-bunny-free`;
-- the OpenCode provider whitelist contains only `space-bunny-free`.
+- primary model: `opencode/long-cat-free`;
+- small model: `opencode/long-cat-free`;
+- the OpenCode provider whitelist contains only `long-cat-free`.
 
 A dedicated wrapper is used:
 
@@ -133,7 +133,7 @@ OpenClaw agent entries used for this experiment also have a model policy contain
 only:
 
 ```text
-opencode/space-bunny-free
+opencode/long-cat-free
 ```
 
 There are therefore two useful layers:
@@ -162,7 +162,7 @@ The correct argument list for the installed OpenCode version is currently:
 An earlier experiment attempted:
 
 ```json
-["acp", "--model", "opencode/space-bunny-free"]
+["acp", "--model", "opencode/long-cat-free"]
 ```
 
 but the installed OpenCode ACP command does not accept `--model`. The model lock
@@ -187,7 +187,7 @@ OpenCode harness. Their important shape is:
     }
   },
   "modelPolicy": {
-    "allow": ["opencode/space-bunny-free"]
+    "allow": ["opencode/long-cat-free"]
   }
 }
 ```
@@ -439,7 +439,7 @@ openclaw models list --provider opencode
 ```
 
 returns no models, and an explicit embedded run using
-`opencode/space-bunny-free` fails as an unknown model.
+`opencode/long-cat-free` fails as an unknown model.
 
 This explains why the foreground Gateway's default heartbeat attempted the built-in
 OpenAI default even though the ACP agents were restricted to Space Bunny.
@@ -475,12 +475,12 @@ openclaw models list --refresh --provider opencode
 but the current direct OpenClaw/OpenCode catalog contains models such as
 `opencode/gpt-5.6-sol`, `opencode/claude-opus-5`, and
 `opencode/big-pickle`; it does **not** contain
-`opencode/space-bunny-free`.
+`opencode/long-cat-free`.
 
 By contrast, the dedicated OpenCode CLI configuration used by ACP reports exactly:
 
 ```text
-opencode/space-bunny-free
+opencode/long-cat-free
 ```
 
 This is an important architectural distinction:

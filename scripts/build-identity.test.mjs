@@ -19,12 +19,19 @@ const WEB_GENERATED = join(repoRoot, 'web', 'build-identity.generated.ts');
 const { resolveBuildIdentity, BuildIdentityError, renderCliModule, renderWebModule } =
   await import(generator);
 
+const MOCK_DEPLOY_TIME = '2020-09-30T18:34:00.000Z';
+
 function runGenerator(env = {}, cwd = repoRoot) {
   return spawnSync(process.execPath, [generator], {
     encoding: 'utf8',
     timeout: 60_000,
     cwd,
-    env: { ...process.env, ANTONINA_BUILD_COMMIT: undefined, ...env },
+    env: {
+      ...process.env,
+      ANTONINA_BUILD_COMMIT: undefined,
+      ANTONINA_DEPLOY_TIME: MOCK_DEPLOY_TIME,
+      ...env,
+    },
   });
 }
 
@@ -46,12 +53,22 @@ test('each surface reports its own manifest version', () => {
 });
 
 test('an explicit commit override wins over the working tree', () => {
-  // The deploy path sets this, so a builder container without a usable .git can
-  // still produce a correctly identified artifact.
+  // A Git-less builder must supply the companion provenance that cannot be
+  // derived from a synthetic object name. Deploy time remains independently
+  // mockable for deterministic tests.
   const override = 'a'.repeat(40);
-  const identity = resolveBuildIdentity({ repoRoot, env: { ANTONINA_BUILD_COMMIT: override } });
+  const env = {
+    ANTONINA_BUILD_COMMIT: override,
+    ANTONINA_BUILD_DESCRIBE: 'v0.1.2-3-gaaaaaaa',
+    ANTONINA_BUILD_COMMIT_TIME: '2020-09-28T18:34:00Z',
+    ANTONINA_DEPLOY_TIME: MOCK_DEPLOY_TIME,
+  };
+  const identity = resolveBuildIdentity({ repoRoot, env });
   assert.equal(identity.cli.commit, override);
   assert.equal(identity.cli.source, 'env');
+  assert.equal(identity.cli.describe, 'v0.1.2-3-gaaaaaaa');
+  assert.equal(identity.cli.commitTime, '2020-09-28T18:34:00.000Z');
+  assert.equal(identity.cli.deployTime, MOCK_DEPLOY_TIME);
   assert.equal(identity.web.commit, override);
 });
 
@@ -129,17 +146,17 @@ test('the generated modules are ignored, not committed', () => {
   assert.equal(tracked, '');
 });
 
-test('regenerating is deterministic: no timestamp, no churn between runs', () => {
+test('regenerating with a mocked deploy clock is deterministic', () => {
   const first = runGenerator();
   assert.equal(first.status, 0, first.stderr);
   const before = [CLI_GENERATED, WEB_GENERATED].map((f) => readFileSync(f, 'utf8'));
   const second = runGenerator();
   assert.equal(second.status, 0, second.stderr);
   const after = [CLI_GENERATED, WEB_GENERATED].map((f) => readFileSync(f, 'utf8'));
-  assert.deepEqual(after, before, 'two builds of one commit must produce identical files');
-  // Belt and braces on the same property: no date-shaped value is written.
+  assert.deepEqual(after, before, 'a fixed deploy clock must produce identical files');
   for (const text of after) {
-    assert.doesNotMatch(text, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+    assert.match(text, /deployTime: "2020-09-30T18:34:00.000Z"/);
+    assert.match(text, /commitTime: "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
     assert.match(text, /GENERATED FILE - do not edit/);
   }
 });

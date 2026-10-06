@@ -11,12 +11,12 @@ The follow exists to carry the run's output to the operator who asked for it in 
 This is a statement about the attached foreground follow alone. It is not a claim that every wait in the command surface is unbounded, and it does not forbid a bound where one was deliberately asked for.
 
 $id-9448585901481383
-title: antonina uses OpenCode LongCat-2.5 Preview Free
+title: antonina uses OpenCode Muse Spark 1.3 Contributor Free
 date: 2026/09/23
 source: @ottojung
 kind: constraint
 
-`antonina` must use LongCat-2.5 Preview Free through OpenCode, identified as `opencode/longcat-2.5-preview-free`. This is the configured `antonina` model and supersedes the previous Muse Spark 1.3 Contributor requirement.
+`antonina` must use Muse Spark 1.3 Contributor Free through OpenCode, identified as `opencode/muse-spark-1.3-contributor-free`. This is the configured `antonina` model and supersedes the temporary LongCat requirement.
 
 $id-5849903270418621
 title: Antonina managed agents use the high OpenCode variant

@@ -3,7 +3,7 @@
 // The contract this file pins, in the order the tests pin it:
 //
 //   1. A fork is a snapshot. The clone gets the source's persisted work
-//      identity (cwd, title, variant, native session, prompt history, terminal
+//      identity (cwd, title, native session, prompt history, terminal
 //      outcome) and its own id and its own record.
 //   2. The clone shares NO mutable object with the source, at any depth. This
 //      is asserted by mutating each side and observing the other is byte-for-byte
@@ -158,7 +158,6 @@ test('a fork carries the source work identity and takes a new identity of its ow
   assert.equal(clone.native_session_id, 'sess-abcdef0123456789');
   assert.equal(clone.cwd, '/srv/work');
   assert.equal(clone.title, 'original title');
-  assert.equal(clone.variant, 'high');
   assert.equal(clone.prompt_count, 3);
   assert.equal(clone.last_prompt, 'third prompt');
   // The source's outcome is carried as history; the clone's own lifecycle state

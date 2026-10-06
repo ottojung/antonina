@@ -208,7 +208,7 @@ antonina agent run --id ID --cwd /absolute/worktree --prompt '...' --detach
 antonina agent new --id ID --cwd /absolute/worktree
 ```
 
-The managed runtime invokes Space Bunny Free with OpenCode `--variant high`. The runtime supplies that variant itself; the orchestrator must not try to downgrade it or treat a legacy stored `low` value as the setting for a new invocation.
+The managed runtime invokes Long Cat Free with OpenCode `--variant high`. The runtime supplies that variant itself; the orchestrator must not try to downgrade it or treat a legacy stored `low` value as the setting for a new invocation.
 
 Always declare `--cwd` on `run`. A front's working directory is the one declared there, never the directory the orchestrator happened to run the command from, and `agent status`/`agent list` report exactly that declared directory or an explicit `null`. A reported `cwd` is therefore the directory the front runs in, not an observation of where the front has since worked: to learn that, read `agent log`. An agent created without `--cwd` has no working directory and `run` refuses to launch it, so declare one at launch.
 

@@ -304,7 +304,7 @@ test('the probe path and the spawn path are given the same database', (t) => {
   const command = buildAgentCommand(readMeta('b18608', { env }), 'work', true, backendEnv);
   assert.ok(command !== null, 'continue mode built no command');
   assert.deepEqual(command?.slice(1), [
-    'run', '--auto', '--session', 'ses_b18608', '--model', 'opencode/space-bunny-free',
+    'run', '--auto', '--session', 'ses_b18608', '--model', 'opencode/long-cat-free',
     '--variant', 'high', '--thinking', '--dir', command[command.length - 2], 'work',
   ]);
 

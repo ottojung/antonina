@@ -7,7 +7,7 @@ const turn = readFileSync(fileURLToPath(new URL('../../../scripts/antonina-orche
 
 test('scheduled turn is a short OpenClaw scheduler pass with a compact snapshot', () => {
   assert.match(turn, /ANTONINA-SCHEDULER-TURN/);
-  assert.match(turn, /timeout -k 10s 75s/);
+  assert.match(turn, /timeout -k 15s 240s/);
   assert.match(turn, /--model opencode-go\/longcat-2\.5-preview-free/);
   assert.match(turn, /--variant low/);
   assert.doesNotMatch(turn, /--thinking/);

@@ -13,6 +13,11 @@ import time
 ANTONINA = os.path.expanduser("~/.local/bin/antonina")
 AUTHOR = "openclaw@marceline-dev"
 LOCK = os.path.expanduser("~/.local/state/antonina/frontier-refill.lock")
+CGROUP_CURRENT = Path("/sys/fs/cgroup/memory.current")
+CGROUP_MAX = Path("/sys/fs/cgroup/memory.max")
+HARD_PROJECT_HEADROOM_BYTES = 512 * 1024 * 1024
+ISSUE_HEADROOM_FRACTION = 0.15
+ISSUE_HEADROOM_MIN_BYTES = 2 * 1024 * 1024 * 1024
 
 ALIASES = {
     "kawun": "skrynia-apps",
@@ -26,6 +31,8 @@ ALIASES = {
     "lubko": "lubko",
     "along": "along",
 }
+
+BREADTH_TITLE = re.compile(r"^breadth\s+(\S+)\s+issue\s+(\d+)$", re.I)
 
 def run(args, *, check=True):
     return subprocess.run(args, check=check, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -57,6 +64,9 @@ def project_from_path(path):
 
 def project_from_title(title):
     text = title.strip()
+    m = BREADTH_TITLE.match(text)
+    if m:
+        return normalize_project(m.group(1))
     m = re.match(r"^\[([^#\]]+)#", text)
     if m:
         return normalize_project(m.group(1))
@@ -72,6 +82,25 @@ def project_from_title(title):
         return "assemblyp1"
     return None
 
+def project_from_agent(agent):
+    title_project = project_from_title(agent.get("title") or "")
+    if BREADTH_TITLE.match(agent.get("title") or ""):
+        return title_project
+    return project_from_path(agent.get("cwd") or "") or title_project
+
+def issue_from_agent(agent):
+    title = agent.get("title") or ""
+    m = BREADTH_TITLE.match(title)
+    if m:
+        return int(m.group(2))
+    m = re.match(r"^(\d+)\b", title)
+    if m:
+        return int(m.group(1))
+    for part in Path(agent.get("cwd") or "").name.split("-"):
+        if part.isdigit():
+            return int(part)
+    return None
+
 def live_agent_ids():
     proc = run(["pgrep", "-af", "opencode"], check=False)
     result = set()
@@ -84,37 +113,41 @@ def live_agent_ids():
 def running_records():
     return cli_json("agent", "list", "--page", 1, "--limit", 500, "--running", "--json").get("agents", [])
 
-def represented_projects():
+def live_records():
     live = live_agent_ids()
-    represented = set()
-    for agent in running_records():
-        if str(agent.get("id", "")).lower() not in live:
+    return [a for a in running_records() if str(a.get("id", "")).lower() in live]
+
+def cleanup_duplicate_breadth(records):
+    groups = {}
+    for agent in records:
+        m = BREADTH_TITLE.match(agent.get("title") or "")
+        if not m:
             continue
-        project = project_from_path(agent.get("cwd") or "")
-        if project:
-            represented.add(project)
-    return represented
+        project = normalize_project(m.group(1))
+        groups.setdefault(project, []).append(agent)
+    for project, agents in groups.items():
+        agents.sort(key=lambda a: float(a.get("created_at") or 0))
+        for duplicate in agents[1:]:
+            run([ANTONINA, "agent", "stop", "--id", str(duplicate["id"])], check=False)
+            print(json.dumps({
+                "stopped_duplicate": duplicate["id"],
+                "project": project,
+                "kept": agents[0]["id"],
+            }, sort_keys=True), flush=True)
 
 def resources_for_issue(issue_number):
-    result = []
-    for page in range(1, 5):
-        batch = cli_json("board", "resource", "list", "--issue", issue_number, "--page", page, "--json")
-        if not batch:
-            break
-        result.extend(batch)
-    return [r.get("path") for r in result if r.get("path")]
+    batch = cli_json("board", "resource", "list", "--issue", issue_number, "--page", 1, "--json")
+    return [r.get("path") for r in batch if r.get("path")]
 
 def usable_cwd(issue_number, project, paths):
     for path in paths:
         p = Path(path)
         if str(p).startswith("/workspace/") and p.is_dir():
             return str(p)
-
     prefixes = {
         "skrynia-apps": ["skrynia-apps", "skrynia"],
         "qai": ["qai", "pyreports"],
     }.get(project, [project])
-
     for prefix in prefixes:
         for pattern in (f"/workspace/{prefix}-{issue_number}*", f"/workspace/{prefix}*"):
             for candidate in sorted(glob.glob(pattern)):
@@ -123,41 +156,83 @@ def usable_cwd(issue_number, project, paths):
                     return str(p)
     return None
 
-def queue_plan():
-    represented = represented_projects()
-    selected = []
-    seen = set(represented)
+def issue_project_and_cwd(issue):
+    number = int(issue["number"])
+    title = issue.get("title", "")
+    project = project_from_title(title)
+    paths = []
+    if not project:
+        paths = resources_for_issue(number)
+        project = next((project_from_path(p) for p in paths if project_from_path(p)), None)
+    if not project:
+        return None, None
+    if not paths:
+        paths = resources_for_issue(number)
+    return project, usable_cwd(number, project, paths)
 
-    for issue in open_queue():
-        number = int(issue["number"])
-        title = issue.get("title", "")
-        project = project_from_title(title)
-        paths = []
+def queue_plan(records):
+    represented = {p for p in (project_from_agent(a) for a in records) if p}
+    live_issues = {n for n in (issue_from_agent(a) for a in records) if n is not None}
+    live_cwds = {a.get("cwd") for a in records if a.get("cwd")}
+    queue = open_queue()
 
-        if project in seen:
+    project_plan = []
+    seen_projects = set(represented)
+    for issue in queue:
+        project, cwd = issue_project_and_cwd(issue)
+        if not project or project in seen_projects or not cwd:
             continue
-
-        if not project:
-            paths = resources_for_issue(number)
-            project = next((project_from_path(path) for path in paths if project_from_path(path)), None)
-        if not project or project in seen:
-            continue
-
-        if not paths:
-            paths = resources_for_issue(number)
-        cwd = usable_cwd(number, project, paths)
-        if not cwd:
-            continue
-
-        selected.append({
-            "number": number,
-            "title": title,
+        project_plan.append({
+            "phase": "project",
+            "number": int(issue["number"]),
+            "title": issue.get("title", ""),
             "project": project,
             "cwd": cwd,
         })
-        seen.add(project)
+        seen_projects.add(project)
 
-    return represented, selected
+    if project_plan:
+        return represented, project_plan
+
+    issue_plan = []
+    wave_projects = set()
+    for issue in queue:
+        number = int(issue["number"])
+        if number in live_issues:
+            continue
+        project, cwd = issue_project_and_cwd(issue)
+        if not project or project not in represented or project in wave_projects or not cwd or cwd in live_cwds:
+            continue
+        issue_plan.append({
+            "phase": "issue",
+            "number": number,
+            "title": issue.get("title", ""),
+            "project": project,
+            "cwd": cwd,
+        })
+        wave_projects.add(project)
+        live_cwds.add(cwd)
+    return represented, issue_plan
+
+def memory_headroom():
+    try:
+        current = int(CGROUP_CURRENT.read_text().strip())
+        raw_max = CGROUP_MAX.read_text().strip()
+        if raw_max == "max":
+            return None, None
+        maximum = int(raw_max)
+        return maximum - current, maximum
+    except Exception:
+        return None, None
+
+def launch_allowed(phase):
+    headroom, maximum = memory_headroom()
+    if headroom is None or maximum is None:
+        return True
+    if phase == "project":
+        return headroom >= HARD_PROJECT_HEADROOM_BYTES
+    reserve = max(ISSUE_HEADROOM_MIN_BYTES, int(maximum * ISSUE_HEADROOM_FRACTION))
+    return headroom >= reserve
 
 def comment(issue, body):
     run([ANTONINA, "board", "comment", "--id", str(issue), "--author", AUTHOR, "--body", body, "--json"])
@@ -166,6 +241,7 @@ def launch(candidate):
     issue = candidate["number"]
     project = candidate["project"]
     cwd = candidate["cwd"]
+    phase = candidate["phase"]
     stamp = int(time.time() * 1000) % 1000000
     agent_id = f"b{issue}{stamp:06d}"
     title = f"breadth {project} issue {issue}"
@@ -174,19 +250,20 @@ def launch(candidate):
         "[orchestrator-refill]\n"
         "state: working\n"
         f"owner: {AUTHOR}\n"
-        f"run: deterministic-breadth-{int(time.time())}\n"
-        f"summary: deterministic project-breadth refill selected issue {issue} for unrepresented project {project}.\n"
+        f"run: deterministic-{phase}-breadth-{int(time.time())}\n"
+        f"summary: deterministic {phase}-breadth refill selected issue {issue} for project {project}.\n"
         "artifacts: none\n"
         f"resources: planned agent {agent_id}; cwd {cwd}\n"
-        "validation: selected from current open queue; project has no live OpenCode agent process\n"
-        "next: breadth owner reads current issue state and performs or reconciles the highest-value actionable next step."
+        f"validation: selected from current open queue; {phase}-breadth topology permits a distinct live owner\n"
+        "next: breadth owner reads current issue state, yields to any genuinely live conflicting claim, and performs or reconciles the highest-value actionable next step."
     ))
 
     prompt = (
         f"Antonina board issue #{issue}: {candidate['title']}. "
-        f"You are the breadth owner for project {project}. "
+        f"You are a deterministic {phase}-breadth owner for project {project}. "
         "First read the issue body and newest comments with antonina board show, then read the nearest AGENTS.md and any directly referenced project orchestration instructions. "
-        "Reconcile existing branches, worktrees, reviews, and registered resources before changing code. "
+        "If a genuinely live conflicting owner exists, do not duplicate its work: record/confirm the conflict and exit. "
+        "Otherwise reconcile existing branches, worktrees, reviews, and registered resources before changing code. "
         "If the requested result is already complete, validate the completion predicate and update/close the board issue as appropriate. "
         "Otherwise perform the highest-value concrete next action now. Do actual repository work rather than returning a prose-only plan. "
         "Use an isolated worktree/branch if the existing cwd is not the correct writable worktree, register or record any new durable resource, run focused validation, commit and push durable progress according to project policy, and append a concise board handoff with exact artifacts."
@@ -199,12 +276,12 @@ def launch(candidate):
         "[orchestrator-refill]\n"
         "state: working\n"
         f"owner: {AUTHOR}\n"
-        f"run: deterministic-breadth-{int(time.time())}\n"
-        f"summary: launched project-breadth owner for issue {issue} in {project}.\n"
+        f"run: deterministic-{phase}-breadth-{int(time.time())}\n"
+        f"summary: launched {phase}-breadth owner for issue {issue} in {project}.\n"
         "artifacts: none\n"
         f"resources: agent {agent_id}; cwd {cwd}\n"
         "validation: antonina agent run returned successfully in detached mode\n"
-        "next: agent owns project breadth until terminal; future refill passes treat the project as represented while its process is live."
+        "next: agent owns this breadth front until terminal; future refill passes account for its live project, issue, and cwd."
     ))
     return agent_id
 
@@ -220,12 +297,26 @@ def main():
         except BlockingIOError:
             return 0
 
-        represented, plan = queue_plan()
+        records = live_records()
+        if not args.dry_run:
+            cleanup_duplicate_breadth(records)
+            records = live_records()
+
+        represented, plan = queue_plan(records)
         if args.dry_run:
             print(json.dumps({"represented": sorted(represented), "plan": plan}, indent=2))
             return 0
 
         for candidate in plan:
+            if not launch_allowed(candidate["phase"]):
+                headroom, maximum = memory_headroom()
+                print(json.dumps({
+                    "backpressure": True,
+                    "phase": candidate["phase"],
+                    "headroom": headroom,
+                    "maximum": maximum,
+                }, sort_keys=True), flush=True)
+                break
             try:
                 agent_id = launch(candidate)
                 print(json.dumps({"launched": agent_id, **candidate}, sort_keys=True), flush=True)

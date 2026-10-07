@@ -24,11 +24,25 @@ test('slow main orchestration cannot monopolize dispatch for fifteen minutes', (
   assert.match(turn, /Do not list \/workspace/);
 });
 
-test('deterministic refill launches only unrepresented projects from board state', () => {
-  assert.match(refill, /if project in seen/);
-  assert.match(refill, /seen = set\(represented\)/);
-  assert.match(refill, /board", "list", "--state", "open/);
-  assert.match(refill, /board", "resource", "list", "--issue"/);
-  assert.match(refill, /project has no live OpenCode agent process/);
-  assert.match(refill, /agent", "run"/);
+test('deterministic refill enforces project breadth before issue breadth', () => {
+  assert.match(refill, /if project_plan:\n        return represented, project_plan/);
+  assert.match(refill, /phase": "project"/);
+  assert.match(refill, /phase": "issue"/);
+  assert.match(refill, /wave_projects/);
+  assert.match(refill, /cwd in live_cwds/);
+});
+
+test('deterministic breadth identity comes from agent title before cwd heuristics', () => {
+  assert.match(refill, /BREADTH_TITLE/);
+  assert.match(refill, /def project_from_agent/);
+  assert.match(refill, /if BREADTH_TITLE\.match/);
+  assert.match(refill, /cleanup_duplicate_breadth/);
+});
+
+test('issue breadth uses cgroup backpressure rather than a worker-count cap', () => {
+  assert.match(refill, /ISSUE_HEADROOM_FRACTION = 0\.15/);
+  assert.match(refill, /ISSUE_HEADROOM_MIN_BYTES/);
+  assert.match(refill, /def launch_allowed/);
+  assert.match(refill, /candidate\["phase"\]/);
+  assert.doesNotMatch(refill, /MAX_WORKERS|worker_count_limit/);
 });

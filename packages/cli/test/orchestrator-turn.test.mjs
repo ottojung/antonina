@@ -7,8 +7,9 @@ const turn = readFileSync(fileURLToPath(new URL('../../../scripts/antonina-orche
 
 test('scheduled turn is a short OpenClaw scheduler pass', () => {
   assert.match(turn, /ANTONINA-SCHEDULER-TURN/);
-  assert.match(turn, /timeout -k 10s 120s/);
-  assert.match(turn, /--variant low --thinking/);
+  assert.match(turn, /timeout -k 10s 75s/);
+  assert.match(turn, /--variant low/);
+  assert.doesNotMatch(turn, /--thinking/);
   assert.match(turn, /antonina-scheduler\/SKILL\.md/);
   assert.match(turn, /project breadth, then issue breadth/);
   assert.match(turn, /Do not implement project work yourself/);
@@ -16,6 +17,7 @@ test('scheduled turn is a short OpenClaw scheduler pass', () => {
 
 test('scheduler launcher makes live cwd reconciliation the first action', () => {
   assert.match(turn, /FIRST ACTION, before scanning the board or launching anything/);
+  assert.match(turn, /immediately inspect current running Antonina agents/);
   assert.match(turn, /build the occupied cwd set/);
   assert.match(turn, /Do not launch while a same-cwd collision remains/);
   assert.match(turn, /only onto unoccupied cwd\/worktrees/);

@@ -12,8 +12,9 @@ const skill = read('../../../skills/antonina-scheduler/SKILL.md');
 test('scheduler is a single short OpenClaw scheduling lane', () => {
   assert.match(loop, /ANTONINA-SCHEDULER-TURN/);
   assert.doesNotMatch(loop, /orchestrator-refill/);
-  assert.match(turn, /timeout -k 10s 120s/);
-  assert.match(turn, /--variant low --thinking/);
+  assert.match(turn, /timeout -k 10s 75s/);
+  assert.match(turn, /--variant low/);
+  assert.doesNotMatch(turn, /--thinking/);
   assert.match(turn, /antonina-scheduler\/SKILL\.md/);
 });
 

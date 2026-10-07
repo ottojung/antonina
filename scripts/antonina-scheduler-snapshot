@@ -23,15 +23,36 @@ def live_ids():
             result.add(m.group(1))
     return result
 
+def read_cgroup(name):
+    try:
+        return (Path("/sys/fs/cgroup") / name).read_text().strip()
+    except OSError:
+        return ""
+
+def kv_lines(text):
+    out = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            try:
+                out[parts[0]] = int(parts[1])
+            except ValueError:
+                pass
+    return out
+
 def memory_snapshot():
-    result = {}
-    for name in ("memory.current", "memory.max", "memory.pressure", "memory.events", "memory.stat"):
-        p = Path("/sys/fs/cgroup") / name
-        try:
-            result[name] = p.read_text().strip()
-        except OSError:
-            result[name] = None
-    return result
+    stat = kv_lines(read_cgroup("memory.stat"))
+    events = kv_lines(read_cgroup("memory.events"))
+    pressure = read_cgroup("memory.pressure").splitlines()
+    return {
+        "current": read_cgroup("memory.current") or None,
+        "max": read_cgroup("memory.max") or None,
+        "psi": pressure,
+        "anon": stat.get("anon"),
+        "file": stat.get("file"),
+        "oom": events.get("oom"),
+        "oom_kill": events.get("oom_kill"),
+    }
 
 running = cli_json("agent", "list", "--page", 1, "--limit", 500, "--running", "--json").get("agents", [])
 live = live_ids()
@@ -40,7 +61,6 @@ agents = [
         "id": a.get("id"),
         "title": a.get("title"),
         "cwd": a.get("cwd"),
-        "last_activity_at": a.get("last_activity_at"),
     }
     for a in running
     if str(a.get("id")) in live
@@ -50,16 +70,14 @@ issues = cli_json("board", "list", "--state", "open", "--page", 1, "--json")
 issue_headers = [
     {
         "number": i.get("number"),
-        "title": i.get("title"),
-        "lastActivityAt": i.get("lastActivityAt"),
-        "messageCount": i.get("messageCount"),
+        "title": (i.get("title") or "")[:120],
     }
     for i in issues
 ]
 
 print(json.dumps({
-    "generated_at": datetime.now(timezone.utc).isoformat(),
     "live_agents": agents,
+    "open_issue_count": len(issue_headers),
     "open_issues": issue_headers,
-    "cgroup": memory_snapshot(),
+    "memory": memory_snapshot(),
 }, separators=(",", ":")))

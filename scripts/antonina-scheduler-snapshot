@@ -3,8 +3,6 @@ import json
 import os
 import re
 import subprocess
-from datetime import datetime, timezone
-from pathlib import Path
 
 ANTONINA = os.path.expanduser("~/.local/bin/antonina")
 
@@ -23,36 +21,14 @@ def live_ids():
             result.add(m.group(1))
     return result
 
-def read_cgroup(name):
-    try:
-        return (Path("/sys/fs/cgroup") / name).read_text().strip()
-    except OSError:
-        return ""
-
-def kv_lines(text):
-    out = {}
-    for line in text.splitlines():
-        parts = line.split()
-        if len(parts) == 2:
-            try:
-                out[parts[0]] = int(parts[1])
-            except ValueError:
-                pass
-    return out
-
-def memory_snapshot():
-    stat = kv_lines(read_cgroup("memory.stat"))
-    events = kv_lines(read_cgroup("memory.events"))
-    pressure = read_cgroup("memory.pressure").splitlines()
-    return {
-        "current": read_cgroup("memory.current") or None,
-        "max": read_cgroup("memory.max") or None,
-        "psi": pressure,
-        "anon": stat.get("anon"),
-        "file": stat.get("file"),
-        "oom": events.get("oom"),
-        "oom_kill": events.get("oom_kill"),
-    }
+def open_issues():
+    result = []
+    for page in range(1, 100):
+        batch = cli_json("board", "list", "--state", "open", "--page", page, "--json")
+        if not batch:
+            break
+        result.extend(batch)
+    return result
 
 running = cli_json("agent", "list", "--page", 1, "--limit", 500, "--running", "--json").get("agents", [])
 live = live_ids()
@@ -66,18 +42,16 @@ agents = [
     if str(a.get("id")) in live
 ]
 
-issues = cli_json("board", "list", "--state", "open", "--page", 1, "--json")
 issue_headers = [
     {
         "number": i.get("number"),
-        "title": (i.get("title") or "")[:120],
+        "title": (i.get("title") or "")[:160],
     }
-    for i in issues
+    for i in open_issues()
 ]
 
 print(json.dumps({
     "live_agents": agents,
     "open_issue_count": len(issue_headers),
     "open_issues": issue_headers,
-    "memory": memory_snapshot(),
 }, separators=(",", ":")))

@@ -9,44 +9,44 @@ const turn = read('../../../scripts/antonina-orchestrator-turn');
 const scheduler = read('../../../docs/skills/scheduler.md');
 const skill = read('../../../skills/antonina-scheduler/SKILL.md');
 
-test('scheduler is a single short OpenClaw scheduling lane', () => {
+test('scheduler is a single agentic OpenClaw scheduling lane', () => {
   assert.match(loop, /ANTONINA-SCHEDULER-TURN/);
   assert.doesNotMatch(loop, /orchestrator-refill/);
-  assert.match(turn, /timeout -k 10s 60s/);
+  assert.match(turn, /timeout -k 15s 240s/);
+  assert.match(turn, /--model opencode-go\/longcat-2\.5-preview-free/);
   assert.match(turn, /--variant low/);
   assert.doesNotMatch(turn, /--thinking/);
 });
 
-test('scheduler remains agentic rather than deterministic dispatch code', () => {
+test('scheduler optimizes only efficiency and topology', () => {
   assert.doesNotMatch(loop, /board list|board resource|agent run/);
   assert.doesNotMatch(turn, /antonina agent run|antonina board comment/);
-  assert.match(turn, /board resource list --issue ISSUE/);
-  assert.match(scheduler, /There is no global worker-count cap/);
-  assert.match(scheduler, /memory\.pressure/);
-  assert.match(scheduler, /reclaimable file cache/);
-  assert.match(scheduler, /fresh .*oom.*oom_kill.* increment/);
-  assert.match(scheduler, /launch a bounded reconnaissance agent/);
+  assert.match(scheduler, /Optimize only for \*\*efficiency and topology\*\*/);
+  assert.match(scheduler, /positive expected marginal wall-clock speedup/);
+  assert.match(scheduler, /Runtime capacity is completely outside your decision problem/);
+  assert.match(scheduler, /Never inspect, request, infer, estimate, discuss, or reason about runtime or host capacity/);
+  assert.match(scheduler, /A large number of live agents is never itself a reason to stop/);
+  assert.doesNotMatch(scheduler, /memory\.pressure|memory\.stat|memory\.events|reclaimable file cache|oom_kill|PSI/);
 });
 
-test('scheduler requires project breadth before issue depth', () => {
+test('scheduler expands breadth before costly depth because of topology', () => {
   const project = scheduler.indexOf('### 1. Project breadth');
   const issue = scheduler.indexOf('### 2. Issue breadth');
-  const depth = scheduler.indexOf('### 3. Intra-issue depth and project floors');
-  assert.ok(project >= 0 && issue > project && depth > issue);
-  assert.match(scheduler, /AssemblyP1 should maintain at least five useful agents/);
+  const depth = scheduler.indexOf('### 3. Intra-issue parallelism');
+  const stop = scheduler.indexOf('### 4. Marginal-speedup stop condition');
+  assert.ok(project >= 0 && issue > project && depth > issue && stop > depth);
+  assert.match(scheduler, /AssemblyP1 should ordinarily have at least five useful agents/);
   assert.match(scheduler, /CURRENT_SNAPSHOT\.live_agents/);
   assert.match(scheduler, /complete open-issue header list/);
-  assert.match(scheduler, /general board feed as an initial scheduling scan/);
   assert.match(scheduler, /Occupied cwd is a hard scheduling constraint/);
-  assert.match(scheduler, /Never invoke .*antonina agent run.*cwd that is already/);
-  assert.match(scheduler, /resolve the collision before launching anything else/i);
+  assert.match(scheduler, /Never invoke .*antonina agent run.*cwd owned by another genuinely live worker/);
 });
 
 test('installed scheduler skill stays in sync with canonical docs', () => {
   const frontmatter = [
     '---',
     'name: antonina-scheduler',
-    'description: Keep the Antonina agent mycelium broad, saturated, collision-free, and resource-aware by scheduling work from the canonical board.',
+    'description: Keep the Antonina agent mycelium efficient, topologically parallel, collision-free, and saturated with positive-speedup work from the canonical board.',
     '---',
     '',
     '',

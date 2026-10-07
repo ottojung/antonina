@@ -18,7 +18,7 @@ while :; do
     next_main=$((now + main_interval))
   fi
 
-  if [ "$now" -ge "$next_refill" ] && ! pgrep -f 'opencode-openclaw.*ANTONINA-FRONTIER-REFILL' >/dev/null 2>&1; then
+  if [ "$now" -ge "$next_refill" ]; then
     "$HOME/.local/bin/antonina-orchestrator-refill" >>"$state_dir/orchestrator-refill.log" 2>&1 </dev/null &
     next_refill=$((now + refill_interval))
   fi

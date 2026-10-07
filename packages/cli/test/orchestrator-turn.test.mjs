@@ -56,3 +56,10 @@ test('launcher delegates stale project-queue archaeology', () => {
   assert.match(turn, /STOP auditing that project's backlog yourself/);
   assert.match(turn, /launch a bounded project-reconnaissance owner/);
 });
+
+test('launcher treats worktree topology as an immediate dispatch gate', () => {
+  assert.match(turn, /REGISTERED-WORKTREE FAST PATH/);
+  assert.match(turn, /if that command returns \[\], reject this candidate immediately/);
+  assert.match(turn, /LAUNCH NOW/);
+  assert.match(turn, /before reading any other candidate/);
+});

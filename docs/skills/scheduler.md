@@ -154,6 +154,19 @@ Use Antonina's named-option grammar exactly. Never pass issue IDs as positional 
 
 Do not guess CLI syntax. A failed command due to grammar is scheduler overhead and should not consume the turn.
 
+## Registered-worktree fast path
+
+Registered worktree information is used only for topology/collision decisions.
+
+For the currently selected breadth candidate:
+
+- If `antonina board resource list --issue ISSUE --page 1 --json` returns an empty list, reject that candidate immediately as lacking a schedulable registered worktree. Do not search old comments for former paths, do not inspect the filesystem, and do not deliberate about reconstructing a cwd. Move immediately to the next candidate.
+- If the issue is not explicitly complete/human-blocked/dependency-blocked and the list contains at least one registered worktree not occupied by a live agent, launch immediately on one such worktree. Do not compare every historical worktree and do not inspect another issue first.
+- If the issue state is stale or decomposition is unclear but an unoccupied registered worktree exists, launch bounded reconnaissance there immediately.
+- Only inspect another candidate when the current one is explicitly non-actionable, collides on all registered worktrees, or has no registered worktree.
+
+This is a latency rule: worktree topology answers "can this front run independently?" It is not an invitation for branch archaeology.
+
 ## Worktree and collision discipline
 
 Occupied cwd is a hard scheduling constraint.

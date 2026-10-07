@@ -41,6 +41,9 @@ test('scheduler expands breadth before costly depth because of topology', () => 
   assert.match(scheduler, /### Stale-queue delegation/);
   assert.match(scheduler, /stop auditing more issues in that project yourself/);
   assert.match(scheduler, /project reconnaissance owner/);
+  assert.match(scheduler, /## Registered-worktree fast path/);
+  assert.match(scheduler, /reject that candidate immediately/);
+  assert.match(scheduler, /launch immediately on one such worktree/);
   assert.match(scheduler, /CURRENT_SNAPSHOT\.live_agents/);
   assert.match(scheduler, /complete open-issue header list/);
   assert.match(scheduler, /Occupied cwd is a hard scheduling constraint/);

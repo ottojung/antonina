@@ -5,10 +5,11 @@ import test from 'node:test';
 
 const turn = readFileSync(fileURLToPath(new URL('../../../scripts/antonina-orchestrator-turn', import.meta.url)), 'utf8');
 
-test('scheduled turn enforces cross-project breadth before depth', () => {
-  assert.match(turn, /MANDATORY SCHEDULING ORDER: project breadth before issue breadth before intra-issue depth/);
-  assert.match(turn, /any useful live agent is already represented/);
-  assert.match(turn, /DO NOT launch another new front in any represented project/);
-  assert.match(turn, /at most one new front per project/);
-  assert.match(turn, /worker floors are constraints, not monopolization licenses/);
+test('scheduled turn is a short OpenClaw scheduler pass', () => {
+  assert.match(turn, /ANTONINA-SCHEDULER-TURN/);
+  assert.match(turn, /timeout -k 10s 120s/);
+  assert.match(turn, /--variant low --thinking/);
+  assert.match(turn, /antonina-scheduler\/SKILL\.md/);
+  assert.match(turn, /project breadth, then issue breadth/);
+  assert.match(turn, /Do not implement project work yourself/);
 });

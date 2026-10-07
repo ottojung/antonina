@@ -6,27 +6,41 @@ import test from 'node:test';
 const read = (p) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), 'utf8');
 const loop = read('../../../scripts/antonina-orchestrator-loop');
 const turn = read('../../../scripts/antonina-orchestrator-turn');
-const refill = read('../../../scripts/antonina-orchestrator-refill');
+const scheduler = read('../../../docs/skills/scheduler.md');
+const skill = read('../../../skills/antonina-scheduler/SKILL.md');
 
-test('supervisor is non-blocking and runs an independent breadth refill lane', () => {
-  assert.match(loop, /antonina-orchestrator-turn.*&/s);
-  assert.match(loop, /antonina-orchestrator-refill.*&/s);
-  assert.match(loop, /ANTONINA-MAIN-TURN/);
-  assert.match(loop, /ANTONINA-FRONTIER-REFILL/);
-  assert.match(loop, /REFILL_INTERVAL_SECONDS:-30/);
+test('scheduler is a single short OpenClaw scheduling lane', () => {
+  assert.match(loop, /ANTONINA-SCHEDULER-TURN/);
+  assert.doesNotMatch(loop, /orchestrator-refill/);
+  assert.match(turn, /timeout -k 10s 120s/);
+  assert.match(turn, /--variant low --thinking/);
+  assert.match(turn, /antonina-scheduler\/SKILL\.md/);
 });
 
-test('slow main orchestration cannot monopolize dispatch for fifteen minutes', () => {
-  assert.match(turn, /timeout -k 15s 180s/);
-  assert.match(turn, /ANTONINA-MAIN-TURN/);
-  assert.match(turn, /Do not list \/workspace/);
+test('scheduler remains agentic rather than deterministic dispatch code', () => {
+  assert.doesNotMatch(loop, /board list|board resource|agent run/);
+  assert.doesNotMatch(turn, /python3|board list|board resource|agent run/);
+  assert.match(scheduler, /There is no global worker-count cap/);
+  assert.match(scheduler, /launch a bounded reconnaissance agent/);
 });
 
-test('refill lane is short, breadth-only, and excludes archaeology', () => {
-  assert.match(refill, /timeout -k 10s 120s/);
-  assert.match(refill, /ANTONINA-FRONTIER-REFILL/);
-  assert.match(refill, /NEVER add depth to a represented project/);
-  assert.match(refill, /at most one new front for each such project/);
-  assert.match(refill, /Do not list \/workspace/);
-  assert.match(refill, /inspect git history/);
+test('scheduler requires project breadth before issue depth', () => {
+  const project = scheduler.indexOf('### 1. Project breadth');
+  const issue = scheduler.indexOf('### 2. Issue breadth');
+  const depth = scheduler.indexOf('### 3. Intra-issue depth and project floors');
+  assert.ok(project >= 0 && issue > project && depth > issue);
+  assert.match(scheduler, /AssemblyP1 should maintain at least five useful agents/);
+  assert.match(scheduler, /stale Antonina record does not represent a project/);
+});
+
+test('installed scheduler skill stays in sync with canonical docs', () => {
+  const frontmatter = [
+    '---',
+    'name: antonina-scheduler',
+    'description: Keep the Antonina agent mycelium broad, saturated, collision-free, and resource-aware by scheduling work from the canonical board.',
+    '---',
+    '',
+    '',
+  ].join('\n');
+  assert.equal(skill, frontmatter + scheduler);
 });

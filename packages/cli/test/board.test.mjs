@@ -126,6 +126,24 @@ test('board show pages newest comments while retaining the issue description', a
   assert.deepEqual(thirdIssue.messages, []);
 });
 
+test('board comment returns a compact acknowledgement instead of replaying issue history', async () => {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  const initialized = await owner.initialize();
+  await owner.createIssue('Verbose issue', 'DESCRIPTION_MARKER');
+  await owner.comment(1, 'old-worker', 'OLD_HISTORY_MARKER');
+
+  const writer = client(server, { credential: initialized.credential });
+  const result = await run(['comment', '1', 'fresh update', '--author', 'worker'], {
+    createClient: () => writer,
+  });
+
+  assert.equal(result.code, 0, result.err.join('\n'));
+  assert.deepEqual(result.out, ['Commented on #1 as worker.']);
+  assert.equal(result.out.join('\n').includes('DESCRIPTION_MARKER'), false);
+  assert.equal(result.out.join('\n').includes('OLD_HISTORY_MARKER'), false);
+});
+
 test('board CLI requires author from flag or environment', async () => {
   const capture = memoryIo();
   const code = await runBoardCommand(['comment', '1', 'hello'], {

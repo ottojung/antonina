@@ -106,6 +106,11 @@ export interface BoardCommandContext {
   home?: string;
 }
 
+interface CommentAck {
+  number: number;
+  author: string;
+}
+
 type CommandValue =
   | BoardIssue
   | BoardIssue[]
@@ -126,6 +131,7 @@ type CommandValue =
   | CollectDeleteReportBase
   | BoardImportReport
   | BoardFeedPage
+  | CommentAck
   | number[]
   | null;
 
@@ -460,14 +466,9 @@ async function execute(
       if (authorOption.rest.length !== 2) throw new AntoninaApiError('comment requires NUMBER BODY');
       const author = authorOption.value ?? context.env[BOARD_AUTHOR_ENV];
       if (!author) throw new AntoninaApiError('Message author is required; use --author or ' + BOARD_AUTHOR_ENV);
-      return {
-        mode: 'issue',
-        value: await client.comment(
-          parsePositiveInteger(authorOption.rest[0], 'NUMBER'),
-          author,
-          requireArg(authorOption.rest[1], 'BODY'),
-        ),
-      };
+      const number = parsePositiveInteger(authorOption.rest[0], 'NUMBER');
+      await client.comment(number, author, requireArg(authorOption.rest[1], 'BODY'));
+      return { mode: 'comment', value: { number, author } };
     }
     case 'review': {
       const verdictOption = option(parsed.args, '--verdict');
@@ -1159,6 +1160,11 @@ function humanLines(result: CommandResult): string[] {
         + ' about ' + (review.commit === '' ? 'no named commit' : review.commit),
       '  ' + review.rationale,
     ];
+  }
+
+  if (result.mode === 'comment') {
+    const comment = result.value as CommentAck;
+    return ['Commented on #' + comment.number + ' as ' + comment.author + '.'];
   }
 
   const value = result.value;

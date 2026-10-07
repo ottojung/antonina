@@ -223,7 +223,7 @@ Every pass has a **frontier-first phase** before deep archaeology. Inspect the l
 
 For each orchestration pass:
 
-1. Harvest terminal agents and incorporate their durable results before deciding what is still open.
+1. Harvest terminal agents only when their result is not already incorporated by a newer board comment or current durable issue state. A terminal agent superseded by a newer coordination comment is archived evidence, not mandatory archaeology; do not read its log unless a current issue or unresolved handoff specifically depends on it.
 2. Sweep enough of the queue to discover independent actionable fronts instead of serializing unrelated work behind the first issue.
 3. For every distinct front, ask only whether topology permits useful independent execution now: is it unblocked, sufficiently understood, non-duplicative, and isolated from conflicting ownership/write surfaces? If yes, launch it.
 4. Ignore runtime capacity completely. Topology alone determines whether a front is launchable.

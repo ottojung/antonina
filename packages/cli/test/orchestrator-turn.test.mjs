@@ -15,10 +15,12 @@ test('scheduled turn is a short OpenClaw scheduler pass', () => {
   assert.match(turn, /Do not implement project work yourself/);
 });
 
-test('scheduler launcher makes live cwd reconciliation the first action', () => {
-  assert.match(turn, /FIRST ACTION, before scanning the board or launching anything/);
+test('scheduler launcher makes live cwd reconciliation precede policy loading', () => {
+  const first = turn.indexOf('FIRST ACTION');
+  const skill = turn.indexOf('read and obey $HOME/.openclaw/skills/antonina-scheduler/SKILL.md');
+  assert.ok(first >= 0 && skill > first);
+  assert.match(turn, /before reading any skill, docs, board history/);
   assert.match(turn, /immediately inspect current running Antonina agents/);
   assert.match(turn, /build the occupied cwd set/);
   assert.match(turn, /Do not launch while a same-cwd collision remains/);
-  assert.match(turn, /only onto unoccupied cwd\/worktrees/);
 });

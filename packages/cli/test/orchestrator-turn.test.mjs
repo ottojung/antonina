@@ -15,6 +15,9 @@ test('scheduled turn is a LongCat OpenClaw scheduler pass with a compact snapsho
   assert.match(turn, /CURRENT_SNAPSHOT/);
   assert.match(turn, /positive expected marginal wall-clock speedup/);
   assert.match(turn, /Do not implement project work yourself/);
+  assert.match(turn, /board show --id ISSUE --page 1 --json/);
+  assert.match(turn, /agent run --id AGENT_ID --cwd CWD --prompt PROMPT --detach --json/);
+  assert.match(turn, /Never call 'antonina board show ISSUE' positionally/);
 });
 
 test('launcher excludes runtime capacity from scheduling', () => {
@@ -31,4 +34,13 @@ test('launcher uses topology snapshot before broad discovery', () => {
   assert.match(turn, /MUST NOT finish without either launching at least one missing-project owner or recording a precise dependency\/topology\/collision blocker/);
   assert.match(turn, /NEVER use ls\/find\/globs over \/workspace/);
   assert.match(turn, /only onto unoccupied cwd\/worktrees/);
+});
+
+test('launcher carries exact Antonina named-option grammar', () => {
+  assert.match(turn, /board show --id ISSUE --page 1 --json/);
+  assert.match(turn, /board resource list --issue ISSUE --page 1 --json/);
+  assert.match(turn, /board comment --id ISSUE --body BODY --author openclaw@marceline-dev --json/);
+  assert.match(turn, /agent new --id AGENT_ID --cwd CWD --title TITLE --json/);
+  assert.match(turn, /agent run --id AGENT_ID --cwd CWD --prompt PROMPT --detach --json/);
+  assert.match(turn, /never pass issue IDs positionally/);
 });

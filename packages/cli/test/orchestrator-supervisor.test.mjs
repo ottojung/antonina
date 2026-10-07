@@ -20,7 +20,6 @@ test('scheduler is a single agentic OpenClaw scheduling lane', () => {
 
 test('scheduler optimizes only efficiency and topology', () => {
   assert.doesNotMatch(loop, /board list|board resource|agent run/);
-  assert.doesNotMatch(turn, /antonina agent run|antonina board comment/);
   assert.match(scheduler, /Optimize only for \*\*efficiency and topology\*\*/);
   assert.match(scheduler, /positive expected marginal wall-clock speedup/);
   assert.match(scheduler, /Runtime capacity is completely outside your decision problem/);
@@ -40,6 +39,8 @@ test('scheduler expands breadth before costly depth because of topology', () => 
   assert.match(scheduler, /complete open-issue header list/);
   assert.match(scheduler, /Occupied cwd is a hard scheduling constraint/);
   assert.match(scheduler, /Never invoke .*antonina agent run.*cwd owned by another genuinely live worker/);
+  assert.match(scheduler, /board show --id ISSUE --page 1 --json/);
+  assert.match(scheduler, /Never pass issue IDs as positional arguments/);
 });
 
 test('installed scheduler skill stays in sync with canonical docs', () => {

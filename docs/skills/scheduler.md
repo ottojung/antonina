@@ -111,6 +111,20 @@ Stop launching only when every remaining candidate has non-positive expected mar
 
 A large number of live agents is never itself a reason to stop.
 
+
+## Antonina hot-path command grammar
+
+Use Antonina's named-option grammar exactly. Never pass issue IDs as positional arguments.
+
+- Read an issue and newest comments: antonina board show --id ISSUE --page 1 --json
+- Read registered cwd/worktree topology: antonina board resource list --issue ISSUE --page 1 --json
+- Record a working claim or handoff: antonina board comment --id ISSUE --body BODY --author openclaw@marceline-dev --json
+- List live scheduler records: antonina agent list --page 1 --limit 500 --running --json
+- Create an agent: antonina agent new --id AGENT_ID --cwd CWD --title TITLE --json
+- Start it detached: antonina agent run --id AGENT_ID --cwd CWD --prompt PROMPT --detach --json
+
+Do not guess CLI syntax. A failed command due to grammar is scheduler overhead and should not consume the turn.
+
 ## Worktree and collision discipline
 
 Occupied cwd is a hard scheduling constraint.
@@ -119,7 +133,7 @@ At the start of every turn, and again immediately before a launch:
 
 1. Use `CURRENT_SNAPSHOT.live_agents` as the initial occupied cwd/worktree set.
 2. If the snapshot shows duplicate cwd ownership, re-check only the specific live processes involved and resolve the collision before launching anything else.
-3. For a chosen issue, read its body and newest comments with `antonina board show`.
+3. For a chosen issue, read its body and newest comments with antonina board show --id ISSUE --page 1 --json.
 4. Use `antonina board resource list --issue ISSUE --page 1 --json` only to discover registered worktree/path topology for that issue.
 5. Never use `ls`, `find`, or broad globs over `/workspace` to discover candidate cwds.
 6. Immediately before launch, verify the selected cwd is still unoccupied.

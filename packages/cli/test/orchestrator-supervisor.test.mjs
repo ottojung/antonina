@@ -8,14 +8,12 @@ const loop = read('../../../scripts/antonina-orchestrator-loop');
 const turn = read('../../../scripts/antonina-orchestrator-turn');
 const refill = read('../../../scripts/antonina-orchestrator-refill');
 
-test('supervisor is non-blocking and runs deterministic breadth refill independently', () => {
+test('supervisor is non-blocking and runs an independent breadth refill lane', () => {
   assert.match(loop, /antonina-orchestrator-turn.*&/s);
   assert.match(loop, /antonina-orchestrator-refill.*&/s);
+  assert.match(loop, /ANTONINA-MAIN-TURN/);
+  assert.match(loop, /ANTONINA-FRONTIER-REFILL/);
   assert.match(loop, /REFILL_INTERVAL_SECONDS:-30/);
-  assert.doesNotMatch(refill, /opencode-openclaw/);
-  assert.match(refill, /def queue_plan/);
-  assert.match(refill, /live_agent_ids/);
-  assert.match(refill, /resources_for_issue/);
 });
 
 test('slow main orchestration cannot monopolize dispatch for fifteen minutes', () => {
@@ -24,11 +22,11 @@ test('slow main orchestration cannot monopolize dispatch for fifteen minutes', (
   assert.match(turn, /Do not list \/workspace/);
 });
 
-test('deterministic refill launches only unrepresented projects from board state', () => {
-  assert.match(refill, /if project in seen/);
-  assert.match(refill, /seen = set\(represented\)/);
-  assert.match(refill, /board", "list", "--state", "open/);
-  assert.match(refill, /board", "resource", "list", "--issue"/);
-  assert.match(refill, /project has no live OpenCode agent process/);
-  assert.match(refill, /agent", "run"/);
+test('refill lane is short, breadth-only, and excludes archaeology', () => {
+  assert.match(refill, /timeout -k 10s 120s/);
+  assert.match(refill, /ANTONINA-FRONTIER-REFILL/);
+  assert.match(refill, /NEVER add depth to a represented project/);
+  assert.match(refill, /at most one new front for each such project/);
+  assert.match(refill, /Do not list \/workspace/);
+  assert.match(refill, /inspect git history/);
 });

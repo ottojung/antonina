@@ -124,16 +124,14 @@ def cleanup_duplicate_breadth(records):
         if not m:
             continue
         project = normalize_project(m.group(1))
-        issue = int(m.group(2))
-        groups.setdefault((project, issue), []).append(agent)
-    for (project, issue), agents in groups.items():
+        groups.setdefault(project, []).append(agent)
+    for project, agents in groups.items():
         agents.sort(key=lambda a: float(a.get("created_at") or 0))
         for duplicate in agents[1:]:
             run([ANTONINA, "agent", "stop", "--id", str(duplicate["id"])], check=False)
             print(json.dumps({
                 "stopped_duplicate": duplicate["id"],
                 "project": project,
-                "issue": issue,
                 "kept": agents[0]["id"],
             }, sort_keys=True), flush=True)
 

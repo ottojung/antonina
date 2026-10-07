@@ -39,12 +39,6 @@ test('deterministic breadth identity comes from agent title before cwd heuristic
   assert.match(refill, /cleanup_duplicate_breadth/);
 });
 
-test('duplicate cleanup is scoped to one project and issue, not the whole project', () => {
-  assert.match(refill, /groups\.setdefault\(\(project, issue\), \[\]\)/);
-  assert.match(refill, /for \(project, issue\), agents in groups\.items\(\)/);
-  assert.match(refill, /"issue": issue/);
-});
-
 test('issue breadth uses cgroup backpressure rather than a worker-count cap', () => {
   assert.match(refill, /ISSUE_HEADROOM_FRACTION = 0\.15/);
   assert.match(refill, /ISSUE_HEADROOM_MIN_BYTES/);

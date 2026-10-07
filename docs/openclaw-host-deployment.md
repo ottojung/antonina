@@ -8,7 +8,7 @@ The immediate goals are:
 
 - run OpenClaw on an Antonina-compatible host;
 - use the existing OpenCode installation as the coding-agent runtime;
-- constrain OpenCode to `opencode/muse-spark-1.3-contributor-free`;
+- constrain OpenCode to `opencode-go/longcat-2.5-preview-free`;
 - prove that OpenClaw can spawn and manage OpenCode work through ACP/ACPX;
 - later turn the successful procedure into a deterministic provisioning script.
 
@@ -83,7 +83,7 @@ The preferred integration path is:
 OpenClaw
   -> ACPX
   -> OpenCode ACP server
-  -> opencode/muse-spark-1.3-contributor-free
+  -> opencode-go/longcat-2.5-preview-free
 ```
 
 This is preferable to making Antonina own another long-running coding-agent process
@@ -100,7 +100,7 @@ The initially attempted direct `@openclaw/opencode-provider` route showed versio
 skew relative to the installed OpenClaw version, so ACPX plus the existing OpenCode
 executable is currently the more useful path.
 
-## Space Bunny model restriction
+## OpenClaw scheduler model restriction
 
 OpenCode already has working authentication on `marceline-dev`.
 
@@ -112,9 +112,9 @@ A dedicated OpenCode configuration is used for OpenClaw:
 
 Its intent is:
 
-- primary model: `opencode/muse-spark-1.3-contributor-free`;
-- small model: `opencode/muse-spark-1.3-contributor-free`;
-- the OpenCode provider whitelist contains only `muse-spark-1.3-contributor-free`.
+- primary model: `opencode-go/longcat-2.5-preview-free`;
+- small model: `opencode-go/longcat-2.5-preview-free`;
+- the OpenCode provider whitelist contains only `longcat-2.5-preview-free`.
 
 A dedicated wrapper is used:
 
@@ -125,6 +125,18 @@ A dedicated wrapper is used:
 It sets `OPENCODE_CONFIG` to that dedicated configuration before invoking the
 host's OpenCode executable.
 
+The dedicated configuration is versioned at:
+
+```text
+config/opencode-openclaw.json
+```
+
+On `marceline-dev`, the `opencode-go` provider route is intentionally used instead of
+the similarly named `opencode` route. A live control-plane latency probe on 2026-10-07
+returned a trivial LongCat response in about 5 seconds through `opencode-go`, while
+the `opencode` route repeatedly exceeded 35 seconds. This changes the provider path,
+not the scheduler model.
+
 The dedicated config and wrapper were made read-only as useful friction against
 accidental agent modification. This is **not** a strong security boundary while the
 agent runs as the same Unix user and has unrestricted filesystem/shell authority.
@@ -133,12 +145,12 @@ OpenClaw agent entries used for this experiment also have a model policy contain
 only:
 
 ```text
-opencode/muse-spark-1.3-contributor-free
+opencode-go/longcat-2.5-preview-free
 ```
 
 There are therefore two useful layers:
 
-1. OpenClaw policy admits only Space Bunny for the configured agent.
+1. OpenClaw policy admits only LongCat through the `opencode-go` provider for the configured agent.
 2. The OpenCode process launched by OpenClaw sees a dedicated config in which only
    Space Bunny is available.
 
@@ -162,7 +174,7 @@ The correct argument list for the installed OpenCode version is currently:
 An earlier experiment attempted:
 
 ```json
-["acp", "--model", "opencode/muse-spark-1.3-contributor-free"]
+["acp", "--model", "opencode-go/longcat-2.5-preview-free"]
 ```
 
 but the installed OpenCode ACP command does not accept `--model`. The model lock
@@ -187,7 +199,7 @@ OpenCode harness. Their important shape is:
     }
   },
   "modelPolicy": {
-    "allow": ["opencode/muse-spark-1.3-contributor-free"]
+    "allow": ["opencode-go/longcat-2.5-preview-free"]
   }
 }
 ```
@@ -439,7 +451,7 @@ openclaw models list --provider opencode
 ```
 
 returns no models, and an explicit embedded run using
-`opencode/muse-spark-1.3-contributor-free` fails as an unknown model.
+`opencode-go/longcat-2.5-preview-free` fails as an unknown model.
 
 This explains why the foreground Gateway's default heartbeat attempted the built-in
 OpenAI default even though the ACP agents were restricted to Space Bunny.
@@ -475,12 +487,12 @@ openclaw models list --refresh --provider opencode
 but the current direct OpenClaw/OpenCode catalog contains models such as
 `opencode/gpt-5.6-sol`, `opencode/claude-opus-5`, and
 `opencode/big-pickle`; it does **not** contain
-`opencode/muse-spark-1.3-contributor-free`.
+`opencode-go/longcat-2.5-preview-free`.
 
 By contrast, the dedicated OpenCode CLI configuration used by ACP reports exactly:
 
 ```text
-opencode/muse-spark-1.3-contributor-free
+opencode-go/longcat-2.5-preview-free
 ```
 
 This is an important architectural distinction:

@@ -9,6 +9,7 @@ test('scheduled turn is a short OpenClaw scheduler pass', () => {
   assert.match(turn, /ANTONINA-SCHEDULER-TURN/);
   assert.match(turn, /timeout -k 10s 75s/);
   assert.match(turn, /--variant low/);
+  assert.match(turn, /opencode-go\/longcat-2\.5-preview-free/);
   assert.doesNotMatch(turn, /--thinking/);
   assert.match(turn, /antonina-scheduler\/SKILL\.md/);
   assert.match(turn, /project breadth, then issue breadth/);

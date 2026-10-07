@@ -60,11 +60,15 @@ There is no global worker-count cap.
 
 Keep expanding the useful frontier while independent positive-value work exists and real machine resources make another worker reasonable.
 
-- Inspect cgroup memory state when the machine is heavily loaded.
-- Use recent OOM evidence and observed per-worker memory footprint when deciding whether another launch is safe.
-- Do not stop simply because the worker count is large.
-- Do not deliberately run the cgroup to essentially zero headroom; preserve enough margin for current workers and the scheduler to remain healthy.
-- When resource pressure is the only reason not to launch, leave the queue intact and let a future turn retry as workers finish.
+Judge **active pressure**, not the raw value of `memory.current` alone:
+
+- Read `memory.pressure`, `memory.stat`, and `memory.events` when resource state could affect a launch.
+- Distinguish anonymous/process working set from file cache. A high `memory.current` dominated by reclaimable file cache with zero PSI is not by itself a reason to leave the mycelium under-filled.
+- Treat rising PSI, a fresh `oom`/`oom_kill` increment, rapidly growing anonymous memory, or a worker spawning a large test/build fan-out as stronger evidence of real pressure.
+- When one worker's child-process fan-out is the pressure source, prefer steering/reconciling that front toward bounded validation rather than starving unrelated projects indefinitely.
+- Use observed live worker/build cost and current pressure to decide whether another launch is reasonable. Do not use a fixed global worker-count cap.
+- Preserve enough operational margin that the scheduler and existing workers can keep making progress; saturation means useful throughput, not repeatedly OOM-killing the frontier.
+- When active resource pressure is the only reason not to launch, leave ready work queued and retry on a later scheduler turn after pressure subsides.
 
 ## Claims and collisions
 

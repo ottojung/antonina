@@ -22,6 +22,9 @@ test('scheduler remains agentic rather than deterministic dispatch code', () => 
   assert.doesNotMatch(loop, /board list|board resource|agent run/);
   assert.doesNotMatch(turn, /python3|board list|board resource|agent run/);
   assert.match(scheduler, /There is no global worker-count cap/);
+  assert.match(scheduler, /memory\.pressure/);
+  assert.match(scheduler, /reclaimable file cache/);
+  assert.match(scheduler, /fresh .*oom.*oom_kill.* increment/);
   assert.match(scheduler, /launch a bounded reconnaissance agent/);
 });
 

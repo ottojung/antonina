@@ -58,6 +58,19 @@ Before launching:
 
 Do not spend the turn supervising healthy existing workers.
 
+### First-dispatch invariant
+
+When CURRENT_SNAPSHOT shows an obvious unrepresented project with open work, the first useful scheduling action of the turn must be a breadth dispatch, not a portfolio audit.
+
+1. Choose one promising issue from one unrepresented project directly from the snapshot headers.
+2. Read exactly that issue with antonina board show --id ISSUE --page 1 --json and inspect its registered worktree topology with antonina board resource list --issue ISSUE --page 1 --json.
+3. If the newest state explicitly proves the issue is complete, human-blocked, dependency-blocked, or collides with live ownership, move immediately to the next candidate.
+4. Otherwise launch a useful owner immediately. If the exact implementation decomposition is uncertain, launch a bounded reconnaissance owner rather than continuing scheduler-side investigation.
+5. Do not batch-read several candidate issues, build a comprehensive blocker map, or compare many possible projects before the first launch.
+6. After the first launch, continue breadth one unrepresented project at a time using the same launch-early rule.
+
+The scheduler's job is to create parallel progress, not to find the globally perfect first assignment. A good independent front launched now is better than a theoretically better front discovered after minutes of serial scheduler analysis.
+
 ### 1. Project breadth
 
 Scan the complete open-issue header list and identify actionable projects/repositories/workspaces that currently have no useful live owner.

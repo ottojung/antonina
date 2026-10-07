@@ -44,3 +44,9 @@ test('launcher carries exact Antonina named-option grammar', () => {
   assert.match(turn, /agent run --id AGENT_ID --cwd CWD --prompt PROMPT --detach --json/);
   assert.match(turn, /never pass issue IDs positionally/);
 });
+
+test('launcher enforces dispatch before portfolio audit', () => {
+  assert.match(turn, /FIRST-DISPATCH INVARIANT/);
+  assert.match(turn, /launch an owner or bounded reconnaissance agent BEFORE reading another project's candidate/);
+  assert.match(turn, /Do not batch-audit candidate issues or build a comprehensive blocker map before the first launch/);
+});

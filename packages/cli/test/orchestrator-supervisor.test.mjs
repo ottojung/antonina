@@ -35,6 +35,9 @@ test('scheduler expands breadth before costly depth because of topology', () => 
   const stop = scheduler.indexOf('### 4. Marginal-speedup stop condition');
   assert.ok(project >= 0 && issue > project && depth > issue && stop > depth);
   assert.match(scheduler, /AssemblyP1 should ordinarily have at least five useful agents/);
+  assert.match(scheduler, /### First-dispatch invariant/);
+  assert.match(scheduler, /Do not batch-read several candidate issues/);
+  assert.match(scheduler, /A good independent front launched now is better/);
   assert.match(scheduler, /CURRENT_SNAPSHOT\.live_agents/);
   assert.match(scheduler, /complete open-issue header list/);
   assert.match(scheduler, /Occupied cwd is a hard scheduling constraint/);

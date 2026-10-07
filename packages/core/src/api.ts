@@ -508,16 +508,25 @@ export class BoardApi {
   }
 
   /**
-   * One bounded page of an issue's conversation: the issue's core fields with
-   * its `messages` empty, plus the 50 messages of the requested page and the
-   * whole thread's total count and page count.
+   * One bounded page of an issue's conversation, newest-first.
+   *
+   * Page 1 holds the MOST RECENT comments and higher page numbers walk backward
+   * into older history, so a reader who opens an issue sees its current state
+   * without having to page. This is the same page `getIssuePage` returns for
+   * the same number: board issue 206 exists because these two reads used to
+   * disagree, one counting from the oldest comment and one from the newest, so
+   * the CLI and the web rendered the same thread in opposite page order.
+   *
+   * Order inside a page is chronological and deterministic: it is storage
+   * position, which is unique per comment, so two comments sharing a timestamp
+   * are still ordered rather than left to an unstable tie-break.
    *
    * This exists beside `getIssue` and does not replace it. `getIssue` is the
    * whole issue — every message — and its callers (the CLI's issue view,
    * `listIssues`) ask for that. A client paging through a conversation does not,
    * and reassembling a 5,000-message thread to draw 50 of them is the cost this
-   * read removes: it fetches the issue's own shard and at most the one comment
-   * shard holding the page, and a page past the end fetches none at all.
+   * read removes: it fetches the issue's own shard and at most the two comment
+   * shards the window straddles, and a page past the end fetches none at all.
    */
   async getIssueCommentPage(number: number, page: number): Promise<IssueCommentPage> {
     const credential = await this.fastReadCredential();

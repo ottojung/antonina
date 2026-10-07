@@ -17,6 +17,8 @@ import type { BoardAccessState, BoardOverview, IssueCommentPage } from '../../pa
 import { newestCommentAt } from '../../packages/core/src/api';
 import type { BrowserBoardSession } from './api';
 import {
+  COMMENT_PAGE_NEWER,
+  COMMENT_PAGE_OLDER,
   COMMENT_PAGE_SIZE,
   clampCommentPage,
   commentPageCount,
@@ -89,12 +91,21 @@ function overview(): BoardOverview {
  * records the request. A stub that could return the whole thread would make
  * every assertion below pass, so the fan-out is asserted on the requests this
  * one saw, the way the store test counts shard reads.
+ *
+ * The window is cut from the NEWEST end, which is what the store does:
+ * `readNewestFirstCommentPage` in packages/core. This stub mirrors that
+ * arithmetic deliberately rather than slicing from the front, because a stub
+ * that disagreed with the store about which end page 1 is would make every
+ * ordering assertion below pass for the wrong reason. Board issue 206: the
+ * browser and the CLI have to answer "what is on page 1" identically.
  */
 function readPage(number: number, page: number): IssueCommentPage {
   askedPages.push([number, page]);
   const found = board.find((each) => each.number === number);
   if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
   const total = found.messages.length;
+  const end = Math.max(0, total - (page - 1) * COMMENT_PAGE_SIZE);
+  const start = Math.max(0, end - COMMENT_PAGE_SIZE);
   return {
     schemaVersion: 2,
     boardId: 'board-1',
@@ -102,7 +113,7 @@ function readPage(number: number, page: number): IssueCommentPage {
     page,
     pageCount: commentPageCount(total),
     total,
-    messages: found.messages.slice((page - 1) * COMMENT_PAGE_SIZE, page * COMMENT_PAGE_SIZE),
+    messages: found.messages.slice(start, end),
   };
 }
 
@@ -173,12 +184,19 @@ function positionText(container: HTMLElement): string {
   return container.querySelector('.comment-page-position')?.textContent ?? '';
 }
 
+/**
+ * The two ways out of a page of a conversation.
+ *
+ * Board issue 206: these are named for which END of the conversation they reach,
+ * because page 1 is the newest window. The page numbers they move to are the
+ * list's own arithmetic and are unchanged; only the words differ.
+ */
 function nextButton(): HTMLButtonElement {
-  return screen.getByRole('button', { name: 'Next page' });
+  return screen.getByRole('button', { name: COMMENT_PAGE_OLDER });
 }
 
 function previousButton(): HTMLButtonElement {
-  return screen.getByRole('button', { name: 'Previous page' });
+  return screen.getByRole('button', { name: COMMENT_PAGE_NEWER });
 }
 
 beforeEach(() => {
@@ -210,9 +228,18 @@ describe('issue conversation pagination state', () => {
     expect(clampCommentPage(9, 120)).toBe(3);
     expect(clampCommentPage(0, 120)).toBe(1);
     expect(clampCommentPage(2, 0)).toBe(1);
-    expect(commentPageRange(120, 2)).toBe('51–100 of 120');
-    expect(commentPageRange(120, 3)).toBe('101–120 of 120');
+    // Board issue 206: the RANGE is the one thing that is not the list's. Page 1
+    // of a 120-comment thread is the newest window, so it covers comments 71–120,
+    // and the line has to say so rather than reporting the window nobody is
+    // looking at. The count, the clamp and the "is there another page" question
+    // are still the list's own, because none of those depend on direction.
+    expect(commentPageRange(120, 1)).toBe('71–120 of 120');
+    expect(commentPageRange(120, 2)).toBe('21–70 of 120');
+    expect(commentPageRange(120, 3)).toBe('1–20 of 120');
     expect(commentPageRange(0, 1)).toBe('No issues');
+    // A thread that fits on one page reports the whole thread whichever end the
+    // pages are numbered from.
+    expect(commentPageRange(50, 1)).toBe('1–50 of 50');
   });
 
   it('names the conversation page in the address, separately from the list page', () => {
@@ -223,12 +250,18 @@ describe('issue conversation pagination state', () => {
 });
 
 describe('the conversation renders one page at a time', () => {
-  it('draws 50 messages of a 120-message thread, not all 120', async () => {
+  it('draws the 50 MOST RECENT messages of a 120-message thread, not all 120', async () => {
     const container = await mountAtIssue(2);
     const drawn = drawnMessages(container);
     expect(drawn).toHaveLength(50);
-    expect(drawn[0]).toBe('message 1');
-    expect(drawn[49]).toBe('message 50');
+    // Board issue 206: this is the assertion the 21:00Z orchestrator pass could
+    // not have made. Opening an issue has to show the END of its conversation,
+    // so a reader who reads one page has seen the current state. Under
+    // oldest-first numbering this page began at 'message 1' and a reader took it
+    // for the whole story.
+    expect(drawn.at(-1)).toBe('message 120');
+    expect(drawn[0]).toBe('message 71');
+    expect(drawn).not.toContain('message 1');
     expect(drawn).not.toContain('message 51');
   });
 
@@ -242,22 +275,27 @@ describe('the conversation renders one page at a time', () => {
     expect(askedPages.every(([, page]) => page === 1)).toBe(true);
   });
 
-  it('pages forward and back, reading the page it is asked for', async () => {
+  it('pages backward into older history, reading the page it is asked for', async () => {
     const container = await mountAtIssue(2);
     await waitFor(() => expect(positionText(container)).not.toBe(''));
 
+    // Board issue 206: "Older" increments the page number, because a higher page
+    // number reaches further back into the thread. The page numbers the buttons
+    // move to are the list's own arithmetic and are unchanged by the direction.
     await act(async () => { fireEvent.click(nextButton()); });
-    await waitFor(() => expect(drawnMessages(container)[0]).toBe('message 51'));
+    await waitFor(() => expect(drawnMessages(container)[0]).toBe('message 21'));
     expect(drawnMessages(container)).toHaveLength(50);
     expect(positionText(container)).toContain('Page 2 of 3');
-    expect(positionText(container)).toContain('51–100 of 120');
+    expect(positionText(container)).toContain('21–70 of 120');
     expect(window.location.search).toContain('thread=2');
 
     await act(async () => { fireEvent.click(nextButton()); });
     await waitFor(() => expect(drawnMessages(container)).toHaveLength(20));
-    expect(drawnMessages(container)[0]).toBe('message 101');
+    expect(drawnMessages(container)[0]).toBe('message 1');
     expect(positionText(container)).toContain('Page 3 of 3');
     expect((nextButton() as HTMLButtonElement).disabled).toBe(true);
+    // There is nothing newer than page 1, so the other control is disabled there.
+    expect((previousButton() as HTMLButtonElement).disabled).toBe(false);
 
     await act(async () => { fireEvent.click(previousButton()); });
     await waitFor(() => expect(positionText(container)).toContain('Page 2 of 3'));
@@ -266,23 +304,32 @@ describe('the conversation renders one page at a time', () => {
     expect(askedPages).toContainEqual([2, 3]);
   });
 
-  it('keeps the message order stable across pages', async () => {
+  it('keeps the message order stable across pages, newest window first', async () => {
     const container = await mountAtIssue(2);
     await waitFor(() => expect(positionText(container)).not.toBe(''));
-    const paged: string[] = [];
-    paged.push(...drawnMessages(container));
+    const pages: string[][] = [drawnMessages(container)];
     for (let page = 2; page <= 3; page += 1) {
       await act(async () => { fireEvent.click(nextButton()); });
       await waitFor(() => expect(positionText(container)).toContain(`Page ${page} of 3`));
-      paged.push(...drawnMessages(container));
+      pages.push(drawnMessages(container));
     }
-    expect(paged).toEqual(messages(120).map((each) => each.body));
+
+    // Within a page the order is chronological, so reversing the PAGE sequence
+    // reproduces the whole thread. Reversing the flat concatenation would not, and
+    // asserting that instead would be asserting an unstable tie-break.
+    expect(pages.slice().reverse().flat()).toEqual(messages(120).map((each) => each.body));
+    // And the pages partition the thread: nothing lost, nothing drawn twice.
+    expect(new Set(pages.flat()).size).toBe(120);
   });
 
   it('opens the page the address names', async () => {
+    // A deep link keeps meaning the same thing it meant before the direction
+    // changed, because a page number still selects the same WINDOW -- the windows
+    // are just enumerated from the other end. `thread=3` is the oldest page of a
+    // 120-comment thread either way.
     const container = await mountAtIssue(2, '&thread=3');
     await waitFor(() => expect(positionText(container)).toContain('Page 3 of 3'));
-    expect(drawnMessages(container)[0]).toBe('message 101');
+    expect(drawnMessages(container)[0]).toBe('message 1');
     expect(askedPages).toContainEqual([2, 3]);
   });
 
@@ -292,7 +339,7 @@ describe('the conversation renders one page at a time', () => {
     // leaving a link that no longer opens what it says.
     const container = await mountAtIssue(2, '&thread=9');
     await waitFor(() => expect(positionText(container)).toContain('Page 3 of 3'));
-    expect(drawnMessages(container)[0]).toBe('message 101');
+    expect(drawnMessages(container)[0]).toBe('message 1');
     expect(parseBoardUrl(window.location.search).commentPage).toBe(3);
     expect(askedPages).toContainEqual([2, 3]);
   });
@@ -312,18 +359,29 @@ describe('the conversation renders one page at a time', () => {
   });
 
   it('lands a new comment on the page it was appended to', async () => {
-    const container = await mountAtIssue(2);
-    await waitFor(() => expect(positionText(container)).not.toBe(''));
+    // Start on an OLDER page, so "the post went to page 1" is not satisfied
+    // vacuously by the reader happening to be there already.
+    const container = await mountAtIssue(2, '&thread=3');
+    await waitFor(() => expect(positionText(container)).toContain('Page 3 of 3'));
+    expect(drawnMessages(container)[0]).toBe('message 1');
     // The composer is reachable because the stub grants write access and a name.
     const composer = container.querySelector('.composer-area textarea') as HTMLTextAreaElement;
     expect(composer).not.toBeNull();
     fireEvent.change(composer, { target: { value: 'the newest comment' } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Post/ })); });
 
-    // A comment is appended to the end of the thread, so the reader is taken to
-    // the page it is on: page 3 of a 121-message thread.
-    await waitFor(() => expect(positionText(container)).toContain('Page 3 of 3'));
-    expect(drawnMessages(container)).toHaveLength(21);
-    expect(parseBoardUrl(window.location.search).commentPage).toBe(3);
+    // Board issue 206: a comment is appended to the newest end and page 1 is the
+    // newest window, so the reader is taken THERE -- page 1 of a 121-message
+    // thread -- and sees their own post. Under oldest-first numbering this jumped
+    // to the last page, which is the same swallowed-post bug pointing the other
+    // way.
+    await waitFor(() => expect(positionText(container)).toContain('Page 1 of 3'));
+    expect(drawnMessages(container)).toHaveLength(50);
+    // The stub appends the 121st message to the board's copy of the thread; what
+    // matters is that the comment written AFTER the reader arrived is on the page
+    // they are now looking at.
+    expect(drawnMessages(container).at(-1)).toBe('message 121');
+    expect(positionText(container)).toContain('72–121 of 121');
+    expect(parseBoardUrl(window.location.search).commentPage).toBe(1);
   });
 });

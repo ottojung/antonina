@@ -519,9 +519,26 @@ export function clampCommentPage(page: number, total: number, pageSize = COMMENT
   return clampIssuePage(page, total, pageSize);
 }
 
-/** Which comments are on screen out of how many the thread holds. */
+/**
+ * Which comments are on screen out of how many the thread holds.
+ *
+ * Board issue 206: this is the one place in the browser where a conversation's
+ * numbers are NOT `issuePageRange`. The count, the clamp and the "is there more
+ * than one page" question are still the list's own helpers, because those do not
+ * depend on direction. The RANGE does: page 1 is the newest window, so it covers
+ * the last `pageSize` comments rather than the first, and the reported range has
+ * to say so. Delegating to `issuePageRange` here would label page 1 of a
+ * 120-comment thread "1–50 of 120" while the reader was looking at comments
+ * 71–120 — the position line would name a window nobody is looking at.
+ */
 export function commentPageRange(total: number, page: number, pageSize = COMMENT_PAGE_SIZE): string {
-  return issuePageRange(total, page, pageSize);
+  // The empty case is not direction-dependent, so it stays the list's own
+  // wording rather than being restated here.
+  if (total <= 0) return issuePageRange(total, page, pageSize);
+  const index = clampCommentPage(page, total, pageSize);
+  const end = Math.max(0, total - (index - 1) * pageSize);
+  const start = Math.max(0, end - pageSize);
+  return `${start + 1}–${end} of ${total}`;
 }
 
 /** Whether the conversation is long enough to be worth paging at all. */
@@ -529,13 +546,47 @@ export function hasCommentPages(total: number, pageSize = COMMENT_PAGE_SIZE): bo
   return hasIssuePages(total, pageSize);
 }
 
-/** The page after a post, which is where a newly written comment lands. */
+/**
+ * How many pages a thread of `total` comments occupies — its last page.
+ *
+ * Board issue 206 changed what this is FOR. It used to be the page a freshly
+ * posted comment lands on, because page 1 was the oldest window and a new comment
+ * went to the end of the thread. Page 1 is now the NEWEST window, so a new
+ * comment lands there and the reader must be taken to page 1, not to the last
+ * page. The function is kept because "how many pages does this thread have" is
+ * still a real question the position line and the pagination control both ask,
+ * but `FIRST_COMMENT_PAGE` is what a post now navigates to.
+ */
 export function lastCommentPage(total: number, pageSize = COMMENT_PAGE_SIZE): number {
   return commentPageCount(total, pageSize);
 }
 
+/**
+ * The page a freshly posted comment is on: page 1, because page 1 is the newest
+ * window on the thread.
+ *
+ * This is the reader-facing half of board issue 206. A reader who posts a
+ * comment is taken to the page it is actually on, so the post is visible instead
+ * of apparently swallowed. Sending them to the last page instead would put a
+ * freshly written comment on a screen they cannot see, which is the same class
+ * of bug as the one this change removes, in the other direction.
+ */
+export const FIRST_COMMENT_PAGE = 1;
+
 /** What a conversation's Previous/Next control announces itself as paging. */
 export const COMMENT_PAGES_LABEL = 'Issue conversation pages';
+
+/**
+ * The two ways out of a page of an issue's conversation.
+ *
+ * Board issue 206: these are not "Previous page" and "Next page" because page 1
+ * of a conversation is now the NEWEST window. They say which END of the
+ * conversation they reach, which is the thing a reader of a conversation is
+ * actually navigating by. The page numbers they move to are unchanged — these
+ * name the same arithmetic the list uses, in words that stay true of it.
+ */
+export const COMMENT_PAGE_NEWER = 'Newer comments';
+export const COMMENT_PAGE_OLDER = 'Older comments';
 
 /**
  * Moves one queued issue to another slot, returning the whole reordered queue.

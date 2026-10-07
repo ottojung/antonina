@@ -3,7 +3,7 @@ import { createBrowserBoardApi, targetViews, type BoardFeedEntry, type BoardFeed
 import { resourceState, type BoardIssue, type BoardResource } from './model';
 import { BOARD_VIEWS, DEFAULT_BOARD_URL_STATE, DEFAULT_COMMENT_PAGE, DEFAULT_ISSUE_PAGE, ISSUE_FILTERS, boardHomeState, boardHref, boardUrlFor, issueHref, issueUrlState, parseBoardUrl, tabHref, writeBoardUrl, type BoardUrlState, type BoardView, DEFAULT_RESOURCE_PAGE } from './board-url';
 import { TARGETS_EMPTY, TARGETS_HINT, TARGET_ACCESS_LABEL, TARGET_CLEANUP_LABEL, TARGET_KIND_LABEL, TARGET_PERSISTENCE_LABEL, TARGET_STATUS_LABEL, targetCatalogRows } from './targets';
-import { clampCommentPage, clampIssuePage, COMMENT_PAGE_SIZE, COMMENT_PAGES_LABEL, commentPageRange, hasCommentPages, lastCommentPage, ISSUE_PAGE_NEXT, ISSUE_PAGE_PREVIOUS, ISSUE_PAGE_SIZE, hasIssuePages, issuePage, issuePageCount, issuePageRange, COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, ISSUE_LIST_PAGES_LABEL, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, overviewLoaded, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, readFeedPage, clampFeedPage, feedPageNextCursor, feedPageEntries, feedPageTotal, hasFeedPages, feedPageRange, FEED_LIST_PAGES_LABEL, FEED_PAGE_PREVIOUS, FEED_PAGE_NEXT, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type BoardSummary, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess, clampResourcePage, RESOURCE_LIST_PAGES_LABEL, RESOURCE_PAGE_SIZE, resourcePage } from './ui-state';
+import { clampCommentPage, clampIssuePage, COMMENT_PAGE_SIZE, COMMENT_PAGES_LABEL, commentPageRange, hasCommentPages, lastCommentPage, FIRST_COMMENT_PAGE, ISSUE_PAGE_NEXT, ISSUE_PAGE_PREVIOUS, COMMENT_PAGE_NEWER, COMMENT_PAGE_OLDER, ISSUE_PAGE_SIZE, hasIssuePages, issuePage, issuePageCount, issuePageRange, COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, ISSUE_LIST_PAGES_LABEL, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_MORE_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, overviewLoaded, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedFirstPage, readFeedPage, clampFeedPage, feedPageNextCursor, feedPageEntries, feedPageTotal, hasFeedPages, feedPageRange, FEED_LIST_PAGES_LABEL, FEED_PAGE_PREVIOUS, FEED_PAGE_NEXT, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type BoardSummary, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess, clampResourcePage, RESOURCE_LIST_PAGES_LABEL, RESOURCE_PAGE_SIZE, resourcePage } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
@@ -296,12 +296,13 @@ export default function App() {
     const result = await run(() => api.comment(selected.issue.number, displayName, body), 'Message posted');
     if (!result) return;
     form.reset();
-    // A comment is appended to the end of the thread, so it lands on the page
-    // after the last one the reader could see. Following it there is what makes
-    // a post visible instead of apparently swallowed: a reader on page 1 of a
-    // three-page thread moves to the page the comment is actually on, and a
-    // reader whose post stayed on the current page does not move at all.
-    setCommentPageIndex(lastCommentPage(selected.total + 1));
+    // A comment is appended to the newest end of the thread, and page 1 IS the
+    // newest window (board issue 206), so a post lands on page 1 and following it
+    // there is what makes it visible instead of apparently swallowed. This used
+    // to walk to the LAST page, because page 1 was then the oldest window; leaving
+    // that in place would drop the reader on the oldest comments immediately
+    // after they wrote a new one.
+    setCommentPageIndex(FIRST_COMMENT_PAGE);
   }
   // Opening an issue is `issueUrlState`, the same transition the hrefs already
   // advertise, so a click and a copied link both land on that issue's first
@@ -665,7 +666,7 @@ function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSel
  * paging announces the new range instead of silently swapping the rows under the
  * reader.
  */
-export function IssuePagination({ total, page, pageSize = ISSUE_PAGE_SIZE, onPage, label = ISSUE_LIST_PAGES_LABEL }: {
+export function IssuePagination({ total, page, pageSize = ISSUE_PAGE_SIZE, onPage, label = ISSUE_LIST_PAGES_LABEL, range, newestFirst = false }: {
   total: number;
   page: number;
   pageSize?: number;
@@ -677,14 +678,44 @@ export function IssuePagination({ total, page, pageSize = ISSUE_PAGE_SIZE, onPag
    * the list.
    */
   label?: string;
+  /**
+   * The position line, when this run of pages numbers itself differently from
+   * the Issues list.
+   *
+   * Board issue 206: a conversation's page 1 is the NEWEST window, so its
+   * position line cannot be `issuePageRange`, which would report page 1 of a
+   * 120-comment thread as "1–50 of 120" while the reader was looking at comments
+   * 71–120. The list's own line stays the default, so nothing else changes.
+   */
+  range?: (total: number, page: number, pageSize: number) => string;
+  /**
+   * Whether page 1 is the newest window rather than the oldest, which is true of
+   * an issue's conversation and false of the Issues list and Resources.
+   *
+   * This changes what the two controls MEAN and nothing about which page numbers
+   * they reach: `page - 1` is still the lower page number and `page + 1` still the
+   * higher one, so the address arithmetic is untouched. What it changes is that
+   * for a conversation the lower page number is the NEWER one, so "Previous" and
+   * "Next" would otherwise walk a reader backwards through time while claiming
+   * to walk forwards. The controls are relabelled to say which end of the
+   * conversation they reach.
+   */
+  newestFirst?: boolean;
 }) {
   if (!hasIssuePages(total, pageSize)) return null;
   const index = clampIssuePage(page, total, pageSize);
   const pages = issuePageCount(total, pageSize);
+  const position = range ?? issuePageRange;
+  // Under newest-first numbering, decrementing the page number moves toward the
+  // NEWEST comments and incrementing it moves toward the OLDEST. The words on the
+  // buttons follow the comments rather than the arithmetic, so the labels cannot
+  // contradict what the buttons do.
+  const previousLabel = newestFirst ? COMMENT_PAGE_NEWER : ISSUE_PAGE_PREVIOUS;
+  const nextLabel = newestFirst ? COMMENT_PAGE_OLDER : ISSUE_PAGE_NEXT;
   return <nav className="issue-pagination" aria-label={label}>
-    <button type="button" className="quiet" aria-label={ISSUE_PAGE_PREVIOUS} disabled={index <= 1} onClick={() => onPage(index - 1)}>Previous</button>
-    <p className="issue-page-range" role="status">{issuePageRange(total, index, pageSize)}</p>
-    <button type="button" className="quiet" aria-label={ISSUE_PAGE_NEXT} disabled={index >= pages} onClick={() => onPage(index + 1)}>Next</button>
+    <button type="button" className="quiet" aria-label={previousLabel} disabled={index <= 1} onClick={() => onPage(index - 1)}>{newestFirst ? 'Newer' : 'Previous'}</button>
+    <p className="issue-page-range" role="status">{position(total, index, pageSize)}</p>
+    <button type="button" className="quiet" aria-label={nextLabel} disabled={index >= pages} onClick={() => onPage(index + 1)}>{newestFirst ? 'Older' : 'Next'}</button>
   </nav>;
 }
 
@@ -1059,7 +1090,14 @@ function Thread({ conversation, page, onPage, access, displayName, setDisplayNam
         page it is out of how many and offers the two ways out of it. Both
         controls are the Issues list's own pagination helpers applied to the
         thread's total, so a thread of one page is never given dead controls and a
-        thread of three pages offers exactly two. */}
+        thread of three pages offers exactly two.
+
+        Board issue 206: the conversation draws the page newest-first, so the
+        messages are in the order the store returned them -- page 1 holds the most
+        recent comments and the page sequence walks backward into older history.
+        The control is told `newestFirst` so its two buttons say which end of the
+        conversation they reach, and it is given the conversation's own range
+        function so the position line names the window actually on screen. */}
     <section className="messages" aria-label="Issue conversation"><h2>Conversation</h2>{messages.length ? messages.map((message) => <article className="message" key={message.id}><div className="message-meta"><span className="avatar" aria-hidden="true">{message.author.slice(0, 1).toUpperCase()}</span><div><strong>{message.author}</strong><time dateTime={message.createdAt}>{date.format(new Date(message.createdAt))}</time></div></div><p>{message.body}</p></article>) : total === 0
         // "No conversation yet" is a claim about the whole thread, so it is only
         // ever made when the thread really is empty. A page that holds no
@@ -1071,7 +1109,7 @@ function Thread({ conversation, page, onPage, access, displayName, setDisplayNam
       {/* The list's own control, not a second implementation of it: it takes the
           thread's total and the conversation's page size, and it renders nothing
           at all for a thread short enough to need no paging. */}
-      <IssuePagination total={total} page={page} pageSize={COMMENT_PAGE_SIZE} onPage={onPage} label={COMMENT_PAGES_LABEL} />
+      <IssuePagination total={total} page={page} pageSize={COMMENT_PAGE_SIZE} onPage={onPage} label={COMMENT_PAGES_LABEL} range={commentPageRange} newestFirst />
     </section>
     <div className="composer-area">{access !== 'editable' ? <AccessNotice access={access} readOnly={COMPOSER_READ_ONLY_CALLOUT} className="composer-access" onAction={openSettings} /> : !displayName.trim() ? <form className="name-prompt" onSubmit={saveDisplayName}><label htmlFor="composer-name">Before you post, tell everyone who you are</label><div><input id="composer-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} required /><button type="submit">Save name</button></div></form> : <CommentComposer displayName={displayName} comment={comment} />}</div>
   </article>;

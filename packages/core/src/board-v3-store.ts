@@ -3648,23 +3648,45 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
   }
 
   /**
-   * Read one logical issue page newest-first without hydrating the entire
-   * append-only comment history. Storage comment shards are oldest-first, so a
-   * logical page can straddle two physical shards.
+   * The one newest-first comment window, for every caller that pages a thread.
+   *
+   * Board issue 206. This arithmetic used to exist only inside `getIssuePage`,
+   * which meant the CLI's `board show` walked backward from the newest comment
+   * while `readIssueCommentPage` -- the read behind the web conversation --
+   * walked forward from the oldest. The same issue therefore read one way in a
+   * terminal and the opposite way in a browser, and a reader who took page 1 to
+   * mean "the current state" got the beginning of a long history instead of its
+   * end. That is not a rendering bug, it is two readers disagreeing about what a
+   * page number means, so the fix is one shared function rather than a second
+   * correct copy: there is now exactly one place that decides which comments a
+   * page holds.
+   *
+   * The window is cut from the newest end. Storage comment shards are oldest-first
+   * and are filled from the oldest end, so a logical page can straddle two
+   * physical shards -- at most two, and never the whole thread, which is the cost
+   * a paged read exists to avoid.
+   *
+   * Order WITHIN the window is storage order, left ascending. That is a total
+   * order and not a sort: `canonicalTimestampAtOrAfter` floors each appended
+   * timestamp at the board's own, so append order is nondecreasing in time and
+   * every position is distinct. Two comments may share a `createdAt` exactly,
+   * and this still orders them, because their positions differ. Deriving the
+   * order from `createdAt` instead would leave every such pair tied and hand the
+   * tie to whatever the surrounding code happened to do.
+   *
+   * Returns `[]` for a page at or past the end of the thread, which the
+   * snapshot's own `messageCount` already establishes without touching a shard.
    */
-  async getIssuePage(
-    credentialValue: BoardCredential,
+  private async readNewestFirstCommentPage(
+    credential: BoardCredential,
+    meta: ShardedBoardMeta,
     number: number,
+    snapshot: IssueSnapshot,
     page: number,
-  ): Promise<BoardIssue | null> {
-    const { credential, meta } = await this.requirePointerForCredential(credentialValue);
-    const resolved = await this.readIssueSnapshotByNumber(credential, meta, number, false);
-    if (resolved === null) return null;
-
-    const { snapshot, issue } = resolved;
+  ): Promise<BoardMessage[]> {
     const end = Math.max(0, snapshot.messageCount - (page - 1) * V3_COMMENT_PAGE_SIZE);
     const start = Math.max(0, end - V3_COMMENT_PAGE_SIZE);
-    if (start >= end) return issue;
+    if (start >= end) return [];
 
     const firstPhysicalIndex = Math.floor(start / V3_COMMENT_PAGE_SIZE);
     const lastPhysicalIndex = Math.floor((end - 1) / V3_COMMENT_PAGE_SIZE);
@@ -3680,30 +3702,60 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         )),
     );
     const physicalStart = firstPhysicalIndex * V3_COMMENT_PAGE_SIZE;
-    const messages = physicalPages.flat().slice(start - physicalStart, end - physicalStart);
+    return physicalPages.flat().slice(start - physicalStart, end - physicalStart);
+  }
+
+  /**
+   * Read one logical issue page newest-first without hydrating the entire
+   * append-only comment history. Storage comment shards are oldest-first, so a
+   * logical page can straddle two physical shards.
+   */
+  async getIssuePage(
+    credentialValue: BoardCredential,
+    number: number,
+    page: number,
+  ): Promise<BoardIssue | null> {
+    const { credential, meta } = await this.requirePointerForCredential(credentialValue);
+    const resolved = await this.readIssueSnapshotByNumber(credential, meta, number, false);
+    if (resolved === null) return null;
+
+    const { snapshot, issue } = resolved;
+    const messages = await this.readNewestFirstCommentPage(credential, meta, number, snapshot, page);
+    if (messages.length === 0) return issue;
     return { ...issue, messages: clone(messages) };
   }
 
   /**
-   * One bounded page of one issue's conversation.
+   * One bounded page of one issue's conversation, newest-first.
    *
    * This is the read that replaces "reassemble the thread" for a reader who is
    * looking at a page of it. It fetches the directory page that names the
-   * issue, that issue's own snapshot shard, and at most ONE comment shard: the
-   * one holding the requested page. A page past the end of the thread fetches no
-   * comment shard at all, because the snapshot's own `commentRefs` already says
-   * there is nothing there — the empty page is a fact about the snapshot, not
-   * something that has to be confirmed against the shards.
+   * issue, that issue's own snapshot shard, and at most TWO comment shards.
+   *
+   * Board issue 206: page 1 is the NEWEST window on the thread, and higher page
+   * numbers walk BACKWARD into older history. This read used to number pages
+   * from the oldest end, so opening an issue in the browser showed the beginning
+   * of the conversation as though it were the end of it. The window comes from
+   * `readNewestFirstCommentPage`, the same function `getIssuePage` uses, so the
+   * browser and the CLI cannot answer "what is on page 1" differently.
+   *
+   * One window can straddle two comment shards because the window is cut from
+   * the newest end while shards are filled from the oldest end. That is the
+   * bound: at most the two shards one page can touch, never the whole thread. A
+   * page past the end of the thread fetches no comment shard at all, because the
+   * snapshot's own `messageCount` already says there is nothing there — the empty
+   * page is a fact about the snapshot, not something that has to be confirmed
+   * against the shards.
    *
    * `issue` comes back with its `messages` array empty. The page the caller asked
    * for is `messages`, and carrying the thread as well would reintroduce exactly
    * the fan-out this method exists to remove.
    *
-   * `pageCount` is the number of comment shards the snapshot carries, which is
-   * the number of pages the thread has; `total` is the whole thread's message
-   * count, taken from the snapshot's stored `messageCount` rather than from the
-   * page. So the count and the range a reader sees are the thread's, not this
-   * page's.
+   * `pageCount` is how many pages the thread has and `total` is its whole message
+   * count, both taken from the snapshot's stored `messageCount` rather than from
+   * the page — the same inputs the window is cut from, so the count a reader is
+   * shown cannot disagree with the page they are on. So the count and the range
+   * a reader sees are the thread's, not this page's.
    */
   async readIssueCommentPage(
     credentialValue: BoardCredential,
@@ -3722,9 +3774,9 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       boardId: meta.boardId,
       issue,
       page,
-      pageCount: Math.max(1, snapshot.commentRefs.length),
+      pageCount: Math.max(1, Math.ceil(snapshot.messageCount / V3_COMMENT_PAGE_SIZE)),
       total: snapshot.messageCount,
-      messages: await this.readCommentShard(credential, meta, snapshot, page - 1),
+      messages: await this.readNewestFirstCommentPage(credential, meta, number, snapshot, page),
     };
   }
 

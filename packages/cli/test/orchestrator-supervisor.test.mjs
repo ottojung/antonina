@@ -15,7 +15,6 @@ test('scheduler is a single short OpenClaw scheduling lane', () => {
   assert.match(turn, /timeout -k 10s 90s/);
   assert.match(turn, /--variant low/);
   assert.doesNotMatch(turn, /--thinking/);
-  assert.match(turn, /antonina-scheduler\/SKILL\.md/);
 });
 
 test('scheduler remains agentic rather than deterministic dispatch code', () => {

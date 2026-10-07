@@ -1,11 +1,12 @@
 #!/bin/sh
 set -u
 interval="${ANTONINA_ORCHESTRATOR_INTERVAL_SECONDS:-60}"
+turn_timeout="${ANTONINA_ORCHESTRATOR_TURN_TIMEOUT_SECONDS:-900}"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/antonina"
 mkdir -p "$state_dir"
 while :; do
   if ! pgrep -f 'opencode-openclaw.*antonina-orchestrator/SKILL.md' >/dev/null 2>&1; then
-    "$HOME/.local/bin/antonina-orchestrator-turn" >>"$state_dir/orchestrator-turn.log" 2>&1 || true
+    timeout -k 15s "$turn_timeout" "$HOME/.local/bin/antonina-orchestrator-turn" >>"$state_dir/orchestrator-turn.log" 2>&1 || true
   fi
   sleep "$interval"
 done

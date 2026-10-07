@@ -50,3 +50,9 @@ test('launcher enforces dispatch before portfolio audit', () => {
   assert.match(turn, /launch an owner or bounded reconnaissance agent BEFORE reading another project's candidate/);
   assert.match(turn, /Do not batch-audit candidate issues or build a comprehensive blocker map before the first launch/);
 });
+
+test('launcher delegates stale project-queue archaeology', () => {
+  assert.match(turn, /STALE-QUEUE DELEGATION/);
+  assert.match(turn, /STOP auditing that project's backlog yourself/);
+  assert.match(turn, /launch a bounded project-reconnaissance owner/);
+});

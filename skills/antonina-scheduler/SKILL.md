@@ -76,6 +76,22 @@ When CURRENT_SNAPSHOT shows an obvious unrepresented project with open work, the
 
 The scheduler's job is to create parallel progress, not to find the globally perfect first assignment. A good independent front launched now is better than a theoretically better front discovered after minutes of serial scheduler analysis.
 
+### Stale-queue delegation
+
+Do not serially audit a missing project's backlog when issue headers are stale, completion-candidates, or repeatedly human-blocked.
+
+When the first candidate evidence shows that the project's open queue cannot be trusted to expose an immediately actionable implementation issue without broader archaeology:
+
+- stop auditing more issues in that project yourself;
+- choose an unoccupied registered worktree from the candidate/project topology;
+- launch a bounded **project reconnaissance owner** whose job is to inspect that project's open issues, newest comments, current branches/resources, and identify or begin the highest positive-speedup actionable front;
+- record that reconnaissance agent as the project's live breadth owner;
+- continue scheduling the next missing project immediately.
+
+Reconnaissance is real delegated work, not a placeholder. Its prompt should tell the worker to either begin a concrete actionable front it discovers or leave a precise board handoff naming the dependency/topology blocker and next launchable task.
+
+The scheduler must not spend multiple minutes proving that several stale issues are individually non-actionable. Queue freshness uncertainty is itself a reason to delegate discovery.
+
 ### 1. Project breadth
 
 Scan the complete open-issue header list and identify actionable projects/repositories/workspaces that currently have no useful live owner.

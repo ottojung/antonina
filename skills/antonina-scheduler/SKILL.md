@@ -24,10 +24,12 @@ Each scheduler turn is short and action-oriented.
 2. Do not rerun broad `agent list`, `board list`, `board feed`, workspace-discovery, or historical scans unless the snapshot is missing or clearly stale. In particular, do not use the general board feed as an initial scheduling scan.
 3. Reconcile any duplicate cwd/effectively identical live ownership visible in the snapshot before launching more work. Re-check the specific processes/resources involved before stopping or redirecting an owner.
 4. Reason across the complete issue-header list in the snapshot for project breadth. Select a candidate, then use `antonina board show --id ISSUE --page 1 --json` to read that issue body and newest comments before deciding or launching.
-5. Read only additional resources directly relevant to that candidate. If deeper investigation is needed, delegate it to a reconnaissance agent instead of doing project archaeology yourself.
-6. Launch useful detached agents early. Do not spend the turn building a comprehensive mental model of a project.
-7. Record fresh ownership comments with real agent IDs and exact cwd/worktree after launch.
-8. Return promptly once the useful frontier has been refilled.
+5. Resolve the candidate's execution location through Antonina, not filesystem discovery: use `antonina board resource list --issue ISSUE --page 1 --json` (and further pages only if needed). Prefer an existing unoccupied registered worktree/resource. Do **not** run `ls /workspace`, `find /workspace`, glob the workspace, or otherwise enumerate worktrees yourself.
+6. If no suitable registered cwd exists, either create/register a distinct worktree through the project's documented workflow or launch a bounded reconnaissance/coordination front from the project's known canonical repo resource. Do not burn the scheduler turn on workspace archaeology.
+7. A turn that starts with a clear project-breadth gap and no active-pressure/resource blocker must not return without a concrete scheduling outcome: launch at least one missing-project owner, or append a precise current blocker to the candidate issue explaining why no safe launch is possible.
+8. Launch useful detached agents early. Do not spend the turn building a comprehensive mental model of a project.
+9. Record fresh ownership comments with real agent IDs and exact cwd/worktree after launch.
+10. Return promptly once the useful frontier has been refilled.
 
 ## Scheduling order
 

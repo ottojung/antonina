@@ -19,6 +19,8 @@ test('scheduled turn is a short OpenClaw scheduler pass with a compact snapshot'
 
 test('launcher tells OpenClaw to use snapshot before broad discovery', () => {
   assert.match(turn, /Do not rerun broad agent-list, board-list, board-feed/);
-  assert.match(turn, /Before any launch, re-check the chosen issue/);
+  assert.match(turn, /board resource list --issue ISSUE --page 1 --json/);
+  assert.match(turn, /MUST NOT finish without either launching at least one missing-project owner or recording a precise blocker/);
+  assert.match(turn, /NEVER use ls\/find\/globs over \/workspace/);
   assert.match(turn, /only onto unoccupied cwd\/worktrees/);
 });

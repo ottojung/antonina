@@ -20,7 +20,8 @@ test('scheduler is a single short OpenClaw scheduling lane', () => {
 
 test('scheduler remains agentic rather than deterministic dispatch code', () => {
   assert.doesNotMatch(loop, /board list|board resource|agent run/);
-  assert.doesNotMatch(turn, /python3|board list|board resource|agent run/);
+  assert.doesNotMatch(turn, /antonina agent run|antonina board comment/);
+  assert.match(turn, /board resource list --issue ISSUE/);
   assert.match(scheduler, /There is no global worker-count cap/);
   assert.match(scheduler, /memory\.pressure/);
   assert.match(scheduler, /reclaimable file cache/);

@@ -68,16 +68,27 @@ Keep expanding the useful frontier while independent positive-value work exists 
 
 ## Claims and collisions
 
-Before launching:
+Occupied cwd is a hard scheduling constraint.
+
+At the start of every turn, and again immediately before a launch:
+
+1. Read `antonina agent list --running --json`.
+2. Correlate those records with actual OpenCode agent processes (for example `pgrep -af 'opencode run --auto --title antonina-'`) so dead/stale records do not reserve resources forever.
+3. Build the set of cwd/worktree paths owned by genuinely live workers.
+4. If two genuinely live workers have the same cwd, treat that as a scheduler fault. Resolve the collision before launching anything else: preserve useful work, keep or redirect one owner, and stop the redundant duplicate.
+5. Never invoke `antonina agent run` with a cwd that is already in the live occupied-cwd set. This is a hard gate, including when satisfying a project floor.
+6. If an issue needs another independent front but all relevant worktrees are occupied, choose or create a distinct scheduling worktree/resource first rather than reusing one.
+
+For each launch:
 
 1. Read the issue body and newest comments.
 2. Check live ownership and registered resources relevant to that issue.
-3. Append a concise fresh `state: working` scheduling comment naming the intended scope and resource.
+3. Append a concise fresh `state: working` scheduling comment naming the intended scope and distinct resource.
 4. Re-read the newest comments if collision risk is non-trivial.
-5. Launch detached with an explicit cwd.
+5. Launch detached with the explicit unoccupied cwd.
 6. Append the actual live agent ID and exact cwd/worktree.
 
-Never reuse a worktree already owned by another live agent. Never create duplicate fronts merely because an old board comment is stale; distinguish stale comments from live processes.
+Never create duplicate fronts merely because an old board comment is stale; distinguish stale comments from live processes.
 
 ## Completion of a scheduler turn
 

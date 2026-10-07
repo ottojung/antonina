@@ -31,6 +31,9 @@ test('scheduler requires project breadth before issue depth', () => {
   assert.ok(project >= 0 && issue > project && depth > issue);
   assert.match(scheduler, /AssemblyP1 should maintain at least five useful agents/);
   assert.match(scheduler, /stale Antonina record does not represent a project/);
+  assert.match(scheduler, /Occupied cwd is a hard scheduling constraint/);
+  assert.match(scheduler, /Never invoke .*antonina agent run.*cwd that is already/);
+  assert.match(scheduler, /Resolve the collision before launching anything else/);
 });
 
 test('installed scheduler skill stays in sync with canonical docs', () => {

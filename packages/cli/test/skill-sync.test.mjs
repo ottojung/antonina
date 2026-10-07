@@ -25,3 +25,18 @@ test('versioned OpenClaw skill stays in sync with canonical skill docs', () => {
   assert.equal(skill, frontmatter + orchestrator);
   assert.equal(installedResources, resources);
 });
+
+test('orchestrator policy preserves project breadth before intra-issue depth', () => {
+  const orchestrator = read('../../../docs/skills/orchestrator.md');
+
+  assert.match(orchestrator, /Project breadth wave/);
+  assert.match(orchestrator, /Issue breadth wave/);
+  assert.match(orchestrator, /Intra-issue depth wave/);
+  assert.match(orchestrator, /unrepresented actionable project remains/);
+  assert.match(orchestrator, /monopolization licenses/);
+
+  const projectBreadth = orchestrator.indexOf('**Project breadth wave.**');
+  const issueBreadth = orchestrator.indexOf('**Issue breadth wave.**');
+  const intraIssueDepth = orchestrator.indexOf('**Intra-issue parallelism.**');
+  assert.ok(projectBreadth >= 0 && issueBreadth > projectBreadth && intraIssueDepth > issueBreadth);
+});

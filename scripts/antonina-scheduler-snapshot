@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+import json
+import os
+import re
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+ANTONINA = os.path.expanduser("~/.local/bin/antonina")
+
+def run(args, check=True):
+    return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
+
+def cli_json(*args):
+    return json.loads(run([ANTONINA, *map(str, args)]).stdout)
+
+def live_ids():
+    proc = run(["pgrep", "-af", "opencode run --auto --title antonina-"], check=False)
+    result = set()
+    for line in proc.stdout.splitlines():
+        m = re.search(r"--title\s+antonina-([^\s]+)", line)
+        if m:
+            result.add(m.group(1))
+    return result
+
+def memory_snapshot():
+    result = {}
+    for name in ("memory.current", "memory.max", "memory.pressure", "memory.events", "memory.stat"):
+        p = Path("/sys/fs/cgroup") / name
+        try:
+            result[name] = p.read_text().strip()
+        except OSError:
+            result[name] = None
+    return result
+
+running = cli_json("agent", "list", "--page", 1, "--limit", 500, "--running", "--json").get("agents", [])
+live = live_ids()
+agents = [
+    {
+        "id": a.get("id"),
+        "title": a.get("title"),
+        "cwd": a.get("cwd"),
+        "last_activity_at": a.get("last_activity_at"),
+    }
+    for a in running
+    if str(a.get("id")) in live
+]
+
+issues = cli_json("board", "list", "--state", "open", "--page", 1, "--json")
+issue_headers = [
+    {
+        "number": i.get("number"),
+        "title": i.get("title"),
+        "lastActivityAt": i.get("lastActivityAt"),
+        "messageCount": i.get("messageCount"),
+    }
+    for i in issues
+]
+
+print(json.dumps({
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "live_agents": agents,
+    "open_issues": issue_headers,
+    "cgroup": memory_snapshot(),
+}, separators=(",", ":")))

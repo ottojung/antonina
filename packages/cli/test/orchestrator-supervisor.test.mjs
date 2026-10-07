@@ -34,10 +34,12 @@ test('scheduler requires project breadth before issue depth', () => {
   const depth = scheduler.indexOf('### 3. Intra-issue depth and project floors');
   assert.ok(project >= 0 && issue > project && depth > issue);
   assert.match(scheduler, /AssemblyP1 should maintain at least five useful agents/);
-  assert.match(scheduler, /stale Antonina record does not represent a project/);
+  assert.match(scheduler, /CURRENT_SNAPSHOT\.live_agents/);
+  assert.match(scheduler, /complete open-issue header list/);
+  assert.match(scheduler, /general board feed as an initial scheduling scan/);
   assert.match(scheduler, /Occupied cwd is a hard scheduling constraint/);
   assert.match(scheduler, /Never invoke .*antonina agent run.*cwd that is already/);
-  assert.match(scheduler, /Resolve the collision before launching anything else/);
+  assert.match(scheduler, /resolve the collision before launching anything else/i);
 });
 
 test('installed scheduler skill stays in sync with canonical docs', () => {

@@ -1,11 +1,27 @@
 #!/bin/sh
 set -u
-interval="${ANTONINA_ORCHESTRATOR_INTERVAL_SECONDS:-60}"
+
+interval="${ANTONINA_ORCHESTRATOR_INTERVAL_SECONDS:-15}"
+main_interval="${ANTONINA_ORCHESTRATOR_MAIN_INTERVAL_SECONDS:-60}"
+refill_interval="${ANTONINA_ORCHESTRATOR_REFILL_INTERVAL_SECONDS:-30}"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/antonina"
 mkdir -p "$state_dir"
+
+next_main=0
+next_refill=0
+
 while :; do
-  if ! pgrep -f 'opencode-openclaw.*antonina-orchestrator/SKILL.md' >/dev/null 2>&1; then
-    "$HOME/.local/bin/antonina-orchestrator-turn" >>"$state_dir/orchestrator-turn.log" 2>&1 || true
+  now="$(date +%s)"
+
+  if [ "$now" -ge "$next_main" ] && ! pgrep -f 'opencode-openclaw.*ANTONINA-MAIN-TURN' >/dev/null 2>&1; then
+    "$HOME/.local/bin/antonina-orchestrator-turn" >>"$state_dir/orchestrator-turn.log" 2>&1 </dev/null &
+    next_main=$((now + main_interval))
   fi
+
+  if [ "$now" -ge "$next_refill" ] && ! pgrep -f 'opencode-openclaw.*ANTONINA-FRONTIER-REFILL' >/dev/null 2>&1; then
+    "$HOME/.local/bin/antonina-orchestrator-refill" >>"$state_dir/orchestrator-refill.log" 2>&1 </dev/null &
+    next_refill=$((now + refill_interval))
+  fi
+
   sleep "$interval"
 done

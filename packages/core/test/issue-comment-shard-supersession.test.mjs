@@ -201,18 +201,27 @@ test('superseding a comment shard writes a new ref and leaves the old shard in p
     'the retention window held, so the sweep reclaimed nothing');
 
   // The paged read resolves against the snapshot this commit published.
-  const page2 = await store.readIssueCommentPage(initialized.credential, 1, 2);
-  assert.equal(page2.total, 61);
-  assert.equal(page2.pageCount, 2);
-  assert.equal(page2.messages.length, 11);
-  assert.equal(page2.messages[0].body, 'message 51', 'the rewritten page, in order');
-  assert.equal(page2.messages.at(-1).body, 'newest 1');
-
-  // Page 1 was never rewritten, so its ref is carried forward untouched.
+  //
+  // Board issue 206: pages are numbered from the NEWEST end, so the shard that
+  // was rewritten -- the tail shard, holding the newest comments -- is the one
+  // page 1 is drawn from. Under oldest-first numbering this same assertion read
+  // `page2`, and naming the physical shard's old page number here would pin the
+  // bug rather than the behaviour.
   const page1 = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  assert.equal(page1.total, 61);
+  assert.equal(page1.pageCount, 2);
   assert.equal(page1.messages.length, 50);
-  assert.equal(page1.messages[0].body, 'message 1');
-  assert.equal(page1.messages.at(-1).body, 'message 50');
+  assert.equal(page1.messages.at(-1).body, 'newest 1', 'the rewritten shard, in order');
+  // Page 1 is a 50-comment window cut from the newest end, so it reaches back
+  // into the shard that was NOT rewritten and still serves it.
+  assert.equal(page1.messages[0].body, 'message 12');
+
+  // The older shard was never rewritten, so its ref is carried forward untouched
+  // and the remainder of the thread is still readable through it.
+  const page2 = await store.readIssueCommentPage(initialized.credential, 1, 2);
+  assert.equal(page2.messages.length, 11);
+  assert.equal(page2.messages[0].body, 'message 1');
+  assert.equal(page2.messages.at(-1).body, 'message 11');
 });
 
 test('commentRefs is rewritten in the same commit that supersedes the shard', async () => {
@@ -295,15 +304,22 @@ test('after the window closes, the sweep reclaims the superseded shard and the r
     'every comment ref the live snapshot names resolves to an object that exists');
 
   // Every page still reads, so no ref the snapshot names was reclaimed.
+  //
+  // Board issue 206: newest-first numbering, so page 1 is the window ending at
+  // the newest comment and page 2 holds the older remainder. Both still resolve,
+  // which is the point of this assertion -- the sweep reclaimed superseded
+  // objects and neither page depends on one.
   const page1 = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  assert.equal(page1.total, 63);
+  assert.equal(page1.pageCount, 2);
   assert.equal(page1.messages.length, 50);
-  assert.equal(page1.messages.at(-1).body, 'message 50');
+  assert.equal(page1.messages.at(-1).body, 'newest 3', 'page 1 ends at the newest comment');
   const page2 = await store.readIssueCommentPage(initialized.credential, 1, 2);
   assert.equal(page2.total, 63);
   assert.equal(page2.pageCount, 2);
   assert.equal(page2.messages.length, 13);
-  assert.equal(page2.messages[0].body, 'message 51');
-  assert.equal(page2.messages.at(-1).body, 'newest 3');
+  assert.equal(page2.messages[0].body, 'message 1', 'page 2 walks back to the oldest comments');
+  assert.equal(page2.messages.at(-1).body, 'message 13');
 
   // The whole thread still reassembles in order: no page lost, none served twice.
   const thread = await store.getIssue(initialized.credential, 1);
@@ -368,13 +384,18 @@ test('an interrupted commit leaves commentRefs naming only resolvable shards', a
     'the ref map is unchanged, so no ref it names was superseded');
 
   // Both pages resolve against the still-published snapshot.
+  //
+  // Board issue 206: newest-first numbering, so page 1 ends at the newest
+  // comment and page 2 holds the older remainder. The interrupted write changed
+  // neither, so the thread still ends at 'message 60'.
   const page1 = await h.store.readIssueCommentPage(initialized.credential, 1, 1);
   assert.equal(page1.messages.length, 50);
-  assert.equal(page1.messages.at(-1).body, 'message 50');
+  assert.equal(page1.messages.at(-1).body, 'message 60', 'page 1 ends at the newest comment');
   const page2 = await h.store.readIssueCommentPage(initialized.credential, 1, 2);
   assert.equal(page2.total, 60);
   assert.equal(page2.messages.length, 10);
-  assert.equal(page2.messages.at(-1).body, 'message 60');
+  assert.equal(page2.messages[0].body, 'message 1');
+  assert.equal(page2.messages.at(-1).body, 'message 10');
 
   // The attempt's shards are inert garbage, not a dangling reference.
   const orphanKeys = new Set(commentShards(server)

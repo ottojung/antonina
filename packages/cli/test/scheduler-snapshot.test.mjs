@@ -30,9 +30,19 @@ test('project hints are read-only topology context', () => {
 
 
 test('project hints prefer explicit titles and keep independent workstreams distinct', () => {
-  assert.match(snapshot, /project_hint_from_title\(a\.get\("title"\)\) or project_hint_from_cwd/);
   assert.match(snapshot, /startswith\("pyreports"\).*return "pyreports"/);
   assert.match(snapshot, /return "Kawun"/);
   assert.match(snapshot, /return "Skrynia"/);
   assert.match(snapshot, /number == 206.*return "Antonina"/);
+});
+
+
+test('live agent issue number overrides misleading cwd topology', () => {
+  assert.match(snapshot, /issue_number_from_agent_title/);
+  assert.match(snapshot, /issue_project_by_number/);
+  assert.match(snapshot, /issue_project_by_number\.get\(issue_number_from_agent_title/);
+  const titlePos = snapshot.indexOf('project_hint_from_title(a.get("title"))');
+  const issuePos = snapshot.indexOf('issue_project_by_number.get(issue_number_from_agent_title');
+  const cwdPos = snapshot.indexOf('project_hint_from_cwd(a.get("cwd"))');
+  assert.ok(titlePos >= 0 && issuePos > titlePos && cwdPos > issuePos);
 });

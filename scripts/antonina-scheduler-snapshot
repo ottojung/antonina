@@ -48,6 +48,10 @@ def project_hint_from_cwd(cwd):
     if "along" in low: return "Along"
     return None
 
+def issue_number_from_agent_title(title):
+    m = re.match(r"\s*(\d+)\b", title or "")
+    return int(m.group(1)) if m else None
+
 def open_issues():
     result = []
     for page in range(1, 100):
@@ -59,16 +63,6 @@ def open_issues():
 
 running = cli_json("agent", "list", "--page", 1, "--limit", 500, "--running", "--json").get("agents", [])
 live = live_ids()
-agents = [
-    {
-        "id": a.get("id"),
-        "title": a.get("title"),
-        "cwd": a.get("cwd"),
-        "project_hint": project_hint_from_title(a.get("title")) or project_hint_from_cwd(a.get("cwd")),
-    }
-    for a in running
-    if str(a.get("id")) in live
-]
 
 issue_headers = [
     {
@@ -77,6 +71,26 @@ issue_headers = [
         "project_hint": project_hint_from_title(i.get("title"), i.get("number")),
     }
     for i in open_issues()
+]
+issue_project_by_number = {
+    i["number"]: i["project_hint"]
+    for i in issue_headers
+    if i.get("number") is not None and i.get("project_hint") is not None
+}
+
+agents = [
+    {
+        "id": a.get("id"),
+        "title": a.get("title"),
+        "cwd": a.get("cwd"),
+        "project_hint": (
+            project_hint_from_title(a.get("title"))
+            or issue_project_by_number.get(issue_number_from_agent_title(a.get("title")))
+            or project_hint_from_cwd(a.get("cwd"))
+        ),
+    }
+    for a in running
+    if str(a.get("id")) in live
 ]
 
 print(json.dumps({

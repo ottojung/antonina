@@ -49,6 +49,7 @@ test('scheduler optimizes only efficiency and topology', () => {
   assert.doesNotMatch(loop, /board list|board resource|agent run/);
   assert.match(scheduler, /Optimize only for \*\*efficiency and topology\*\*/);
   assert.match(scheduler, /positive expected marginal wall-clock speedup/);
+  assert.match(scheduler, /opencode-go\/step-5-preview-free/);
   assert.match(scheduler, /A large number of live agents is never itself a reason to stop/);
   assert.doesNotMatch(scheduler, /memory\.pressure|memory\.stat|memory\.events|reclaimable file cache|oom_kill|PSI/);
 });

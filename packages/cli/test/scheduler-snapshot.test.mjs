@@ -27,3 +27,12 @@ test('project hints are read-only topology context', () => {
   assert.match(snapshot, /project_hint/);
   assert.doesNotMatch(snapshot, /agent\", \"run|agent\", \"new|board\", \"comment/);
 });
+
+
+test('project hints prefer explicit titles and keep independent workstreams distinct', () => {
+  assert.match(snapshot, /project_hint_from_title\(a\.get\("title"\)\) or project_hint_from_cwd/);
+  assert.match(snapshot, /startswith\("pyreports"\).*return "pyreports"/);
+  assert.match(snapshot, /return "Kawun"/);
+  assert.match(snapshot, /return "Skrynia"/);
+  assert.match(snapshot, /number == 206.*return "Antonina"/);
+});

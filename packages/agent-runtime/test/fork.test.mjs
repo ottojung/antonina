@@ -156,7 +156,7 @@ test('a fork carries the source work identity and takes a new identity of its ow
   assert.equal(clone.native_session_id, 'sess-abcdef0123456789');
   assert.equal(clone.cwd, '/srv/work');
   assert.equal(clone.title, 'original title');
-  assert.equal(clone.variant, 'low');
+  assert.equal(clone.variant, 'high');
   assert.equal(clone.prompt_count, 3);
   assert.equal(clone.last_prompt, 'third prompt');
   // The source's outcome is carried as history; the clone's own lifecycle state

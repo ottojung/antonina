@@ -60,7 +60,8 @@ test('scheduler expands breadth before costly depth because of topology', () => 
   assert.match(scheduler, /complete open-issue header list/);
   assert.match(scheduler, /Occupied cwd is a hard scheduling constraint/);
   assert.match(scheduler, /Never invoke .*antonina agent run.*cwd owned by another genuinely live worker/);
-  assert.match(scheduler, /board show --id ISSUE --page 1 --json/);
+  assert.match(scheduler, /antonina-scheduler-issue --issue ISSUE/);
+  assert.doesNotMatch(scheduler, /board show --id ISSUE --page 1 --json/);
   assert.match(scheduler, /Never pass issue IDs as positional arguments/);
 });
 

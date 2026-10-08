@@ -2,9 +2,9 @@
 snapshot="$("$HOME/.local/bin/antonina-scheduler-snapshot" 2>/dev/null || printf '{}')"
 exec timeout -k 15s 240s "$HOME/.local/bin/opencode-openclaw" run --auto --model opencode-go/longcat-2.5-preview-free --variant low --dir /workspace/antonina "ANTONINA-SCHEDULER-TURN. Minimize useful wall-clock completion time by topology. Use CURRENT_SNAPSHOT; rescan only if clearly stale.
 
-FIRST ACTION: project breadth. Use CURRENT_SNAPSHOT.unrepresented_projects; use project_hint only to choose an issue within it. For each unrepresented project, test one issue at a time. CANDIDATE BUDGET: one board show + one resource lookup, then launch or skip; never reread a skipped candidate.
+FIRST ACTION: project breadth. Use CURRENT_SNAPSHOT.unrepresented_projects; use project_hint only to choose an issue within it. For each unrepresented project, test one issue at a time. CANDIDATE BUDGET: one compact issue read + one worktree lookup, then launch or skip; never reread a skipped candidate.
 Read:
-antonina board show --id ISSUE --page 1 --json
+antonina-scheduler-issue --issue ISSUE
 antonina-scheduler-worktrees --issue ISSUE
 [] => next header. Explicit complete/human/dependency/collision => next header for the same project; do not investigate. A returned cwd is registered, existing, and unoccupied: LAUNCH before another candidate. Never search for unregistered paths. If scope is unclear, launch bounded reconnaissance. If the project queue is stale, launch project reconnaissance instead of auditing it.
 

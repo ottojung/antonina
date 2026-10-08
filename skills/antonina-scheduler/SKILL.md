@@ -61,7 +61,7 @@ Do not spend the turn supervising healthy existing workers.
 When CURRENT_SNAPSHOT shows an obvious unrepresented project with open work, the first useful scheduling action of the turn must be a breadth dispatch, not a portfolio audit.
 
 1. Choose one promising issue from one unrepresented project directly from the snapshot headers.
-2. Read exactly that issue with antonina board show --id ISSUE --page 1 --json and inspect schedulable registered worktree topology with antonina-scheduler-worktrees --issue ISSUE.
+2. Read exactly that issue with antonina-scheduler-issue --issue ISSUE and inspect schedulable registered worktree topology with antonina-scheduler-worktrees --issue ISSUE.
 3. If the newest state explicitly proves the issue is complete, human-blocked, dependency-blocked, or collides with live ownership, move immediately to the next candidate.
 4. Otherwise launch a useful owner immediately. If the exact implementation decomposition is uncertain, launch a bounded reconnaissance owner rather than continuing scheduler-side investigation.
 5. Do not batch-read several candidate issues, build a comprehensive blocker map, or compare many possible projects before the first launch.
@@ -144,7 +144,7 @@ A large number of live agents is never itself a reason to stop.
 
 Use Antonina's named-option grammar exactly. Never pass issue IDs as positional arguments.
 
-- Read an issue and newest comments: antonina board show --id ISSUE --page 1 --json
+- Read compact issue state/body/newest comments: antonina-scheduler-issue --issue ISSUE
 - Read schedulable registered cwd/worktree topology: antonina-scheduler-worktrees --issue ISSUE
 - Record a working claim or handoff: antonina board comment --id ISSUE --body BODY --author openclaw@marceline-dev --json
 - List live scheduler records: antonina agent list --page 1 --limit 500 --running --json
@@ -152,6 +152,8 @@ Use Antonina's named-option grammar exactly. Never pass issue IDs as positional 
 - Start it detached: antonina agent run --id AGENT_ID --cwd CWD --prompt PROMPT --detach --json
 
 Do not guess CLI syntax. A failed command due to grammar is scheduler overhead and should not consume the turn.
+
+`antonina-scheduler-issue` is a read-only issue-state helper. It returns a bounded issue body plus the newest comments so control turns never need to reread a huge issue history.
 
 `antonina-scheduler-worktrees` is a read-only topology helper. It filters canonical board resources by local path existence and live cwd ownership; it never creates, launches, stops, or prioritizes agents.
 
@@ -179,7 +181,7 @@ At the start of every turn, and again immediately before a launch:
 
 1. Treat `CURRENT_SNAPSHOT.live_agents` as authoritative for live ownership. Do not scan historical/finished agent inventories to reconstruct current ownership.
 2. If the snapshot shows duplicate cwd ownership, re-check only the specific live processes involved and resolve the collision before launching anything else. For a serialized queue with no live owner, launch one bounded reconciliation owner rather than reconstructing old holder history yourself.
-3. For a chosen issue, read its body and newest comments with antonina board show --id ISSUE --page 1 --json.
+3. For a chosen issue, read compact body/state/newest comments with antonina-scheduler-issue --issue ISSUE.
 4. Use `antonina-scheduler-worktrees --issue ISSUE` to discover registered worktrees that exist locally and are not live-owned.
 5. Never use `ls`, `find`, or broad globs over `/workspace` to discover candidate cwds.
 6. Immediately before launch, verify the selected cwd is still unoccupied.

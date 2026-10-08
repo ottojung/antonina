@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
+
+ANTONINA = os.path.expanduser("~/.local/bin/antonina")
+BODY_LIMIT = 1800
+MESSAGE_LIMIT = 1200
+NEWEST_MESSAGES = 8
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[1] != "--issue" or not sys.argv[2].isdigit():
+        raise SystemExit("usage: antonina-scheduler-issue --issue ISSUE")
+    issue = sys.argv[2]
+    raw = subprocess.check_output(
+        [ANTONINA, "board", "show", "--id", issue, "--page", "1", "--json"],
+        text=True,
+    )
+    item = json.loads(raw)
+    messages = item.get("messages") or []
+    compact = {
+        "number": item.get("number"),
+        "state": item.get("state"),
+        "title": item.get("title"),
+        "updatedAt": item.get("updatedAt"),
+        "body": (item.get("body") or "")[:BODY_LIMIT],
+        "message_count": len(messages),
+        "newest_messages": [
+            {
+                "author": message.get("author"),
+                "createdAt": message.get("createdAt"),
+                "body": (message.get("body") or "")[:MESSAGE_LIMIT],
+            }
+            for message in messages[-NEWEST_MESSAGES:]
+        ],
+    }
+    print(json.dumps(compact, separators=(",", ":")))
+
+if __name__ == "__main__":
+    main()

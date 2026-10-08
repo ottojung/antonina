@@ -20,7 +20,7 @@ test('first useful breadth dispatch is cheap and precedes depth', () => {
   assert.match(turn, /FIRST ACTION: project breadth/);
   assert.match(turn, /unrepresented_projects/);
   assert.match(turn, /CANDIDATE BUDGET/);
-  assert.match(turn, /one board show \+ one resource lookup/);
+  assert.match(turn, /one compact issue read \+ one worktree lookup/);
   assert.match(turn, /never reread a skipped candidate/);
   assert.match(turn, /LAUNCH before another candidate/);
   assert.match(turn, /BREADTH BARRIER/);
@@ -29,7 +29,8 @@ test('first useful breadth dispatch is cheap and precedes depth', () => {
 });
 
 test('launcher carries exact Antonina grammar and topology gates', () => {
-  assert.match(turn, /board show --id ISSUE --page 1 --json/);
+  assert.match(turn, /antonina-scheduler-issue --issue ISSUE/);
+  assert.doesNotMatch(turn, /board show --id ISSUE/);
   assert.match(turn, /antonina-scheduler-worktrees --issue ISSUE/);
   assert.doesNotMatch(turn, /board resource list --issue ISSUE/);
   assert.match(turn, /board comment --id ISSUE --body BODY --author openclaw@marceline-dev --json/);

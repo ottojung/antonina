@@ -5,9 +5,9 @@ import subprocess
 import sys
 
 ANTONINA = os.path.expanduser("~/.local/bin/antonina")
-BODY_LIMIT = 1800
-MESSAGE_LIMIT = 1200
-NEWEST_MESSAGES = 8
+BODY_LIMIT = 1200
+MESSAGE_LIMIT = 500
+NEWEST_MESSAGES = 3
 
 def main():
     args = [arg for arg in sys.argv[1:] if arg != "--json"]

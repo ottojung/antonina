@@ -5,10 +5,10 @@ import test from 'node:test';
 
 const turn = readFileSync(fileURLToPath(new URL('../../../scripts/antonina-orchestrator-turn', import.meta.url)), 'utf8');
 
-test('scheduled turn is a compact LongCat OpenClaw scheduler pass', () => {
+test('scheduled turn is a compact Step 5 Preview Free OpenClaw scheduler pass', () => {
   assert.match(turn, /ANTONINA-SCHEDULER-TURN/);
   assert.match(turn, /timeout -k 15s 900s/);
-  assert.match(turn, /--model opencode-go\/longcat-2\.5-preview-free/);
+  assert.match(turn, /--model opencode-go\/step-5-preview-free/);
   assert.match(turn, /--variant low/);
   assert.doesNotMatch(turn, /--thinking/);
   assert.match(turn, /antonina-scheduler-snapshot/);
@@ -60,7 +60,7 @@ test('launcher rejects stale cwd paths and historical ownership archaeology', ()
 });
 
 
-test('LongCat batches actions but refreshes topology after each one', () => {
+test('Step 5 Preview Free batches actions but refreshes topology after each one', () => {
   assert.match(turn, /AFTER EACH ACTION/);
   assert.match(turn, /PRE-LAUNCH GATE/);
   assert.match(turn, /newly unrepresented/);

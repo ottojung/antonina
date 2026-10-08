@@ -6,7 +6,7 @@ An Antonina host is a provisioned execution environment that can access the boar
 
 ## Current implementation
 
-Antonina uses TypeScript/Node.js for its CLI, managed-agent runtime, shared board core, and web application. The repository currently includes a local managed-agent runtime built around OpenCode. That runtime is an implementation available to hosts, not the product boundary of Antonina.
+Antonina uses TypeScript/Node.js for its CLI, managed-agent runtime, shared board core, and web application. The repository currently includes a local managed-agent runtime built around OpenCode. That runtime is an implementation available to hosts, not the product boundary of Antonina. Managed Antonina agents and the OpenClaw scheduler must use only `opencode-go/step-5-preview-free` (Step 5 Preview Free); no other model or fallback is permitted. The authoritative constraint is `docs/intent-records/agent.md`.
 
 ## Requirements
 

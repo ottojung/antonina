@@ -1,3 +1,11 @@
+$id-20261008-step5only
+title: Step 5 Preview Free is Antonina's sole permitted OpenCode model
+date: 2026/10/08
+source: @ottojung
+kind: constraint
+
+Antonina managed agents and the OpenClaw orchestrator must use **only** Step 5 Preview Free, by StepFun, through OpenCode Go, with the exact identifier `opencode-go/step-5-preview-free`. Do not substitute other models, switch providers, or silently fall back to LongCat, Muse Spark, Space Bunny, or any other model, even if Step 5 is temporarily unavailable. Fail visibly instead; changing this model requires a new explicit user decision and an updated intent record. The runtime model constant, CLI status/availability diagnostics, scheduler launcher, OpenCode provider whitelist, tests, and deployment documentation must agree on this exact identifier. This decision supersedes all earlier model-selection intent records.
+
 $id-1773008474150624
 title: Following an attached agent run is not bounded
 date: 2026/09/27

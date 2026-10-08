@@ -256,7 +256,7 @@ exit 70
   writeFileSync(bin, `#!/bin/sh
 printf '%s %s\\n' "$0" "$*" >>'${calls}'
 if [ "$1" = models ]; then
-  printf "%s\\n" other/model opencode/space-bunny-free
+  printf "%s\\n" other/model opencode-go/step-5-preview-free
   exit 0
 fi
 exit 2

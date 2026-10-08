@@ -6,7 +6,7 @@ import { isAbsolute } from 'node:path';
 import { DEFAULT_VARIANT, persistedNativeSessionId, persistedVariant, requiredAgentCwd, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
 
-export const AGENT_MODEL = 'opencode/space-bunny-free';
+export const AGENT_MODEL = 'opencode-go/step-5-preview-free';
 export const OPENCODE_TITLE_PREFIX = 'antonina-';
 export const DEFAULT_OPENCODE_BIN = 'opencode';
 export const OPENCODE_BIN_ENV = 'ANTONINA_OPENCODE_BIN';

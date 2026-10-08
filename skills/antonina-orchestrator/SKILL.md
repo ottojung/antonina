@@ -74,42 +74,27 @@ Closing an issue removes it from the queue. Reopening it appends it. Treat both 
 
 ## Work-selection algorithm
 
-At the beginning of every pass:
+The canonical board queue is the operator priority order. Dispatch open
+issues in queue order whenever useful isolated work can run concurrently.
+Do not block independent higher-priority fronts behind a compulsory
+cross-project breadth barrier. Distinct tasks should get distinct worktrees,
+without worker-count quotas, ceilings or resource-awareness.
 
-1. Verify board access.
-2. Read the queue plus compact agent/resource state.
-3. Inspect only enough queued state, in queue order, to identify the first clearly actionable, non-conflicting front.
-4. Claim and launch that front promptly; do not finish an exhaustive queue audit first.
-5. Continue scanning and launching additional independent fronts, reconciling only the durable artifacts needed for each scheduling decision.
-6. Build a portfolio of useful concurrent work rather than stopping after one issue.
+The scheduler snapshot includes all open issues, not a six-per-project limit.
+Agents on closed issues are orphaned ownership, not valid representation of
+open work. Before launch read the issue state, body and recent comments;
+the atomic launcher must independently reject closed issues.
 
-Use a **launch-early** policy. Full issue-history or repository investigation is not a prerequisite to delegation when a safe agent can perform that investigation itself. Large append-only issue histories are especially unsuitable as serial orchestrator work: prefer compact queue/list/feed/resource/agent state for scheduling, and delegate deep history reading, code archaeology, diagnosis, review, or research to an Antonina agent. Read a full issue record in the orchestrator only when its exact content is needed to avoid a concrete ownership, safety, or scope mistake.
+If a worthwhile issue has no registered worktree, invoke
+antonina-scheduler-provision --issue N --json to create a separate Git
+worktree and register it, then dispatch. If the trusted repository root is
+unknown, record the concrete blocker rather than silently skipping the issue.
 
-A live Antonina agent with a known issue/worktree is already reconciled enough for frontier accounting. Treat it as work already represented, not as consumption of a worker quota or slot. Do not deep-read its issue, re-review its work, or supervise it before launching other worthwhile fronts. If an old handoff or stale reservation needs substantial investigation before it can resume, delegate that reconciliation to an agent (read-only when appropriate) instead of turning it into serial orchestrator work. Uncertainty about an issue's internals is a reason to launch a bounded reconnaissance/review agent when that has positive expected value, not a reason to stall the whole frontier.
-
-There is no worker-count target, quota, soft cap, default maximum, or notion of a full pool. Worker count is an outcome of the available work topology. For each candidate front, ask only whether topology permits useful independent execution now. The negative cases are topological: duplicated work, unresolved dependency edges, conflicting ownership/write surfaces, or predicted merge/rebase/reconciliation cost from work that should remain serial. If none of those topological conflicts applies, launch it. Keep scanning and launching regardless of how many agents are already live. If the board contains 1000 mutually independent projects and each additional front still has positive expected value, the expected behavior is to start at least 1000 workers in that pass. Fill obvious independent work before doing deep harvest, review, or recovery work on already represented fronts. Do not delay an early launch merely to prove that all later fronts are also worthwhile.
-
-Begin with a compact breadth sweep to discover candidate fronts, but discovery is not enough to assign work. Before launching, steering, or materially re-scoping any agent for an issue, the orchestrator itself must understand that issue's current state. At minimum, read the issue description and its most recent comments. Read enough of the recent tail to reconstruct the current goal, latest decisions, blockers, existing work/ownership, and the immediate next step; if those facts are not clear, expand farther back until they are. Never launch an implementation, review, research, or reconnaissance agent from title/collection metadata alone.
-
-For very large append-only histories, start with `board show --id NUMBER --page 1` and read older pages only until the current state is clear. Old archaeology can be delegated after this current-state read, but the orchestrator must know what it is delegating and why before creating the agent. A reconnaissance agent is appropriate for resolving older or deeper uncertainty, not for replacing the orchestrator's minimum understanding of the issue's present state.
-
-Selection proceeds in phases:
-
-1. **Recoverable ongoing work.** Account for live or obviously recoverable work without deep supervision. Before assigning any continuation, read that issue's description and recent comments to verify that the apparent next step is still current. If continuation then requires substantial older archaeology, diagnosis, or review, delegate that deeper work to an agent.
-2. **Breadth discovery, then informed launch.** Scan the whole queue from front to back using compact collection state, continuing across pages. For every unrepresented candidate that appears promising, read its description and recent comment tail before deciding. Launch a distinct implementation or reconnaissance front only after that current-state read shows positive expected marginal value and gives enough context for a correct prompt. Then continue the sweep. Do not require proof of zero risk; compare likely progress against likely topology/resource costs.
-3. **Prefer obvious independence.** Issues from clearly unrelated projects or repositories should normally be admitted concurrently unless they share an explicit dependency, deployment target, mutable external resource, or other concrete conflict. Do not stop scanning merely because an earlier issue is already being worked on.
-4. **Reason about same-project topology, not project labels.** Same repository or project is neither a reason to serialize nor a reason to parallelize. Parallelize when branches/files/subsystems or roles are likely separable and the expected merge/reconciliation cost is smaller than the benefit of concurrent progress. Keep serial only the work whose dependency or integration topology makes parallel execution predictably wasteful.
-5. **Depth scan.** After the breadth sweep, revisit deferred same-project or uncertain-topology candidates. Resolve uncertainty cheaply, preferably through bounded reconnaissance agents, and launch every newly positive-value front.
-6. **Intra-issue parallelism.** For substantial issues, consider complementary agents with genuinely different roles, such as implementation, independent review, verification/testing, or focused research/design. Distinct roles are worthwhile when their expected information/progress exceeds coordination and reconciliation cost.
-7. **Marginal stop condition.** Stop expanding the frontier only after the compact breadth sweep has covered the available queue and no remaining candidate has positive expected marginal value. A large current worker count is never itself a reason to stop. Uncertain independence should be resolved cheaply when possible, including by a bounded reconnaissance agent, rather than treated as an automatic veto.
-
-Queue order still expresses shared priority. The orchestrator should preserve that priority while exploiting concurrency; do not reorder the queue merely to encode scheduler state.
-
-Useful evidence of independence includes disjoint repositories, separate monorepo packages/apps, unrelated subsystems, separate worktrees, distinct deployment targets, or clearly non-overlapping implementation areas. Potential conflict domains include the same source files, shared core APIs under active redesign, one database/schema migration path, the same mutable deployment environment, or another shared external resource.
-
-Runtime capacity is entirely outside orchestration. Do not inspect it, estimate it, or use it in launch decisions. A topologically valid front is launched; execution behavior belongs to workers and the runtime layer.
-
-Development can often proceed concurrently even when integration must later serialize. Separate branches or worktrees may be safe to implement in parallel and then merge into a shared release branch one at a time.
+Preserve uncommitted work and transfer its resource dependency to an open
+handoff issue before stopping old agents or collecting old directories.
+After one successful launch, return so the supervised loop can immediately
+start another turn with fresh state. Launch independent work whenever marginal
+speedup is positive; do not examine CPU/RAM or other runtime capacity.
 
 ## Release-branch authority
 

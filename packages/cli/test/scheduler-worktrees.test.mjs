@@ -25,3 +25,12 @@ test('worktree helper is issue-scoped and paginated', () => {
   assert.match(helper, /MAX_RESULTS = 8/);
   assert.match(helper, /len\(available\) >= MAX_RESULTS/);
 });
+
+test('breadth barrier is enforced mechanically before returning worktrees', () => {
+  assert.match(helper, /antonina-scheduler-snapshot/);
+  assert.match(helper, /def breadth_allows\(issue\)/);
+  assert.match(helper, /unrepresented_projects/);
+  assert.match(helper, /unrepresented_issues/);
+  assert.match(helper, /if not breadth_allows\(issue\):/);
+  assert.match(helper, /print\("\[\]"\)/);
+});

@@ -110,12 +110,16 @@ unrepresented_issues = [
     if issue.get("project_hint") in unrepresented_project_set
 ]
 
-print(json.dumps({
+context = {
     "live_agents": agents,
     "represented_projects": represented_projects,
     "open_projects": open_projects,
     "unrepresented_projects": unrepresented_projects,
-    "unrepresented_issues": unrepresented_issues,
     "open_issue_count": len(issue_headers),
-    "open_issues": issue_headers,
-}, separators=(",", ":")))
+}
+if unrepresented_projects:
+    context["unrepresented_issues"] = unrepresented_issues
+else:
+    context["open_issues"] = issue_headers
+
+print(json.dumps(context, separators=(",", ":")))

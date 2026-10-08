@@ -51,8 +51,11 @@ test('live agent issue number overrides misleading cwd topology', () => {
   assert.ok(titlePos >= 0 && issuePos > titlePos && cwdPos > issuePos);
 });
 
-test('snapshot exposes only missing-project issue headers for breadth dispatch', () => {
+test('snapshot emits only the queue relevant to the current breadth phase', () => {
   assert.match(snapshot, /unrepresented_project_set/);
   assert.match(snapshot, /unrepresented_issues/);
   assert.match(snapshot, /issue\.get\("project_hint"\) in unrepresented_project_set/);
+  assert.match(snapshot, /if unrepresented_projects:/);
+  assert.match(snapshot, /context\["unrepresented_issues"\] = unrepresented_issues/);
+  assert.match(snapshot, /context\["open_issues"\] = issue_headers/);
 });

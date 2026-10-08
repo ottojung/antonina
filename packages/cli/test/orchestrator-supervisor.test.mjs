@@ -50,6 +50,11 @@ test('scheduler expands breadth before costly depth because of topology', () => 
   assert.match(scheduler, /## Registered-worktree fast path/);
   assert.match(scheduler, /reject that candidate immediately/);
   assert.match(scheduler, /launch immediately on one such worktree/);
+  assert.match(scheduler, /test -d CWD/);
+  assert.match(scheduler, /path-existence probe/);
+  assert.match(scheduler, /authoritative for live ownership/);
+  assert.match(scheduler, /Do not scan historical\/finished agent inventories/);
+  assert.match(scheduler, /bounded reconciliation owner/);
   assert.match(scheduler, /CURRENT_SNAPSHOT\.live_agents/);
   assert.match(scheduler, /complete open-issue header list/);
   assert.match(scheduler, /Occupied cwd is a hard scheduling constraint/);

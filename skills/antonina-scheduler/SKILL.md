@@ -160,7 +160,8 @@ Registered worktree information is used only for topology/collision decisions.
 For the currently selected breadth candidate:
 
 - If `antonina board resource list --issue ISSUE --page 1 --json` returns an empty list, reject that candidate immediately as lacking a schedulable registered worktree. Do not search old comments for former paths, do not inspect the filesystem, and do not deliberate about reconstructing a cwd. Move immediately to the next candidate.
-- If the issue is not explicitly complete/human-blocked/dependency-blocked and the list contains at least one registered worktree not occupied by a live agent, launch immediately on one such worktree. Do not compare every historical worktree and do not inspect another issue first.
+- For each returned registered cwd considered for launch, use a direct existence check such as `test -d CWD` before `agent new`. Skip missing registered paths immediately; do not use failed agent creation as a path-existence probe.
+- If the issue is not explicitly complete/human-blocked/dependency-blocked and the list contains at least one existing registered worktree not occupied by a live agent, launch immediately on one such worktree. Do not compare every historical worktree and do not inspect another issue first.
 - If the issue state is stale or decomposition is unclear but an unoccupied registered worktree exists, launch bounded reconnaissance there immediately.
 - Only inspect another candidate when the current one is explicitly non-actionable, collides on all registered worktrees, or has no registered worktree.
 
@@ -172,8 +173,8 @@ Occupied cwd is a hard scheduling constraint.
 
 At the start of every turn, and again immediately before a launch:
 
-1. Use `CURRENT_SNAPSHOT.live_agents` as the initial occupied cwd/worktree set.
-2. If the snapshot shows duplicate cwd ownership, re-check only the specific live processes involved and resolve the collision before launching anything else.
+1. Treat `CURRENT_SNAPSHOT.live_agents` as authoritative for live ownership. Do not scan historical/finished agent inventories to reconstruct current ownership.
+2. If the snapshot shows duplicate cwd ownership, re-check only the specific live processes involved and resolve the collision before launching anything else. For a serialized queue with no live owner, launch one bounded reconciliation owner rather than reconstructing old holder history yourself.
 3. For a chosen issue, read its body and newest comments with antonina board show --id ISSUE --page 1 --json.
 4. Use `antonina board resource list --issue ISSUE --page 1 --json` only to discover registered worktree/path topology for that issue.
 5. Never use `ls`, `find`, or broad globs over `/workspace` to discover candidate cwds.

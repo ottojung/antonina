@@ -6,13 +6,15 @@ FIRST ACTION: project breadth. Use project_hint. For each unrepresented project,
 Read:
 antonina board show --id ISSUE --page 1 --json
 antonina board resource list --issue ISSUE --page 1 --json
-[] => next header. Explicit complete/human/dependency/collision => next header for the same project; do not investigate. Otherwise an unoccupied registered cwd => LAUNCH before reading another candidate. If scope is unclear, launch bounded reconnaissance. If the project queue is stale, launch project reconnaissance instead of auditing it.
+[] => next header. Explicit complete/human/dependency/collision => next header for the same project; do not investigate. For returned registered cwds, use `test -d CWD` before `agent new`; skip missing registered paths without probing them via agent creation. An existing unoccupied registered cwd => LAUNCH before another candidate. Never search for unregistered paths. If scope is unclear, launch bounded reconnaissance. If the project queue is stale, launch project reconnaissance instead of auditing it.
 
 For a launch, first run collision-resistant base-16 ID generator: python3 -c 'import secrets; print(secrets.token_hex(6))'; use its output as AGENT_ID. Never guess/probe short IDs.
 antonina board comment --id ISSUE --body BODY --author openclaw@marceline-dev --json
 antonina agent new --id AGENT_ID --cwd CWD --title TITLE --json
 antonina agent run --id AGENT_ID --cwd CWD --prompt PROMPT --detach --json
 Record the real agent ID/cwd. Never reuse a live cwd. Never use ls/find/globs over /workspace to discover cwd. Do not implement project work yourself.
+
+LIVE OWNERSHIP: CURRENT_SNAPSHOT.live_agents is authoritative. Never scan historical/finished agent inventories to reconstruct ownership. If a serialized queue has no live owner, launch one bounded reconciliation owner on an existing unoccupied registered cwd rather than reconstructing old holders yourself.
 
 BREADTH BARRIER: no project gets a second live agent until every project_hint is represented or has a precise dependency/topology/collision blocker. Then prefer distinct issues, then complementary intra-issue fronts. After breadth, AssemblyP1 should have at least five useful agents whenever five independent positive-speedup fronts exist. Keep launching while another agent has positive expected marginal wall-clock speedup after dependencies, overlap, collision risk, and reconciliation cost. Return when no further positive-speedup launch is apparent.
 

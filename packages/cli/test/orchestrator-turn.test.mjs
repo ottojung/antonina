@@ -22,7 +22,7 @@ test('first useful breadth dispatch is cheap and precedes depth', () => {
   assert.match(turn, /CANDIDATE BUDGET/);
   assert.match(turn, /one board show \+ one resource lookup/);
   assert.match(turn, /never reread a skipped candidate/);
-  assert.match(turn, /LAUNCH before reading another candidate/);
+  assert.match(turn, /LAUNCH before another candidate/);
   assert.match(turn, /BREADTH BARRIER/);
   assert.match(turn, /no project gets a second live agent/);
   assert.match(turn, /every project_hint is represented/);
@@ -43,4 +43,13 @@ test('launcher optimizes only topology and marginal speedup', () => {
   assert.match(turn, /dependencies, overlap, collision risk, and reconciliation cost/);
   assert.match(turn, /AssemblyP1 should have at least five useful agents/);
   assert.doesNotMatch(turn, /memory|pressure|oom|headroom|cgroup|loadavg|runtime capacity|machine capacity|host capacity/i);
+});
+
+
+test('launcher rejects stale cwd paths and historical ownership archaeology', () => {
+  assert.match(turn, /test -d CWD/);
+  assert.match(turn, /skip missing registered paths without probing them via agent creation/);
+  assert.match(turn, /CURRENT_SNAPSHOT\.live_agents is authoritative/);
+  assert.match(turn, /Never scan historical\/finished agent inventories/);
+  assert.match(turn, /bounded reconciliation owner/);
 });

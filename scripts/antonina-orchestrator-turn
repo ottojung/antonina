@@ -5,6 +5,8 @@ exec timeout -k 15s 360s "$HOME/.local/bin/opencode-openclaw" run --auto --model
 FIRST ACTION: project breadth. Use CURRENT_SNAPSHOT.unrepresented_projects; use project_hint only to choose an issue within it. For each unrepresented project, test one issue at a time. CANDIDATE BUDGET: one compact issue read, then at most one worktree lookup; never reread a skipped candidate.
 FIRST read antonina-scheduler-issue --issue ISSUE. If explicit complete/human/dependency blocker, skip immediately WITHOUT a worktree lookup. Otherwise run antonina-scheduler-worktrees --issue ISSUE. [] => next header. A returned cwd is registered, existing, and unoccupied: LAUNCH before another candidate. Never search for unregistered paths. If scope is unclear, launch bounded reconnaissance. If the project queue is stale, launch project reconnaissance instead of auditing it.
 
+PRE-LAUNCH GATE: before any second-agent or depth launch, rerun antonina-scheduler-snapshot. If any project became newly unrepresented, return to project breadth before launching depth.
+
 For a launch, first run collision-resistant base-16 ID generator: python3 -c 'import secrets; print(secrets.token_hex(6))'; use its output as AGENT_ID. Never guess/probe short IDs.
 antonina board comment --id ISSUE --body BODY --author openclaw@marceline-dev --json
 antonina agent new --id AGENT_ID --cwd CWD --title TITLE --json

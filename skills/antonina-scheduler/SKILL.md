@@ -188,6 +188,8 @@ At the start of every turn, and again immediately before a launch:
 7. Never invoke `antonina agent run` with a cwd owned by another genuinely live worker.
 8. If another independent front is worthwhile but no distinct worktree exists, create/register a distinct worktree or delegate that preparation rather than colliding.
 
+Immediately before a second-agent or depth launch, refresh the topology snapshot. If a project became newly unrepresented, project breadth regains priority and the depth launch waits.
+
 For every new agent, generate one fresh collision-resistant base-16 ID instead of guessing short IDs. A suitable recipe is `python3 -c 'import secrets; print(secrets.token_hex(6))'`. Reuse that ID consistently for the claim, `agent new`, `agent run`, and the post-launch ownership comment. If the extremely unlikely ID collision occurs, generate one new ID and retry once; never burn scheduler time probing a sequence of memorable IDs.
 
 For each launch:

@@ -61,6 +61,8 @@ test('launcher rejects stale cwd paths and historical ownership archaeology', ()
 
 test('LongCat batches actions but refreshes topology after each one', () => {
   assert.match(turn, /AFTER EACH ACTION/);
+  assert.match(turn, /PRE-LAUNCH GATE/);
+  assert.match(turn, /newly unrepresented/);
   assert.match(turn, /rerun antonina-scheduler-snapshot/);
   assert.match(turn, /treat it as CURRENT_SNAPSHOT/);
   assert.match(turn, /continue from project breadth/);

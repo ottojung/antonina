@@ -55,10 +55,10 @@ test('launcher rejects stale cwd paths and historical ownership archaeology', ()
 });
 
 
-test('each LongCat turn takes one scheduling action then refreshes topology', () => {
-  assert.match(turn, /ONE ACTION PER TURN/);
-  assert.match(turn, /after one successful agent launch/);
-  assert.match(turn, /RETURN IMMEDIATELY/);
-  assert.match(turn, /fresh LongCat turn with a fresh snapshot/);
-  assert.match(turn, /Never continue auditing after that action/);
+test('LongCat batches actions but refreshes topology after each one', () => {
+  assert.match(turn, /AFTER EACH ACTION/);
+  assert.match(turn, /rerun antonina-scheduler-snapshot/);
+  assert.match(turn, /treat it as CURRENT_SNAPSHOT/);
+  assert.match(turn, /continue from project breadth/);
+  assert.match(turn, /Return only when refreshed topology exposes no positive-speedup launch/);
 });

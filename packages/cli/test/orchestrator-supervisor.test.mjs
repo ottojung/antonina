@@ -25,6 +25,15 @@ test('scheduler is a single agentic OpenClaw scheduling lane owned by the superv
   assert.doesNotMatch(turn, /--thinking/);
 });
 
+test('bounded scheduler turn returns instead of idle-watching', () => {
+  assert.match(turn, /FINISH THE BOUNDED TURN/);
+  assert.match(turn, /RETURN IMMEDIATELY/);
+  assert.match(turn, /s6-supervised loop is responsible for invoking another fresh reconciliation pass/);
+  assert.doesNotMatch(turn, /IDLE WATCH/);
+  assert.doesNotMatch(turn, /sleep 20/);
+  assert.doesNotMatch(turn, /retry until watchdog\/fatal error/);
+});
+
 test('scheduler optimizes only efficiency and topology', () => {
   assert.doesNotMatch(loop, /board list|board resource|agent run/);
   assert.match(scheduler, /Optimize only for \*\*efficiency and topology\*\*/);

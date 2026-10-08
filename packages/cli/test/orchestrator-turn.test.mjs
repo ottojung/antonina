@@ -85,3 +85,7 @@ test('post-breadth issue sweep precedes idle watch', () => {
 test('post-breadth search rotates after repeated non-launches', () => {
   assert.match(turn, /after 2 skips in one project, switch projects/);
 });
+
+test('breadth search rotates after a non-launch', () => {
+  assert.match(turn, /After one non-launch in a missing project, switch projects/);
+});

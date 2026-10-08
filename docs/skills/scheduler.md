@@ -86,6 +86,8 @@ The scheduler must not spend multiple minutes proving that several stale issues 
 
 Scan the complete open-issue header list and identify actionable projects/repositories/workspaces that currently have no useful live owner.
 
+During breadth search, after one non-launchable candidate from a missing project, switch to another missing project before reading more from that queue. This minimizes time to the next useful launch; it is not a fairness rule.
+
 Independent projects normally have extremely low reconciliation cost, so an unrepresented actionable project is usually a high-value parallel front.
 
 While such a project exists, prefer launching one useful owner there before adding another front to a project that is already well represented, unless a concrete dependency makes that launch non-useful.

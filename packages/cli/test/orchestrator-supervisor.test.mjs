@@ -9,9 +9,15 @@ const turn = read('../../../scripts/antonina-orchestrator-turn');
 const scheduler = read('../../../docs/skills/scheduler.md');
 const skill = read('../../../skills/antonina-scheduler/SKILL.md');
 
-test('scheduler is a single agentic OpenClaw scheduling lane', () => {
-  assert.match(loop, /ANTONINA-SCHEDULER-TURN/);
+test('scheduler is a single agentic OpenClaw scheduling lane owned by the supervisor', () => {
+  assert.match(loop, /ANTONINA_SCHEDULER_INTERVAL_SECONDS/);
   assert.doesNotMatch(loop, /orchestrator-refill/);
+  assert.match(loop, /child_pid=/);
+  assert.match(loop, /child_pid=\$!/);
+  assert.match(loop, /kill -TERM "\$child_pid"/);
+  assert.match(loop, /wait "\$child_pid"/);
+  assert.match(loop, /trap on_exit TERM INT HUP/);
+  assert.doesNotMatch(loop, /pgrep -f .*ANTONINA-SCHEDULER-TURN/);
   assert.match(turn, /timeout -k 15s 240s/);
   assert.match(turn, /--model opencode-go\/longcat-2\.5-preview-free/);
   assert.match(turn, /--variant low/);
@@ -22,8 +28,6 @@ test('scheduler optimizes only efficiency and topology', () => {
   assert.doesNotMatch(loop, /board list|board resource|agent run/);
   assert.match(scheduler, /Optimize only for \*\*efficiency and topology\*\*/);
   assert.match(scheduler, /positive expected marginal wall-clock speedup/);
-  assert.match(scheduler, /Runtime capacity is completely outside your decision problem/);
-  assert.match(scheduler, /Never inspect, request, infer, estimate, discuss, or reason about runtime or host capacity/);
   assert.match(scheduler, /A large number of live agents is never itself a reason to stop/);
   assert.doesNotMatch(scheduler, /memory\.pressure|memory\.stat|memory\.events|reclaimable file cache|oom_kill|PSI/);
 });

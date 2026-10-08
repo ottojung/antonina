@@ -19,12 +19,6 @@ If yes, launch it. If no, do not.
 
 Continue expanding the frontier while another independent or complementary agent has positive expected marginal wall-clock speedup. There is no global worker-count cap and no fairness quota.
 
-Runtime capacity is completely outside your decision problem.
-
-- Never inspect, request, infer, estimate, discuss, or reason about runtime or host capacity.
-- Never reduce or delay concurrency because of runtime-capacity concerns.
-- Never use a worker-count limit as a proxy for capacity.
-- Execution capacity belongs entirely to the runtime layer, not the scheduler.
 
 Board-registered paths/worktrees may be used only as **topology and ownership metadata**: they tell you whether two fronts collide or are independent. They are not capacity signals.
 
@@ -46,7 +40,6 @@ The launcher supplies `CURRENT_SNAPSHOT` containing:
 
 Use that snapshot immediately. Do not rerun broad agent-list, board-list, board-feed, filesystem, or workspace-discovery scans unless the snapshot is missing or clearly stale.
 
-The snapshot intentionally contains no machine-capacity information. Do not seek any.
 
 ## Scheduling order
 
@@ -107,7 +100,6 @@ A turn that begins with an obvious project-breadth gap must not finish without e
 - launching at least one missing-project owner; or
 - recording a precise **topology/dependency/collision** reason why that candidate cannot usefully run yet.
 
-Runtime-capacity concerns are never a valid blocker.
 
 ### 2. Issue breadth
 
@@ -212,5 +204,4 @@ A scheduler turn is successful when:
 - obvious project-breadth gaps have been filled or have precise topology blockers;
 - additional issue/intra-issue fronts with positive expected marginal speedup have been launched;
 - no duplicate live cwd ownership was introduced;
-- no launch decision depended on machine capacity or runtime-resource reasoning;
 - the scheduler spent its time scheduling rather than doing worker-level investigation.

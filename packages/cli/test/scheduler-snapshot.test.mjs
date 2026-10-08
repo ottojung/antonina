@@ -11,7 +11,7 @@ test('scheduler snapshot is read-only topology context, not a scheduler', () => 
   assert.match(snapshot, /pgrep/);
   assert.match(snapshot, /live_agents/);
   assert.match(snapshot, /open_issues/);
-  assert.doesNotMatch(snapshot, /\/sys\/fs\/cgroup|memory\.|pressure|oom|cpu|loadavg/);
+  assert.doesNotMatch(snapshot, /\/sys\/fs\/cgroup|memory\.|pressure|oom|cpu|loadavg|headroom/);
   assert.doesNotMatch(snapshot, /agent", "run"|agent", "new"|board", "comment"|agent", "stop"|agent", "kill"/);
 });
 

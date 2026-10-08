@@ -1,12 +1,43 @@
 #!/bin/sh
 set -u
+
 interval="${ANTONINA_SCHEDULER_INTERVAL_SECONDS:-15}"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/antonina"
 mkdir -p "$state_dir"
 
-while :; do
-  if ! pgrep -f 'opencode-openclaw.*ANTONINA-SCHEDULER-TURN' >/dev/null 2>&1; then
-    "$HOME/.local/bin/antonina-orchestrator-turn" >>"$state_dir/orchestrator-turn.log" 2>&1 </dev/null &
+child_pid=""
+
+stop_child() {
+  if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+    kill -TERM "$child_pid" 2>/dev/null || true
+    wait "$child_pid" 2>/dev/null || true
   fi
-  sleep "$interval"
+  child_pid=""
+}
+
+on_exit() {
+  stop_child
+  exit 0
+}
+
+trap on_exit TERM INT HUP
+
+while :; do
+  if [ -n "$child_pid" ]; then
+    if kill -0 "$child_pid" 2>/dev/null; then
+      :
+    else
+      wait "$child_pid" 2>/dev/null || true
+      child_pid=""
+    fi
+  fi
+
+  if [ -z "$child_pid" ]; then
+    "$HOME/.local/bin/antonina-orchestrator-turn" >>"$state_dir/orchestrator-turn.log" 2>&1 </dev/null &
+    child_pid=$!
+  fi
+
+  sleep "$interval" &
+  sleep_pid=$!
+  wait "$sleep_pid" 2>/dev/null || true
 done

@@ -20,13 +20,6 @@ test('scheduled turn is a LongCat OpenClaw scheduler pass with a compact snapsho
   assert.match(turn, /Never call 'antonina board show ISSUE' positionally/);
 });
 
-test('launcher excludes runtime capacity from scheduling', () => {
-  assert.match(turn, /Optimize ONLY for efficiency and topology/);
-  assert.match(turn, /NEVER inspect, infer, request, discuss, or reason about runtime or host capacity/);
-  assert.match(turn, /Runtime capacity is outside scheduling/);
-  assert.match(turn, /Machine\/runtime capacity is NEVER a valid blocker/);
-  assert.doesNotMatch(turn, /memory\.pressure|memory\.stat|memory\.events|reclaimable file cache|headroom/);
-});
 
 test('launcher uses topology snapshot before broad discovery', () => {
   assert.match(turn, /Do not rerun broad agent-list, board-list, board-feed/);
@@ -62,4 +55,10 @@ test('launcher treats worktree topology as an immediate dispatch gate', () => {
   assert.match(turn, /if that command returns \[\], reject this candidate immediately/);
   assert.match(turn, /LAUNCH NOW/);
   assert.match(turn, /before reading any other candidate/);
+});
+
+test('scheduler launcher is topology-only', () => {
+  assert.match(turn, /positive expected marginal wall-clock speedup/);
+  assert.match(turn, /dependencies, overlap, collision risk, and reconciliation cost/);
+  assert.doesNotMatch(turn, /memory|pressure|oom|headroom|cgroup|loadavg|runtime capacity|machine capacity|host capacity/i);
 });

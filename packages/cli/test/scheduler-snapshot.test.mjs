@@ -59,3 +59,9 @@ test('snapshot emits only the queue relevant to the current breadth phase', () =
   assert.match(snapshot, /context\["unrepresented_issues"\] = unrepresented_issues/);
   assert.match(snapshot, /context\["open_issues"\] = issue_headers/);
 });
+
+
+test('live project-prefixed agent titles outrank misleading cwd names', () => {
+  assert.match(snapshot, /low\.startswith\("kawun "\)/);
+  assert.match(snapshot, /low\.startswith\("qai "\)/);
+});

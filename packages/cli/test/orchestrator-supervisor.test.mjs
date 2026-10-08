@@ -53,36 +53,29 @@ test('scheduler optimizes only efficiency and topology', () => {
   assert.doesNotMatch(scheduler, /memory\.pressure|memory\.stat|memory\.events|reclaimable file cache|oom_kill|PSI/);
 });
 
-test('scheduler expands breadth before costly depth because of topology', () => {
-  const project = scheduler.indexOf('### 1. Project breadth');
-  const issue = scheduler.indexOf('### 2. Issue breadth');
-  const depth = scheduler.indexOf('### 3. Intra-issue parallelism');
-  const stop = scheduler.indexOf('### 4. Marginal-speedup stop condition');
-  assert.ok(project >= 0 && issue > project && depth > issue && stop > depth);
-  assert.match(scheduler, /\*\*Breadth barrier:\*\*/);
-  assert.match(scheduler, /before giving any project a second live agent/);
-  assert.match(scheduler, /AssemblyP1 should ordinarily have at least five useful agents/);
-  assert.match(scheduler, /### First-dispatch invariant/);
-  assert.match(scheduler, /Do not batch-read several candidate issues/);
-  assert.match(scheduler, /A good independent front launched now is better/);
-  assert.match(scheduler, /### Stale-queue delegation/);
-  assert.match(scheduler, /stop auditing more issues in that project yourself/);
-  assert.match(scheduler, /project reconnaissance owner/);
-  assert.match(scheduler, /## Registered-worktree fast path/);
-  assert.match(scheduler, /reject that candidate immediately/);
-  assert.match(scheduler, /launch immediately on one such worktree/);
-  assert.match(scheduler, /test -d CWD/);
-  assert.match(scheduler, /path-existence probe/);
-  assert.match(scheduler, /authoritative for live ownership/);
-  assert.match(scheduler, /Do not scan historical\/finished agent inventories/);
-  assert.match(scheduler, /bounded reconciliation owner/);
-  assert.match(scheduler, /CURRENT_SNAPSHOT\.live_agents/);
-  assert.match(scheduler, /complete open-issue header list/);
-  assert.match(scheduler, /Occupied cwd is a hard scheduling constraint/);
-  assert.match(scheduler, /Never invoke .*antonina agent run.*cwd owned by another genuinely live worker/);
-  assert.match(scheduler, /antonina-scheduler-issue --issue ISSUE/);
-  assert.doesNotMatch(scheduler, /board show --id ISSUE --page 1 --json/);
-  assert.match(scheduler, /Never pass issue IDs as positional arguments/);
+test('scheduler respects priority and provisions isolated open work without a breadth barrier', () => {
+  for (const text of [
+    '### Priority-first dispatch without a breadth barrier',
+    'canonical board priority order',
+    'CURRENT_SNAPSHOT.open_issues',
+    'orphan_agents',
+    'atomic launcher checks',
+    'antonina-scheduler-provision --issue N --json',
+    '## Registered-worktree fast path',
+    'launch immediately on one such worktree',
+    'test -d CWD',
+    'path-existence probe',
+    'authoritative for live ownership',
+    'Do not scan historical/finished agent inventories',
+    'bounded reconciliation owner',
+    'CURRENT_SNAPSHOT.live_agents',
+    'complete open-issue header list',
+    'Occupied cwd is a hard scheduling constraint',
+    'antonina-scheduler-issue --issue ISSUE',
+    'Never pass issue IDs as positional arguments',
+  ]) assert.ok(scheduler.includes(text), 'Missing policy invariant: ' + text);
+  assert.ok(!scheduler.includes('**Breadth barrier:**'));
+  assert.ok(!scheduler.includes('board show --id ISSUE --page 1 --json'));
 });
 
 test('installed scheduler skill stays in sync with canonical docs', () => {

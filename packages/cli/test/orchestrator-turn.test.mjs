@@ -7,7 +7,7 @@ const turn = readFileSync(fileURLToPath(new URL('../../../scripts/antonina-orche
 
 test('scheduled turn is a compact LongCat OpenClaw scheduler pass', () => {
   assert.match(turn, /ANTONINA-SCHEDULER-TURN/);
-  assert.match(turn, /timeout -k 15s 360s/);
+  assert.match(turn, /timeout -k 15s 900s/);
   assert.match(turn, /--model opencode-go\/longcat-2\.5-preview-free/);
   assert.match(turn, /--variant low/);
   assert.doesNotMatch(turn, /--thinking/);
@@ -67,7 +67,9 @@ test('LongCat batches actions but refreshes topology after each one', () => {
   assert.match(turn, /rerun antonina-scheduler-snapshot/);
   assert.match(turn, /treat it as CURRENT_SNAPSHOT/);
   assert.match(turn, /continue from project breadth/);
-  assert.match(turn, /Return only when refreshed topology exposes no positive-speedup launch/);
+  assert.match(turn, /IDLE WATCH/);
+  assert.match(turn, /sleep 20/);
+  assert.match(turn, /Never return just because frontier is full/);
 });
 
 test('breadth gate forbids inspecting represented projects while gaps remain', () => {

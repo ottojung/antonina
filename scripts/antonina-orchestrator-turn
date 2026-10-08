@@ -1,6 +1,6 @@
 #!/bin/sh
 snapshot="$("$HOME/.local/bin/antonina-scheduler-snapshot" 2>/dev/null || printf '{}')"
-exec timeout -k 15s 360s "$HOME/.local/bin/opencode-openclaw" run --auto --model opencode-go/longcat-2.5-preview-free --variant low --dir /workspace/antonina "ANTONINA-SCHEDULER-TURN. Minimize useful wall-clock completion time by topology. Use CURRENT_SNAPSHOT; rescan only if clearly stale.
+exec timeout -k 15s 900s "$HOME/.local/bin/opencode-openclaw" run --auto --model opencode-go/longcat-2.5-preview-free --variant low --dir /workspace/antonina "ANTONINA-SCHEDULER-TURN. Minimize wall-clock completion time by topology. Use CURRENT_SNAPSHOT; rescan only if clearly stale.
 
 FIRST ACTION: breadth. While unrepresented_projects is nonempty, inspect ONLY CURRENT_SNAPSHOT.unrepresented_issues; skip represented-project issue reads. Test one issue per missing project. CANDIDATE BUDGET: one compact issue read + at most one worktree lookup; never reread a skipped candidate.
 FIRST read antonina-scheduler-issue --issue ISSUE. If explicit complete/human/dependency blocker, skip immediately WITHOUT a worktree lookup. Otherwise run antonina-scheduler-worktrees --issue ISSUE. [] => next header. A returned cwd is registered, existing, and unoccupied: LAUNCH before another candidate. Never search for unregistered paths. If scope is unclear, launch bounded reconnaissance. If the project queue is stale, launch project reconnaissance instead of auditing it.
@@ -15,7 +15,7 @@ Record the real agent ID/cwd. Never reuse a live cwd. Never use ls/find/globs ov
 
 LIVE OWNERSHIP: CURRENT_SNAPSHOT.live_agents is authoritative. Never scan historical/finished agent inventories to reconstruct ownership. If a serialized queue has no live owner, launch one bounded reconciliation owner on an existing unoccupied registered cwd rather than reconstructing old holders yourself.
 
-BREADTH BARRIER: no project gets a second live agent until every project_hint is represented or has a precise dependency/topology/collision blocker. Then prefer distinct issues, then complementary intra-issue fronts. After breadth, AssemblyP1 should have at least five useful agents whenever five independent positive-speedup fronts exist. Choose only actions with positive expected marginal wall-clock speedup after dependencies, overlap, collision risk, and reconciliation cost. AFTER EACH ACTION: rerun antonina-scheduler-snapshot, treat it as CURRENT_SNAPSHOT, and continue from project breadth. Return only when refreshed topology exposes no positive-speedup launch or new precise blocker to record.
+BREADTH BARRIER: no project gets a second live agent until every project_hint is represented or has a precise dependency/topology/collision blocker. Then prefer distinct issues, then complementary intra-issue fronts. After breadth, AssemblyP1 should have at least five useful agents whenever five independent positive-speedup fronts exist. Choose only actions with positive expected marginal wall-clock speedup after dependencies, overlap, collision risk, and reconciliation cost. AFTER EACH ACTION: rerun antonina-scheduler-snapshot, treat it as CURRENT_SNAPSHOT, and continue from project breadth. IDLE WATCH: if idle, run sleep 20; rerun antonina-scheduler-snapshot; continue until watchdog/fatal error. Never return just because frontier is full.
 
 CURRENT_SNAPSHOT:
 $snapshot"

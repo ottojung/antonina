@@ -10,9 +10,10 @@ MESSAGE_LIMIT = 1200
 NEWEST_MESSAGES = 8
 
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] != "--issue" or not sys.argv[2].isdigit():
-        raise SystemExit("usage: antonina-scheduler-issue --issue ISSUE")
-    issue = sys.argv[2]
+    args = [arg for arg in sys.argv[1:] if arg != "--json"]
+    if len(args) != 2 or args[0] != "--issue" or not args[1].isdigit():
+        raise SystemExit("usage: antonina-scheduler-issue --issue ISSUE [--json]")
+    issue = args[1]
     raw = subprocess.check_output(
         [ANTONINA, "board", "show", "--id", issue, "--page", "1", "--json"],
         text=True,

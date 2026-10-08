@@ -194,14 +194,10 @@ The scheduler is a control-plane agent. Its own deliberation must not become the
 - Do not build a comprehensive model of every project before the first useful launch.
 - Read deeply only enough to establish dependency/collision topology for the current candidate.
 - Delegate deep diagnosis/research to workers.
-- After each launch, continue looking for another positive-speedup front rather than supervising the worker.
-- Return once the useful frontier has been filled for this pass.
+- After one successful launch, return immediately. The supervisor will start a fresh scheduler turn with a fresh topology snapshot.
+- If no launch is possible for the selected missing project but you can record one precise dependency/topology/collision blocker, record it and return immediately.
+- Never continue auditing after the turn has taken its one scheduling action.
 
 ## Completion of a scheduler turn
 
-A scheduler turn is successful when:
-
-- obvious project-breadth gaps have been filled or have precise topology blockers;
-- additional issue/intra-issue fronts with positive expected marginal speedup have been launched;
-- no duplicate live cwd ownership was introduced;
-- the scheduler spent its time scheduling rather than doing worker-level investigation.
+A scheduler turn is successful when it takes one useful scheduling action quickly: launch one positive-speedup front, or record one precise blocker for a missing project, without introducing duplicate cwd ownership or doing worker-level investigation. Fresh turns repeat until breadth and useful depth are filled.

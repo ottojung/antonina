@@ -53,3 +53,12 @@ test('launcher rejects stale cwd paths and historical ownership archaeology', ()
   assert.match(turn, /Never scan historical\/finished agent inventories/);
   assert.match(turn, /bounded reconciliation owner/);
 });
+
+
+test('each LongCat turn takes one scheduling action then refreshes topology', () => {
+  assert.match(turn, /ONE ACTION PER TURN/);
+  assert.match(turn, /after one successful agent launch/);
+  assert.match(turn, /RETURN IMMEDIATELY/);
+  assert.match(turn, /fresh LongCat turn with a fresh snapshot/);
+  assert.match(turn, /Never continue auditing after that action/);
+});

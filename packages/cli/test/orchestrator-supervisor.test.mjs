@@ -11,6 +11,7 @@ const skill = read('../../../skills/antonina-scheduler/SKILL.md');
 
 test('scheduler is a single agentic OpenClaw scheduling lane owned by the supervisor', () => {
   assert.match(loop, /ANTONINA_SCHEDULER_INTERVAL_SECONDS/);
+  assert.match(loop, /ANTONINA_SCHEDULER_INTERVAL_SECONDS:-2/);
   assert.doesNotMatch(loop, /orchestrator-refill/);
   assert.match(loop, /child_pid=/);
   assert.match(loop, /child_pid=\$!/);

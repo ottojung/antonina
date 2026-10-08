@@ -16,7 +16,7 @@ Record the real agent ID/cwd. Never reuse a live cwd. Never use ls/find/globs ov
 
 LIVE OWNERSHIP: CURRENT_SNAPSHOT.live_agents is authoritative. Never scan historical/finished agent inventories to reconstruct ownership. If a serialized queue has no live owner, launch one bounded reconciliation owner on an existing unoccupied registered cwd rather than reconstructing old holders yourself.
 
-BREADTH BARRIER: no project gets a second live agent until every project_hint is represented or has a precise dependency/topology/collision blocker. Then prefer distinct issues, then complementary intra-issue fronts. After breadth, AssemblyP1 should have at least five useful agents whenever five independent positive-speedup fronts exist. Keep launching while another agent has positive expected marginal wall-clock speedup after dependencies, overlap, collision risk, and reconciliation cost. Return when no further positive-speedup launch is apparent.
+BREADTH BARRIER: no project gets a second live agent until every project_hint is represented or has a precise dependency/topology/collision blocker. Then prefer distinct issues, then complementary intra-issue fronts. After breadth, AssemblyP1 should have at least five useful agents whenever five independent positive-speedup fronts exist. Choose only actions with positive expected marginal wall-clock speedup after dependencies, overlap, collision risk, and reconciliation cost. ONE ACTION PER TURN: after one successful agent launch, or after recording one precise blocker for a missing project, RETURN IMMEDIATELY. The supervisor will start a fresh LongCat turn with a fresh snapshot. Never continue auditing after that action.
 
 CURRENT_SNAPSHOT:
 $snapshot"

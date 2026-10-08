@@ -1,0 +1,22 @@
+#!/bin/sh
+# Controlled restart for the s6-supervised scheduler.
+#
+# The 2026-10-08 incident left s6-supervise running but the service wanted
+# down (`s6-svstat`: exitcode 0, normally up, without "want up"). A deploy
+# that stops a service with `s6-svc -d` (or drops a `down` file) and forgets
+# `s6-svc -u` leaves it down forever even though the supervisor is healthy.
+# A controlled restart must therefore raise the service first and then
+# restart it in place: `s6-svc -r` preserves the want-up state, while `-d`
+# clears it.
+set -u
+
+service="${ANTONINA_ORCHESTRATOR_SERVICE_DIR:-/run/s6/legacy-services/antonina-orchestrator}"
+
+if [ ! -d "$service" ]; then
+  echo "antonina-orchestrator-restart: service directory not found: $service" >&2
+  exit 1
+fi
+
+s6-svc -u "$service"
+s6-svc -r "$service"
+s6-svstat -o up,wantedup,normallyup,pid "$service"

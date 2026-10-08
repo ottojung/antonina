@@ -8,6 +8,8 @@ const loop = read('../../../scripts/antonina-orchestrator-loop');
 const turn = read('../../../scripts/antonina-orchestrator-turn');
 const scheduler = read('../../../docs/skills/scheduler.md');
 const skill = read('../../../skills/antonina-scheduler/SKILL.md');
+const service = read('../../../config/s6/antonina-orchestrator/run');
+const restart = read('../../../scripts/antonina-orchestrator-restart');
 
 test('scheduler is a single agentic OpenClaw scheduling lane owned by the supervisor', () => {
   assert.match(loop, /ANTONINA_SCHEDULER_INTERVAL_SECONDS/);
@@ -32,6 +34,14 @@ test('bounded scheduler turn returns instead of idle-watching', () => {
   assert.doesNotMatch(turn, /IDLE WATCH/);
   assert.doesNotMatch(turn, /sleep 20/);
   assert.doesNotMatch(turn, /retry until watchdog\/fatal error/);
+});
+
+test('scheduler service lifecycle keeps the supervisor wanted up', () => {
+  assert.match(service, /exec "\$HOME\/\.local\/bin\/antonina-orchestrator-loop"/);
+  assert.doesNotMatch(service, /ANTONINA_ORCHESTRATOR_INTERVAL_SECONDS/);
+  assert.match(restart, /s6-svc -u "\$service"/);
+  assert.match(restart, /s6-svc -r "\$service"/);
+  assert.match(restart, /wantedup/);
 });
 
 test('scheduler optimizes only efficiency and topology', () => {

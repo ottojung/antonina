@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+import json
+import os
+import re
+import subprocess
+import sys
+
+ANTONINA = os.path.expanduser("~/.local/bin/antonina")
+
+def run(args, check=True):
+    return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
+
+def cli_json(*args):
+    return json.loads(run([ANTONINA, *map(str, args)]).stdout)
+
+def live_ids():
+    proc = run(["pgrep", "-af", "opencode run --auto --title antonina-"], check=False)
+    result = set()
+    for line in proc.stdout.splitlines():
+        match = re.search(r"--title\s+antonina-([^\s]+)", line)
+        if match:
+            result.add(match.group(1))
+    return result
+
+def resources(issue):
+    result = []
+    for page in range(1, 100):
+        batch = cli_json("board", "resource", "list", "--issue", issue, "--page", page, "--json")
+        if not batch:
+            break
+        result.extend(batch)
+    return result
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[1] != "--issue" or not sys.argv[2].isdigit():
+        raise SystemExit("usage: antonina-scheduler-worktrees --issue ISSUE")
+    issue = sys.argv[2]
+    running = cli_json("agent", "list", "--page", 1, "--limit", 500, "--running", "--json").get("agents", [])
+    live = live_ids()
+    occupied = {
+        os.path.realpath(a["cwd"])
+        for a in running
+        if str(a.get("id")) in live and a.get("cwd")
+    }
+    available = []
+    seen = set()
+    for item in resources(issue):
+        path = item.get("path")
+        if not path or not os.path.isdir(path):
+            continue
+        real = os.path.realpath(path)
+        if real in occupied or real in seen:
+            continue
+        seen.add(real)
+        available.append({
+            "path": path,
+            "host": item.get("host"),
+        })
+    print(json.dumps(available, separators=(",", ":")))
+
+if __name__ == "__main__":
+    main()

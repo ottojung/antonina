@@ -30,7 +30,8 @@ test('first useful breadth dispatch is cheap and precedes depth', () => {
 
 test('launcher carries exact Antonina grammar and topology gates', () => {
   assert.match(turn, /board show --id ISSUE --page 1 --json/);
-  assert.match(turn, /board resource list --issue ISSUE --page 1 --json/);
+  assert.match(turn, /antonina-scheduler-worktrees --issue ISSUE/);
+  assert.doesNotMatch(turn, /board resource list --issue ISSUE/);
   assert.match(turn, /board comment --id ISSUE --body BODY --author openclaw@marceline-dev --json/);
   assert.match(turn, /agent new --id AGENT_ID --cwd CWD --title TITLE --json/);
   assert.match(turn, /agent run --id AGENT_ID --cwd CWD --prompt PROMPT --detach --json/);
@@ -47,9 +48,9 @@ test('launcher optimizes only topology and marginal speedup', () => {
 
 
 test('launcher rejects stale cwd paths and historical ownership archaeology', () => {
-  assert.match(turn, /test -d CWD/);
-  assert.match(turn, /agent new` is forbidden unless that exact test returned 0/);
-  assert.match(turn, /never probe existence via `agent new`/);
+  assert.match(turn, /returned cwd is registered, existing, and unoccupied/);
+  assert.match(turn, /antonina-scheduler-worktrees --issue ISSUE/);
+  assert.doesNotMatch(turn, /test -d CWD/);
   assert.match(turn, /CURRENT_SNAPSHOT\.live_agents is authoritative/);
   assert.match(turn, /Never scan historical\/finished agent inventories/);
   assert.match(turn, /bounded reconciliation owner/);

@@ -113,6 +113,8 @@ Rotate across independent fronts according to expected speedup and queue priorit
 
 ### 3. Intra-issue parallelism
 
+After project breadth is satisfied, inspect represented projects for additional distinct open issues before intra-issue depth. The control snapshot may provide `represented_issue_candidates`; treat it as a read-only shortlist, not a deterministic schedule. Launch only when the candidate has positive expected marginal wall-clock speedup and an unoccupied registered cwd.
+
 After project and issue breadth, decompose substantial issues when multiple agents can shorten the same critical path.
 
 Good complementary roles include:

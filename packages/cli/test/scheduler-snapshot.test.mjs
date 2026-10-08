@@ -71,3 +71,12 @@ test('snapshot exposes compact represented-project issue candidates for post-bre
   assert.match(snapshot, /count >= 6/);
   assert.match(snapshot, /project not in represented_project_set/);
 });
+
+
+test('worktree lookup is topology-only and never enforces scheduler breadth policy', () => {
+  const worktrees = readFileSync(fileURLToPath(new URL('../../../scripts/antonina-scheduler-worktrees', import.meta.url)), 'utf8');
+  assert.match(worktrees, /board.*resource.*list/);
+  assert.match(worktrees, /os\.path\.isdir/);
+  assert.match(worktrees, /occupied/);
+  assert.doesNotMatch(worktrees, /breadth_allows|unrepresented_projects|antonina-scheduler-snapshot/);
+});

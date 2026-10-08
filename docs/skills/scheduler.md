@@ -150,6 +150,8 @@ Do not guess CLI syntax. A failed command due to grammar is scheduler overhead a
 
 ## Registered-worktree fast path
 
+A registered cwd is schedulable only after `test -d CWD` succeeds immediately before launch. `agent new` must never be used to probe whether a cwd exists; a missing registered path is stale topology and must be skipped.
+
 Registered worktree information is used only for topology/collision decisions.
 
 For the currently selected breadth candidate:

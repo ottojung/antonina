@@ -18,7 +18,7 @@ test('scheduled turn is a compact LongCat OpenClaw scheduler pass', () => {
 
 test('first useful breadth dispatch is cheap and precedes depth', () => {
   assert.match(turn, /FIRST ACTION: project breadth/);
-  assert.match(turn, /Use project_hint/);
+  assert.match(turn, /unrepresented_projects/);
   assert.match(turn, /CANDIDATE BUDGET/);
   assert.match(turn, /one board show \+ one resource lookup/);
   assert.match(turn, /never reread a skipped candidate/);

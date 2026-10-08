@@ -94,8 +94,22 @@ agents = [
     if str(a.get("id")) in live
 ]
 
+open_projects = sorted({
+    i["project_hint"] for i in issue_headers if i.get("project_hint")
+})
+represented_projects = sorted({
+    a["project_hint"] for a in agents if a.get("project_hint")
+})
+represented_project_set = set(represented_projects)
+unrepresented_projects = [
+    project for project in open_projects if project not in represented_project_set
+]
+
 print(json.dumps({
     "live_agents": agents,
+    "represented_projects": represented_projects,
+    "open_projects": open_projects,
+    "unrepresented_projects": unrepresented_projects,
     "open_issue_count": len(issue_headers),
     "open_issues": issue_headers,
 }, separators=(",", ":")))

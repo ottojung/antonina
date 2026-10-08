@@ -110,12 +110,26 @@ unrepresented_issues = [
     if issue.get("project_hint") in unrepresented_project_set
 ]
 
+
+represented_issue_candidates = []
+per_project = {}
+for i in issue_headers:
+    project = i.get("project_hint")
+    if not project or project not in represented_project_set:
+        continue
+    count = per_project.get(project, 0)
+    if count >= 6:
+        continue
+    represented_issue_candidates.append(i)
+    per_project[project] = count + 1
+
 context = {
     "live_agents": agents,
     "represented_projects": represented_projects,
     "open_projects": open_projects,
     "unrepresented_projects": unrepresented_projects,
     "open_issue_count": len(issue_headers),
+    "represented_issue_candidates": represented_issue_candidates,
 }
 if unrepresented_projects:
     context["unrepresented_issues"] = unrepresented_issues

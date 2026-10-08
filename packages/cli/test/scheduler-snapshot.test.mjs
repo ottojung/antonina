@@ -65,3 +65,9 @@ test('live project-prefixed agent titles outrank misleading cwd names', () => {
   assert.match(snapshot, /low\.startswith\("kawun "\)/);
   assert.match(snapshot, /low\.startswith\("qai "\)/);
 });
+
+test('snapshot exposes compact represented-project issue candidates for post-breadth scheduling', () => {
+  assert.match(snapshot, /represented_issue_candidates/);
+  assert.match(snapshot, /count >= 6/);
+  assert.match(snapshot, /project not in represented_project_set/);
+});

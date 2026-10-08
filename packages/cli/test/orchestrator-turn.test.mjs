@@ -69,10 +69,15 @@ test('LongCat batches actions but refreshes topology after each one', () => {
   assert.match(turn, /continue from project breadth/);
   assert.match(turn, /IDLE WATCH/);
   assert.match(turn, /sleep 20/);
-  assert.match(turn, /Never return just because frontier is full/);
 });
 
 test('breadth gate forbids inspecting represented projects while gaps remain', () => {
   assert.match(turn, /inspect ONLY CURRENT_SNAPSHOT\.unrepresented_issues/);
   assert.match(turn, /skip represented-project issue reads/);
+});
+
+test('post-breadth issue sweep precedes idle watch', () => {
+  assert.match(turn, /AFTER BREADTH: do not idle/);
+  assert.match(turn, /represented_issue_candidates/);
+  assert.match(turn, /represented_issue_candidates produced no launchable distinct issue or complementary front/);
 });

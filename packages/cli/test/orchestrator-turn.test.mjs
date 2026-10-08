@@ -9,7 +9,7 @@ test('scheduled turn is a compact Step 5 Preview Free OpenClaw scheduler pass', 
   assert.match(turn, /ANTONINA-SCHEDULER-TURN/);
   assert.match(turn, /timeout -k 15s 900s/);
   assert.match(turn, /--model opencode-go\/step-5-preview-free/);
-  assert.match(turn, /--variant low/);
+  assert.match(turn, /--variant high/);
   assert.doesNotMatch(turn, /--thinking/);
   assert.match(turn, /antonina-scheduler-snapshot/);
   assert.match(turn, /CURRENT_SNAPSHOT/);

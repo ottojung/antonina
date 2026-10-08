@@ -33,6 +33,7 @@ test('project hints prefer explicit titles and keep independent workstreams dist
   assert.match(snapshot, /startswith\("pyreports"\).*return "pyreports"/);
   assert.match(snapshot, /return "Kawun"/);
   assert.match(snapshot, /return "Skrynia"/);
+  assert.match(snapshot, /number == 187.*return \"Skrynia\"/);
   assert.match(snapshot, /number == 206.*return "Antonina"/);
 });
 

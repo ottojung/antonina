@@ -81,3 +81,7 @@ test('post-breadth issue sweep precedes idle watch', () => {
   assert.match(turn, /represented_issue_candidates/);
   assert.match(turn, /represented_issue_candidates produced no launchable distinct issue or complementary front/);
 });
+
+test('post-breadth search rotates after repeated non-launches', () => {
+  assert.match(turn, /after 2 skips in one project, switch projects/);
+});

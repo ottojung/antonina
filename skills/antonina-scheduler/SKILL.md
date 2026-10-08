@@ -109,6 +109,8 @@ After project breadth is covered, look for distinct actionable issues inside rep
 
 Prefer another issue when its work can proceed independently and therefore shortens the project critical path more than adding a duplicate front to an already-owned issue.
 
+During the post-breadth search, after two non-launchable candidates from the same represented project, switch to a different represented project before reading more from that queue. This is a search-latency heuristic to find the next positive-speedup front sooner, not a fairness rule.
+
 Rotate across independent fronts according to expected speedup and queue priority; do not exhaust one project's depth merely because it appears first.
 
 ### 3. Intra-issue parallelism

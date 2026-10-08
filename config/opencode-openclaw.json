@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode-go/longcat-2.5-preview-free",
+  "small_model": "opencode-go/longcat-2.5-preview-free",
+  "provider": {
+    "opencode-go": {
+      "whitelist": [
+        "longcat-2.5-preview-free"
+      ]
+    }
+  }
+}

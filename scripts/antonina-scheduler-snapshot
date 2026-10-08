@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+import json
+import os
+import re
+import subprocess
+
+ANTONINA = os.path.expanduser("~/.local/bin/antonina")
+
+def run(args, check=True):
+    return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
+
+def cli_json(*args):
+    return json.loads(run([ANTONINA, *map(str, args)]).stdout)
+
+def live_ids():
+    proc = run(["pgrep", "-af", "opencode run --auto --title antonina-"], check=False)
+    result = set()
+    for line in proc.stdout.splitlines():
+        m = re.search(r"--title\s+antonina-([^\s]+)", line)
+        if m:
+            result.add(m.group(1))
+    return result
+
+def project_hint_from_title(title, number=None):
+    low=(title or "").strip().lower()
+    if "assemblyp1" in low: return "AssemblyP1"
+    if low.startswith("volodyslav"): return "Volodyslav"
+    if low.startswith("along"): return "Along"
+    if low.startswith("lubko"): return "Lubko"
+    if low.startswith("antonina"): return "Antonina"
+    if low.startswith("pyreports"): return "pyreports"
+    if low.startswith("qai:") or low.startswith("qai ") or "proviral" in low or low.startswith("schema.sql"): return "QAI"
+    if low.startswith("kawun:") or low.startswith("kawun ") or low.startswith("[skrynia-apps#") or "kawunapp" in low: return "Kawun"
+    if low.startswith("skrynia") or "skrynia release line" in low or "skrynia check-retired-apps" in low: return "Skrynia"
+    if number == 187: return "Skrynia"
+    if number == 206: return "Antonina"
+    return None
+
+def project_hint_from_cwd(cwd):
+    low=(cwd or "").lower()
+    if "assemblyp1" in low: return "AssemblyP1"
+    if "volodyslav" in low: return "Volodyslav"
+    if "pyreports" in low: return "pyreports"
+    if "qai" in low: return "QAI"
+    if "skrynia-apps" in low or "kawun" in low: return "Kawun"
+    if "skrynia" in low: return "Skrynia"
+    if "antonina" in low: return "Antonina"
+    if "lubko" in low: return "Lubko"
+    if "along" in low: return "Along"
+    return None
+
+def issue_number_from_agent_title(title):
+    text = (title or "").strip()
+    m = re.match(
+        r"(?:(?:AssemblyP1|Volodyslav|Kawun|QAI|Skrynia|Antonina|Lubko|Along|pyreports)\s+)?(\d+)\b",
+        text,
+        re.IGNORECASE,
+    )
+    return int(m.group(1)) if m else None
+
+def open_issues():
+    result = []
+    for page in range(1, 100):
+        batch = cli_json("board", "list", "--state", "open", "--page", page, "--json")
+        if not batch:
+            break
+        result.extend(batch)
+    return result
+
+running = cli_json("agent", "list", "--page", 1, "--limit", 500, "--running", "--json").get("agents", [])
+live = live_ids()
+
+issue_headers = [
+    {
+        "number": i.get("number"),
+        "title": (i.get("title") or "")[:160],
+        "project_hint": project_hint_from_title(i.get("title"), i.get("number")),
+    }
+    for i in open_issues()
+]
+issue_project_by_number = {
+    i["number"]: i["project_hint"]
+    for i in issue_headers
+    if i.get("number") is not None and i.get("project_hint") is not None
+}
+
+agents = [
+    {
+        "id": a.get("id"),
+        "title": a.get("title"),
+        "cwd": a.get("cwd"),
+        "project_hint": (
+            project_hint_from_title(a.get("title"))
+            or issue_project_by_number.get(issue_number_from_agent_title(a.get("title")))
+            or project_hint_from_cwd(a.get("cwd"))
+        ),
+    }
+    for a in running
+    if str(a.get("id")) in live
+]
+
+open_projects = sorted({
+    i["project_hint"] for i in issue_headers if i.get("project_hint")
+})
+represented_projects = sorted({
+    a["project_hint"] for a in agents if a.get("project_hint")
+})
+represented_project_set = set(represented_projects)
+unrepresented_projects = [
+    project for project in open_projects if project not in represented_project_set
+]
+unrepresented_project_set = set(unrepresented_projects)
+unrepresented_issues = [
+    issue for issue in issue_headers
+    if issue.get("project_hint") in unrepresented_project_set
+]
+
+
+live_issue_numbers = {
+    issue_number
+    for a in agents
+    for issue_number in [issue_number_from_agent_title(a.get("title"))]
+    if issue_number is not None
+}
+
+represented_issue_candidates = []
+per_project = {}
+for i in issue_headers:
+    project = i.get("project_hint")
+    if not project or project not in represented_project_set:
+        continue
+    if i.get("number") in live_issue_numbers:
+        continue
+    count = per_project.get(project, 0)
+    if count >= 6:
+        continue
+    represented_issue_candidates.append(i)
+    per_project[project] = count + 1
+
+context = {
+    "live_agents": agents,
+    "represented_projects": represented_projects,
+    "open_projects": open_projects,
+    "unrepresented_projects": unrepresented_projects,
+    "open_issue_count": len(issue_headers),
+    "live_issue_numbers": sorted(live_issue_numbers),
+    "represented_issue_candidates": represented_issue_candidates,
+}
+if unrepresented_projects:
+    context["unrepresented_issues"] = unrepresented_issues
+else:
+    context["open_issues"] = issue_headers
+
+print(json.dumps(context, separators=(",", ":")))

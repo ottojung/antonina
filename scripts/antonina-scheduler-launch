@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import secrets
+import subprocess
+import sys
+
+ANTONINA = os.environ.get("ANTONINA_BIN", os.path.expanduser("~/.local/bin/antonina"))
+WORKTREES = os.environ.get("ANTONINA_SCHEDULER_WORKTREES_BIN", os.path.expanduser("~/.local/bin/antonina-scheduler-worktrees"))
+
+def run(args, check=True):
+    return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
+
+def available_worktrees(issue):
+    proc = run([WORKTREES, "--issue", str(issue), "--json"])
+    return json.loads(proc.stdout)
+
+def chosen_cwd_is_available(issue, cwd):
+    chosen = os.path.realpath(cwd)
+    return any(os.path.realpath(item.get("path", "")) == chosen for item in available_worktrees(issue))
+
+def new_agent(agent_id, cwd, title):
+    return run([ANTONINA, "agent", "new", "--id", agent_id, "--cwd", cwd, "--title", title, "--json"], check=False)
+
+def cleanup_idle(agent_id):
+    run([ANTONINA, "agent", "delete", "--id", agent_id, "--force"], check=False)
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--issue", required=True, type=int)
+    parser.add_argument("--cwd", required=True)
+    parser.add_argument("--title", required=True)
+    parser.add_argument("--summary", required=True)
+    parser.add_argument("--prompt", required=True)
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    if not chosen_cwd_is_available(args.issue, args.cwd):
+        raise SystemExit("selected cwd is no longer a registered existing unoccupied worktree")
+
+    agent_id = None
+    for _ in range(2):
+        candidate = secrets.token_hex(6)
+        proc = new_agent(candidate, args.cwd, args.title)
+        if proc.returncode == 0:
+            agent_id = candidate
+            break
+        if "already exists" not in (proc.stdout + proc.stderr).lower():
+            sys.stderr.write(proc.stderr or proc.stdout)
+            raise SystemExit(proc.returncode or 1)
+    if agent_id is None:
+        raise SystemExit("failed to allocate a unique agent id")
+
+    started = run([
+        ANTONINA, "agent", "run",
+        "--id", agent_id,
+        "--cwd", args.cwd,
+        "--prompt", args.prompt,
+        "--detach",
+        "--json",
+    ], check=False)
+    if started.returncode != 0:
+        cleanup_idle(agent_id)
+        sys.stderr.write(started.stderr or started.stdout)
+        raise SystemExit(started.returncode or 1)
+
+    body = (
+        "[scheduler-turn]\n"
+        "state: working\n"
+        f"summary: {args.summary}\n"
+        f"resources: agent {agent_id}; cwd {args.cwd}\n"
+        "next: worker owns this front until terminal; refresh topology before another launch."
+    )
+    comment = run([
+        ANTONINA, "board", "comment",
+        "--id", str(args.issue),
+        "--body", body,
+        "--author", "openclaw@marceline-dev",
+        "--json",
+    ], check=False)
+
+    result = {
+        "id": agent_id,
+        "cwd": args.cwd,
+        "run": json.loads(started.stdout) if started.stdout.strip() else None,
+        "comment_recorded": comment.returncode == 0,
+    }
+    print(json.dumps(result, separators=(",", ":")))
+    if comment.returncode != 0:
+        sys.stderr.write("worker started but board comment failed\n")
+        sys.stderr.write(comment.stderr or comment.stdout)
+        raise SystemExit(2)
+
+if __name__ == "__main__":
+    main()

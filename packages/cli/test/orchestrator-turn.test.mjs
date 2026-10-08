@@ -20,8 +20,9 @@ test('first useful breadth dispatch is cheap and precedes depth', () => {
   assert.match(turn, /FIRST ACTION: project breadth/);
   assert.match(turn, /unrepresented_projects/);
   assert.match(turn, /CANDIDATE BUDGET/);
-  assert.match(turn, /one compact issue read \+ one worktree lookup/);
+  assert.match(turn, /one compact issue read, then at most one worktree lookup/);
   assert.match(turn, /never reread a skipped candidate/);
+  assert.match(turn, /skip immediately WITHOUT a worktree lookup/);
   assert.match(turn, /LAUNCH before another candidate/);
   assert.match(turn, /BREADTH BARRIER/);
   assert.match(turn, /no project gets a second live agent/);

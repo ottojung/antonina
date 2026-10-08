@@ -20,3 +20,8 @@ test('worktree helper is issue-scoped and paginated', () => {
   assert.match(helper, /for page in range\(1, 100\)/);
   assert.match(helper, /for item in resources\(issue\)/);
 });
+
+ test('worktree helper caps returned topology choices', () => {
+  assert.match(helper, /MAX_RESULTS = 8/);
+  assert.match(helper, /len\(available\) >= MAX_RESULTS/);
+});

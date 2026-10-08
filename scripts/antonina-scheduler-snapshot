@@ -104,12 +104,18 @@ represented_project_set = set(represented_projects)
 unrepresented_projects = [
     project for project in open_projects if project not in represented_project_set
 ]
+unrepresented_project_set = set(unrepresented_projects)
+unrepresented_issues = [
+    issue for issue in issue_headers
+    if issue.get("project_hint") in unrepresented_project_set
+]
 
 print(json.dumps({
     "live_agents": agents,
     "represented_projects": represented_projects,
     "open_projects": open_projects,
     "unrepresented_projects": unrepresented_projects,
+    "unrepresented_issues": unrepresented_issues,
     "open_issue_count": len(issue_headers),
     "open_issues": issue_headers,
 }, separators=(",", ":")))

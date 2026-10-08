@@ -50,3 +50,9 @@ test('live agent issue number overrides misleading cwd topology', () => {
   const cwdPos = snapshot.indexOf('project_hint_from_cwd(a.get("cwd"))');
   assert.ok(titlePos >= 0 && issuePos > titlePos && cwdPos > issuePos);
 });
+
+test('snapshot exposes only missing-project issue headers for breadth dispatch', () => {
+  assert.match(snapshot, /unrepresented_project_set/);
+  assert.match(snapshot, /unrepresented_issues/);
+  assert.match(snapshot, /issue\.get\("project_hint"\) in unrepresented_project_set/);
+});

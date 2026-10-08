@@ -17,10 +17,11 @@ test('scheduled turn is a compact LongCat OpenClaw scheduler pass', () => {
 });
 
 test('first useful breadth dispatch is cheap and precedes depth', () => {
-  assert.match(turn, /FIRST ACTION: project breadth/);
+  assert.match(turn, /FIRST ACTION: breadth/);
   assert.match(turn, /unrepresented_projects/);
   assert.match(turn, /CANDIDATE BUDGET/);
-  assert.match(turn, /one compact issue read, then at most one worktree lookup/);
+  assert.match(turn, /one compact issue read/);
+  assert.match(turn, /at most one worktree lookup/);
   assert.match(turn, /never reread a skipped candidate/);
   assert.match(turn, /skip immediately WITHOUT a worktree lookup/);
   assert.match(turn, /LAUNCH before another candidate/);
@@ -67,4 +68,9 @@ test('LongCat batches actions but refreshes topology after each one', () => {
   assert.match(turn, /treat it as CURRENT_SNAPSHOT/);
   assert.match(turn, /continue from project breadth/);
   assert.match(turn, /Return only when refreshed topology exposes no positive-speedup launch/);
+});
+
+test('breadth gate forbids inspecting represented projects while gaps remain', () => {
+  assert.match(turn, /inspect ONLY CURRENT_SNAPSHOT\.unrepresented_issues/);
+  assert.match(turn, /skip represented-project issue reads/);
 });

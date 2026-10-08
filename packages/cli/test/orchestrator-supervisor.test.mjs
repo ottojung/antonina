@@ -38,6 +38,8 @@ test('scheduler expands breadth before costly depth because of topology', () => 
   const depth = scheduler.indexOf('### 3. Intra-issue parallelism');
   const stop = scheduler.indexOf('### 4. Marginal-speedup stop condition');
   assert.ok(project >= 0 && issue > project && depth > issue && stop > depth);
+  assert.match(scheduler, /\*\*Breadth barrier:\*\*/);
+  assert.match(scheduler, /before giving any project a second live agent/);
   assert.match(scheduler, /AssemblyP1 should ordinarily have at least five useful agents/);
   assert.match(scheduler, /### First-dispatch invariant/);
   assert.match(scheduler, /Do not batch-read several candidate issues/);

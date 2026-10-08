@@ -87,6 +87,8 @@ The scheduler must not spend multiple minutes proving that several stale issues 
 
 ### 1. Project breadth
 
+**Breadth barrier:** before giving any project a second live agent, every identifiable project in the open queue must either have a genuinely live useful owner or a precise dependency/topology/collision blocker. Re-evaluate this barrier after every breadth launch. Project-local concurrency targets activate only after the barrier is satisfied.
+
 Scan the complete open-issue header list and identify actionable projects/repositories/workspaces that currently have no useful live owner.
 
 Independent projects normally have extremely low reconciliation cost, so an unrepresented actionable project is usually a high-value parallel front.
@@ -178,6 +180,8 @@ At the start of every turn, and again immediately before a launch:
 6. Immediately before launch, verify the selected cwd is still unoccupied.
 7. Never invoke `antonina agent run` with a cwd owned by another genuinely live worker.
 8. If another independent front is worthwhile but no distinct worktree exists, create/register a distinct worktree or delegate that preparation rather than colliding.
+
+For every new agent, generate one fresh collision-resistant base-16 ID instead of guessing short IDs. A suitable recipe is `python3 -c 'import secrets; print(secrets.token_hex(6))'`. Reuse that ID consistently for the claim, `agent new`, `agent run`, and the post-launch ownership comment. If the extremely unlikely ID collision occurs, generate one new ID and retry once; never burn scheduler time probing a sequence of memorable IDs.
 
 For each launch:
 

@@ -5,7 +5,7 @@ import test from 'node:test';
 
 const turn = readFileSync(fileURLToPath(new URL('../../../scripts/antonina-orchestrator-turn', import.meta.url)), 'utf8');
 
-test('scheduled turn is a LongCat OpenClaw scheduler pass with a compact snapshot', () => {
+test('scheduled turn is a compact LongCat OpenClaw scheduler pass', () => {
   assert.match(turn, /ANTONINA-SCHEDULER-TURN/);
   assert.match(turn, /timeout -k 15s 240s/);
   assert.match(turn, /--model opencode-go\/longcat-2\.5-preview-free/);
@@ -13,52 +13,34 @@ test('scheduled turn is a LongCat OpenClaw scheduler pass with a compact snapsho
   assert.doesNotMatch(turn, /--thinking/);
   assert.match(turn, /antonina-scheduler-snapshot/);
   assert.match(turn, /CURRENT_SNAPSHOT/);
-  assert.match(turn, /positive expected marginal wall-clock speedup/);
-  assert.match(turn, /Do not implement project work yourself/);
-  assert.match(turn, /board show --id ISSUE --page 1 --json/);
-  assert.match(turn, /agent run --id AGENT_ID --cwd CWD --prompt PROMPT --detach --json/);
-  assert.match(turn, /Never call 'antonina board show ISSUE' positionally/);
+  assert.ok(Buffer.byteLength(turn, 'utf8') < 3000);
 });
 
-
-test('launcher uses topology snapshot before broad discovery', () => {
-  assert.match(turn, /Do not rerun broad agent-list, board-list, board-feed/);
-  assert.match(turn, /board resource list --issue ISSUE --page 1 --json/);
-  assert.match(turn, /MUST NOT finish without either launching at least one missing-project owner or recording a precise dependency\/topology\/collision blocker/);
-  assert.match(turn, /NEVER use ls\/find\/globs over \/workspace/);
-  assert.match(turn, /only onto unoccupied cwd\/worktrees/);
+test('first useful breadth dispatch is cheap and precedes depth', () => {
+  assert.match(turn, /FIRST ACTION: project breadth/);
+  assert.match(turn, /Use project_hint/);
+  assert.match(turn, /CANDIDATE BUDGET/);
+  assert.match(turn, /one board show \+ one resource lookup/);
+  assert.match(turn, /never reread a skipped candidate/);
+  assert.match(turn, /LAUNCH before reading another candidate/);
+  assert.match(turn, /BREADTH BARRIER/);
+  assert.match(turn, /no project gets a second live agent/);
+  assert.match(turn, /every project_hint is represented/);
 });
 
-test('launcher carries exact Antonina named-option grammar', () => {
+test('launcher carries exact Antonina grammar and topology gates', () => {
   assert.match(turn, /board show --id ISSUE --page 1 --json/);
   assert.match(turn, /board resource list --issue ISSUE --page 1 --json/);
   assert.match(turn, /board comment --id ISSUE --body BODY --author openclaw@marceline-dev --json/);
   assert.match(turn, /agent new --id AGENT_ID --cwd CWD --title TITLE --json/);
   assert.match(turn, /agent run --id AGENT_ID --cwd CWD --prompt PROMPT --detach --json/);
-  assert.match(turn, /never pass issue IDs positionally/);
+  assert.match(turn, /Never reuse a live cwd/);
+  assert.match(turn, /Never use ls\/find\/globs over \/workspace/);
 });
 
-test('launcher enforces dispatch before portfolio audit', () => {
-  assert.match(turn, /FIRST-DISPATCH INVARIANT/);
-  assert.match(turn, /launch an owner or bounded reconnaissance agent BEFORE reading another project's candidate/);
-  assert.match(turn, /Do not batch-audit candidate issues or build a comprehensive blocker map before the first launch/);
-});
-
-test('launcher delegates stale project-queue archaeology', () => {
-  assert.match(turn, /STALE-QUEUE DELEGATION/);
-  assert.match(turn, /STOP auditing that project's backlog yourself/);
-  assert.match(turn, /launch a bounded project-reconnaissance owner/);
-});
-
-test('launcher treats worktree topology as an immediate dispatch gate', () => {
-  assert.match(turn, /REGISTERED-WORKTREE FAST PATH/);
-  assert.match(turn, /if that command returns \[\], reject this candidate immediately/);
-  assert.match(turn, /LAUNCH NOW/);
-  assert.match(turn, /before reading any other candidate/);
-});
-
-test('scheduler launcher is topology-only', () => {
+test('launcher optimizes only topology and marginal speedup', () => {
   assert.match(turn, /positive expected marginal wall-clock speedup/);
   assert.match(turn, /dependencies, overlap, collision risk, and reconciliation cost/);
+  assert.match(turn, /AssemblyP1 should have at least five useful agents/);
   assert.doesNotMatch(turn, /memory|pressure|oom|headroom|cgroup|loadavg|runtime capacity|machine capacity|host capacity/i);
 });

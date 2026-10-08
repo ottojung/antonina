@@ -20,3 +20,10 @@ test('snapshot paginates the open queue without classifying or scheduling it', (
   assert.match(snapshot, /--state", "open"/);
   assert.doesNotMatch(snapshot, /project_from|queue_plan|launch_allowed|worker_count/);
 });
+
+test('project hints are read-only topology context', () => {
+  assert.match(snapshot, /project_hint_from_title/);
+  assert.match(snapshot, /project_hint_from_cwd/);
+  assert.match(snapshot, /project_hint/);
+  assert.doesNotMatch(snapshot, /agent\", \"run|agent\", \"new|board\", \"comment/);
+});

@@ -50,7 +50,12 @@ def project_hint_from_cwd(cwd):
     return None
 
 def issue_number_from_agent_title(title):
-    m = re.match(r"\s*(\d+)\b", title or "")
+    text = (title or "").strip()
+    m = re.match(
+        r"(?:(?:AssemblyP1|Volodyslav|Kawun|QAI|Skrynia|Antonina|Lubko|Along|pyreports)\s+)?(\d+)\b",
+        text,
+        re.IGNORECASE,
+    )
     return int(m.group(1)) if m else None
 
 def open_issues():
@@ -111,11 +116,20 @@ unrepresented_issues = [
 ]
 
 
+live_issue_numbers = {
+    issue_number
+    for a in agents
+    for issue_number in [issue_number_from_agent_title(a.get("title"))]
+    if issue_number is not None
+}
+
 represented_issue_candidates = []
 per_project = {}
 for i in issue_headers:
     project = i.get("project_hint")
     if not project or project not in represented_project_set:
+        continue
+    if i.get("number") in live_issue_numbers:
         continue
     count = per_project.get(project, 0)
     if count >= 6:
@@ -129,6 +143,7 @@ context = {
     "open_projects": open_projects,
     "unrepresented_projects": unrepresented_projects,
     "open_issue_count": len(issue_headers),
+    "live_issue_numbers": sorted(live_issue_numbers),
     "represented_issue_candidates": represented_issue_candidates,
 }
 if unrepresented_projects:

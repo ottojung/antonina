@@ -80,3 +80,9 @@ test('worktree lookup is topology-only and never enforces scheduler breadth poli
   assert.match(worktrees, /occupied/);
   assert.doesNotMatch(worktrees, /breadth_allows|unrepresented_projects|antonina-scheduler-snapshot/);
 });
+
+test('post-breadth candidates exclude issues already owned by live agents', () => {
+  assert.match(snapshot, /live_issue_numbers/);
+  assert.match(snapshot, /i\.get\("number"\) in live_issue_numbers/);
+  assert.match(snapshot, /AssemblyP1\|Volodyslav\|Kawun\|QAI/);
+});

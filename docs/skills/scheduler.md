@@ -191,7 +191,7 @@ At the start of every turn, and again immediately before a launch:
 
 Immediately before a second-agent or depth launch, refresh the topology snapshot. If a project became newly unrepresented, project breadth regains priority and the depth launch waits.
 
-For every new agent, generate one fresh collision-resistant base-16 ID instead of guessing short IDs. A suitable recipe is `python3 -c 'import secrets; print(secrets.token_hex(6))'`. Reuse that ID consistently for the claim, `agent new`, `agent run`, and the post-launch ownership comment. If the extremely unlikely ID collision occurs, generate one new ID and retry once; never burn scheduler time probing a sequence of memorable IDs.
+Use antonina-scheduler-launch as the scheduler's launch transaction. LongCat chooses the issue, scope, registered unoccupied cwd, title, and prompt; the helper only executes that decision atomically. It revalidates the cwd, allocates a collision-resistant base-16 ID, creates and starts the detached agent, deletes the idle record if startup fails, and writes the board working claim only after startup succeeds. Never split agent new and agent run across separate scheduler tool calls.
 
 For each launch:
 

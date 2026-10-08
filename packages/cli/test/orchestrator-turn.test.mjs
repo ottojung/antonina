@@ -35,9 +35,9 @@ test('launcher carries exact Antonina grammar and topology gates', () => {
   assert.doesNotMatch(turn, /board show --id ISSUE/);
   assert.match(turn, /antonina-scheduler-worktrees --issue ISSUE/);
   assert.doesNotMatch(turn, /board resource list --issue ISSUE/);
-  assert.match(turn, /board comment --id ISSUE --body BODY --author openclaw@marceline-dev --json/);
-  assert.match(turn, /agent new --id AGENT_ID --cwd CWD --title TITLE --json/);
-  assert.match(turn, /agent run --id AGENT_ID --cwd CWD --prompt PROMPT --detach --json/);
+  assert.match(turn, /antonina-scheduler-launch --issue ISSUE --cwd CWD --title TITLE --summary SUMMARY --prompt PROMPT --json/);
+  assert.doesNotMatch(turn, /antonina agent new --id/);
+  assert.doesNotMatch(turn, /antonina agent run --id/);
   assert.match(turn, /Never reuse a live cwd/);
   assert.match(turn, /Never use ls\/find\/globs over \/workspace/);
 });

@@ -6,7 +6,7 @@ FIRST ACTION: project breadth. Use project_hint. For each unrepresented project,
 Read:
 antonina board show --id ISSUE --page 1 --json
 antonina board resource list --issue ISSUE --page 1 --json
-[] => next header. Explicit complete/human/dependency/collision => next header for the same project; do not investigate. For returned registered cwds, use `test -d CWD` before `agent new`; skip missing registered paths without probing them via agent creation. An existing unoccupied registered cwd => LAUNCH before another candidate. Never search for unregistered paths. If scope is unclear, launch bounded reconnaissance. If the project queue is stale, launch project reconnaissance instead of auditing it.
+[] => next header. Explicit complete/human/dependency/collision => next header for the same project; do not investigate. CWD GATE: run `test -d CWD` before `agent new`; `agent new` is forbidden unless that exact test returned 0. Missing => skip; never probe existence via `agent new`. An existing unoccupied registered cwd => LAUNCH before another candidate. Never search for unregistered paths. If scope is unclear, launch bounded reconnaissance. If the project queue is stale, launch project reconnaissance instead of auditing it.
 
 For a launch, first run collision-resistant base-16 ID generator: python3 -c 'import secrets; print(secrets.token_hex(6))'; use its output as AGENT_ID. Never guess/probe short IDs.
 antonina board comment --id ISSUE --body BODY --author openclaw@marceline-dev --json

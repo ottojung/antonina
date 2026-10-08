@@ -48,7 +48,8 @@ test('launcher optimizes only topology and marginal speedup', () => {
 
 test('launcher rejects stale cwd paths and historical ownership archaeology', () => {
   assert.match(turn, /test -d CWD/);
-  assert.match(turn, /skip missing registered paths without probing them via agent creation/);
+  assert.match(turn, /agent new` is forbidden unless that exact test returned 0/);
+  assert.match(turn, /never probe existence via `agent new`/);
   assert.match(turn, /CURRENT_SNAPSHOT\.live_agents is authoritative/);
   assert.match(turn, /Never scan historical\/finished agent inventories/);
   assert.match(turn, /bounded reconciliation owner/);

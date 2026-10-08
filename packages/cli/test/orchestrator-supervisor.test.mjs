@@ -19,7 +19,7 @@ test('scheduler is a single agentic OpenClaw scheduling lane owned by the superv
   assert.match(loop, /wait "\$child_pid"/);
   assert.match(loop, /trap on_exit TERM INT HUP/);
   assert.doesNotMatch(loop, /pgrep -f .*ANTONINA-SCHEDULER-TURN/);
-  assert.match(turn, /timeout -k 15s 240s/);
+  assert.match(turn, /timeout -k 15s 360s/);
   assert.match(turn, /--model opencode-go\/longcat-2\.5-preview-free/);
   assert.match(turn, /--variant low/);
   assert.doesNotMatch(turn, /--thinking/);

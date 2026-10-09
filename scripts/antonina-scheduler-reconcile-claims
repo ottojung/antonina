@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+import json, os, subprocess
+folder = os.path.expanduser("~/.local/state/antonina/pending-claims")
+if os.path.isdir(folder):
+    for name in sorted(os.listdir(folder)):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(folder, name)
+        with open(path) as file:
+            claim = json.load(file)
+        r = subprocess.run([os.path.expanduser("~/.local/bin/antonina"),"board","comment","--id",str(claim["issue"]),"--body",claim["body"],"--author","openclaw@marceline-dev","--json"])
+        if r.returncode == 0:
+            os.rename(path, path+".done")

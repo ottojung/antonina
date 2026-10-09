@@ -109,7 +109,7 @@ function pruneFixtureParent(t) {
 // inference from the durable record: a runner that refused must leave no child,
 // and a runner that launched must leave a child in the directory the record
 // declares, not in the directory the runner process happened to sit in.
-function fakeBackend(t, marker, body = `#!/bin/sh\nprintf '%s %s %s\\n' "$1" "$" "$(pwd -P)" >> ${JSON.stringify(marker)}\nexit 0\n`) {
+function fakeBackend(t, marker, body = `#!/bin/sh\nprintf '%s %s %s\\n' "$1" "$$" "$(pwd -P)" >> ${JSON.stringify(marker)}\nexit 0\n`) {
   const failures = [];
   for (const parent of [tmpdir(), REPO_FIXTURE_PARENT]) {
     let root;
@@ -236,7 +236,7 @@ function backendRuns(marker) {
   if (!existsSync(marker)) return [];
   return readFileSync(marker, 'utf8').split('\n').filter((line) => line.trim() !== '');
 }
-\n// A cwd-scoped OpenCode "session list" probe executes the same fake binary
+// A cwd-scoped OpenCode "session list" probe executes the same fake binary
 // in the SAME worktree after a turn. Only "run" is the invocation under test.
 function invocationRuns(marker, cwd) {
   return backendRuns(marker).filter((line) => line.startsWith('run ') && line.split(' ')[2] === cwd);
@@ -496,7 +496,7 @@ test('the owner token is not handed to the backend the runner spawns', async (t)
   // record of the same process rather than two records that have to be matched up.
   const backend = fakeBackend(t, marker, `#!/bin/sh
 if [ -n "\${ANTONINA_RUNNER_OWNER_TOKEN+x}" ]; then verdict=token-present; else verdict=token-absent; fi
-printf '%s %s %s %s\\n' "$1" "$verdict" "$" "$(pwd -P)" >> ${JSON.stringify(marker)}
+printf '%s %s %s %s\\n' "$1" "$verdict" "$$" "$(pwd -P)" >> ${JSON.stringify(marker)}
 exit 0
 `);
   if (backend === null) return;
@@ -779,7 +779,7 @@ test('a retry re-decides the launch gate, so a capability withdrawn after the fi
   const marker = join(tmpdir(), `antonina-launch-gate-${process.pid}-retry.marker`);
   rmSync(marker, { force: true });
   t.after(() => rmSync(marker, { force: true }));
-  const backend = fakeBackend(t, marker, `#!/bin/sh\nprintf '%s %s %s\\n' "$1" "$" "$(pwd -P)" >> ${JSON.stringify(marker)}\nprintf '%s\\n' 'Unexpected server error'\nexit 1\n`);
+  const backend = fakeBackend(t, marker, `#!/bin/sh\nprintf '%s %s %s\\n' "$1" "$$" "$(pwd -P)" >> ${JSON.stringify(marker)}\nprintf '%s\\n' 'Unexpected server error'\nexit 1\n`);
   if (backend === null) return;
   const options = scratch(t, backend);
   const { id, cwd } = agent(t, options, {

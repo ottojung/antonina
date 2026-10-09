@@ -28,6 +28,26 @@ def running_agents():
             return agents
         page += 1
 
+def recent_terminal_agents():
+    """Compact terminal evidence. Success does not prove artifact acceptance."""
+    try:
+        data = cli_json("agent", "list", "--finished", "--page", 1,
+                        "--limit", 500, "--json")
+        if data.get("unreadable"):
+            return {"agents": [], "incomplete": True}
+        entries = []
+        for a in data.get("agents", []):
+            issue = issue_number_from_agent_title(a.get("title"))
+            if issue is not None:
+                entries.append({
+                    "issue": issue, "id": a.get("id"),
+                    "state": a.get("state"), "finished_at": a.get("finished_at")
+                })
+        return {"agents": entries, "incomplete": False}
+    except (OSError, subprocess.CalledProcessError, ValueError, KeyError, TypeError):
+        return {"agents": [], "incomplete": True}
+
+
 def project_hint_from_title(title, number=None):
     low=(title or "").strip().lower()
     if "assemblyp1" in low: return "AssemblyP1"
@@ -64,6 +84,7 @@ def open_issues():
     return result
 
 running = running_agents()
+terminal_hints = recent_terminal_agents()
 
 issue_headers = [
     {
@@ -140,5 +161,6 @@ context = {
 }
 context["unrepresented_issues"] = unrepresented_issues
 context["open_issues"] = issue_headers
+context["recent_terminal_agents"] = terminal_hints
 
 print(json.dumps(context, separators=(",", ":")))

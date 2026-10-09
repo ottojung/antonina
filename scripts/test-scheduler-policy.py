@@ -180,7 +180,7 @@ class FullFrontierTests(unittest.TestCase):
 
     def test_terminal_hints_are_bounded_and_issue_keyed(self):
         snapshot = (ROOT / "antonina-scheduler-snapshot").read_text()
-        self.assertIn('context["recent_terminal_agents"] = terminal_hints', snapshot)
+        self.assertIn('context["recent_terminal_agents"] = compact_terminal_hints(terminal_hints, open_numbers)', snapshot)
         func = next(x for x in ast.parse(snapshot).body
                     if isinstance(x, ast.FunctionDef) and x.name == "recent_terminal_agents")
         def fake_cli(*args):
@@ -200,6 +200,23 @@ class FullFrontierTests(unittest.TestCase):
         self.assertFalse(result["incomplete"])
         self.assertEqual([(a["issue"], a["state"]) for a in result["agents"]],
                          [(225, "succeeded"), (211, "failed")])
+
+    def test_terminal_snapshot_only_contains_open_issue_latest(self):
+        source = ast.parse((ROOT / "antonina-scheduler-snapshot").read_text())
+        f = next(x for x in source.body if isinstance(x, ast.FunctionDef)
+                 and x.name == "compact_terminal_hints")
+        ns = {}
+        exec(compile(ast.Module(body=[f], type_ignores=[]), "<compact>", "exec"), ns)
+        hints = {"agents": [
+            {"issue": 225, "state": "succeeded", "id": "latest"},
+            {"issue": 900, "state": "succeeded", "id": "closed"},
+            {"issue": 225, "state": "failed", "id": "older"},
+            {"issue": 229, "state": "succeeded", "id": "maxwell"},
+        ], "incomplete": False}
+        result = ns["compact_terminal_hints"](hints, {225, 229})
+        self.assertEqual([a["id"] for a in result["agents"]],
+                         ["latest", "maxwell"])
+        self.assertFalse(result["incomplete"])
 
     def test_skills_and_worker_outcomes_agree(self):
         for name in ("scheduler", "orchestrator"):

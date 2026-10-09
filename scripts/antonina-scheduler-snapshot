@@ -83,6 +83,18 @@ def open_issues():
         result.extend(batch)
     return result
 
+def compact_terminal_hints(hints, relevant_issues):
+    # The CLI inventory is newest-first. Keep only the latest outcome of
+    # each CURRENTLY OPEN board issue; discard closed/historical noise.
+    latest = {}
+    for row in hints.get("agents", []):
+        number = row.get("issue")
+        if number in relevant_issues and number not in latest:
+            latest[number] = row
+    return {"agents": list(latest.values()),
+            "incomplete": bool(hints.get("incomplete", False))}
+
+
 running = running_agents()
 terminal_hints = recent_terminal_agents()
 
@@ -161,6 +173,6 @@ context = {
 }
 context["unrepresented_issues"] = unrepresented_issues
 context["open_issues"] = issue_headers
-context["recent_terminal_agents"] = terminal_hints
+context["recent_terminal_agents"] = compact_terminal_hints(terminal_hints, open_numbers)
 
 print(json.dumps(context, separators=(",", ":")))

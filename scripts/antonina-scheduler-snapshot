@@ -28,6 +28,26 @@ def running_agents():
             return agents
         page += 1
 
+def recent_terminal_agents():
+    """Compact terminal evidence. Success does not prove artifact acceptance."""
+    try:
+        data = cli_json("agent", "list", "--finished", "--page", 1,
+                        "--limit", 500, "--json")
+        if data.get("unreadable"):
+            return {"agents": [], "incomplete": True}
+        entries = []
+        for a in data.get("agents", []):
+            issue = issue_number_from_agent_title(a.get("title"))
+            if issue is not None:
+                entries.append({
+                    "issue": issue, "id": a.get("id"),
+                    "state": a.get("state"), "finished_at": a.get("finished_at")
+                })
+        return {"agents": entries, "incomplete": False}
+    except (OSError, subprocess.CalledProcessError, ValueError, KeyError, TypeError):
+        return {"agents": [], "incomplete": True}
+
+
 def project_hint_from_title(title, number=None):
     low=(title or "").strip().lower()
     if "assemblyp1" in low: return "AssemblyP1"
@@ -35,6 +55,7 @@ def project_hint_from_title(title, number=None):
     if low.startswith("along"): return "Along"
     if low.startswith("lubko"): return "Lubko"
     if low.startswith("antonina"): return "Antonina"
+    if "supernatural" in low: return "Supernatural"
     if low.startswith("pyreports"): return "pyreports"
     if low.startswith("qai:") or low.startswith("qai ") or "proviral" in low or low.startswith("schema.sql"): return "QAI"
     if low.startswith("kawun:") or low.startswith("kawun ") or low.startswith("[skrynia-apps#") or "kawunapp" in low: return "Kawun"
@@ -43,27 +64,15 @@ def project_hint_from_title(title, number=None):
     if number == 206: return "Antonina"
     return None
 
-def project_hint_from_cwd(cwd):
-    low=(cwd or "").lower()
-    if "assemblyp1" in low: return "AssemblyP1"
-    if "volodyslav" in low: return "Volodyslav"
-    if "pyreports" in low: return "pyreports"
-    if "qai" in low: return "QAI"
-    if "skrynia-apps" in low or "kawun" in low: return "Kawun"
-    if "skrynia" in low: return "Skrynia"
-    if "antonina" in low: return "Antonina"
-    if "lubko" in low: return "Lubko"
-    if "along" in low: return "Along"
-    return None
-
 def issue_number_from_agent_title(title):
     text = (title or "").strip()
-    m = re.match(
-        r"(?:(?:AssemblyP1|Volodyslav|Kawun|QAI|Skrynia|Antonina|Lubko|Along|pyreports)\s+)?(\d+)\b",
-        text,
-        re.IGNORECASE,
-    )
-    return int(m.group(1)) if m else None
+    # Every project, including newly onboarded projects, may use "Name #N".
+    match = re.search(r"(?:^|\s)#(\d+)\b", text)
+    if match:
+        return int(match.group(1))
+    # Preserve legacy numeric prefixes on older managed sessions.
+    match = re.match(r"^#?(\d+)\b", text)
+    return int(match.group(1)) if match else None
 
 def open_issues():
     result = []
@@ -74,7 +83,20 @@ def open_issues():
         result.extend(batch)
     return result
 
+def compact_terminal_hints(hints, relevant_issues):
+    # The CLI inventory is newest-first. Keep only the latest outcome of
+    # each CURRENTLY OPEN board issue; discard closed/historical noise.
+    latest = {}
+    for row in hints.get("agents", []):
+        number = row.get("issue")
+        if number in relevant_issues and number not in latest:
+            latest[number] = row
+    return {"agents": list(latest.values()),
+            "incomplete": bool(hints.get("incomplete", False))}
+
+
 running = running_agents()
+terminal_hints = recent_terminal_agents()
 
 issue_headers = [
     {
@@ -94,11 +116,9 @@ agents = [
     {
         "id": a.get("id"),
         "title": a.get("title"),
-        "cwd": a.get("cwd"),
         "project_hint": (
             project_hint_from_title(a.get("title"))
             or issue_project_by_number.get(issue_number_from_agent_title(a.get("title")))
-            or project_hint_from_cwd(a.get("cwd"))
         ),
     }
     for a in running
@@ -108,7 +128,7 @@ open_projects = sorted({
     i["project_hint"] for i in issue_headers if i.get("project_hint")
 })
 represented_projects = sorted({
-    a["project_hint"] for a in agents if a.get("project_hint")
+    a["project_hint"] for a in agents if a.get("project_hint") and issue_number_from_agent_title(a.get("title")) in issue_project_by_number
 })
 represented_project_set = set(represented_projects)
 unrepresented_projects = [
@@ -128,22 +148,22 @@ live_issue_numbers = {
     if issue_number is not None
 }
 
-represented_issue_candidates = []
-per_project = {}
-for i in issue_headers:
-    project = i.get("project_hint")
-    if not project or project not in represented_project_set:
-        continue
-    if i.get("number") in live_issue_numbers:
-        continue
-    count = per_project.get(project, 0)
-    if count >= 6:
-        continue
-    represented_issue_candidates.append(i)
-    per_project[project] = count + 1
+# The board is already in its canonical priority order. Keep EVERY actionable
+# distinct issue in that order, without a six-per-project truncation.
+# Closed-issue agents are observable but cannot represent open issue ownership.
+open_numbers = {i["number"] for i in issue_headers}
+active_issue_agents = [a for a in agents if issue_number_from_agent_title(a.get("title")) in open_numbers]
+orphan_agents = [a for a in agents if issue_number_from_agent_title(a.get("title")) not in open_numbers]
+represented_issue_candidates = [
+    i for i in issue_headers
+    if i.get("number") not in {
+        issue_number_from_agent_title(a.get("title")) for a in active_issue_agents
+    }
+]
 
 context = {
     "live_agents": agents,
+    "orphan_agents": orphan_agents,
     "represented_projects": represented_projects,
     "open_projects": open_projects,
     "unrepresented_projects": unrepresented_projects,
@@ -151,9 +171,8 @@ context = {
     "live_issue_numbers": sorted(live_issue_numbers),
     "represented_issue_candidates": represented_issue_candidates,
 }
-if unrepresented_projects:
-    context["unrepresented_issues"] = unrepresented_issues
-else:
-    context["open_issues"] = issue_headers
+context["unrepresented_issues"] = unrepresented_issues
+context["open_issues"] = issue_headers
+context["recent_terminal_agents"] = compact_terminal_hints(terminal_hints, open_numbers)
 
 print(json.dumps(context, separators=(",", ":")))

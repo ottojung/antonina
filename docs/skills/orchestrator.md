@@ -80,10 +80,16 @@ Agents on closed issues are orphaned ownership, not valid representation of
 open work. Before launch read the issue state, body and recent comments;
 the atomic launcher must independently reject closed issues.
 
-If a worthwhile issue has no registered worktree, invoke
-antonina-scheduler-provision --issue N --json to create a separate Git
-worktree and register it, then dispatch. If the trusted repository root is
-unknown, record the concrete blocker rather than silently skipping the issue.
+If a worthwhile issue has no registered workspace, invoke
+antonina-scheduler-provision --issue N --json to reserve an isolated issue
+directory and register it, then dispatch. Do not require pre-cloned repositories,
+pre-registered Git roots, or a trusted-root allowlist. In an empty workspace,
+the delegated agent identifies the repository from the issue and its references,
+clones it into that workspace, and creates its own issue branch before editing.
+If the repository is unclear, have the agent investigate it rather than
+requiring operator registration; report genuine missing/ambiguous repositories
+only after the agent has attempted discovery. Existing registered worktrees
+remain valid and are reused subject to exclusive issue ownership.
 
 Preserve uncommitted work and transfer its resource dependency to an open
 handoff issue before stopping old agents or collecting old directories.

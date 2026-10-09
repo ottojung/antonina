@@ -2,7 +2,7 @@
 
 Use this skill for a recurring orchestrator that selects, continues, and hands off work through an Antonina board.
 
-Model constraint: use only `opencode-go/step-5-preview-free` (Step 5 Preview Free); never silently fall back. See `docs/intent-records/agent.md`.
+Model constraint: use only `opencode-go/longcat-2.5-preview-free` (Step 5 Preview Free); never silently fall back. See `docs/intent-records/agent.md`.
 
 The Antonina CLI is the orchestration interface. Read and mutate the board through `antonina board ...`; do not bypass it with direct Skrynia access, browser automation, or a second private queue.
 

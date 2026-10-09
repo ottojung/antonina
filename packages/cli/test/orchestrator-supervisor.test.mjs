@@ -22,7 +22,7 @@ test('scheduler is a single agentic OpenClaw scheduling lane owned by the superv
   assert.match(loop, /trap on_exit TERM INT HUP/);
   assert.doesNotMatch(loop, /pgrep -f .*ANTONINA-SCHEDULER-TURN/);
   assert.match(turn, /timeout -k 15s 900s/);
-  assert.match(turn, /--model opencode-go\/step-5-preview-free/);
+  assert.match(turn, /--model opencode-go\/longcat-2.5-preview-free/);
   assert.match(turn, /--variant low/);
   assert.match(turn, /never fall back to any other model/);
   assert.doesNotMatch(turn, /--thinking/);
@@ -49,7 +49,7 @@ test('scheduler optimizes only efficiency and topology', () => {
   assert.doesNotMatch(loop, /board list|board resource|agent run/);
   assert.match(scheduler, /Optimize only for \*\*efficiency and topology\*\*/);
   assert.match(scheduler, /positive expected marginal wall-clock speedup/);
-  assert.match(scheduler, /opencode-go\/step-5-preview-free/);
+  assert.match(scheduler, /opencode-go\/longcat-2.5-preview-free/);
   assert.match(scheduler, /Never fall back to another model or provider/);
   assert.match(scheduler, /A large number of live agents is never itself a reason to stop/);
   assert.doesNotMatch(scheduler, /memory\.pressure|memory\.stat|memory\.events|reclaimable file cache|oom_kill|PSI/);

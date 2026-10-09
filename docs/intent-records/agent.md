@@ -1,3 +1,11 @@
+$id-20261009-longcat-restoration
+title: Switch Antonina to LongCat 2.5 Preview Free with low variant
+date: 2026/10/09
+source: @ottojung
+kind: constraint
+
+User explicitly directs immediate replacement of Step 5 Preview Free with `opencode-go/longcat-2.5-preview-free` for all Antonina managed agents and the OpenClaw orchestrator, with `--variant low`. This supersedes the 2026/10/08 Step 5-only constraint and the 2026/10/09 Step 5 low-variant constraint, while preserving the single authorized model policy. Deploy consistently across CLI runtime, scheduler launcher, OpenCode config, and existing agent records. No fallback models.
+
 $id-20261009-step5-low-variant
 title: Antonina uses Low reasoning effort with Step 5 Preview Free
 date: 2026/10/09

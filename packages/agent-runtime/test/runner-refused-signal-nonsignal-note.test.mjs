@@ -10,12 +10,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
+import { idleMeta, mintRunnerReservationOwnerToken } from '../dist/packages/agent-runtime/src/metadata.js';
 import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import { runManagedRunner } from '../dist/packages/agent-runtime/src/runner.js';
 import { createAgentDirectory, readMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
 
 const LIFETIME_MS = Number(process.env.ANTONINA_TEST_FIXTURE_LIFETIME_MS ?? 60000);
+
+// The reservation below names this process as its owner, and the `self` verdict
+// now requires the owner token minted for it as well as pid plus start time: a
+// record cannot establish its own ownership. The product mints a token on every
+// reservation it writes and hands it to the runner, so this fixture carries and
+// presents one.
+const LAUNCHER_TOKEN = mintRunnerReservationOwnerToken();
 
 function cgroup(usedGiB) {
   const gib = 1024 * 1024 * 1024;
@@ -83,7 +90,7 @@ for (const intent of ['stop', 'kill']) {
       process.env.XDG_STATE_HOME = stateHome;
       process.env.XDG_CONFIG_HOME = configHome;
       t.after(() => { Object.assign(process.env, saved); });
-      const options = { env: { XDG_STATE_HOME: stateHome, XDG_CONFIG_HOME: configHome } };
+      const options = { env: { XDG_STATE_HOME: stateHome, XDG_CONFIG_HOME: configHome, ANTONINA_RUNNER_OWNER_TOKEN: LAUNCHER_TOKEN } };
 
       const id = 'a11d';
       const cwd = mkdtempSync(join(tmpdir(), 'harvest167-cwd-'));
@@ -91,7 +98,7 @@ for (const intent of ['stop', 'kill']) {
       assert.equal(createAgentDirectory(id, options), true);
       const meta = idleMeta(id, cwd, null, 1);
       meta.runner_gen = 7;
-      meta.runner_reservation = { state: 'reserved', gen: 7, mode: 'new', reserved_at: 1, owner_pid: process.pid, owner_start_ticks: 0 };
+      meta.runner_reservation = { state: 'reserved', gen: 7, mode: 'new', reserved_at: 1, owner_pid: process.pid, owner_start_ticks: procStartTicks(process.pid), owner_token: LAUNCHER_TOKEN };
       meta.pending_prompt = 'work';
       writeMeta(id, meta, options);
 

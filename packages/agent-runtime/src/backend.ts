@@ -3,7 +3,15 @@ import { readFileSync, statSync } from 'node:fs';
 import { constants } from 'node:os';
 import { isAbsolute } from 'node:path';
 
-import { DEFAULT_VARIANT, persistedNativeSessionId, persistedVariant, requiredAgentCwd, requiredPersistedAgentId, type AgentMetadata } from './metadata.js';
+import {
+  DEFAULT_VARIANT,
+  RUNNER_OWNER_TOKEN_ENV,
+  persistedNativeSessionId,
+  persistedVariant,
+  requiredAgentCwd,
+  requiredPersistedAgentId,
+  type AgentMetadata,
+} from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
 
 export const AGENT_MODEL = 'opencode-go/step-5-preview-free';
@@ -185,6 +193,17 @@ interface BackendFailureRule {
 }
 
 const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
+  // The OpenCode Go Step 5 free tier can reject requests across many sessions
+  // simultaneously. Name the provider throttle instead of reporting an
+  // unrecognized backend failure. Do not replay the turn automatically:
+  // the API error alone cannot prove no earlier tool action was committed.
+  {
+    marker: 'Rate limit exceeded. Please try again later.',
+    classification: 'upstream_rate_limited',
+    provider: 'opencode-go',
+    transient: true,
+    automaticRetrySafe: false,
+  },
   {
     marker: 'Unexpected server error',
     classification: 'transient_backend_server_error',
@@ -331,17 +350,35 @@ function parseSessionRows(value: unknown): SessionRow[] | null {
   return rows;
 }
 
+/**
+ * The environment a backend *probe* is handed.
+ *
+ * Board 197: the per-invocation owner token authorises one runner's claim on one
+ * reservation and nothing else, and the probe is not that runner -- it is a short
+ * `models`/`session list` the runtime runs beside the invocation. It is dropped
+ * here rather than at each call site so no probe can be added later that leaks
+ * it by forgetting. `delete` rather than a blank value, so a later spread cannot
+ * reintroduce a copy.
+ */
+function probeEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  const childEnv: Record<string, string | undefined> = { ...process.env, ...env };
+  delete childEnv[RUNNER_OWNER_TOKEN_ENV];
+  return childEnv;
+}
+
 export function discoverSessionId(
   agentId: string,
   env: Record<string, string | undefined> = process.env,
+  cwd: string = process.cwd(),
 ): string | null {
-  const childEnv = { ...process.env, ...env };
+  const childEnv = probeEnv(env);
   const result = spawnSync(
     resolveOpencode(childEnv),
     ['session', 'list', '--format', 'json', '--max-count', String(SESSION_LIST_MAX_COUNT)],
     {
       encoding: 'utf8',
       timeout: SESSION_LIST_TIMEOUT_MS,
+      cwd,
       env: childEnv,
       stdio: ['ignore', 'pipe', 'ignore'],
     },
@@ -364,7 +401,7 @@ export function discoverSessionId(
 export function configuredModelAvailable(
   env: Record<string, string | undefined> = process.env,
 ): boolean | null {
-  const childEnv = { ...process.env, ...env };
+  const childEnv = probeEnv(env);
   const result = spawnSync(resolveOpencode(childEnv), ['models'], {
     encoding: 'utf8',
     timeout: MODEL_LIST_TIMEOUT_MS,
@@ -375,52 +412,6 @@ export function configuredModelAvailable(
   return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).includes(AGENT_MODEL);
 }
 
-/**
- * What the configured backend can actually honour, asked as data rather than
- * discovered by failing.
- *
- * Board issue 178: `--cwd` means "run this invocation in this directory", for
- * every invocation including a `--steer`. A backend that cannot place a single
- * invocation in a named directory must say so *here*, so that `agent run --cwd`
- * refuses with a named capability error instead of quietly running somewhere
- * else. A backend-agnostic CLI cannot do better than this: it cannot invent a
- * meaning for the flag that the backend will honour, and it must not change the
- * meaning of the flag depending on which backend is configured.
- *
- * OpenCode can: every invocation is a fresh `opencode run` process, spawned
- * with `spawn({cwd})` *and* told `--dir` the same value, and a continuation is
- * a new process re-attaching the same session rather than a live process whose
- * directory would have to change in place.
- */
-export interface BackendCapabilities {
-  /** An invocation can be launched in a named working directory. */
-  invocation_cwd: boolean;
-}
-
-/**
- * Test-only override that makes the configured backend report a capability it
- * does not have, so the refusal path can be driven from outside the package.
- *
- * It exists only because `invocation_cwd` is currently a constant `true`: with
- * one backend and no way to make the answer differ, no test could reach the
- * refusal, and "unreachable" is exactly how a divergence between entry points
- * hides. Board issue 178's required fix 1 is one clause in `cmdNew` that is
- * otherwise unobservable by execution.
- *
- * Deliberately narrow and fail-safe in the safe direction: only the exact value
- * `'1'` withdraws a capability, every other value (including unset) leaves the
- * backend's real answer alone, so no ordinary environment can reach a
- * different answer.
- */
-const TEST_WITHDRAW_INVOCATION_CWD_ENV = 'ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD';
-
-export function backendCapabilities(
-  env: Record<string, string | undefined> = process.env,
-): BackendCapabilities {
-  if (env[TEST_WITHDRAW_INVOCATION_CWD_ENV] === '1') return { invocation_cwd: false };
-  return { invocation_cwd: true };
-}
-
 export function buildAgentCommand(
   meta: AgentMetadata,
   prompt: string,
@@ -428,17 +419,17 @@ export function buildAgentCommand(
   env: Record<string, string | undefined> = process.env,
 ): string[] | null {
   const agentId = requiredPersistedAgentId(meta);
-  // Board issue 178: the launch directory is resolved by one function in
-  // `metadata.ts` and consumed here and in `runner.ts`, so `--dir` and the
-  // `spawn({cwd})` this process is launched with cannot name different places.
-  // It resolves the declaration, not the observation: `invocation_cwd` records
-  // where a front actually ran and must never decide where one runs.
   const cwd = requiredAgentCwd(meta);
-  const variant = persistedVariant(meta) || DEFAULT_VARIANT;
+  // The durable field is still validated so malformed or old records fail closed,
+  // but Antonina's backend variant is a product-level setting rather than a
+  // per-agent override. Legacy records may still say `low`; every invocation
+  // launched by this build uses the current Antonina default.
+  persistedVariant(meta);
+  const variant = DEFAULT_VARIANT;
   const executable = resolveOpencode(env);
   if (isContinue) {
     const recorded = persistedNativeSessionId(meta);
-    const sessionId = recorded ?? discoverSessionId(agentId, env);
+    const sessionId = recorded ?? discoverSessionId(agentId, env, cwd);
     if (sessionId === null) return null;
     return [
       executable, 'run', '--auto',
@@ -461,6 +452,58 @@ export function buildAgentCommand(
   ];
 }
 
+
+export interface BackendCapabilities {
+  /**
+   * Whether this backend can launch an invocation in a directory the operator
+   * named. OpenCode can: every invocation is a fresh process, `buildAgentCommand`
+   * tells it `--dir` and the runner spawns it with `spawn({cwd})` on the same
+   * value. A backend that cannot must refuse a declaration *by name*, before
+   * any write, rather than running the invocation somewhere else and reporting
+   * the declared directory as if it had honoured it.
+   */
+  invocation_cwd: boolean;
+}
+
+/**
+ * Test-only override that makes the configured backend report a capability it
+ * does not have, so the refusal path can be driven from outside the package.
+ *
+ * It exists only because `invocation_cwd` is a constant `true`: with one backend
+ * and no way to make the answer differ, no test could reach a refusal, and
+ * "unreachable" is exactly how a divergence between entry points hides.
+ *
+ * Deliberately narrow: only the exact value `'1'` withdraws a capability, and
+ * every other value (including unset) leaves the backend's real answer alone,
+ * so no ordinary environment can reach a different answer. It is a test seam in
+ * the same sense and for the same reason as `ANTONINA_OPENCODE_BIN`: it exists
+ * as a production parameter because there is exactly one backend seam and no
+ * test can reach the other side of it without one. It is not a user setting.
+ */
+const TEST_WITHDRAW_INVOCATION_CWD_ENV = 'ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD';
+
+export function backendCapabilities(
+  env: Record<string, string | undefined> = process.env,
+): BackendCapabilities {
+  if (env[TEST_WITHDRAW_INVOCATION_CWD_ENV] === '1') return { invocation_cwd: false };
+  return { invocation_cwd: true };
+}
+
+/**
+ * Whether a capability answer may be relied on, failing closed.
+ *
+ * Only the literal boolean `true` counts as "this backend can honour a named
+ * directory". Anything else -- absent, `null`, a string, a capability this
+ * runtime does not know the meaning of, a backend that reported a shape it was
+ * never asked for -- is treated as "cannot", because the alternative is to run
+ * an invocation somewhere the operator did not ask for and report the declared
+ * directory as though it had been honoured. An unrecognised capability must
+ * never be read as permission.
+ */
+export function honoursInvocationCwd(capabilities: unknown): boolean {
+  if (typeof capabilities !== 'object' || capabilities === null || Array.isArray(capabilities)) return false;
+  return (capabilities as Record<string, unknown>).invocation_cwd === true;
+}
 
 export function classifyBackendFailure(
   path: string,

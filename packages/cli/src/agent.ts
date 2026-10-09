@@ -985,7 +985,7 @@ function spawnRunner(
   generation: number,
   ownerToken: string,
   context: AgentCommandContext,
-): void {
+): number | undefined {
   const entryScript = context.entryScript ?? process.argv[1];
   if (!entryScript) throw new Error('cannot locate Antonina JavaScript entry point');
   const child = spawn(
@@ -1004,6 +1004,13 @@ function spawnRunner(
     },
   );
   child.unref();
+  // The runner's own pid, which is the identity its claim publishes
+  // (`runner_pid`). Handing it back lets the detach ack recognise the claim even
+  // when the runner finished its invocation before the first poll: a launch that
+  // is refused synchronously (a directory that vanished) claims and then
+  // finalizes inside one poll interval, and the ack must still see that a runner
+  // owned the prompt rather than report that none ever did.
+  return child.pid;
 }
 
 // Board issue 207: a detached run used to report acceptance the instant the
@@ -1023,6 +1030,7 @@ const RUNNER_CLAIM_ACK_POLL_MS = 25;
 async function awaitRunnerClaim(
   agentId: string,
   generation: number,
+  expectedRunnerPid: number | undefined,
   timeoutMs: number,
   context: AgentCommandContext,
 ): Promise<number | null> {
@@ -1030,6 +1038,15 @@ async function awaitRunnerClaim(
   for (;;) {
     const meta = readMeta(agentId, paths(context));
     if (meta === null) return null;
+    // The runner this command spawned published its own pid as the claim. A
+    // match is the claim, whatever the lifecycle state is now: a launch refused
+    // synchronously (a directory that vanished between acceptance and spawn)
+    // claims and finalizes inside one poll interval, and the record is already
+    // terminal by the first read. The pid is the launcher's own observation of
+    // the process it started, so it cannot be a stale value from another run.
+    if (expectedRunnerPid !== undefined && meta.runner_pid === expectedRunnerPid) {
+      return expectedRunnerPid;
+    }
     if (persistedLifecycleState(meta) !== 'running') return null;
     const reservation = meta.runner_reservation;
     if (
@@ -1074,9 +1091,10 @@ async function failUnclaimedRunner(
 async function acknowledgeDetachedSpawn(
   agentId: string,
   generation: number,
+  expectedRunnerPid: number | undefined,
   context: AgentCommandContext,
 ): Promise<number> {
-  const claimedPid = await awaitRunnerClaim(agentId, generation, RUNNER_CLAIM_ACK_TIMEOUT_MS, context);
+  const claimedPid = await awaitRunnerClaim(agentId, generation, expectedRunnerPid, RUNNER_CLAIM_ACK_TIMEOUT_MS, context);
   if (claimedPid !== null) return claimedPid;
   if (await failUnclaimedRunner(agentId, generation, context)) {
     throw new Error(`agent ${agentId}: detached runner never claimed ownership within ${RUNNER_CLAIM_ACK_TIMEOUT_MS / 1000}s`);
@@ -1084,7 +1102,8 @@ async function acknowledgeDetachedSpawn(
   // The fail-write lost a race: the claim landed after the timeout, or a
   // control path already decided this invocation. Report what the record says.
   const meta = readMeta(agentId, paths(context));
-  if (meta !== null && persistedLifecycleState(meta) === 'running' && typeof meta.runner_pid === 'number') {
+  if (meta !== null && typeof meta.runner_pid === 'number'
+    && (meta.runner_pid === expectedRunnerPid || persistedLifecycleState(meta) === 'running')) {
     return meta.runner_pid;
   }
   throw new Error(`agent ${agentId}: detached runner never claimed ownership within ${RUNNER_CLAIM_ACK_TIMEOUT_MS / 1000}s`);
@@ -1353,9 +1372,9 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   if (decision.action === 'spawn') {
     // The token is minted only on the branches that reserve, so a spawn decision
     // always has one; a reservation written without it could not be claimed.
-    spawnRunner(agentId, decision.mode!, decision.generation!, decision.ownerToken!, context);
+    const spawnedRunnerPid = spawnRunner(agentId, decision.mode!, decision.generation!, decision.ownerToken!, context);
     if (parsed.flags.has('--detach')) {
-      await acknowledgeDetachedSpawn(agentId, decision.generation!, context);
+      await acknowledgeDetachedSpawn(agentId, decision.generation!, spawnedRunnerPid, context);
     }
     if (decision.recoverBusy) {
       throw new Error(`agent ${agentId} is recovering an already accepted prompt; this prompt was rejected`);

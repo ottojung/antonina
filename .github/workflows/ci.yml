@@ -30,15 +30,7 @@ jobs:
       - name: Agent runtime tests
         run: node --test packages/agent-runtime/test/*.test.mjs
       - name: CLI tests
-        shell: bash
-        run: |
-          set +e
-          node --test packages/cli/test/*.test.mjs > /tmp/cli-tests.log 2>&1
-          status=$?
-          if [ "$status" -ne 0 ]; then
-            awk '/^not ok/{p=1} p{print "::error::"$0} /^  \.\.\.$/{p=0}' /tmp/cli-tests.log | head -160
-          fi
-          exit "$status"
+        run: node --test packages/cli/test/*.test.mjs
       - name: Pack precompiled CLI
         run: npm pack ./packages/cli --pack-destination /tmp
       - name: Install and run packed CLI

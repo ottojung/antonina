@@ -559,7 +559,7 @@ test('an invocation that finishes before its identity can be captured still reco
 
   const runs = backendRuns(marker);
   assert.equal(
-    runs.filter((line) => line.split(' ')[1] === cwd).length,
+    invocationRuns(marker, cwd).length,
     1,
     `the backend must have run once in ${cwd}; saw ${JSON.stringify(runs)}`,
   );

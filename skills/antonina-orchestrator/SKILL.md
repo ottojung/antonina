@@ -51,9 +51,9 @@ antonina-scheduler-launch --issue NUMBER --title 'Project #NUMBER: task' --summa
 
 The scheduler **never passes `--cwd`**, calls `antonina-scheduler-provision` or `antonina-scheduler-worktrees`, or even asks whether there is a checkout. The launch helper establishes the runtime's fixed generic starting context and revalidates board openness and live ownership. The agent receives the issue, chooses its own isolated files, clones Git repositories if needed, follows repository instructions, and performs all substantive work.
 
-On success, record the actual agent ID and logical task ownership on the board. On a launch failure, record the error without claiming launch success, continue scanning other useful tasks, and delegate recovery without adding a fabricated topological constraint. Never start two agents to do the same logical work unless the work has been deliberately split into non-overlapping components.
+On success, record the actual agent ID and logical task ownership on the board. Continue launching all other independent fronts in the same pass. A successful worker can leave an issue open awaiting review; do not repeat finished design work just because its agent is no longer live. Inspect compact terminal hints and recent board outcomes rather than deep auditing old issues. On a launch failure, record the error without claiming launch success, continue scanning other useful tasks, and delegate recovery without adding a fabricated topological constraint. Never start two agents to do the same logical work unless the work has been deliberately split into non-overlapping components.
 
-The s6-supervised turn runner may return after one successful launch or a factual operational failure and immediately start another pass. Its bounded turns are an execution mechanism, not a project cap. Do not spend turns watching an agent step by step or waiting for it to finish when more independent work is ready.
+The s6-supervised turn runner must delegate the ENTIRE useful independent frontier per reasoning pass, not return after one launch. After launching, immediately continue to the next independent issue. Its bounded turns are an execution mechanism, not a project cap. Do not spend turns watching an agent step by step or waiting for it to finish when more independent work is ready.
 
 ## Completion and continued execution
 

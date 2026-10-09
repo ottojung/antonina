@@ -17,6 +17,8 @@ For each open issue or independently useful part of it, ask:
 
 The scheduler has no host-resource model, quotas, agent-count targets or caps, fairness round-robin, or breadth barrier. Do not consider CPU, RAM, memory pressure, disk, storage, package/tool availability, model quotas, directories, repositories, cloning, branches, checkout presence, workspace registration, path collisions, or provisioning as admission criteria. **Never inspect or manage a workspace, filesystem directory, Git root, checkout, worktree or branch.** The agent owns all of them, including its own isolation, code, testing, integration and deployment.
 
+An issue may stay open after successfully delivering work while awaiting human review or merge. Recent terminal agents are compact outcome hints, not automatic proof. Check newest board evidence; do not relaunch identical already-delivered work. Assign targeted verification to an agent if uncertain. Never require immediate integration to recognize completed design work.
+
 A failed launch is an operational failure, **not a scheduling veto**. Record the factual failure, request agent/runtime recovery as appropriate, and continue delegating independent work. Do not manufacture a topological blocker from missing tools or model availability; do not use a forbidden fallback model or claim a failed invocation succeeded.
 
 ## Model and authority
@@ -29,9 +31,9 @@ The Antonina board owns priorities, issue status, comments and dependencies. Liv
 
 1. Read `CURRENT_SNAPSHOT` of the full priority-ordered open-issue list and live agent ownership. When stale, refresh with the Antonina board and `agent list` APIs, not filesystem or repository inspection.
 2. Read the selected candidate through `antonina-scheduler-issue --issue N` or `antonina board show --id N --page 1 --json`. Derive the task graph and determine which independent fronts have positive marginal speedup.
-3. Delegate directly: `antonina-scheduler-launch --issue N --title 'Project #N: task' --summary SUMMARY --prompt PROMPT --json`. **Do not pass a cwd** and do not call `antonina-scheduler-worktrees` or `antonina-scheduler-provision`. The launch helper owns all runtime mechanics; the agent owns repository/filesystem setup. There is no workspace-preparation phase.
+3. Delegate the WHOLE useful independent frontier in this same pass, not just one agent. Delegate directly: `antonina-scheduler-launch --issue N --title 'Project #N: task' --summary SUMMARY --prompt PROMPT --json`. **Do not pass a cwd** and do not call `antonina-scheduler-worktrees` or `antonina-scheduler-provision`. The launch helper owns all runtime mechanics; the agent owns repository/filesystem setup. There is no workspace-preparation phase.
 4. Record the agent ID and actionable board state. Do not invent paths or resource reservations. Avoid launching duplicate work on the same logical front.
-5. Continue expanding the independent frontier until all remaining fronts have actual topological reasons to wait; the supervised turn runner may split these decisions into repeated bounded invocations. Never stop merely because N agents are already active.
+5. Continue dispatching in this same pass until ALL remaining fronts have actual topological reasons to wait; the supervised turn runner may split these decisions into repeated bounded invocations. Never stop merely because N agents are already active.
 
 Inspect outcomes by delegated agents or issue-level summaries; delegate substantive code review, verification, merges, deployment and failures to agents. Stop/steer/reuse agents by *identity and issue*, not directory.
 

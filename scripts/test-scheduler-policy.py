@@ -169,5 +169,50 @@ class SchedulerPolicyTests(unittest.TestCase):
             self.assertIn("antonina-scheduler-launch", doc)
 
 
+class FullFrontierTests(unittest.TestCase):
+    def test_single_launch_exit_instruction_is_absent(self):
+        script = (ROOT / "antonina-orchestrator-turn").read_text()
+        self.assertIn("FULL-FRONTIER DISPATCH", script)
+        self.assertIn("delegate every topologically ready independent front", script)
+        self.assertNotIn("RETURN IMMEDIATELY", script)
+        self.assertNotIn("after one successful launch or a precise blocker", script)
+        self.assertIn("completed design or implementation", script)
+
+    def test_terminal_hints_are_bounded_and_issue_keyed(self):
+        snapshot = (ROOT / "antonina-scheduler-snapshot").read_text()
+        self.assertIn('context["recent_terminal_agents"] = terminal_hints', snapshot)
+        func = next(x for x in ast.parse(snapshot).body
+                    if isinstance(x, ast.FunctionDef) and x.name == "recent_terminal_agents")
+        def fake_cli(*args):
+            self.assertEqual(args[:3], ("agent", "list", "--finished"))
+            return {"agents": [
+                {"id": "done", "state": "succeeded",
+                 "title": "Supernatural #225: Schaerbeek design", "finished_at": 100},
+                {"id": "other", "state": "failed",
+                 "title": "AssemblyP1 #211: proof", "finished_at": 90},
+            ], "unreadable": []}
+        scope = {"cli_json": fake_cli, "subprocess": __import__("subprocess"),
+                 "issue_number_from_agent_title": lambda title:
+                    int(re.search(r"#(\d+)", title).group(1)) if re.search(r"#(\d+)", title) else None}
+        exec(compile(ast.Module(body=[func], type_ignores=[]),
+                     "<terminals>", "exec"), scope)
+        result=scope["recent_terminal_agents"]()
+        self.assertFalse(result["incomplete"])
+        self.assertEqual([(a["issue"], a["state"]) for a in result["agents"]],
+                         [(225, "succeeded"), (211, "failed")])
+
+    def test_skills_and_worker_outcomes_agree(self):
+        for name in ("scheduler", "orchestrator"):
+            doc = (REPO / "docs/skills" / (name + ".md")).read_text()
+            skill = (REPO / "skills" / ("antonina-" + name) / "SKILL.md").read_text()
+            self.assertTrue(skill.endswith(doc))
+            self.assertIn("frontier", doc.lower())
+        intent = (REPO / "docs/intent-records/full-frontier-dispatch.md").read_text()
+        self.assertIn("entire", intent.lower())
+        self.assertIn("awaiting review", intent.lower())
+        launcher = (ROOT / "antonina-scheduler-launch").read_text()
+        self.assertIn("TERMINAL HANDOFF", launcher)
+
+
 if __name__ == "__main__":
     unittest.main()

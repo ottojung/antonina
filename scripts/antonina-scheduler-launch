@@ -63,6 +63,10 @@ def agent_prompt(issue, prompt, agent_id):
         f"Agent ID: {agent_id}. Issue #{issue.get('number')}: "
         f"{issue.get('title', '')}\n"
         f"Issue description:\n{issue.get('body') or ''}\n\n"
+        "TERMINAL HANDOFF: Before ending a successful task, post a short board "
+        "comment naming the actual artifact or pushed branch, review state, "
+        "and what remains. Keep the issue open if awaiting human review; do "
+        "not assume an open issue means its work was not delivered.\n"
         f"Delegated task:\n{prompt}"
     )
 

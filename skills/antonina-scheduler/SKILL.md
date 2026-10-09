@@ -152,10 +152,9 @@ Use Antonina's named-option grammar exactly. Never pass issue IDs as positional 
 
 - Read compact issue state/body/newest comments: antonina-scheduler-issue --issue ISSUE
 - Read schedulable registered cwd/worktree topology: antonina-scheduler-worktrees --issue ISSUE
-- Record a working claim or handoff: antonina board comment --id ISSUE --body BODY --author openclaw@marceline-dev --json
+- Launch and record working claim transactionally: antonina-scheduler-launch --issue ISSUE --cwd CWD --title TITLE --summary SUMMARY --prompt PROMPT --json
 - List live scheduler records: antonina agent list --page 1 --limit 500 --running --json
-- Create an agent: antonina agent new --id AGENT_ID --cwd CWD --title TITLE --json
-- Start it detached: antonina agent run --id AGENT_ID --cwd CWD --prompt PROMPT --detach --json
+- Record a topology blocker or other non-launch handoff: antonina board comment --id ISSUE --body BODY --author openclaw@marceline-dev --json
 
 Do not guess CLI syntax. A failed command due to grammar is scheduler overhead and should not consume the turn.
 

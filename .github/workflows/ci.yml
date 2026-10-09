@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
@@ -42,7 +44,7 @@ jobs:
           antonina=/tmp/antonina-install/node_modules/.bin/antonina
           export XDG_STATE_HOME=/tmp/antonina-state
           output="$("$antonina" agent list --page 1 --json)"
-          test "$output" = '{"agents":[]}'
+          test "$output" = '{"agents":[],"unreadable":[]}'
 
           cat >/tmp/antonina-fake-bin/opencode <<'EOF'
           #!/bin/sh
@@ -92,6 +94,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
           node-version: "22"

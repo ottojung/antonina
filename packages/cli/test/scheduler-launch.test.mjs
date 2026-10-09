@@ -36,3 +36,9 @@ test('comment publication failure does not advertise failed worker launch', () =
   assert.match(launch, /"comment_recorded": comment.returncode == 0/);
   assert.doesNotMatch(launch, /raise SystemExit\(2\)/);
 });
+
+test('supervisor retries claims from an already-started worker', () => {
+  const loop = readFileSync(fileURLToPath(new URL('../../../scripts/antonina-orchestrator-loop', import.meta.url)), 'utf8');
+  assert.match(loop, /antonina-scheduler-reconcile-claims/);
+  assert.match(launch, /pending-claims/);
+});

@@ -46,7 +46,7 @@ jobs:
           export XDG_STATE_HOME=/tmp/antonina-state
           mkdir -p "$XDG_STATE_HOME/antonina/agents"
           output="$("$antonina" agent list --page 1 --json)"
-          test "$output" = '{"agents":[]}'
+          test "$output" = '{"agents":[],"unreadable":[]}'
 
           cat >/tmp/antonina-fake-bin/opencode <<'EOF'
           #!/bin/sh

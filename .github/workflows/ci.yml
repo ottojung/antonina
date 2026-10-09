@@ -51,7 +51,7 @@ jobs:
           #!/bin/sh
           case "$1" in
             models)
-              echo "opencode-go/step-5-preview-free"
+              echo "opencode-go/longcat-2.5-preview-free"
               ;;
             session)
               echo '[{"id":"ses_pkg","title":"antonina-a11d","created":100}]'

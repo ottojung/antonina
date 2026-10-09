@@ -89,3 +89,8 @@ test('post-breadth search rotates after repeated non-launches', () => {
 test('breadth search rotates after a non-launch', () => {
   assert.match(turn, /After one non-launch in a missing project, switch projects/);
 });
+
+test('a failed running-agent snapshot never becomes an empty scheduling universe', () => {
+  assert.match(turn, /live-agent snapshot failed; refusing to schedule/);
+  assert.doesNotMatch(turn, /printf '\\{\\}'|2>\\/dev\\/null/);
+});

@@ -30,7 +30,18 @@ jobs:
       - name: Agent runtime tests
         run: node --test packages/agent-runtime/test/*.test.mjs
       - name: CLI tests
-        run: node --test packages/cli/test/*.test.mjs
+        shell: bash
+        run: |
+          set +e
+          node --test packages/cli/test/*.test.mjs > /tmp/cli-tests.log 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            grep "^not ok" /tmp/cli-tests.log | while IFS= read -r line; do
+              echo "::error title=CLI test failed::$line"
+            done
+            tail -80 /tmp/cli-tests.log
+          fi
+          exit "$status"
       - name: Pack precompiled CLI
         run: npm pack ./packages/cli --pack-destination /tmp
       - name: Install and run packed CLI

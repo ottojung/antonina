@@ -1202,7 +1202,13 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     } else {
       // Board 186: the same database the invocation will be spawned with, so a
       // session an isolated invocation recorded is still discoverable here.
-      const recoveredSession = discoverSessionId(agentId, { ...context.env, ...opencodeBackendEnv(meta, paths(context)) });
+      // OpenCode session discovery is worktree-scoped. Probe the invocation
+      // directory, not the CLI caller's cwd.
+      const recoveredSession = discoverSessionId(
+        agentId,
+        { ...context.env, ...opencodeBackendEnv(meta, paths(context)) },
+        launchCwd!,
+      );
       if (recoveredSession === null) {
         mode = 'new';
       } else {

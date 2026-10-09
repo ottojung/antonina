@@ -118,6 +118,10 @@ case "$1" in
     exit 0
     ;;
   session)
+    if [ -n "$ANTONINA_FIXTURE_SESSION_CWD" ] && [ "$(pwd -P)" != "$ANTONINA_FIXTURE_SESSION_CWD" ]; then
+      echo '[]'
+      exit 0
+    fi
     echo '[{"id":"ses_fake","title":"antonina-a11d","created":100},{"id":"ses_beef","title":"antonina-beef","created":100}]'
     exit 0
     ;;
@@ -732,6 +736,9 @@ test('backend server failure is persisted and sanitized through status', async (
 test('prompt recovers an existing OpenCode session when durable session id was lost', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
+  // Reproduce real OpenCode: session list returns only sessions for its cwd.
+  // The caller runs in the repository; the agent runs in its own worktree.
+  env.ANTONINA_FIXTURE_SESSION_CWD = work;
   assert.equal(run(['agent', 'new', '--id', 'a11d', '--cwd', work], env).status, 0);
   assert.equal(run(['agent', 'run', '--id', 'a11d', '--detach', '--prompt', 'first'], env).status, 0);
   await waitFor(root, 'a11d', (meta) => meta.state === 'succeeded' && meta.active_runner === false);

@@ -66,5 +66,53 @@ class SchedulerPolicyTests(unittest.TestCase):
         self.assertTrue(any(a[1:3] == ["agent","stop"] for a in calls))
         self.assertFalse(any(a[1:3] == ["board","comment"] for a in calls))
 
+
+    def test_live_inventory_is_reconciled_by_antonina_not_process_titles(self):
+        for helper in ("antonina-scheduler-snapshot", "antonina-scheduler-worktrees"):
+            source = (ROOT / helper).read_text()
+            self.assertNotIn("pgrep", source)
+            self.assertNotIn("live_ids(", source)
+            tree = ast.parse(source)
+            function = next(node for node in tree.body
+                            if isinstance(node, ast.FunctionDef) and node.name == "running_agents")
+            calls = []
+            def fake_cli(*args):
+                calls.append(args)
+                return {"agents": [{"id": "continued", "state": "running",
+                                    "title": "AssemblyP1 #214: continued session", "cwd": "/tmp"}],
+                        "unreadable": []}
+            scope = {"cli_json": fake_cli}
+            exec(compile(ast.Module(body=[function], type_ignores=[]), "<running_agents>", "exec"), scope)
+            self.assertEqual(scope["running_agents"]()[0]["id"], "continued")
+            self.assertEqual(calls, [("agent", "list", "--page", 1, "--limit", 500, "--running", "--json")])
+            scope["cli_json"] = lambda *args: {"agents": [], "unreadable": [{"id": "damaged"}]}
+            with self.assertRaisesRegex(RuntimeError, "incomplete ownership data"):
+                scope["running_agents"]()
+
+    def test_running_inventory_traverses_second_page(self):
+        source = ast.parse((ROOT / "antonina-scheduler-snapshot").read_text())
+        function = next(node for node in source.body
+                        if isinstance(node, ast.FunctionDef) and node.name == "running_agents")
+        pages = []
+        def fake_cli(*args):
+            pages.append(args[3])
+            return {"agents": [{"id": str(i)} for i in range(500)] if args[3] == 1
+                    else [{"id": "continued"}], "unreadable": []}
+        scope = {"cli_json": fake_cli}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "<running_agents>", "exec"), scope)
+        self.assertEqual(len(scope["running_agents"]()), 501)
+        self.assertEqual(pages, [1, 2])
+
+    def test_release_retains_priority_first_and_provisioning(self):
+        script = (ROOT / "antonina-orchestrator-turn").read_text()
+        self.assertIn("PRIORITY-FIRST DISPATCH", script)
+        self.assertIn("antonina-scheduler-provision", script)
+        self.assertIn("live-agent snapshot failed", script)
+        self.assertNotIn("FIRST ACTION: breadth", script)
+        snapshot = (ROOT / "antonina-scheduler-snapshot").read_text()
+        self.assertIn('#?(\\d+)', snapshot)
+        self.assertIn('context["open_issues"] = issue_headers', snapshot)
+        self.assertIn('"orphan_agents"', snapshot)
+
 if __name__ == "__main__":
     unittest.main()

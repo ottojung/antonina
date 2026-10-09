@@ -40,6 +40,7 @@ def main():
     parser.add_argument("--title", required=True)
     parser.add_argument("--summary", required=True)
     parser.add_argument("--prompt", required=True)
+    parser.add_argument("--resume-agent", help="Exact terminal agent ID to resume in its original cwd")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
@@ -47,25 +48,49 @@ def main():
     if not chosen_cwd_is_available(args.issue, args.cwd):
         raise SystemExit("selected cwd is no longer a registered existing unoccupied worktree")
 
-    agent_id = None
-    for _ in range(2):
-        candidate = secrets.token_hex(6)
-        proc = new_agent(candidate, args.cwd, args.title)
-        if proc.returncode == 0:
-            agent_id = candidate
-            break
-        if "already exists" not in (proc.stdout + proc.stderr).lower():
-            sys.stderr.write(proc.stderr or proc.stdout)
-            raise SystemExit(proc.returncode or 1)
-    if agent_id is None:
-        raise SystemExit("failed to allocate a unique agent id")
+    # A scheduler may explicitly reuse the original failed agent from the
+    # newest board handoff. Do not enumerate historical agents or guess an ID.
+    # Validating the terminal state and declared cwd is essential: another
+    # agent/worktree could otherwise be hijacked by a stale comment.
+    created = False
+    agent_id = args.resume_agent
+    if agent_id is not None:
+        status = run([ANTONINA, "agent", "status", "--id", agent_id, "--json"], check=False)
+        if status.returncode != 0:
+            raise SystemExit("cannot verify requested resume agent: " + (status.stderr or status.stdout))
+        try:
+            previous = json.loads(status.stdout)
+        except ValueError:
+            raise SystemExit("resume agent has unreadable status")
+        if (
+            previous.get("id") != agent_id
+            or previous.get("cwd") is None
+            or os.path.realpath(previous["cwd"]) != os.path.realpath(args.cwd)
+            or previous.get("alive") is not False
+            or previous.get("state") not in ("failed", "stopped", "killed", "idle", "succeeded")
+        ):
+            raise SystemExit("refusing to resume agent: identity, cwd, or terminal-state mismatch")
+    else:
+        for _ in range(2):
+            candidate = secrets.token_hex(6)
+            proc = new_agent(candidate, args.cwd, args.title)
+            if proc.returncode == 0:
+                agent_id = candidate
+                created = True
+                break
+            if "already exists" not in (proc.stdout + proc.stderr).lower():
+                sys.stderr.write(proc.stderr or proc.stdout)
+                raise SystemExit(proc.returncode or 1)
+        if agent_id is None:
+            raise SystemExit("failed to allocate a unique agent id")
 
     # A prior read or stale scheduler snapshot is not launch authorization.
     # Revalidate immediately before executing, not just before creating.
     try:
         require_open_issue(args.issue)
     except SystemExit:
-        cleanup_idle(agent_id)
+        if created:
+            cleanup_idle(agent_id)
         raise
 
     started = run([
@@ -77,7 +102,8 @@ def main():
         "--json",
     ], check=False)
     if started.returncode != 0:
-        cleanup_idle(agent_id)
+        if created:
+            cleanup_idle(agent_id)
         sys.stderr.write(started.stderr or started.stdout)
         raise SystemExit(started.returncode or 1)
 
@@ -92,7 +118,7 @@ def main():
     body = (
         "[scheduler-turn]\n"
         "state: working\n"
-        f"summary: {args.summary}\n"
+        f"summary: {'Resumed saved agent; ' if args.resume_agent else ''}{args.summary}\n"
         f"resources: agent {agent_id}; cwd {args.cwd}\n"
         "next: worker owns this front until terminal; refresh topology before another launch."
     )

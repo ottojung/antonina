@@ -39,7 +39,9 @@ jobs:
             grep "^not ok" /tmp/cli-tests.log | while IFS= read -r line; do
               echo "::error title=CLI test failed::$line"
             done
-            tail -80 /tmp/cli-tests.log
+            sed -n '/^# failing tests:/,$p' /tmp/cli-tests.log | head -100 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
           fi
           exit "$status"
       - name: Pack precompiled CLI

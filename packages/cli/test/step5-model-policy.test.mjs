@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const source = (path) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8');
-const model = 'opencode-go/step-5-preview-free';
+const model = 'opencode-go/longcat-2.5-preview-free';
 
 test('canonical Step 5 intent matches all executable model-selection surfaces', () => {
   const intent = source('../../../docs/intent-records/agent.md');
@@ -23,5 +23,5 @@ test('canonical Step 5 intent matches all executable model-selection surfaces', 
   const config = JSON.parse(source('../../../config/opencode-openclaw.json'));
   assert.equal(config.model, model);
   assert.equal(config.small_model, model);
-  assert.deepEqual(config.provider['opencode-go'].whitelist, ['step-5-preview-free']);
+  assert.deepEqual(config.provider['opencode-go'].whitelist, ['longcat-2.5-preview-free']);
 });

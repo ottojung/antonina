@@ -122,7 +122,7 @@ function xdgScope(t, prefix) {
 }
 
 test('Antonina is locked to Step 5 Preview Free without an alternate backend model', () => {
-  assert.equal(AGENT_MODEL, 'opencode-go/step-5-preview-free');
+  assert.equal(AGENT_MODEL, 'opencode-go/longcat-2.5-preview-free');
 });
 
 test('recognized OpenCode server failure becomes bounded structured diagnostics', (t) => {
@@ -261,7 +261,7 @@ exit 70
   writeFileSync(bin, `#!/bin/sh
 printf '%s %s\\n' "$0" "$*" >>'${calls}'
 if [ "$1" = models ]; then
-  printf "%s\\n" other/model opencode-go/step-5-preview-free
+  printf "%s\\n" other/model opencode-go/longcat-2.5-preview-free
   exit 0
 fi
 exit 2

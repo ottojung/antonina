@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const read = (p) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), 'utf8');
 const loop = read('../../../scripts/antonina-orchestrator-loop');
 const turn = read('../../../scripts/antonina-orchestrator-turn');
-const scheduler = read('../../../docs/skills/scheduler.md');
+const scheduler = read('../../../skills/antonina-scheduler/SKILL.md');
 const skill = read('../../../skills/antonina-scheduler/SKILL.md');
 const service = read('../../../config/s6/antonina-orchestrator/run');
 const restart = read('../../../scripts/antonina-orchestrator-restart');
@@ -28,10 +28,10 @@ test('scheduler is a single agentic OpenClaw scheduling lane owned by the superv
   assert.doesNotMatch(turn, /--thinking/);
 });
 
-test('bounded scheduler turn returns instead of idle-watching', () => {
-  assert.match(turn, /FINISH THE BOUNDED TURN/);
-  assert.match(turn, /RETURN IMMEDIATELY/);
-  assert.match(turn, /s6-supervised loop is responsible for invoking another fresh reconciliation pass/);
+test('bounded scheduler turn dispatches an entire useful frontier without idle-watching', () => {
+  assert.match(turn, /FULL-FRONTIER DISPATCH/);
+  assert.match(turn, /Do not return after one agent/);
+  assert.doesNotMatch(turn, /RETURN IMMEDIATELY/);
   assert.doesNotMatch(turn, /IDLE WATCH/);
   assert.doesNotMatch(turn, /sleep 20/);
   assert.doesNotMatch(turn, /retry until watchdog\/fatal error/);
@@ -45,49 +45,35 @@ test('scheduler service lifecycle keeps the supervisor wanted up', () => {
   assert.match(restart, /wantedup/);
 });
 
-test('scheduler optimizes only efficiency and topology', () => {
+test('scheduler is topology-only and never owns repositories or workspaces', () => {
   assert.doesNotMatch(loop, /board list|board resource|agent run/);
-  assert.match(scheduler, /Optimize only for \*\*efficiency and topology\*\*/);
-  assert.match(scheduler, /positive expected marginal wall-clock speedup/);
+  assert.match(scheduler, /topology-only/);
+  assert.match(scheduler, /positive marginal speedup/);
   assert.match(scheduler, /opencode-go\/longcat-2.5-preview-free/);
-  assert.match(scheduler, /Never fall back to another model or provider/);
-  assert.match(scheduler, /A large number of live agents is never itself a reason to stop/);
+  assert.match(scheduler, /Do not substitute any other model/);
+  assert.match(scheduler, /no global limit/);
   assert.doesNotMatch(scheduler, /memory\.pressure|memory\.stat|memory\.events|reclaimable file cache|oom_kill|PSI/);
 });
 
-test('scheduler respects priority and provisions isolated open work without a breadth barrier', () => {
-  for (const text of [
-    '### Priority-first dispatch without a breadth barrier',
-    'canonical board priority order',
-    'CURRENT_SNAPSHOT.open_issues',
-    'orphan_agents',
-    'atomic launcher checks',
-    'antonina-scheduler-provision --issue N --json',
-    '## Registered-worktree fast path',
-    'launch immediately on one such worktree',
-    'test -d CWD',
-    'path-existence probe',
-    'authoritative for live ownership',
-    'Do not scan historical/finished agent inventories',
-    'bounded reconciliation owner',
-    'CURRENT_SNAPSHOT.live_agents',
-    'complete open-issue header list',
-    'Occupied cwd is a hard scheduling constraint',
-    'antonina-scheduler-issue --issue ISSUE',
-    'Never pass issue IDs as positional arguments',
-  ]) assert.ok(scheduler.includes(text), 'Missing policy invariant: ' + text);
-  assert.ok(!scheduler.includes('**Breadth barrier:**'));
-  assert.ok(!scheduler.includes('board show --id ISSUE --page 1 --json'));
+test('scheduler uses human priority and dispatches full ready frontier', () => {
+  assert.match(scheduler, /full priority-ordered open-issue list/);
+  assert.match(scheduler, /CURRENT_SNAPSHOT/);
+  assert.match(scheduler, /antonina-scheduler-issue --issue N/);
+  assert.match(scheduler, /antonina-scheduler-launch --issue N/);
+  assert.match(scheduler, /Delegate the WHOLE useful independent frontier/);
+  assert.match(scheduler, /Continue dispatching in this same pass/);
+  assert.match(scheduler, /Do not pass a cwd/);
+  assert.match(scheduler, /agent owns repository\/filesystem setup/);
+  assert.doesNotMatch(turn, /antonina-scheduler-provision/);
+  assert.doesNotMatch(turn, /antonina-scheduler-worktrees/);
 });
 
-test('installed scheduler skill stays in sync with canonical docs', () => {
-  const frontmatter = [
-    '---',
-    'name: antonina-scheduler',
-    'description: Keep the Antonina agent mycelium efficient, topologically parallel, collision-free, and saturated with positive-speedup work from the canonical board.',
-    '---',
-    '',
-    '',
-  ].join('\n');
-  assert.equal(skill, frontmatter + scheduler);
+test('scheduler skill is canonical; no second scheduler.md document exists', () => {
+  assert.equal(scheduler, skill);
+  assert.match(skill, /^---\nname: antonina-scheduler\n/);
+  assert.equal(existsSync(fileURLToPath(new URL('../../../docs/skills/scheduler.md', import.meta.url))), false);
+  const doc = read('../../../docs/skills/orchestrator.md');
+  const orchestratorSkill = read('../../../skills/antonina-orchestrator/SKILL.md');
+  assert.ok(orchestratorSkill.endsWith(doc));
+  assert.doesNotMatch(doc, /docs\/skills\/scheduler\.md/);
 });

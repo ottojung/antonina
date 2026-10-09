@@ -154,19 +154,18 @@ class SchedulerPolicyTests(unittest.TestCase):
             scope["running_agents"]()
 
     def test_canonical_and_installed_skills_agree(self):
-        scheduler = (REPO/"docs/skills/scheduler.md").read_text()
-        orchestrator = (REPO/"docs/skills/orchestrator.md").read_text()
-        scheduler_skill = (REPO/"skills/antonina-scheduler/SKILL.md").read_text()
-        orchestrator_skill = (REPO/"skills/antonina-orchestrator/SKILL.md").read_text()
-        self.assertTrue(scheduler_skill.endswith(scheduler))
+        self.assertFalse((REPO / "docs/skills/scheduler.md").exists())
+        scheduler = (REPO / "skills/antonina-scheduler/SKILL.md").read_text()
+        orchestrator = (REPO / "docs/skills/orchestrator.md").read_text()
+        orchestrator_skill = (REPO / "skills/antonina-orchestrator/SKILL.md").read_text()
+        self.assertTrue(scheduler.startswith("---\nname: antonina-scheduler\n"))
         self.assertTrue(orchestrator_skill.endswith(orchestrator))
-        intent = (REPO/"docs/intent-records/scheduling-topology.md").read_text()
+        intent = (REPO / "docs/intent-records/scheduling-topology.md").read_text()
         self.assertIn("sole legitimate reason", intent)
-        self.assertIn("topology-only", scheduler.lower())
-        self.assertIn("topology-only", orchestrator.lower())
-        for doc in [scheduler,orchestrator]:
-            self.assertNotIn("antonina-scheduler-provision", doc.split("## Model")[0] if False else "")
+        for doc in [scheduler, orchestrator]:
+            self.assertIn("topology-only", doc.lower())
             self.assertIn("antonina-scheduler-launch", doc)
+            self.assertNotIn("docs/skills/scheduler.md", doc)
 
 
 class FullFrontierTests(unittest.TestCase):
@@ -219,10 +218,12 @@ class FullFrontierTests(unittest.TestCase):
         self.assertFalse(result["incomplete"])
 
     def test_skills_and_worker_outcomes_agree(self):
-        for name in ("scheduler", "orchestrator"):
-            doc = (REPO / "docs/skills" / (name + ".md")).read_text()
-            skill = (REPO / "skills" / ("antonina-" + name) / "SKILL.md").read_text()
-            self.assertTrue(skill.endswith(doc))
+        scheduler = (REPO / "skills/antonina-scheduler/SKILL.md").read_text()
+        orchestrator = (REPO / "docs/skills/orchestrator.md").read_text()
+        orchestrator_skill = (REPO / "skills/antonina-orchestrator/SKILL.md").read_text()
+        self.assertFalse((REPO / "docs/skills/scheduler.md").exists())
+        self.assertTrue(orchestrator_skill.endswith(orchestrator))
+        for doc in (scheduler, orchestrator):
             self.assertIn("frontier", doc.lower())
         intent = (REPO / "docs/intent-records/full-frontier-dispatch.md").read_text()
         self.assertIn("entire", intent.lower())

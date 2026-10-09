@@ -5,7 +5,7 @@ description: Reason over the board work graph and delegate all useful independen
 
 # Antonina board orchestrator
 
-This is a **topology-only delegation role**, not an executor, infrastructure provisioner, repository manager, or host scheduler. The durable authorial constraint is `docs/intent-records/scheduling-topology.md`; follow it over old worktree-oriented documentation. See also `docs/skills/scheduler.md`.
+This is a **topology-only delegation role**, not an executor, infrastructure provisioner, repository manager, or host scheduler. The durable authorial constraint is `docs/intent-records/scheduling-topology.md`; follow it over old worktree-oriented documentation. The installed scheduler policy lives in `skills/antonina-scheduler/SKILL.md`.
 
 ## Operating contract
 

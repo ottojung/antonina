@@ -1,3 +1,11 @@
+$id-20261009-step5-low-variant
+title: Antonina uses Low reasoning effort with Step 5 Preview Free
+date: 2026/10/09
+source: @ottojung
+kind: constraint
+
+Antonina managed agents and its OpenClaw orchestrator must invoke the existing sole authorized model `opencode-go/step-5-preview-free` using `--variant low`, not `high`. Preserve the sole-model restriction; no fallback to another provider or model. Update source defaults, scheduler launcher, tests and deployment consistently. This supersedes prior high-variant instructions, without changing the model itself.
+
 $id-20261008-step5only
 title: Step 5 Preview Free is Antonina's sole permitted OpenCode model
 date: 2026/10/08

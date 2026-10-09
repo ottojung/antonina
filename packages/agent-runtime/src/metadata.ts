@@ -3,7 +3,7 @@ import { isAbsolute } from 'node:path';
 import { persistedAgentId, persistedInvocationId, persistedProcessInteger } from './process.js';
 
 export const AGENT_META_VERSION = 4;
-export const DEFAULT_VARIANT = 'high';
+export const DEFAULT_VARIANT = 'low';
 export const TERMINAL_STATES = ['succeeded', 'failed', 'stopped', 'killed'] as const;
 export const PERSISTED_AGENT_STATES = ['idle', 'running', ...TERMINAL_STATES] as const;
 export const CONTROL_REASONS = ['steer', 'stop', 'kill'] as const;

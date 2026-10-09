@@ -33,6 +33,7 @@ while :; do
   fi
 
   if [ -z "$child_pid" ]; then
+    "$HOME/.local/bin/antonina-scheduler-reconcile-claims" || true
     "$HOME/.local/bin/antonina-orchestrator-turn" >>"$state_dir/orchestrator-turn.log" 2>&1 </dev/null &
     child_pid=$!
   fi

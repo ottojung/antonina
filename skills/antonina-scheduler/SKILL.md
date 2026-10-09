@@ -196,14 +196,9 @@ At the start of every turn, and again immediately before a launch:
 
 Immediately before a second-agent or depth launch, refresh the topology snapshot. If a project became newly unrepresented, project breadth regains priority and the depth launch waits.
 
-Use antonina-scheduler-launch as the scheduler's launch transaction. LongCat chooses the issue, scope, registered unoccupied cwd, title, and prompt; the helper only executes that decision atomically. It revalidates the cwd, allocates a collision-resistant base-16 ID, creates and starts the detached agent, deletes the idle record if startup fails, and writes the board working claim only after startup succeeds. Never split agent new and agent run across separate scheduler tool calls.
+Use antonina-scheduler-launch as the scheduler's launch transaction. The Step 5 Preview Free scheduler chooses the issue, scope, registered unoccupied cwd, title, and prompt; the helper only executes that decision atomically. It revalidates the cwd, allocates a collision-resistant base-16 ID, creates and starts the detached agent, deletes the idle record if startup fails, and writes the board working claim only after startup succeeds. Never split agent new and agent run across separate scheduler tool calls.
 
-For each launch:
-
-1. Append a concise fresh `state: working` comment naming intended scope and cwd/worktree.
-2. Re-read newest comments if collision risk is non-trivial.
-3. Launch detached with the explicit unoccupied cwd.
-4. Append the actual live agent ID and exact cwd/worktree.
+For each launch, call `antonina-scheduler-launch` once with the selected issue, scope, registered unoccupied cwd, title and prompt. The helper owns agent creation, detached startup, and publication of the working claim; do not publish a separate pre-launch or post-launch claim. If the helper reports a partial failure after startup, inspect the returned agent ID and live topology and reconcile the claim without starting another agent. Never retry an ambiguous launch blindly.
 
 ## Scheduler latency discipline
 
@@ -213,10 +208,10 @@ The scheduler is a control-plane agent. Its own deliberation must not become the
 - Do not build a comprehensive model of every project before the first useful launch.
 - Read deeply only enough to establish dependency/collision topology for the current candidate.
 - Delegate deep diagnosis/research to workers.
-- After one successful launch, return immediately. The supervisor will start a fresh scheduler turn with a fresh topology snapshot.
-- If no launch is possible for the selected missing project but you can record one precise dependency/topology/collision blocker, record it and return immediately.
-- Never continue auditing after the turn has taken its one scheduling action.
+- After each successful launch, refresh live topology and continue dispatching useful independent fronts while the bounded turn budget permits. At the turn boundary, hand control to the supervisor for a fresh turn; do not interpret the boundary as scheduling completion.
+- If a missing project is blocked, record its precise dependency/topology/collision blocker and continue evaluating other independent projects within the bounded turn budget.
+- Do not audit unnecessarily; prioritize immediate dispatch and fresh topology after each launch.
 
 ## Completion of a scheduler turn
 
-A scheduler turn is successful when it takes one useful scheduling action quickly: launch one positive-speedup front, or record one precise blocker for a missing project, without introducing duplicate cwd ownership or doing worker-level investigation. Fresh turns repeat until breadth and useful depth are filled.
+A scheduler turn is successful when it makes bounded, topology-informed progress: repeatedly launch positive-speedup fronts or record precise blockers, refreshing topology between launches, without duplicate cwd ownership or worker-level investigation. Fresh turns continue until breadth and useful depth are filled.

@@ -25,6 +25,8 @@ test('scheduler is a single agentic OpenClaw scheduling lane owned by the superv
   assert.match(turn, /--model opencode-go\/longcat-2.5-preview-free/);
   assert.match(turn, /--variant low/);
   assert.match(turn, /never fall back to any other model/);
+  assert.match(turn, /RESUME BEFORE REPLACEMENT/);
+  assert.match(turn, /--resume-agent ID/);
   assert.doesNotMatch(turn, /--thinking/);
 });
 

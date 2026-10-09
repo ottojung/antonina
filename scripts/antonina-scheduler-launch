@@ -90,7 +90,7 @@ def main():
     if comment.returncode != 0:
         sys.stderr.write("worker started but board comment failed\n")
         sys.stderr.write(comment.stderr or comment.stdout)
-        raise SystemExit(2)
+        return  # A started worker is success, despite the failed claim.
 
 if __name__ == "__main__":
     main()

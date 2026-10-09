@@ -109,7 +109,7 @@ function pruneFixtureParent(t) {
 // inference from the durable record: a runner that refused must leave no child,
 // and a runner that launched must leave a child in the directory the record
 // declares, not in the directory the runner process happened to sit in.
-function fakeBackend(t, marker, body = `#!/bin/sh\nprintf '%s %s\\n' "$$" "$(pwd -P)" >> ${JSON.stringify(marker)}\nexit 0\n`) {
+function fakeBackend(t, marker, body = `#!/bin/sh\nprintf '%s %s %s\\n' "$1" "$" "$(pwd -P)" >> ${JSON.stringify(marker)}\nexit 0\n`) {
   const failures = [];
   for (const parent of [tmpdir(), REPO_FIXTURE_PARENT]) {
     let root;
@@ -236,6 +236,11 @@ function backendRuns(marker) {
   if (!existsSync(marker)) return [];
   return readFileSync(marker, 'utf8').split('\n').filter((line) => line.trim() !== '');
 }
+\n// A cwd-scoped OpenCode "session list" probe executes the same fake binary
+// in the SAME worktree after a turn. Only "run" is the invocation under test.
+function invocationRuns(marker, cwd) {
+  return backendRuns(marker).filter((line) => line.startsWith('run ') && line.split(' ')[2] === cwd);
+}
 
 test('a withdrawn invocation-cwd capability refuses the launch, and the refusal is a stated failed invocation', async (t) => {
   if (!requireProc(t)) return;
@@ -294,7 +299,7 @@ test('the same launch with the capability intact still spawns in the declared di
   // The fake binary is also what the session-discovery probe executes, in the
   // runner's own directory, so the assertion is on the invocation's line rather
   // than on the number of lines.
-  const invocations = backendRuns(marker).filter((line) => line.split(' ')[1] === cwd);
+  const invocations = invocationRuns(marker, cwd);
   assert.equal(invocations.length, 1, `exactly one invocation must have run in ${cwd}; saw ${JSON.stringify(backendRuns(marker))}`);
   const after = readMeta(id, options);
   assert.equal(after.state, 'succeeded');
@@ -491,7 +496,7 @@ test('the owner token is not handed to the backend the runner spawns', async (t)
   // record of the same process rather than two records that have to be matched up.
   const backend = fakeBackend(t, marker, `#!/bin/sh
 if [ -n "\${ANTONINA_RUNNER_OWNER_TOKEN+x}" ]; then verdict=token-present; else verdict=token-absent; fi
-printf '%s %s %s\\n' "$verdict" "$$" "$(pwd -P)" >> ${JSON.stringify(marker)}
+printf '%s %s %s %s\\n' "$1" "$verdict" "$" "$(pwd -P)" >> ${JSON.stringify(marker)}
 exit 0
 `);
   if (backend === null) return;
@@ -510,14 +515,14 @@ exit 0
 
   const runs = backendRuns(marker);
   assert.equal(
-    runs.filter((line) => line.split(' ')[2] === cwd).length,
+    runs.filter((line) => line.startsWith('run ') && line.split(' ')[3] === cwd).length,
     1,
     `the backend must have run once in ${cwd}; saw ${JSON.stringify(runs)}`,
   );
   // Every process this runner started reports the token absent -- the invocation
   // and the post-run session probe alike -- and none reports it present.
   assert.deepEqual(
-    runs.filter((line) => !line.startsWith('token-absent ')),
+    runs.filter((line) => !line.includes(' token-absent ')),
     [],
     `every backend process must run without the token; saw ${JSON.stringify(runs)}`,
   );
@@ -601,7 +606,7 @@ test('the launcher-shaped reservation is claimed against this process own start 
     assert.equal(after.invocation_cwd, null, `${label}: nothing ran`);
     assert.equal(after.cwd, cwd);
     assert.deepEqual(
-      backendRuns(marker).filter((line) => line.split(' ')[1] === cwd),
+      invocationRuns(marker, cwd),
       [],
       `${label}: a record whose owner identity is false must not launch a backend`,
     );
@@ -617,7 +622,7 @@ test('the launcher-shaped reservation is claimed against this process own start 
   });
   await runManagedRunner(id, 'new', 7, options);
   assert.equal(
-    backendRuns(marker).filter((line) => line.split(' ')[1] === cwd).length,
+    invocationRuns(marker, cwd).length,
     1,
     'the real start time must still be accepted, or the case above proves nothing',
   );
@@ -703,7 +708,7 @@ test('a metadata write cannot establish its own ownership, on board 197 residual
     assert.equal(after.invocation_cwd, null, `${label}: nothing ran`);
     assert.equal(after.cwd, cwd);
     assert.deepEqual(
-      backendRuns(marker).filter((line) => line.split(' ')[1] === cwd),
+      invocationRuns(marker, cwd),
       [],
       `${label}: a write that authorizes itself must not launch a backend`,
     );
@@ -720,7 +725,7 @@ test('a metadata write cannot establish its own ownership, on board 197 residual
   });
   await runManagedRunner(id, 'new', 7, options);
   assert.equal(
-    backendRuns(marker).filter((line) => line.split(' ')[1] === cwd).length,
+    invocationRuns(marker, cwd).length,
     1,
     'the launcher holding its own token must still be able to claim its own reservation',
   );
@@ -774,7 +779,7 @@ test('a retry re-decides the launch gate, so a capability withdrawn after the fi
   const marker = join(tmpdir(), `antonina-launch-gate-${process.pid}-retry.marker`);
   rmSync(marker, { force: true });
   t.after(() => rmSync(marker, { force: true }));
-  const backend = fakeBackend(t, marker, `#!/bin/sh\nprintf '%s %s\\n' "$$" "$(pwd -P)" >> ${JSON.stringify(marker)}\nprintf '%s\\n' 'Unexpected server error'\nexit 1\n`);
+  const backend = fakeBackend(t, marker, `#!/bin/sh\nprintf '%s %s %s\\n' "$1" "$" "$(pwd -P)" >> ${JSON.stringify(marker)}\nprintf '%s\\n' 'Unexpected server error'\nexit 1\n`);
   if (backend === null) return;
   const options = scratch(t, backend);
   const { id, cwd } = agent(t, options, {
@@ -799,7 +804,7 @@ test('a retry re-decides the launch gate, so a capability withdrawn after the fi
   });
 
   assert.equal(
-    backendRuns(marker).filter((line) => line.split(' ')[1] === cwd).length,
+    invocationRuns(marker, cwd).length,
     1,
     `exactly one attempt may have launched in ${cwd}; saw ${JSON.stringify(backendRuns(marker))}`,
   );

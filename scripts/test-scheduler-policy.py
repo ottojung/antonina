@@ -5,6 +5,7 @@ import importlib.machinery
 import importlib.util
 import json
 from pathlib import Path
+import tempfile
 import re
 import unittest
 from unittest.mock import patch
@@ -32,11 +33,39 @@ class SchedulerPolicyTests(unittest.TestCase):
         self.assertEqual(parse("QAI #82: migration"), 82)
         self.assertIsNone(parse("AssemblyP1 freeform"))
 
-    def test_provisioner_only_uses_trusted_roots(self):
+    def test_unrecognized_project_gets_an_empty_agent_owned_workspace(self):
         p = load_helper("antonina-scheduler-provision")
-        self.assertEqual(p.project_of_title("[AssemblyP1 finite] audit"), "AssemblyP1")
-        self.assertEqual(p.project_of_title("Antonina: restart"), "Antonina")
-        self.assertIsNone(p.project_of_title("Unknown repository: request"))
+        self.assertFalse(hasattr(p, "ROOTS"))
+        with tempfile.TemporaryDirectory() as td, \
+             patch.object(p, "ROOT", Path(td) / "workspace"), \
+             patch.dict("os.environ", {"XDG_STATE_HOME": str(Path(td) / "state")}), \
+             patch.object(p, "issue_record", return_value={"number": 223, "state": "open"}):
+            p.ROOT.mkdir()
+            registered = [False]
+            def fake_cli(*args):
+                if args[:3] == ("board", "resource", "add"):
+                    registered[0] = True
+                return {}
+            with patch.object(p, "cli", side_effect=fake_cli), \
+                 patch.object(p, "resource_registered", side_effect=lambda *_: registered[0]):
+                self.assertEqual(p.provision(223, dry_run=True)["action"], "would_reserve")
+                result = p.provision(223)
+                self.assertTrue(result["registered"])
+                self.assertTrue(result["clone_by_agent"])
+                self.assertEqual(list(Path(result["cwd"]).iterdir()), [])
+                self.assertEqual(p.provision(223)["action"], "reused")
+
+    def test_bootstrap_prompt_instructs_agent_to_clone_unknown_repository(self):
+        launch = load_helper("antonina-scheduler-launch")
+        issue = {"number": 223, "title": "[Supernatural] Prologue", 
+                 "body": "Repo: ottojung/vau.place"}
+        with patch.object(launch, "is_git_checkout", return_value=False):
+            prompt = launch.agent_prompt(issue, "/workspace/antonina-issue-223", "Edit prologue")
+        self.assertIn("git clone URL .", prompt)
+        self.assertIn("ottojung/vau.place", prompt)
+        self.assertIn("Edit prologue", prompt)
+        with patch.object(launch, "is_git_checkout", return_value=True):
+            self.assertEqual(launch.agent_prompt(issue, "/workspace/old-worktree", "Edit prologue"), "Edit prologue")
 
     def test_closed_issue_is_a_hard_launch_error(self):
         p = load_helper("antonina-scheduler-launch")
@@ -52,6 +81,7 @@ class SchedulerPolicyTests(unittest.TestCase):
             seen[0] += 1
             if seen[0] == 3:
                 raise SystemExit("closed after start")
+            return {"number": issue, "state": "open", "body": "Repo: ottojung/assemblyp1"}
         def mock_run(args, check=True):
             calls.append(args)
             return types.SimpleNamespace(returncode=0, stdout='{}', stderr='')
@@ -107,6 +137,7 @@ class SchedulerPolicyTests(unittest.TestCase):
         script = (ROOT / "antonina-orchestrator-turn").read_text()
         self.assertIn("PRIORITY-FIRST DISPATCH", script)
         self.assertIn("antonina-scheduler-provision", script)
+        self.assertIn("No trusted repository-root allowlist", script)
         self.assertIn("live-agent snapshot failed", script)
         self.assertNotIn("FIRST ACTION: breadth", script)
         snapshot = (ROOT / "antonina-scheduler-snapshot").read_text()

@@ -1,34 +1,22 @@
 #!/usr/bin/env python3
-"""Provision a collision-free board-owned Git worktree for a genuinely open issue.
+"""Reserve a board-owned isolated workspace for any open issue.
 
-The board remains the authority: registration is verified before a caller may
-launch. No workspace filesystem discovery or resource-capacity planning occurs.
+A missing repository is not a scheduling blocker. An Antonina agent, not this
+provisioner, identifies and clones the issue's repository in its workspace.
+The board resource and live-agent inventory still prevent cwd collisions.
 """
 import argparse
 import fcntl
 import json
 import os
 from pathlib import Path
-import secrets
 import subprocess
 import sys
 
 ANTONINA = os.environ.get("ANTONINA_BIN", os.path.expanduser("~/.local/bin/antonina"))
 HOST = "lubko://marceline-dev"
 ROOT = Path("/workspace")
-# Explicit trusted repo roots only. Never guess from arbitrary user issue text.
-ROOTS = {
-    "AssemblyP1": "assemblyp1",
-    "Antonina": "antonina",
-    "Kawun": "skrynia-apps",
-    "Volodyslav": "volodyslav",
-}
-STEMS = {
-    "AssemblyP1": "assemblyp1-finite",
-    "Antonina": "antonina-board",
-    "Kawun": "skrynia-apps-board",
-    "Volodyslav": "volodyslav-board",
-}
+
 
 def command(*args, check=True):
     p = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -36,22 +24,17 @@ def command(*args, check=True):
         raise RuntimeError(f"{args[0]} failed: {p.stderr[-1200:] or p.stdout[-1200:]}")
     return p
 
+
 def cli(*args):
     return json.loads(command(ANTONINA, *map(str, args), "--json").stdout)
 
-def project_of_title(title):
-    title = title.lower().strip()
-    if "assemblyp1" in title: return "AssemblyP1"
-    if title.startswith("antonina"): return "Antonina"
-    if title.startswith("kawun") or "skrynia-apps" in title: return "Kawun"
-    if title.startswith("volodyslav"): return "Volodyslav"
-    return None
 
 def issue_record(number):
     issue = cli("board", "show", "--id", number, "--page", 1)
     if issue.get("state") != "open":
         raise RuntimeError(f"refusing to provision closed/non-open issue #{number}")
     return issue
+
 
 def resource_registered(number, path):
     for page in range(1, 100):
@@ -60,51 +43,54 @@ def resource_registered(number, path):
                any(i.get("number") == number and i.get("state") == "open"
                    for i in r.get("issues", [])) for r in entries):
             return True
-        if not entries: break
+        if not entries:
+            break
     return False
 
+
+def is_git_checkout(path):
+    p = command("git", "-C", str(path), "rev-parse", "--show-toplevel", check=False)
+    return p.returncode == 0 and Path(p.stdout.strip()).resolve() == path.resolve()
+
+
 def provision(number, dry_run=False):
-    issue = issue_record(number)
-    project = project_of_title(issue.get("title") or "")
-    if project not in ROOTS:
-        raise RuntimeError(f"no verified repository root mapping for issue #{number}; needs repo/worktree registration")
-    repository = ROOT / ROOTS[project]
-    path = ROOT / f"{STEMS[project]}-{number}"
-    if not repository.is_dir() or command("git", "-C", str(repository),
-            "rev-parse", "--is-inside-work-tree", check=False).returncode:
-        raise RuntimeError(f"missing verified Git checkout: {repository}")
+    issue_record(number)
+    path = ROOT / f"antonina-issue-{number}"
     if dry_run:
-        return {"issue": number, "project": project, "cwd": str(path), "action": "would_provision"}
+        return {"issue": number, "cwd": str(path), "action": "would_reserve",
+                "clone_by_agent": True}
+
     lockpath = Path(os.environ.get("XDG_STATE_HOME", str(Path.home()/".local/state"))) / "antonina/provision.lock"
     lockpath.parent.mkdir(parents=True, exist_ok=True)
     with lockpath.open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         issue_record(number)
         created = False
+        if path.is_symlink():
+            raise RuntimeError(f"refusing symlinked workspace: {path}")
         if not path.exists():
-            base = "refs/remotes/origin/main"
-            if command("git", "-C", str(repository), "rev-parse", "--verify", base, check=False).returncode:
-                base = "HEAD"
-            branch = f"agent/board-{number}-{secrets.token_hex(3)}"
-            command("git", "-C", str(repository), "worktree", "add",
-                    "-b", branch, str(path), base)
+            path.mkdir(mode=0o700)
             created = True
-        elif command("git", "-C", str(path), "rev-parse", "--show-toplevel",
-                     check=False).stdout.strip() != str(path):
-            raise RuntimeError(f"unexpected occupied path, will not reuse: {path}")
-        # A closure while creating must not make the new checkout collectible
-        # with a false claim that open issue ownership was established.
+        elif not path.is_dir():
+            raise RuntimeError(f"workspace path is not a directory: {path}")
+        elif any(path.iterdir()) and not is_git_checkout(path):
+            raise RuntimeError(f"workspace contains unexpected non-Git files: {path}")
+
+        # Recheck issue state before registering; do not claim a closed issue.
         try:
             issue_record(number)
         except Exception:
             if created:
-                command("git", "-C", str(repository), "worktree", "remove", "--force", str(path), check=False)
+                path.rmdir()
             raise
         if not resource_registered(number, path):
             cli("board", "resource", "add", "--issue", number, "--host", HOST, "--path", str(path))
         if not resource_registered(number, path):
             raise RuntimeError(f"resource registration for #{number} was not verified")
-        return {"issue": number, "project": project, "cwd": str(path), "action": "created" if created else "reused", "registered": True}
+        return {"issue": number, "cwd": str(path),
+                "action": "created" if created else "reused", "registered": True,
+                "clone_by_agent": not is_git_checkout(path)}
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -119,6 +105,7 @@ def main():
         return 1
     print(json.dumps(result, separators=(",", ":")))
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

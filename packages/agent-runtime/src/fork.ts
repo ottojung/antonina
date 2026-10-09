@@ -174,11 +174,12 @@ export function forkMetaSnapshot(
   clone.state = 'idle';
   // Observation: not copied. `invocation_cwd` means "this agent was launched in
   // that directory", and the clone was launched nowhere. A `structuredClone`
-  // carried it across, so a fresh agent with its own identity, no process and
-  // no launch reported the source's last launch directory as its own -- and
-  // `agent status`/`agent list` printed it as `ran in:`. The clone inherits the
-  // source's history (exit_code, finished_at, last_prompt); the directory a past
-  // run of a *different* agent used is not the clone's history.
+  // carried it across, so a fresh agent with its own identity, no process and no
+  // launch would report the source's last launch directory as its own, and
+  // `agent status` would print it as `ran in:`. The clone inherits the source's
+  // history (`exit_code`, `finished_at`, `last_prompt`, and the declared `cwd`,
+  // which is a fact about the agent rather than about a run); the directory a
+  // past run of a *different* agent used is not the clone's history.
   clone.invocation_cwd = null;
   // Process identity: not copied. A pid means "this agent launched and owns
   // that process"; the clone launched nothing.

@@ -1,9 +1,10 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, fstatSync, openSync, statSync } from 'node:fs';
+import { closeSync, fstatSync, openSync } from 'node:fs';
 import { constants } from 'node:os';
 
 import {
+  backendCapabilities,
   backendRetryDelay,
   buildAgentCommand,
   classifyBackendFailure,
@@ -11,6 +12,7 @@ import {
   describeBackendDeath,
   describeSignalDeath,
   discoverSessionId,
+  honoursInvocationCwd,
   lastLogLineExcerpt,
   type BackendError,
 } from './backend.js';
@@ -29,22 +31,25 @@ import {
   stopLikeOrMalformed,
 } from './lifecycle.js';
 import {
-  LAUNCH_DIRECTORY_MISSING,
+  DEFAULT_VARIANT,
+  RUNNER_OWNER_TOKEN_ENV,
   activeRunnerFlag,
   deletePendingFlag,
+  ownerTokensEqual,
   pendingPrompt,
   persistedControlField,
   persistedNativeSessionId,
-  persistedAgentCwd,
+  requiredAgentCwd,
   runnerGeneration,
   runnerReservationMode,
   runnerReservationState,
   type AgentMetadata,
 } from './metadata.js';
-import { procStartTicks, signalMarkedInvocationProcesses } from './process.js';
+import { procStartTicks, persistedProcessInteger, signalMarkedInvocationProcesses } from './process.js';
 import {
   logPath,
   logSize,
+  opencodeBackendEnv,
   readMeta,
   updateMeta,
   type StatePathsOptions,
@@ -53,7 +58,20 @@ import {
 const CONTROL_POLL_MS = 200;
 const CONTROL_GRACE_MS = 10_000;
 
-
+/**
+ * The one identity the launcher hands the runner it spawns, beside the argv it
+ * already passes, through the environment it already builds
+ * (`RUNNER_OWNER_TOKEN_ENV`, declared with its mint in metadata.ts).
+ *
+ * It is load-bearing: a cryptographically random per-invocation value minted by
+ * the launcher when it writes the reservation, so the runner can prove it is the
+ * process that reservation was created for even after the kernel has reparented
+ * it and no owner identity is left to verify. It is the whole of the evidence in
+ * that shape, which is why `verifyReservationOwner` requires it there rather than
+ * reading a name. The environment also carries `ANTONINA_AGENT_ID` and
+ * `ANTONINA_RUNNER_GEN`, but those are values a claimant could simply write into
+ * its own environment, so they are never evidence of anything.
+ */
 
 export interface RunnerOptions extends StatePathsOptions {
   env?: Record<string, string | undefined>;
@@ -65,6 +83,38 @@ export interface RunnerOptions extends StatePathsOptions {
    * launch.
    */
   capacity?: HostCapacityReadOptions;
+  /**
+   * Seam for the `/proc` reading that captures a just-spawned child's identity.
+   * Production leaves it unset so the reading is the real one, which returns
+   * `null` only when the process is genuinely gone from `/proc` by the time the
+   * runner looks. Tests point it at `() => null` to drive the one branch that
+   * is otherwise a race to lose: a backend that finishes before its identity
+   * can be captured. It cannot grant a launch: the value it returns is the
+   * value `recordSpawned` publishes and every later control path verifies.
+   */
+  childStartTicks?: (pid: number) => number | null;
+  /**
+   * Seam for the `/proc` reading that names *this* runner, the one the launch
+   * gate asks whether it can complete at all. Production leaves it unset so the
+   * reading is the real one, which returns null only on a host whose
+   * `/proc/<pid>/stat` is unreadable. Tests point it at `() => null` to drive
+   * the refusal that would otherwise need such a host. It can only refuse a
+   * launch: no value it returns can authorise anything, and the spawn below
+   * still happens in the declared directory of a record that says so.
+   */
+  selfStartTicks?: (pid: number) => number | null;
+  /**
+   * Seam for the decision to retry a failed backend spawn. Production leaves it
+   * unset so `backendRetryDelay` decides, and today that classifier marks every
+   * backend failure as not automatically retry-safe, so no retry is reachable
+   * as shipped. Tests point it at a function that returns a delay in order to
+   * drive the retry branch at all, which is the only way to pin that the launch
+   * gate is re-decided for a retry rather than decided once per invocation. It
+   * can only add an attempt, never authorise one: every attempt still goes
+   * through `authorizeLaunch` from scratch, and the refusal below writes a
+   * terminal record exactly as a first-attempt refusal does.
+   */
+  retryDelayMs?: (attempt: number) => number | null;
 }
 
 /** The OOM bracket captured around one backend spawn. */
@@ -151,6 +201,119 @@ function childResult(child: ChildProcess, agentId: string, options: RunnerOption
   });
 }
 
+/**
+ * What evidence the claiming runner has that the reservation it is about to
+ * consume was written by whoever launched it.
+ *
+ * `self` -- the reservation names this process as its owner, the recorded start
+ * time is this process's own start time as `/proc` reports it, *and* the
+ * claimant holds the owner token minted for that reservation. A pid that
+ * resolves to this very process already leaves no second *process* it could be
+ * confused with, but it does not make the recorded identity true: this is the
+ * one shape whose evidence is a durable field the claimant can satisfy by
+ * pointing it at itself, so a record naming this pid with a start time that is
+ * not this process's own is refused rather than believed. Pid plus start time
+ * here exactly as on the `parent` shape, for the same reason: the doc comment's
+ * promise is a promise about all three shapes, and a pid alone is not an
+ * identity.
+ *
+ * The token is what makes this shape distinct from the rule it used to follow,
+ * and the reason is the same one that puts a token on `declared`: when the
+ * recorded owner *is* the claimant there is no second process the kernel can
+ * corroborate the record against, so pid plus start time is not evidence that
+ * anybody wrote the reservation -- it is a fact about this process that the
+ * writer of the record read out of `/proc` and copied in. Measured on this head
+ * (board 197's residual R2): a process holding nothing but write access to
+ * `meta.json` wrote a reservation naming the claiming pid with that pid's own
+ * true start time, published the claim and had the backend run in the declared
+ * directory. So this shape is the kernel-evidence-free shape, and the rule this
+ * function already follows -- kernel evidence first, and the token wherever the
+ * kernel kept none -- applies to it exactly as it applies to `declared`. The
+ * product mints a token on *every* reservation it writes (`packages/cli/src/agent.ts`),
+ * so requiring one here costs the launcher nothing and closes the last shape in
+ * which a metadata write could establish its own ownership.
+ *
+ * `parent` -- the reservation names the process that spawned this one, and the
+ * recorded start time matches that live process in `/proc`. Pid plus start time,
+ * never a pid alone (a recycled pid is a different process) and never a process
+ * name (a name is not an identity, and is not consulted anywhere in this
+ * package).
+ *
+ * `declared` -- the recorded owner names a process that is no longer live and
+ * is not this process's parent. This is the ordinary detached launch: the CLI
+ * writes the reservation, spawns the runner detached, and exits, so by the time
+ * the runner reaches its first durable write the kernel has already reparented
+ * it (`/proc/self/stat` reads `ppid == 1`) and there is no parent link left to
+ * verify -- measured on this host, and the reparenting reaper's name is not an
+ * identity and is never read. Nothing in the record can tie a reparented
+ * process back to a launcher that is gone, so the evidence is the one thing the
+ * launcher could hand over that the record could not have been guessed from:
+ * the per-invocation owner token. Board 197's residual, and its closure --
+ * this verdict now *requires* the token rather than falling back to two
+ * self-declared names, and a token minted for a different invocation does not
+ * match, so one invocation can never be confused for another.
+ *
+ * What this decision is *not*, recorded here so a later reader does not read
+ * "the claim is authenticated" as "the record is authenticated": it is
+ * authority over a `meta.json`, and it is only as strong as that file's
+ * integrity. A process that can write `meta.json` can author a reservation and
+ * an owner token together and claim it, because the token is compared against
+ * the record it is meant to authenticate. Requiring the token on the `self`
+ * shape closed the one case where the *file alone* was enough, so a write is no
+ * longer self-authorising on any shape; what remains is a writer that also
+ * supplies the token to the claimant, which means supplying that claimant's
+ * environment -- a strictly larger capability than writing metadata, and one
+ * such a writer does not need this function to obtain, since it could write
+ * `state: succeeded` outright. This runtime has no trust anchor outside its own
+ * state directory to compare a token against, so that limit is not closable
+ * here, and `AGENTS.md` puts the durable state directory in the user's own
+ * hands by design. What closes the *board 197* defect regardless is the launch
+ * gate: a forged claim still cannot make a launch happen after the
+ * invocation-cwd capability is withdrawn.
+ *
+ * `refused` -- anything else, including a reservation whose recorded owner is a
+ * *different* live process, a recorded start time that does not match the live
+ * process it names -- on the `self` shape as well as the `parent` one -- and any
+ * of the `declared` conditions failing.
+ */
+type OwnerIdentityVerdict = 'self' | 'parent' | 'declared' | 'refused';
+
+function verifyReservationOwner(
+  reservation: Record<string, unknown>,
+  env: Record<string, string | undefined>,
+): OwnerIdentityVerdict {
+  const ownerPid = persistedProcessInteger(reservation.owner_pid, 1);
+  const ownerStart = persistedProcessInteger(reservation.owner_start_ticks, 0);
+  if (ownerPid === null || ownerStart === null) return 'refused';
+  if (ownerPid === process.pid) {
+    if (ownerStart < 1) return 'refused';
+    if (procStartTicks(ownerPid) !== ownerStart) return 'refused';
+    // No second process exists for the kernel to corroborate this record
+    // against, so the token is the whole of the evidence -- the same rule the
+    // `declared` shape below follows, applied to the shape that had none. A
+    // metadata write on its own cannot name its own authority: it would also
+    // have to be holding the token the launcher minted for this invocation.
+    if (!ownerTokensEqual(reservation.owner_token, env[RUNNER_OWNER_TOKEN_ENV])) return 'refused';
+    return 'self';
+  }
+  const selfTicks = procStartTicks(process.pid);
+  if (selfTicks === null) return 'refused';
+  if (ownerPid === process.ppid) {
+    if (ownerStart < 1) return 'refused';
+    return procStartTicks(ownerPid) === ownerStart ? 'parent' : 'refused';
+  }
+  if (procStartTicks(ownerPid) !== null) return 'refused';
+  if (selfTicks <= ownerStart) return 'refused';
+  // The kernel kept no evidence of the launcher link for this shape, so the
+  // only question left is whether this process was the one the launcher created
+  // this reservation for. The token answers exactly that and nothing else: it is
+  // unguessable without having been handed over, it is minted per invocation so
+  // it cannot be replayed from a neighbouring one, and it carries no authority
+  // over any other record.
+  if (!ownerTokensEqual(reservation.owner_token, env[RUNNER_OWNER_TOKEN_ENV])) return 'refused';
+  return 'declared';
+}
+
 async function claimRunner(
   agentId: string,
   mode: 'new' | 'continue',
@@ -166,6 +329,14 @@ async function claimRunner(
     const record = reservation as Record<string, unknown>;
     if (runnerGeneration(record.gen, 1) !== generation) return;
     if (runnerReservationMode(record) !== mode) return;
+    // Board 197: a reservation is authority, and authority is claimed against
+    // the identity that wrote it. Before this, a claim checked the
+    // reservation's generation and mode and nothing else, so any process that
+    // could name an agent id and a generation could consume any reservation
+    // with that generation -- including one whose owner was alive and was
+    // somebody else entirely. The check is pid plus start time against live
+    // `/proc`, never a name.
+    if (verifyReservationOwner(record, options.env ?? process.env) === 'refused') return;
     meta.runner_pid = process.pid;
     meta.runner_start_time = procStartTicks(process.pid);
     meta.runner_reservation = { ...record, state: 'claimed' };
@@ -233,14 +404,17 @@ async function recordSpawned(
   let accepted = false;
   await updateMeta(agentId, (meta) => {
     if (deletePendingFlag(meta) !== false || stopLikeOrMalformed(meta)) return;
+    // The command builder always launches the current Antonina variant. Once
+    // the child exists, make durable status name the variant that actually ran;
+    // this also upgrades legacy records that still carried `low`.
+    meta.variant = DEFAULT_VARIANT;
     // Board issue 178: the observation is written here, in the same durable
     // write that publishes the spawned process identity, and nowhere earlier.
     // Everything that can precede a spawn -- accepting the prompt, queueing a
-    // steer, refusing to continue, refusing to launch into a directory that is
-    // gone -- reaches this point without a child, so this write is the first
-    // and only moment at which a value here can be true. A value is therefore
-    // never a directory some front was merely going to enter, which is what
-    // `agent status`'s `ran in:` claims and what it must not claim.
+    // steer, refusing to continue, refusing to launch -- reaches this point
+    // without a child, so this write is the first and only moment at which a
+    // value here can be true. A value is therefore never a directory some front
+    // was merely going to enter.
     meta.invocation_cwd = launchCwd;
     meta.pid = pid;
     meta.pgid = pid;
@@ -428,7 +602,11 @@ async function finalizeInvocation(
 async function rememberFreshSession(agentId: string, options: RunnerOptions): Promise<void> {
   const meta = readMeta(agentId, options);
   if (meta === null || persistedNativeSessionId(meta) !== null) return;
-  const sessionId = discoverSessionId(agentId, options.env);
+  // Board 186: the probe must be given the same database the invocation was
+  // given, or it asks the shared OpenCode database about a session the isolated
+  // invocation wrote somewhere else and answers `null` for a session that
+  // exists.
+  const sessionId = discoverSessionId(agentId, { ...options.env, ...opencodeBackendEnv(meta, options) }, requiredAgentCwd(meta));
   if (sessionId === null) return;
   await updateMeta(agentId, (current) => {
     if (current.native_session_id === null) {
@@ -437,23 +615,79 @@ async function rememberFreshSession(agentId: string, options: RunnerOptions): Pr
   }, options);
 }
 
+interface LaunchAuthorization {
+  allowed: boolean;
+  reason: string | null;
+}
+
+/**
+ * The launch gate, re-decided at the only place a launch can happen.
+ *
+ * The capability gate the CLI applies at acceptance time (`requireInvocationCwdCapability`
+ * in `packages/cli`) is an acceptance-time decision about a *declaration*: at
+ * that moment nothing has been spawned, so a refusal writes nothing and costs
+ * nothing. Board 197 is that the decision was never taken again afterwards. The
+ * spawn path read the record, built a command from the declared directory and
+ * called `spawn`, so a reservation accepted while the capability held could be
+ * launched after it was withdrawn, and the backend ran in a directory whose
+ * invocation-cwd capability no backend had answered for. Reproduced on this head:
+ * with `ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD=1` and a hand-written
+ * reservation, `_runner` exited 0 and recorded `state succeeded` with
+ * `invocation_cwd` set.
+ *
+ * So the acceptance-time answer is not trusted to survive: it is re-decided
+ * here, from the same `backendCapabilities`/`honoursInvocationCwd` pair, and
+ * `honoursInvocationCwd` fails closed on anything it does not recognise. What
+ * spawn will accept is therefore not "a reservation once passed this gate" but
+ * "the backend can still honour the directory this launch names, decided at the
+ * moment of the spawn".
+ *
+ * The gate reads no durable record, and that is deliberate. Ownership of the
+ * launch is already a durable fact re-verified at the only write that publishes
+ * a spawned process (`recordSpawned`), whose rejection kills the process group
+ * and leaves the control path's record whole; adding a second read here would
+ * move the window in which a stop between the runner's read and its write is
+ * observed, and would make this gate a second, weaker copy of an invariant that
+ * is already enforced where it can be enforced atomically. This gate covers the
+ * one thing the durable write cannot: the capability answer, which is not in
+ * the record at all.
+ */
+async function authorizeLaunch(options: RunnerOptions): Promise<LaunchAuthorization> {
+  const refused = (reason: string): LaunchAuthorization => ({ allowed: false, reason });
+  if (!honoursInvocationCwd(backendCapabilities({ ...process.env, ...options.env }))) {
+    return refused(
+      'the configured backend cannot run this invocation in the declared working directory; refusing to spawn',
+    );
+  }
+  // A runner that cannot name its own process in `/proc` cannot be the owner of
+  // anything it then writes, so it does not get to launch.
+  if ((options.selfStartTicks ?? procStartTicks)(process.pid) === null) {
+    return refused('this runner cannot establish its own process identity; refusing to spawn');
+  }
+  return { allowed: true, reason: null };
+}
+
 async function runInvocation(
   agentId: string,
   prompt: string,
   isContinue: boolean,
+  generation: number,
   options: RunnerOptions,
 ): Promise<boolean> {
   const meta = readMeta(agentId, options);
   if (meta === null) return false;
-  // Board issue 178: resolved once, from this one snapshot of the record, and
-  // then used for both `--dir` and `spawn({cwd})`. These used to be two reads
-  // in two files with nothing forcing them to agree. It is the declaration
-  // (`cwd`) and never the observation (`invocation_cwd`): the observation is
-  // written below, from this same `launchCwd`, and only once a child exists.
-  const launchCwd = persistedAgentCwd(meta);
   let command: string[] | null;
+  // Resolved once, from this one snapshot of the record, and then used for both
+  // `--dir` and `spawn({cwd})` and for the observation written below. It is the
+  // declaration (`cwd`) and never the observation (`invocation_cwd`): a value is
+  // recorded only once a child exists, so launching from the declaration is what
+  // keeps the observation an observation.
+  let launchCwd: string;
   try {
-    command = buildAgentCommand(meta, prompt, isContinue, options.env);
+    launchCwd = requiredAgentCwd(meta);
+    // The same database the invocation will be spawned with, because
+    // `buildAgentCommand` may itself probe for the session to continue.
+    command = buildAgentCommand(meta, prompt, isContinue, { ...options.env, ...opencodeBackendEnv(meta, options) });
   } catch (error) {
     // A durable record the backend cannot be launched from -- an undeclared
     // working directory, a malformed one -- is a failed invocation with a
@@ -475,42 +709,49 @@ async function runInvocation(
   }
   if (!await claimPendingPrompt(agentId, prompt, options)) return false;
 
-  // A directory that no longer exists produces no pid and no spawn error, and
-  // the recorded reason would otherwise be `OpenCode process had no pid` with
-  // exit 127 -- a note that does not name the real cause at all. This is the
-  // launch-time half of the check the CLI also performs at acceptance: a
-  // directory can disappear in between, and an accepted prompt must still end
-  // with a named reason.
-  if (launchCwd === null || !statSync(launchCwd, { throwIfNoEntry: false })?.isDirectory()) {
-    await updateMeta(agentId, (current) => {
-      finalizeTerminal(
-        current,
-        'failed',
-        Date.now() / 1000,
-        null,
-        null,
-        `${LAUNCH_DIRECTORY_MISSING}: ${launchCwd ?? 'undeclared'}`,
-      );
-      setActiveRunner(current, false);
-    }, options);
-    return false;
-  }
-
   let attempt = 0;
   while (true) {
+    // Inside the loop, not above it: a retry is a launch too, so every spawn
+    // this invocation can perform is decided by the same gate against the
+    // record as it stands at that moment. A refusal is a failed invocation with
+    // a stated reason, exactly like the refusals above it, so the accepted
+    // prompt is never left pending behind a front that will not run it.
+    const authorization = await authorizeLaunch(options);
+    if (!authorization.allowed) {
+      await updateMeta(agentId, (current) => {
+        finalizeTerminal(current, 'failed', Date.now() / 1000, null, null, authorization.reason!);
+        setActiveRunner(current, false);
+      }, options);
+      return false;
+    }
     const invocationId = randomBytes(16).toString('hex');
     const logFile = logPath(agentId, options);
     const fd = openSync(logFile, 'a', 0o600);
     const invocationLogStart = fstatSync(fd).size;
     const oom: OomBracket = { before: readOomCounters(options.capacity), startedAt: Date.now() / 1000 };
-    const env = {
+    const env: Record<string, string | undefined> = {
       ...process.env,
       ...options.env,
       ANTONINA_AGENT_ID: agentId,
       ANTONINA_INVOCATION_ID: invocationId,
       ANTONINA_PROMPT: prompt,
       NO_COLOR: '1',
+      // Board 186. Spread last, so which database this front's session and
+      // message writes go to is decided by this record and not inherited from
+      // the runner's own environment. This is the whole fix for the
+      // cross-front lock contention: OpenCode hardcodes `busy_timeout = 5000`
+      // and turns a `database is locked` timeout into a fatal
+      // `Failed to execute statement`, so the databases must not be shared.
+      ...opencodeBackendEnv(meta, options),
     };
+    // Board 197: the owner token authorises *this runner's claim on this
+    // reservation* and nothing else. It is stripped from the backend's
+    // environment, so the secret that decides the claim is not also handed to
+    // every process the backend goes on to spawn -- a descendant has no business
+    // holding authority over the claim, and `/proc/<pid>/environ` is readable by
+    // anything running as this user. Deleting the key rather than blanking it
+    // means an inherited copy cannot be reintroduced by a later spread.
+    delete env[RUNNER_OWNER_TOKEN_ENV];
     let child: ChildProcess;
     try {
       child = spawn(command[0]!, command.slice(1), {
@@ -537,7 +778,7 @@ async function runInvocation(
       return false;
     }
     const resultPromise = childResult(child, agentId, options);
-    const startTicks = procStartTicks(pid);
+    const startTicks = (options.childStartTicks ?? procStartTicks)(pid);
 
     let result: ChildResult;
     if (startTicks === null) {
@@ -550,12 +791,12 @@ async function runInvocation(
         // is no live process left to control, so finalize the observed result
         // without persisting a partial identity.
         //
-        // The observation is still recorded, because the child *was* spawned
-        // and did run in `launchCwd`; only its process identity went
-        // unrecorded. `recordSpawned` is the normal home for that write and is
-        // unreachable here, so this is the one other place a front can be
-        // shown to have run somewhere. Leaving it out would make `ran in:`
-        // wrong in the opposite direction -- "never ran" for a front that ran.
+        // The observation is still recorded, because the child *was* spawned and
+        // did run in `launchCwd`; only its process identity went unrecorded.
+        // `recordSpawned` is the normal home for that write and is unreachable
+        // here, so this is the one other place a front can be shown to have run
+        // somewhere. Leaving it out would make `ran in:` wrong in the opposite
+        // direction -- "never ran" for a front that ran.
         await updateMeta(agentId, (current) => {
           // The same ownership guard `recordSpawned` and
           // `releaseUnrecordedSpawn` apply: a stop-like record means some other
@@ -619,7 +860,9 @@ async function runInvocation(
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);
     const backendError = classifyBackendFailure(logFile, invocationLogStart, code, isContinue);
-    const retryDelay = backendRetryDelay(backendError, attempt);
+    const retryDelay = options.retryDelayMs !== undefined
+      ? options.retryDelayMs(attempt)
+      : backendRetryDelay(backendError, attempt);
     if (retryDelay !== null) {
       await updateMeta(agentId, (current) => {
         current.backend_error = backendError;
@@ -658,7 +901,7 @@ export async function runManagedRunner(
       if (await reclaimOrStop(agentId, options)) continue;
       return;
     }
-    if (!await runInvocation(agentId, prompt, isContinue, options)) return;
+    if (!await runInvocation(agentId, prompt, isContinue, generation, options)) return;
     isContinue = true;
     if (!await reclaimOrStop(agentId, options)) return;
   }

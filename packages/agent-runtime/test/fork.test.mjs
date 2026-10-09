@@ -3,7 +3,7 @@
 // The contract this file pins, in the order the tests pin it:
 //
 //   1. A fork is a snapshot. The clone gets the source's persisted work
-//      identity (cwd, title, variant, native session, prompt history, terminal
+//      identity (cwd, title, native session, prompt history, terminal
 //      outcome) and its own id and its own record.
 //   2. The clone shares NO mutable object with the source, at any depth. This
 //      is asserted by mutating each side and observing the other is byte-for-byte
@@ -112,6 +112,8 @@ function finishedMeta(agentId, overrides = {}) {
     exit_signal: null,
     error: 'boom',
     run_log_offset: 4_096,
+    // Board issue 178: the source has run, so it has an observation.
+    invocation_cwd: '/srv/work',
     ...overrides,
   };
   validateAgentMetadata(meta);
@@ -156,7 +158,6 @@ test('a fork carries the source work identity and takes a new identity of its ow
   assert.equal(clone.native_session_id, 'sess-abcdef0123456789');
   assert.equal(clone.cwd, '/srv/work');
   assert.equal(clone.title, 'original title');
-  assert.equal(clone.variant, 'low');
   assert.equal(clone.prompt_count, 3);
   assert.equal(clone.last_prompt, 'third prompt');
   // The source's outcome is carried as history; the clone's own lifecycle state
@@ -190,6 +191,14 @@ test('a fork carries the source work identity and takes a new identity of its ow
   // `output.log` from zero, so it cannot start reading at the source's offset.
   assert.equal(clone.run_log_offset, null);
   assert.equal(readMeta('a1', { env: process.env }).run_log_offset, 4_096);
+  // Board issue 178: `invocation_cwd` is an observation -- "this agent was
+  // launched in that directory" -- and the clone launched nothing, so it is
+  // cleared rather than inherited from the `structuredClone`. Reporting the
+  // source's last launch directory as the clone's own would put a location on a
+  // front that has never been in one. The *declaration* (`cwd`, asserted above)
+  // is a fact about the agent and is inherited; a run's location is not.
+  assert.equal(clone.invocation_cwd, null);
+  assert.equal(readMeta('a1', { env: process.env }).invocation_cwd, '/srv/work');
 
   // Both records are canonical, independently.
   validateAgentMetadata(readMeta('a1', { env: process.env }));

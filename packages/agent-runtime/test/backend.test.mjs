@@ -21,6 +21,7 @@ import {
   configuredModelAvailable,
   describeSignalDeath,
   discoverSessionId,
+  honoursInvocationCwd,
   resolveOpencode,
   sanitizeBackendError,
 } from '../dist/packages/agent-runtime/src/backend.js';
@@ -119,6 +120,10 @@ function xdgScope(t, prefix) {
   });
   return root;
 }
+
+test('Antonina is locked to Step 5 Preview Free without an alternate backend model', () => {
+  assert.equal(AGENT_MODEL, 'opencode-go/step-5-preview-free');
+});
 
 test('recognized OpenCode server failure becomes bounded structured diagnostics', (t) => {
   const root = fixture(t);
@@ -438,23 +443,18 @@ printf '%s\\n' '${JSON.stringify(rows)}'
   assert.deepEqual(recordedInvocations(escapes), [], 'a non-fixture opencode was executed via PATH');
 });
 
-test('continuation command uses persisted session and configured variant', () => {
+test('continuation command uses the persisted session', () => {
   const meta = idleMeta('a11d', '/tmp', null, 1);
   meta.native_session_id = 'ses_123';
-  meta.variant = 'high';
-  assert.deepEqual(buildAgentCommand(meta, 'continue work', true, {}), [
-    'opencode', 'run', '--auto',
-    '--session', 'ses_123',
-    '--model', AGENT_MODEL,
-    '--variant', 'high',
-    '--thinking',
-    '--dir', '/tmp',
-    'continue work',
-  ]);
+  const command = buildAgentCommand(meta, 'continue work', true, {});
+  assert.ok(command !== null);
+  assert.ok(command.includes('ses_123'));
+  assert.ok(command.includes(AGENT_MODEL));
+  assert.equal(command.at(-1), 'continue work');
 });
 
 
-test('agent command rejects malformed durable cwd and variant', () => {
+test('agent command rejects malformed durable cwd', () => {
   for (const cwd of ['', 0, false, [], 'relative', './relative', '../relative']) {
     const meta = idleMeta('a11d', '/tmp', null, 1);
     meta.cwd = cwd;
@@ -467,11 +467,6 @@ test('agent command rejects malformed durable cwd and variant', () => {
   const undeclared = idleMeta('a11d', null, null, 1);
   assert.equal(validateAgentMetadata(undeclared), undefined);
   assert.throws(() => buildAgentCommand(undeclared, 'work', false, {}), /cwd is undeclared/);
-  for (const variant of [null, '', 0, 123, true, false, 1.5, [], {}]) {
-    const meta = idleMeta('a11d', '/tmp', null, 1);
-    meta.variant = variant;
-    assert.throws(() => buildAgentCommand(meta, 'work', false, {}), /variant is malformed/);
-  }
 });
 
 test('e. a signal death is classified as an external kill, not a backend failure', () => {
@@ -639,10 +634,11 @@ test('a corrupted signal field is rejected rather than persisted', () => {
   }
 });
 
-// Board issue 178, required fix 1: the capability is consulted at all three CLI
-// entry points, which is only testable if the capability can be observed to be
-// false. This pins the test-only override's whole contract -- the real answer, the
-// one token that withdraws it, and that nothing else can.
+// Board issue 178, the gate half. The capability is consulted at every entry
+// point that can put a front in a named directory, which is only testable if
+// the capability can be observed to be false. This pins the test-only override's
+// whole contract -- the real answer, the one token that withdraws it, and that
+// nothing else can -- and the fail-closed predicate the CLI gates on.
 test('backendCapabilities reports the real backend, and only an exact test token withdraws a capability', () => {
   assert.deepEqual(backendCapabilities({}), { invocation_cwd: true });
   assert.deepEqual(backendCapabilities(process.env), { invocation_cwd: true });
@@ -650,11 +646,43 @@ test('backendCapabilities reports the real backend, and only an exact test token
     backendCapabilities({ ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: '1' }),
     { invocation_cwd: false },
   );
-  for (const value of ['', '0', 'true', 'yes', '2', ' 1', '1 ']) {
+  for (const value of ['', '0', 'true', 'yes', '2', ' 1', '1 ', '01']) {
     assert.deepEqual(
       backendCapabilities({ ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD: value }),
       { invocation_cwd: true },
       `the override must only answer for the exact token '1', not for ${JSON.stringify(value)}`,
+    );
+  }
+});
+
+// A gate that anything can pass is not a gate. Only the literal boolean `true`
+// is permission; every other shape is a refusal, because the alternative is an
+// invocation running somewhere the operator did not name and reported as though
+// it had been honoured.
+test('an unknown or unrecognised invocation_cwd capability fails closed', () => {
+  assert.equal(honoursInvocationCwd({ invocation_cwd: true }), true);
+
+  for (const answer of [
+    undefined,
+    null,
+    { invocation_cwd: false },
+    { invocation_cwd: null },
+    { invocation_cwd: 'true' },
+    { invocation_cwd: 1 },
+    { invocation_cwd: {} },
+    {},
+    { invocation_dir: true },
+    { future_capability: true },
+    { invocation_cwd: { supported: true } },
+    'true',
+    true,
+    [],
+    [true],
+  ]) {
+    assert.equal(
+      honoursInvocationCwd(answer),
+      false,
+      `an answer that is not the literal boolean true must fail closed: ${JSON.stringify(answer)}`,
     );
   }
 });

@@ -1,5 +1,8 @@
 #!/bin/sh
-snapshot="$("$HOME/.local/bin/antonina-scheduler-snapshot" 2>/dev/null || printf '{}')"
+snapshot="$("$HOME/.local/bin/antonina-scheduler-snapshot")" || {
+  printf '%s\n' 'Antonina scheduler: live-agent snapshot failed; refusing to schedule with unknown ownership' >&2
+  exit 1
+}
 exec timeout -k 15s 900s "$HOME/.local/bin/opencode-openclaw" run --auto --model opencode-go/step-5-preview-free --variant high --dir /workspace/antonina "ANTONINA-SCHEDULER-TURN. Optimize wall-clock time by topology. Use CURRENT_SNAPSHOT.
 FIRST ACTION: breadth. While unrepresented_projects is nonempty, inspect ONLY CURRENT_SNAPSHOT.unrepresented_issues; skip represented-project issue reads. After one non-launch in a missing project, switch projects before another read there. CANDIDATE BUDGET: one compact issue read and at most one worktree lookup; never reread a skipped candidate.
 Run antonina-scheduler-issue --issue ISSUE. Explicit complete/human/dependency blocker => skip immediately WITHOUT a worktree lookup. Else run antonina-scheduler-worktrees --issue ISSUE. [] => next. A returned cwd is registered, existing, and unoccupied: LAUNCH before another candidate. Unclear scope => bounded reconnaissance.

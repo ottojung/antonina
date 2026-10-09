@@ -92,5 +92,6 @@ test('breadth search rotates after a non-launch', () => {
 
 test('a failed running-agent snapshot never becomes an empty scheduling universe', () => {
   assert.match(turn, /live-agent snapshot failed; refusing to schedule/);
-  assert.doesNotMatch(turn, /printf '\\{\\}'|2>\\/dev\\/null/);
+  assert.equal(turn.includes("printf '{}'"), false);
+  assert.equal(turn.includes('2>/dev/null'), false);
 });

@@ -50,7 +50,7 @@ function fixture(t) {
 
 test('resume retains original ID, worktree and session; no replacement', (t) => {
   const f = fixture(t);
-  const result = f.launch(['--resume-agent', 'a11d']);
+  const result = f.launch(['--resume-agent', 'A11D']);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).id, 'a11d');
   assert.equal(f.seen(['agent', 'new']).length, 0);

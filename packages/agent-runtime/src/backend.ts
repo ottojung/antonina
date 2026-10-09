@@ -193,6 +193,16 @@ interface BackendFailureRule {
 }
 
 const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
+  // An OpenCode Go request may fail temporarily even after the previous
+  // turn has performed tool actions. Classify the outage for operators and
+  // the scheduler, but NEVER replay the same turn automatically.
+  {
+    marker: 'Endpoint is unavailable',
+    classification: 'upstream_endpoint_unavailable',
+    provider: 'opencode-go',
+    transient: true,
+    automaticRetrySafe: false,
+  },
   // The OpenCode Go Step 5 free tier can reject requests across many sessions
   // simultaneously. Name the provider throttle instead of reporting an
   // unrecognized backend failure. Do not replay the turn automatically:

@@ -27,6 +27,33 @@ def require_open_issue(issue):
         raise SystemExit(f"refusing launch on non-open board issue #{issue}: {record.get('state')}")
     return record
 
+def is_git_checkout(cwd):
+    p = run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], check=False)
+    return p.returncode == 0 and os.path.realpath(p.stdout.strip()) == os.path.realpath(cwd)
+
+
+def agent_prompt(issue, cwd, prompt):
+    if is_git_checkout(cwd):
+        return prompt
+    # An empty board-owned workspace is launchable. Repository discovery,
+    # cloning and branch creation are agent work, not a coordinator trust gate.
+    body = issue.get("body") or ""
+    bootstrap = (
+        "REPOSITORY BOOTSTRAP REQUIRED. Your cwd is an isolated issue workspace "
+        "without a Git checkout. Before implementing the task, identify the "
+        "repository from the board issue and its references, then clone it "
+        "into this workspace (for an empty directory: git clone URL .). "
+        "Create an issue-specific Git branch. If references are ambiguous, "
+        "investigate the repository using the available GitHub tools before "
+        "escalating; do not invent a remote. Do not ask an operator to register "
+        "a trusted root or worktree: none is required. Keep the board resource "
+        "and its cwd for the whole run.\n"
+        f"Issue #{issue.get('number')}: {issue.get('title', '')}\n"
+        f"Full issue description:\n{body}\n\n"
+    )
+    return bootstrap + prompt
+
+
 def new_agent(agent_id, cwd, title):
     return run([ANTONINA, "agent", "new", "--id", agent_id, "--cwd", cwd, "--title", title, "--json"], check=False)
 
@@ -63,7 +90,7 @@ def main():
     # A prior read or stale scheduler snapshot is not launch authorization.
     # Revalidate immediately before executing, not just before creating.
     try:
-        require_open_issue(args.issue)
+        current_issue = require_open_issue(args.issue)
     except SystemExit:
         cleanup_idle(agent_id)
         raise
@@ -72,7 +99,7 @@ def main():
         ANTONINA, "agent", "run",
         "--id", agent_id,
         "--cwd", args.cwd,
-        "--prompt", args.prompt,
+        "--prompt", agent_prompt(current_issue, args.cwd, args.prompt),
         "--detach",
         "--json",
     ], check=False)

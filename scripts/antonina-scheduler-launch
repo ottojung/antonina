@@ -53,7 +53,7 @@ def main():
     # Validating the terminal state and declared cwd is essential: another
     # agent/worktree could otherwise be hijacked by a stale comment.
     created = False
-    agent_id = args.resume_agent
+    agent_id = args.resume_agent.lower() if args.resume_agent else None
     if agent_id is not None:
         status = run([ANTONINA, "agent", "status", "--id", agent_id, "--json"], check=False)
         if status.returncode != 0:

@@ -81,6 +81,7 @@ class SchedulerPolicyTests(unittest.TestCase):
             seen[0] += 1
             if seen[0] == 3:
                 raise SystemExit("closed after start")
+            return {"number": issue, "state": "open", "body": "Repo: ottojung/assemblyp1"}
         def mock_run(args, check=True):
             calls.append(args)
             return types.SimpleNamespace(returncode=0, stdout='{}', stderr='')

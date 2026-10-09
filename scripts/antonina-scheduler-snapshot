@@ -12,14 +12,21 @@ def run(args, check=True):
 def cli_json(*args):
     return json.loads(run([ANTONINA, *map(str, args)]).stdout)
 
-def live_ids():
-    proc = run(["pgrep", "-af", "opencode run --auto --title antonina-"], check=False)
-    result = set()
-    for line in proc.stdout.splitlines():
-        m = re.search(r"--title\s+antonina-([^\s]+)", line)
-        if m:
-            result.add(m.group(1))
-    return result
+def running_agents():
+    """Use Antonina's reconciled running state, including resumed sessions."""
+    agents = []
+    page = 1
+    while True:
+        inventory = cli_json("agent", "list", "--page", page, "--limit", 500, "--running", "--json")
+        if inventory.get("unreadable"):
+            raise RuntimeError("agent inventory contains unreadable records; refusing to schedule on incomplete ownership data")
+        batch = inventory["agents"]
+        if not isinstance(batch, list):
+            raise RuntimeError("agent list returned an invalid agents collection")
+        agents.extend(batch)
+        if len(batch) < 500:
+            return agents
+        page += 1
 
 def project_hint_from_title(title, number=None):
     low=(title or "").strip().lower()
@@ -67,8 +74,7 @@ def open_issues():
         result.extend(batch)
     return result
 
-running = cli_json("agent", "list", "--page", 1, "--limit", 500, "--running", "--json").get("agents", [])
-live = live_ids()
+running = running_agents()
 
 issue_headers = [
     {
@@ -96,7 +102,6 @@ agents = [
         ),
     }
     for a in running
-    if str(a.get("id")) in live
 ]
 
 open_projects = sorted({

@@ -8,7 +8,8 @@ const helper = readFileSync(fileURLToPath(new URL('../../../scripts/antonina-sch
 test('worktree helper filters canonical topology read-only', () => {
   assert.match(helper, /board", "resource", "list"/);
   assert.match(helper, /agent", "list"/);
-  assert.match(helper, /pgrep/);
+  assert.match(helper, /"--running", "--json"/);
+  assert.doesNotMatch(helper, /pgrep|live_ids|opencode run --auto --title/);
   assert.match(helper, /os\.path\.isdir/);
   assert.match(helper, /os\.path\.realpath/);
   assert.match(helper, /occupied/);
@@ -26,11 +27,8 @@ test('worktree helper is issue-scoped and paginated', () => {
   assert.match(helper, /len\(available\) >= MAX_RESULTS/);
 });
 
-test('breadth barrier is enforced mechanically before returning worktrees', () => {
-  assert.match(helper, /antonina-scheduler-snapshot/);
-  assert.match(helper, /def breadth_allows\(issue\)/);
-  assert.match(helper, /unrepresented_projects/);
-  assert.match(helper, /unrepresented_issues/);
-  assert.match(helper, /if not breadth_allows\(issue\):/);
-  assert.match(helper, /print\("\[\]"\)/);
+test('worktree helper uses reconciled running-agent inventory without inferring process names', () => {
+  assert.match(helper, /def running_agents\(\):/);
+  assert.match(helper, /running = running_agents\(\)/);
+  assert.doesNotMatch(helper, /pgrep|live_ids|breadth_allows/);
 });

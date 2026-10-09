@@ -7,8 +7,10 @@ const snapshot = readFileSync(fileURLToPath(new URL('../../../scripts/antonina-s
 
 test('scheduler snapshot is read-only topology context, not a scheduler', () => {
   assert.match(snapshot, /agent", "list"/);
+  assert.match(snapshot, /running_agents\(\)/);
   assert.match(snapshot, /board", "list"/);
-  assert.match(snapshot, /pgrep/);
+  assert.match(snapshot, /"--running", "--json"/);
+  assert.doesNotMatch(snapshot, /pgrep|live_ids|opencode run --auto --title/);
   assert.match(snapshot, /live_agents/);
   assert.match(snapshot, /open_issues/);
   assert.match(snapshot, /represented_projects/);

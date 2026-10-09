@@ -1,69 +1,84 @@
 #!/usr/bin/env python3
+"""Delegate an open board issue; only the agent owns repositories and files."""
 import argparse
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
 
 ANTONINA = os.environ.get("ANTONINA_BIN", os.path.expanduser("~/.local/bin/antonina"))
-WORKTREES = os.environ.get("ANTONINA_SCHEDULER_WORKTREES_BIN", os.path.expanduser("~/.local/bin/antonina-scheduler-worktrees"))
+# Antonina's runtime requires a startup cwd. This fixed launch context is not
+# a checkout, a scheduler-selected workspace, or an ownership reservation.
+START_DIR = "/workspace"
+
 
 def run(args, check=True):
     return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
 
-def available_worktrees(issue):
-    proc = run([WORKTREES, "--issue", str(issue), "--json"])
-    return json.loads(proc.stdout)
-
-def chosen_cwd_is_available(issue, cwd):
-    chosen = os.path.realpath(cwd)
-    return any(os.path.realpath(item.get("path", "")) == chosen for item in available_worktrees(issue))
 
 def require_open_issue(issue):
-    proc = run([ANTONINA, "board", "show", "--id", str(issue), "--page", "1", "--json"])
-    record = json.loads(proc.stdout)
+    result = run([ANTONINA, "board", "show", "--id", str(issue), "--page", "1", "--json"])
+    record = json.loads(result.stdout)
     if record.get("state") != "open":
         raise SystemExit(f"refusing launch on non-open board issue #{issue}: {record.get('state')}")
     return record
 
-def is_git_checkout(cwd):
-    p = run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], check=False)
-    return p.returncode == 0 and os.path.realpath(p.stdout.strip()) == os.path.realpath(cwd)
+
+def running_owners(issue):
+    """Use agent identity rather than paths or repository discovery."""
+    owners = []
+    page = 1
+    while True:
+        result = json.loads(run([ANTONINA, "agent", "list", "--running", "--page",
+                                 str(page), "--limit", "500", "--json"]).stdout)
+        if result.get("unreadable"):
+            raise SystemExit("agent inventory incomplete; refusing duplicate-risk launch")
+        agents = result["agents"]
+        for agent in agents:
+            title = agent.get("title") or ""
+            if re.search(r"(?<!\\w)#" + str(issue) + r"\\b", title):
+                owners.append(agent["id"])
+        if len(agents) < 500:
+            break
+        page += 1
+    return owners
 
 
-def agent_prompt(issue, cwd, prompt):
-    if is_git_checkout(cwd):
-        return prompt
-    # An empty board-owned workspace is launchable. Repository discovery,
-    # cloning and branch creation are agent work, not a coordinator trust gate.
-    body = issue.get("body") or ""
-    bootstrap = (
-        "REPOSITORY BOOTSTRAP REQUIRED. Your cwd is an isolated issue workspace "
-        "without a Git checkout. Before implementing the task, identify the "
-        "repository from the board issue and its references, then clone it "
-        "into this workspace (for an empty directory: git clone URL .). "
-        "Create an issue-specific Git branch. If references are ambiguous, "
-        "investigate the repository using the available GitHub tools before "
-        "escalating; do not invent a remote. Do not ask an operator to register "
-        "a trusted root or worktree: none is required. Keep the board resource "
-        "and its cwd for the whole run.\n"
-        f"Issue #{issue.get('number')}: {issue.get('title', '')}\n"
-        f"Full issue description:\n{body}\n\n"
+def agent_prompt(issue, prompt, agent_id):
+    # The agent alone decides whether/where to clone and how to isolate edits.
+    return (
+        "AGENT OWNERSHIP: You, not the scheduler, own ALL repository and "
+        "filesystem work for this board issue. This invocation begins in a "
+        "generic runtime directory, NOT an issue checkout. Independently "
+        "identify the correct remote from the issue, choose an isolated "
+        "unique working directory for your own agent and issue, clone when "
+        "needed, establish a branch, read project instructions, and manage "
+        "commits, reviews, integration, deployment and handoff as permitted. "
+        "Do not edit any existing shared checkout or assume the startup "
+        "directory is your repository. Do not ask the scheduler to provision "
+        "worktrees, create directories, register paths, or manage Git. "
+        "If the repository is ambiguous, investigate it yourself. "
+        f"Agent ID: {agent_id}. Issue #{issue.get('number')}: "
+        f"{issue.get('title', '')}\\n"
+        f"Issue description:\\n{issue.get('body') or ''}\\n\\n"
+        f"Delegated task:\\n{prompt}"
     )
-    return bootstrap + prompt
 
 
-def new_agent(agent_id, cwd, title):
-    return run([ANTONINA, "agent", "new", "--id", agent_id, "--cwd", cwd, "--title", title, "--json"], check=False)
+def new_agent(agent_id, title):
+    return run([ANTONINA, "agent", "new", "--id", agent_id,
+                "--cwd", START_DIR, "--title", title, "--json"], check=False)
+
 
 def cleanup_idle(agent_id):
     run([ANTONINA, "agent", "delete", "--id", agent_id, "--force"], check=False)
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--issue", required=True, type=int)
-    parser.add_argument("--cwd", required=True)
     parser.add_argument("--title", required=True)
     parser.add_argument("--summary", required=True)
     parser.add_argument("--prompt", required=True)
@@ -71,13 +86,14 @@ def main():
     args = parser.parse_args()
 
     require_open_issue(args.issue)
-    if not chosen_cwd_is_available(args.issue, args.cwd):
-        raise SystemExit("selected cwd is no longer a registered existing unoccupied worktree")
+    owners = running_owners(args.issue)
+    if owners:
+        raise SystemExit(f"issue #{args.issue} already has live agent(s): {', '.join(owners)}")
 
     agent_id = None
     for _ in range(2):
         candidate = secrets.token_hex(6)
-        proc = new_agent(candidate, args.cwd, args.title)
+        proc = new_agent(candidate, args.title)
         if proc.returncode == 0:
             agent_id = candidate
             break
@@ -87,29 +103,26 @@ def main():
     if agent_id is None:
         raise SystemExit("failed to allocate a unique agent id")
 
-    # A prior read or stale scheduler snapshot is not launch authorization.
-    # Revalidate immediately before executing, not just before creating.
+    # Both rechecks guard against stale queue and agent-state snapshots.
     try:
         current_issue = require_open_issue(args.issue)
+        owners = running_owners(args.issue)
+        if owners:
+            raise SystemExit(f"issue #{args.issue} acquired another live owner: {', '.join(owners)}")
     except SystemExit:
         cleanup_idle(agent_id)
         raise
 
     started = run([
-        ANTONINA, "agent", "run",
-        "--id", agent_id,
-        "--cwd", args.cwd,
-        "--prompt", agent_prompt(current_issue, args.cwd, args.prompt),
-        "--detach",
-        "--json",
+        ANTONINA, "agent", "run", "--id", agent_id, "--cwd", START_DIR,
+        "--prompt", agent_prompt(current_issue, args.prompt, agent_id),
+        "--detach", "--json",
     ], check=False)
     if started.returncode != 0:
         cleanup_idle(agent_id)
         sys.stderr.write(started.stderr or started.stdout)
         raise SystemExit(started.returncode or 1)
 
-    # If closure races with startup, retire the new worker instead of
-    # recording a misleading working claim on a closed issue.
     try:
         require_open_issue(args.issue)
     except SystemExit:
@@ -117,31 +130,26 @@ def main():
         raise
 
     body = (
-        "[scheduler-turn]\n"
-        "state: working\n"
-        f"summary: {args.summary}\n"
-        f"resources: agent {agent_id}; cwd {args.cwd}\n"
-        "next: worker owns this front until terminal; refresh topology before another launch."
+        "[scheduler-turn]\\n"
+        "state: working\\n"
+        f"summary: {args.summary}\\n"
+        f"resources: agent {agent_id}\\n"
+        "next: the delegated agent owns repository setup and all execution."
     )
     comment = run([
-        ANTONINA, "board", "comment",
-        "--id", str(args.issue),
-        "--body", body,
-        "--author", "openclaw@marceline-dev",
-        "--json",
+        ANTONINA, "board", "comment", "--id", str(args.issue), "--body", body,
+        "--author", "openclaw@marceline-dev", "--json",
     ], check=False)
-
-    result = {
+    print(json.dumps({
         "id": agent_id,
-        "cwd": args.cwd,
         "run": json.loads(started.stdout) if started.stdout.strip() else None,
-        "comment_recorded": comment.returncode == 0,
-    }
-    print(json.dumps(result, separators=(",", ":")))
+        "comment_recorded": comment.returncode == 0
+    }, separators=(",", ":")))
     if comment.returncode != 0:
-        sys.stderr.write("worker started but board comment failed\n")
+        sys.stderr.write("worker started but board comment failed\\n")
         sys.stderr.write(comment.stderr or comment.stdout)
         raise SystemExit(2)
+
 
 if __name__ == "__main__":
     main()

@@ -1,3 +1,27 @@
+$id-20261009-longcat-restoration
+title: Switch Antonina to LongCat 2.5 Preview Free with low variant
+date: 2026/10/09
+source: @ottojung
+kind: constraint
+
+User explicitly directs immediate replacement of Step 5 Preview Free with `opencode-go/longcat-2.5-preview-free` for all Antonina managed agents and the OpenClaw orchestrator, with `--variant low`. This supersedes the 2026/10/08 Step 5-only constraint and the 2026/10/09 Step 5 low-variant constraint, while preserving the single authorized model policy. Deploy consistently across CLI runtime, scheduler launcher, OpenCode config, and existing agent records. No fallback models.
+
+$id-20261009-step5-low-variant
+title: Antonina uses Low reasoning effort with Step 5 Preview Free
+date: 2026/10/09
+source: @ottojung
+kind: constraint
+
+Antonina managed agents and its OpenClaw orchestrator must invoke the existing sole authorized model `opencode-go/step-5-preview-free` using `--variant low`, not `high`. Preserve the sole-model restriction; no fallback to another provider or model. Update source defaults, scheduler launcher, tests and deployment consistently. This supersedes prior high-variant instructions, without changing the model itself.
+
+$id-20261008-step5only
+title: Step 5 Preview Free is Antonina's sole permitted OpenCode model
+date: 2026/10/08
+source: @ottojung
+kind: constraint
+
+Antonina managed agents and the OpenClaw orchestrator must use **only** Step 5 Preview Free, by StepFun, through OpenCode Go, with the exact identifier `opencode-go/step-5-preview-free`. Do not substitute other models, switch providers, or silently fall back to LongCat, Muse Spark, Space Bunny, or any other model, even if Step 5 is temporarily unavailable. Fail visibly instead; changing this model requires a new explicit user decision and an updated intent record. The runtime model constant, CLI status/availability diagnostics, scheduler launcher, OpenCode provider whitelist, tests, and deployment documentation must agree on this exact identifier. This decision supersedes all earlier model-selection intent records.
+
 $id-1773008474150624
 title: Following an attached agent run is not bounded
 date: 2026/09/27

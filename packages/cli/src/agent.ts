@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import {
+  type Dirent,
   existsSync,
   readdirSync,
   readFileSync,
@@ -12,6 +13,7 @@ import {
   configuredModelAvailable,
   describeSignalDeath,
   discoverSessionId,
+  honoursInvocationCwd,
   sanitizeBackendError,
 } from '../../agent-runtime/src/backend.js';
 import {
@@ -44,11 +46,11 @@ import {
   type HostCapacity,
 } from '../../agent-runtime/src/host-capacity.js';
 import {
-  LAUNCH_DIRECTORY_MISSING,
   TERMINAL_STATES,
   activeRunnerFlag,
   deletePendingFlag,
   idleMeta,
+  mintRunnerReservationOwnerToken,
   nextPromptCount,
   pendingPrompt,
   persistedAgentCwd,
@@ -67,11 +69,13 @@ import {
 } from '../../agent-runtime/src/metadata.js';
 import { normalizeAgentId } from '../../agent-runtime/src/process.js';
 import {
+  MetadataReadError,
   agentDir,
   agentsDir,
   createAgentDirectory,
   logPath,
   logSize,
+  opencodeBackendEnv,
   readMeta,
   removeAgentDirectory,
   updateMeta,
@@ -160,6 +164,13 @@ function requireAgentId(raw: string | undefined, command: string): string {
 
 class UsageError extends Error {}
 class NotFoundError extends Error {}
+/**
+ * The state root the inventory is read from could not be read at all. A
+ * distinct class so the refusal is identifiable as the root-sweep refusal and
+ * not mistaken for a per-record one; it exits `EXIT_ERROR` like every other
+ * validator refusal, with the OS reason in its message.
+ */
+class InventoryUnreadableError extends Error {}
 
 function requireMeta(agentId: string, context: AgentCommandContext): AgentMetadata {
   const meta = readMeta(agentId, paths(context));
@@ -170,19 +181,150 @@ function requireMeta(agentId: string, context: AgentCommandContext): AgentMetada
 async function reconcileAgent(agentId: string, context: AgentCommandContext): Promise<AgentMetadata | null> {
   const observed = readMeta(agentId, paths(context));
   if (observed === null) return null;
+  return await reconcileMeta(agentId, observed, context);
+}
+
+/**
+ * The reconcile half of {@link reconcileAgent}, split out so a sweep that has
+ * already read a record does not read it a second time -- and, more to the
+ * point, so the sweep can catch the *read* refusal and still hand an already
+ * validated record here (board 198). Same work either way.
+ */
+async function reconcileMeta(
+  agentId: string,
+  observed: AgentMetadata,
+  context: AgentCommandContext,
+): Promise<AgentMetadata | null> {
   if (persistedLifecycleState(observed) !== 'running') return observed;
   if (!reconcileDeadMeta(observed)) return observed;
   return updateMeta(agentId, (meta) => { reconcileDeadMeta(meta); }, paths(context));
 }
 
-function agentIds(context: AgentCommandContext): string[] {
+/**
+ * Board 198 R2: the *sweep itself* must fail closed, one level above the
+ * per-record isolation a518fb86 landed.
+ *
+ * That landing made one malformed `meta.json` not abort the sweep, and kept
+ * naming the record it could not read. It left the root of the sweep behind a
+ * bare `catch { return []; }`: an agents state root that could not be read --
+ * absent, wrong type, a `readdir` that raises -- became an inventory of zero
+ * agents, printed as `(no agents)` or `{"agents":[]}`, exit 0, nothing on
+ * stderr. An orchestrator polling `list` was told, confidently and
+ * successfully, that this machine has no managed agents. Per-record isolation
+ * makes the sweep robust; it cannot make a sweep that never ran report an
+ * answer.
+ *
+ * So the refusal is not absorbed here at all: it is thrown, named after the
+ * path and the OS reason, and it propagates out of both callers.
+ *
+ *   - `list` exits 1 (`EXIT_ERROR`, the same code every validator refusal
+ *     already uses) and writes no inventory to stdout at all, in either the
+ *     human table or `--json`. A machine reader sees a failed command, not an
+ *     empty array it would have to guess about.
+ *   - `clean` exits 1 having deleted nothing, because the enumeration is the
+ *     first thing the sweep does. Deleting on the strength of a read that
+ *     failed is the one direction in which this bug could lose data; refusing
+ *     to sweep at all costs the operator a retry, which costs nothing.
+ *
+ * The refusal is deliberately identical in shape to the single-agent one: a
+ * command asked a question whose honest answer is "it cannot be answered", and
+ * the answer carries the reason. Nothing else about validation changes --
+ * `validateAgentMetadata` is untouched, no state is interpreted from an
+ * unreadable root, no schema field is added to any tolerated set, and the
+ * single-agent commands (`status`, `log`, `wait`, `stop`, `kill`, `delete`,
+ * `run`) keep failing closed on their own validator's reason through
+ * `requireMeta`/`reconcileAgent` exactly as a518fb86 left them.
+ *
+ * Absence is included on purpose. A machine on which no managed agent has ever
+ * been created has no agents directory, and `agent list` there now exits 1
+ * with a named reason instead of printing `(no agents)`. That is the cost of
+ * this choice, and it is the safe one: it is the only shape in which the
+ * command never reports an inventory it did not read.
+ *
+ * Read through the real filesystem, like `logSize` and the opencode-db
+ * helpers in `agent-runtime`: this is an enumeration of the operator's durable
+ * state root, not a rewrite of one record, and the injected `StoreFs` seam
+ * covers only the per-record read/write path.
+ */
+function agentIds(context: AgentCommandContext, command: string): string[] {
+  const root = agentsDir(paths(context));
+  let entries: Dirent[];
   try {
-    return readdirSync(agentsDir(paths(context)), { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-      .sort();
-  } catch {
-    return [];
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch (error) {
+    throw new InventoryUnreadableError(
+      `${command}: refused to read the managed-agent state root ${root}, so no inventory is reported: ${errnoReason(error)}`,
+    );
+  }
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+}
+
+/**
+ * The OS-level reason a `readdir` of the state root was refused, kept as the
+ * errno code when there is one so the refusal names `EACCES`, `ENOTDIR` or
+ * `ENOENT` rather than a wrapper's prose. Falls back to the error's own text
+ * when a failure carries no code.
+ */
+function errnoReason(error: unknown): string {
+  if (error instanceof Error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (typeof code === 'string' && code.length > 0) return code;
+    return error.message;
+  }
+  return String(error);
+}
+
+type SweepRead =
+  | { readable: true; meta: AgentMetadata | null }
+  | { readable: false; agentId: string; reason: string };
+
+/**
+ * Board 198: one unreadable record must not make the whole inventory unreadable.
+ *
+ * `readMeta` is strict by design and stays strict -- a record this build cannot
+ * validate is never interpreted, never rewritten and never acted on. What
+ * changes is only who absorbs the refusal. A command that acts on *one named
+ * agent* still lets the refusal propagate (`requireMeta`, and every
+ * `reconcileAgent` call in a single-agent command), because there the operator
+ * asked about that agent and the honest answer is that it cannot be answered. A
+ * command that *sweeps every record* (`list`, `clean`) is asking about the
+ * set, and answering about the set from zero of its members because one
+ * directory is unreadable is the defect this isolates: the operator is left
+ * with an inventory that shows nothing and a `clean` that cannot run at all,
+ * and the readable agents become unreachable through the very commands meant
+ * to reach them.
+ *
+ * The refusal is never swallowed. The offending agent is reported by id with
+ * the reason the validator gave, so the inventory names what it could not
+ * read rather than silently dropping it. Nothing here is a schema escape
+ * hatch: `validateAgentMetadata` is unchanged, no field is added to the
+ * tolerated set, and no value from an unvalidated record reaches any output.
+ * Only `MetadataReadError` is absorbed -- a programming error still propagates
+ * instead of being reported as corrupt state.
+ *
+ * Precedent for the shape, in the same product: a sweep whose one member is
+ * malformed does not abort -- `docs/intent-records/hosts.md:45`, "a single
+ * malformed argument never aborts a sweep".
+ */
+function readMetaForSweep(agentId: string, context: AgentCommandContext): SweepRead {
+  try {
+    return { readable: true, meta: readMeta(agentId, paths(context)) };
+  } catch (error) {
+    if (!(error instanceof MetadataReadError)) throw error;
+    return { readable: false, agentId, reason: error.message };
+  }
+}
+
+function reportUnreadableAgents(
+  unreadable: ReadonlyArray<{ agentId: string; reason: string }>,
+  context: AgentCommandContext,
+  verdict: 'is not listed' | 'was retained',
+): void {
+  for (const entry of unreadable) {
+    context.io.stderr(`antonina: agent ${entry.agentId} was not read and ${verdict}: ${entry.reason}`);
   }
 }
 
@@ -212,10 +354,10 @@ function summary(meta: AgentMetadata): {
     last_activity_at: canonicalTimestamp(meta, 'last_activity_at', false)!,
     finished_at: canonicalTimestamp(meta, 'finished_at', true),
     prompts: meta.prompt_count as number,
-    // `cwd` is the declared default for invocations that name no directory of
-    // their own; `invocation_cwd` is the directory the current or most recent
-    // invocation was launched in. Board issue 178: reporting only the
-    // declaration made `status` a statement about intent dressed as a location.
+    // `cwd` is the declared working directory; `invocation_cwd` is the
+    // directory the current or most recent invocation was launched in. Board
+    // issue 178: reporting only the declaration made `status` a statement
+    // about intent dressed as a location.
     cwd: persistedAgentCwd(meta),
     invocation_cwd: persistedInvocationCwd(meta),
     title: meta.title as string | null,
@@ -257,33 +399,42 @@ function matchesFilters(parsed: Parsed, state: string): boolean {
 }
 
 /**
+ * The single capability gate, used by every entry point that can put a front in
+ * a named directory.
+ *
+ * Backend agnosticism is represented as data rather than as a changed meaning:
+ * a backend that cannot launch an invocation in a directory the operator named
+ * refuses *here*, by name, before any state is written -- never by running the
+ * invocation somewhere else and reporting the declared directory as if it had
+ * honoured it. All four entry points go through this one function, so they
+ * cannot implement four different rules, and the answer is read through
+ * `honoursInvocationCwd`, which fails closed on an unknown or unrecognised
+ * capability rather than reading it as permission.
+ */
+function requireInvocationCwdCapability(command: string, env: Record<string, string | undefined>): void {
+  if (honoursInvocationCwd(backendCapabilities(env))) return;
+  throw new Error(`${command}: the configured backend cannot run an invocation in a different working directory`);
+}
+
+/**
  * A working directory an operator declared, resolved and checked to be an
  * existing directory. Both `new` and `run` declare one, and both refuse a bad
  * one before any state is written.
- *
- * An empty or whitespace-only value is refused too, and is refused *here*
- * rather than at one of the call sites, because it is refused for the same
- * reason at every one of them.
- *
- * A path that is not an existing directory is a *usage* error, not a state
- * conflict: the command named a value that cannot mean anything, and no record
- * was read to find out so. Board issue 178 moved this from exit 1 to exit 2 for
- * that reason, and it applies to `new` and `run` alike.
  */
 function declaredCwd(raw: string, command: string): string {
   // `--cwd ''` resolves to the invoking shell's directory, because
   // `resolve('') === process.cwd()`. Accepting it would re-admit, through a
   // wrapper's `${VAR:-}` or an unset variable passed straight through, exactly
-  // the inheritance this contract refuses: an agent durably attributed to
-  // wherever the shell happened to be. A whitespace-only value is refused for
-  // the same reason. Refused here, in the one function all three entry points
-  // share, so it is refused at all three at once.
+  // the inheritance this refuses: a front durably attributed to wherever the
+  // shell happened to be. A whitespace-only value is refused for the same
+  // reason. Refused here, in the one function every entry point shares, so it
+  // is refused at all of them at once.
   if (raw.trim().length === 0) {
     throw new UsageError(`${command}: --cwd requires a working directory path`);
   }
   const cwd = resolve(raw);
   if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
-    throw new UsageError(`${command}: working directory does not exist: ${cwd}`);
+    throw new Error(`${command}: working directory does not exist: ${cwd}`);
   }
   return cwd;
 }
@@ -300,17 +451,12 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
   // `run` then refuses to launch it until one is declared, rather than
   // inheriting one and reporting it as the front's location.
   const cwd = parsed.values.has('--cwd') ? declaredCwd(parsed.values.get('--cwd')!, 'new') : null;
-  // Board issue 178, required fix 1: the capability half of the rule is
-  // consulted here exactly as `cmdRun` consults it -- same predicate, same
-  // message shape, same exit code. Declaring a default directory for a front is
-  // the same request as running an invocation in one: the declaration is the
-  // value `run` later launches from, so a backend that cannot place an
-  // invocation in a named directory must refuse the declaration too, by name,
-  // before any state is written. Without this clause `new` accepted a directory
-  // that `run --cwd` refused.
-  if (cwd !== null && !backendCapabilities(context.env).invocation_cwd) {
-    throw new Error('new: the configured backend cannot run an invocation in a different working directory');
-  }
+  // Declaring a default directory for a front is the same request as running an
+  // invocation in one: the declaration is the value `run` later launches from,
+  // so a backend that cannot place an invocation in a named directory refuses
+  // the declaration too, by name, before any state is written. Without this
+  // `new` would accept a directory `run` refuses.
+  if (cwd !== null) requireInvocationCwdCapability('new', context.env);
   if (!createAgentDirectory(agentId, paths(context))) throw new Error(`new: agent ${agentId} already exists`);
   const meta = idleMeta(agentId, cwd, parsed.values.get('--title') ?? null);
   try {
@@ -363,23 +509,22 @@ async function cmdFork(
   if (sourceId === agentId) throw new UsageError('new: --fork source and --id must be different agents');
   if (parsed.values.has('--cwd')) throw new UsageError('new: --cwd cannot be combined with --fork');
   if (parsed.values.has('--title')) throw new UsageError('new: --title cannot be combined with --fork');
-  // Board issue 178, residual R2: `--fork` refuses `--cwd` above, but it does
-  // not thereby declare nothing -- it *inherits* the source's declared
-  // directory verbatim, and `forkMetaSnapshot` keeps it. That is a route to a
-  // declaration that never consulted `backendCapabilities`, so `new --fork`
-  // accepted a directory that a non-forking `new` refuses by name, and the
-  // clone was then launchable with the capability withdrawn. The check is the
-  // same predicate `cmdNew` and `cmdRun` use, on the value the clone is about
-  // to record, and it is above `forkAgent`, so nothing is written on refusal.
+  // `--fork` refuses `--cwd` above, but it does not thereby declare nothing -- it
+  // *inherits* the source's declared directory verbatim and `forkMetaSnapshot`
+  // keeps it. That is a route to a declaration that never consulted the
+  // capability, so `new --fork` would accept a directory a non-forking `new`
+  // refuses by name and leave a clone launchable with the capability withdrawn.
+  // The gate is the same predicate, applied to the value the clone is about to
+  // record, and it is above `forkAgent`, so a refusal writes nothing.
   //
   // The source is read here, and read only. `forkAgent` reads it again inside
   // its own all-or-nothing region and reports a missing source as
-  // `NotFoundError`, exactly as before; a source that is not readable is left
-  // to that path rather than being diagnosed differently here, because
-  // "cannot fork: no managed agent" is the operator's answer in both readings.
+  // `NotFoundError`, exactly as before: "cannot fork: no managed agent" is the
+  // operator's answer under both readings, and diagnosing it here would give a
+  // different message for the same condition.
   const source = readMeta(sourceId, paths(context));
-  if (source !== null && persistedAgentCwd(source) !== null && !backendCapabilities(context.env).invocation_cwd) {
-    throw new Error('new --fork: the configured backend cannot run an invocation in a different working directory');
+  if (source !== null && persistedAgentCwd(source) !== null) {
+    requireInvocationCwdCapability('new --fork', context.env);
   }
   let meta: AgentMetadata;
   try {
@@ -422,8 +567,21 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
   if (!parsed.values.has('--page')) throw new UsageError('list: --page is required');
   const page = positiveInteger(parsed.values.get('--page'), '--page');
   const entries: Array<{ agentId: string; meta: AgentMetadata; state: string; summary: ReturnType<typeof summary> }> = [];
-  for (const agentId of agentIds(context)) {
-    const meta = await reconcileAgent(agentId, context);
+  const unreadable: Array<{ agentId: string; reason: string }> = [];
+  // Board 198 R2: the sweep root is read before anything is printed. If it
+  // cannot be read this throws, so neither the human table nor `--json` can
+  // present an inventory this command never read.
+  for (const agentId of agentIds(context, 'list')) {
+    const read = readMetaForSweep(agentId, context);
+    if (!read.readable) {
+      // Board 198: recorded and named, not thrown. The rest of the inventory
+      // is still this command's job; the unreadable record is still the
+      // operator's to hear about.
+      unreadable.push({ agentId: read.agentId, reason: read.reason });
+      continue;
+    }
+    const observed = read.meta;
+    const meta = observed === null ? null : await reconcileMeta(agentId, observed, context);
     if (meta === null) continue;
     const state = deriveState(meta);
     if (!matchesFilters(parsed, state)) continue;
@@ -435,6 +593,7 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
   if (parsed.flags.has('--json')) {
     context.io.stdout(stableJson({
       agents: selected.map(({ agentId, state, summary: item }) => listEntryJson(agentId, state, item)),
+      unreadable: unreadable.map(({ agentId, reason }) => ({ id: agentId, reason })),
     }));
   } else if (selected.length === 0) {
     context.io.stdout('(no agents)');
@@ -451,6 +610,7 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
       ].join('  '));
     }
   }
+  reportUnreadableAgents(unreadable, context, 'is not listed');
   return EXIT_OK;
 }
 
@@ -558,12 +718,6 @@ const DISPLAYABLE_AGENT_ERRORS: readonly string[] = [
   'OpenCode process had no pid',
   // runner.ts: /proc identity could not be established for a live process.
   'could not establish canonical OpenCode process identity',
-  // runner.ts: the directory this invocation was launched in no longer exists.
-  // Board issue 178. Matched as a fixed-literal prefix followed by the offending
-  // path: the prefix is the constant this repository writes and the path is the
-  // operator's own `--cwd`, so the whole note is a composition of a known
-  // sentence and a value the operator already supplied.
-  `${LAUNCH_DIRECTORY_MISSING}: `,
   // lifecycle.ts: `reconcileDeadMeta` found a `running` record whose process is
   // gone with no captured exit status. Reached from `agent status` and
   // `agent list`, so it is an ordinary sight, not a corner case.
@@ -630,11 +784,6 @@ export function displayableAgentError(meta: AgentMetadata): string | null {
   const note = meta.error;
   if (typeof note !== 'string' || note.length === 0) return null;
   if (DISPLAYABLE_AGENT_ERRORS.includes(note)) return note;
-  // One allowlist entry is a fixed-literal *prefix* (ending in `: `), for a
-  // sentence this repository writes followed by a value the operator supplied.
-  // Nothing else in the list is a prefix, and a suffix match is never accepted:
-  // free text is never quoted because part of it happens to look known.
-  if (DISPLAYABLE_AGENT_ERRORS.some((entry) => entry.endsWith(': ') && note.startsWith(entry))) return note;
   const derived = describeSignalDeath(sanitizeBackendError(meta.backend_error));
   if (derived !== null && derived === note) return note;
   return AGENT_ERROR_WITHHELD;
@@ -660,12 +809,11 @@ function statusJson(
     pgid: meta.pgid,
     runner_pid: meta.runner_pid,
     cwd: item.cwd,
-    // Board issue 178: where this invocation launched, which is not always the
-    // declared default -- a `--steer` can relocate an invocation, and a record
-    // written before this field existed honestly reports that it was never
-    // observed rather than inventing one from the declaration.
+    // Board issue 178: where this front actually launched, which is not always
+    // the declared directory, and which for a record written before the
+    // observation existed honestly reports "never observed" rather than
+    // inventing one from the declaration.
     invocation_cwd: item.invocation_cwd,
-    capabilities: backendCapabilities(env),
     title: item.title,
     created_at: item.created_at,
     started_at: canonicalTimestamp(meta, 'started_at', true),
@@ -684,7 +832,7 @@ function statusJson(
     next_steer: steers.length > 0 ? steers[0]!.prompt.split('\n', 1)[0] : null,
     steer_preempting: intent.value === 'steer',
     steer_metadata_error: null,
-    model: 'opencode/space-bunny-free',
+    model: 'opencode-go/longcat-2.5-preview-free',
     variant: persistedVariant(meta),
     backend_error: sanitizeBackendError(meta.backend_error),
     host_capacity: hostCapacityJson(readHostCapacity()),
@@ -812,10 +960,20 @@ function writeRaw(context: AgentCommandContext, text: string): void {
   else context.io.stdout(text.replace(/\n$/, ''));
 }
 
+/**
+ * Board 197: the per-invocation owner token travels to the runner through the
+ * environment this function already builds, not through argv. `/proc/<pid>/cmdline`
+ * is world-readable, `/proc/<pid>/environ` is 0400 and owner-readable, so the
+ * environment is the only one of the two that does not publish the secret to
+ * every process on the host. The value is minted per invocation and is never
+ * reused, so a runner cannot present another invocation's token -- see
+ * `verifyReservationOwner` in packages/agent-runtime/src/runner.ts.
+ */
 function spawnRunner(
   agentId: string,
   mode: 'new' | 'continue',
   generation: number,
+  ownerToken: string,
   context: AgentCommandContext,
 ): void {
   const entryScript = context.entryScript ?? process.argv[1];
@@ -831,6 +989,7 @@ function spawnRunner(
         ...context.env,
         ANTONINA_AGENT_ID: agentId,
         ANTONINA_RUNNER_GEN: String(generation),
+        ANTONINA_RUNNER_OWNER_TOKEN: ownerToken,
       },
     },
   );
@@ -965,10 +1124,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   // Durable execution configuration must be canonical before this prompt can
   // acquire runner or invocation authority.
   requiredPersistedAgentId(observed);
-  // Canonicality is still checked here even though the declared value is no
-  // longer the one that decides the launch: a malformed record must be refused
-  // before this prompt can acquire runner or invocation authority.
-  persistedAgentCwd(observed);
+  const recordedCwd = persistedAgentCwd(observed);
   persistedVariant(observed);
   persistedNativeSessionId(observed);
   if (
@@ -978,90 +1134,58 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   ) {
     throw new Error(`agent ${agentId} is still running; use --steer to redirect it`);
   }
-  // `--cwd` names the directory *this invocation* runs in. It means the same
-  // thing on every path -- fresh run, and a `--steer` that kills the current
-  // invocation and starts the next one in the same conversation -- and it is
-  // accepted on every one of them. Board issue 178 deletes the quiescence gate
-  // that used to refuse it while a front existed: a flag whose meaning depended
-  // on whether the agent happened to be busy was not one flag, it was two, and
-  // the busy case also refused the prompt the operator asked for.
+  // `--cwd` declares the directory this front runs in, and the record is
+  // corrected to it in the same durable write that accepts the prompt, so the
+  // two can never disagree. It is only ever a statement about a front that does
+  // not exist yet: under a live invocation, an accepted prompt, or an unclaimed
+  // runner reservation it would make the record name a directory the front that
+  // already exists is not in, so it is refused without writing anything.
   const runCwd = parsed.values.has('--cwd') ? declaredCwd(parsed.values.get('--cwd')!, 'run') : null;
   // The directory this invocation will actually launch in: the one named on
-  // this command if there is one, otherwise the agent's declared default. It is
-  // computed here, once, because it is the value the backend is about to be
-  // handed, and the gate below has to be about that value rather than about the
-  // flag: the flag is not the only route by which a directory reaches a
-  // launch.
-  const launchCwd = runCwd ?? persistedAgentCwd(observed);
-  // Backend agnosticism, represented as data: a backend that cannot launch an
-  // invocation in a named directory refuses here, by name, before any write --
-  // never by running the invocation somewhere else and reporting the declared
-  // directory as if it had honoured it.
-  //
-  // Board issue 178, residual R1: the predicate is on `launchCwd`, not on
-  // `runCwd !== null`. Conditioning it on the flag meant a directory declared
-  // earlier, while the backend could honour it, was launched ungated on every
-  // later run that named no directory of its own -- the backend was handed
-  // `--dir <declared>` by a CLI that had just been told it could not run an
-  // invocation in a named directory. That is the same defect the flag-shaped
-  // gate was added to remove, reached through durable state instead of argv, so
-  // the public abstraction would still have changed meaning with the configured
-  // backend. Every branch below is covered: fresh spawn, steer onto a live
-  // front, steer onto a reservation, and busy-recovery, because the gate is
-  // above `updateMeta` and writes nothing before it fires.
-  if (launchCwd !== null && !backendCapabilities(context.env).invocation_cwd) {
-    throw new Error('run: the configured backend cannot run an invocation in a different working directory');
-  }
-  if (runCwd === null) {
-    if (launchCwd === null) {
-      // The operator has no directory to give. There is still no honest value to
-      // launch the backend with, and inheriting the invoking shell's directory is
-      // the defect this replaces, so the launch is refused and says why.
-      throw new Error(`run: agent ${agentId} has no declared working directory; pass --cwd /absolute/path`);
+  // this command if there is one, otherwise the agent's declared default. The
+  // gate is about *that* value rather than about the flag, because the flag is
+  // not the only route by which a directory reaches a launch -- a directory
+  // declared earlier in durable state is handed to the backend by a later run
+  // that names no `--cwd` of its own, and gating on the flag alone would launch
+  // it ungated by a CLI that had just been told it could not. Computed once,
+  // above `updateMeta`, so every accepting branch is covered -- fresh spawn,
+  // steer onto a live front, steer onto a reservation, busy recovery -- and the
+  // gate writes nothing before it fires.
+  const launchCwd = runCwd ?? recordedCwd;
+  if (launchCwd !== null) requireInvocationCwdCapability('run', context.env);
+  if (runCwd !== null) {
+    let acceptedPending: string | null;
+    try {
+      acceptedPending = pendingPrompt(observed);
+    } catch {
+      throw new Error(`run: agent ${agentId} has malformed pending prompt authority`);
     }
-    // A directory that has since been removed is refused here rather than
-    // launched into, where it would produce no pid and a note that does not
-    // name the cause. `runner.ts` repeats this check at the spawn, because a
-    // directory can disappear in between.
-    if (!existsSync(launchCwd) || !statSync(launchCwd).isDirectory()) {
-      throw new Error(`run: agent ${agentId} working directory does not exist: ${launchCwd}`);
+    if (invocationAlive(observed) || reservationInFlight(observed) || acceptedPending !== null) {
+      throw new Error(`run: agent ${agentId} already owns work; --cwd cannot be declared while a front exists`);
     }
+  } else if (recordedCwd === null) {
+    // The operator has no directory to give. There is still no honest value to
+    // launch the backend with, and inheriting the invoking shell's directory is
+    // the defect this replaces, so the launch is refused and says why.
+    throw new Error(`run: agent ${agentId} has no declared working directory; pass --cwd /absolute/path`);
   }
-  if (configuredModelAvailable(context.env) === false) {
-    throw new Error('configured OpenCode model opencode/space-bunny-free is unavailable');
+  // Board 186. The model probe has no agent identity of its own, so it is given
+  // the database of the record this command is about to run. It reads the model
+  // list and writes no session row, so it could safely use any database -- but
+  // leaving it on the shared one would keep every `run` touching the file whose
+  // lock contention this change exists to remove.
+  if (configuredModelAvailable({ ...context.env, ...opencodeBackendEnv(observed, paths(context)) }) === false) {
+    throw new Error('configured OpenCode model opencode-go/longcat-2.5-preview-free is unavailable');
   }
   const decision: {
     action?: 'busy' | 'spawn' | 'reuse';
     mode?: 'new' | 'continue';
     generation?: number;
+    ownerToken?: string;
     interrupt?: boolean;
     recoverBusy?: boolean;
   } = {};
   const steer = parsed.flags.has('--steer');
-  // Written inside the same durable transaction that accepts the prompt, and on
-  // every accepting branch, so the declared default and the directory the
-  // accepted invocation will launch in can never disagree with each other or
-  // with the prompt's acceptance. A transaction that ends in `busy` records
-  // nothing at all, so a rejected prompt cannot leave a directory behind that no
-  // front ever ran in.
-  //
-  // It writes the declaration and nothing else. Board issue 178: writing
-  // `invocation_cwd` here too is what let an accepted-then-never-launched
-  // invocation leave a record permanently naming a directory no front was ever
-  // in, including in a terminal state, and what let a fork report the source's
-  // last launch directory as the clone's own. The observation is written by the
-  // runner, once a child exists; nothing reachable from this command writes it.
-  //
-  // This is the hunk 177 and 178 both had to touch, and taking 177's side here
-  // -- an inline `if (runCwd !== null) meta.cwd = runCwd` -- would restore only
-  // the half of the write that is correct and would be indistinguishable from
-  // the write 178 exists to delete. Both branches below therefore call
-  // `acceptCwd`, which is the only place in the runtime that writes `cwd` at
-  // acceptance, and `invocation_cwd` appears nowhere in this command.
-  const acceptCwd = (meta: AgentMetadata): void => {
-    if (runCwd === null) return;
-    meta.cwd = runCwd;
-  };
   // Observed before this command accepts anything, so it bounds the history it
   // did not cause even on the paths that accept no new invocation of their own.
   const historyLength = logSize(agentId, paths(context));
@@ -1088,7 +1212,6 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
         decision.action = 'busy';
         return;
       }
-      acceptCwd(meta);
       meta.intent = 'steer';
       decision.action = 'reuse';
       decision.interrupt = true;
@@ -1101,7 +1224,6 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
           decision.action = 'busy';
           return;
         }
-        acceptCwd(meta);
         decision.action = 'reuse';
         return;
       }
@@ -1109,7 +1231,6 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
         decision.action = 'busy';
         return;
       }
-      acceptCwd(meta);
       meta.pending_prompt = prompt;
       meta.state = 'running';
       meta.last_activity_at = Date.now() / 1000;
@@ -1132,11 +1253,11 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
             decision.action = 'busy';
             return;
           }
-          acceptCwd(meta);
         } else {
           decision.recoverBusy = true;
         }
         const generation = currentGeneration + 1;
+        const ownerToken = mintRunnerReservationOwnerToken();
         meta.active_runner = true;
         meta.runner_gen = generation;
         meta.runner_reservation = {
@@ -1146,10 +1267,16 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
           owner_start_ticks: currentProcessStartTicks(),
           reserved_at: Date.now() / 1000,
           mode,
+          // Board 197: minted here, in the same durable write that publishes the
+          // reservation, and only on a branch that goes on to spawn. It is the
+          // evidence a runner has of being this reservation's own process once
+          // this process is gone and the kernel has reparented it.
+          owner_token: ownerToken,
         };
         decision.action = 'spawn';
         decision.mode = mode;
         decision.generation = generation;
+        decision.ownerToken = ownerToken;
         return;
       }
       setActiveRunner(meta, false);
@@ -1168,7 +1295,15 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     } else if (persistedLifecycleState(meta) === 'idle' && meta.prompt_count === 0) {
       mode = 'new';
     } else {
-      const recoveredSession = discoverSessionId(agentId, context.env);
+      // Board 186: the same database the invocation will be spawned with, so a
+      // session an isolated invocation recorded is still discoverable here.
+      // OpenCode session discovery is worktree-scoped. Probe the invocation
+      // directory, not the CLI caller's cwd.
+      const recoveredSession = discoverSessionId(
+        agentId,
+        { ...context.env, ...opencodeBackendEnv(meta, paths(context)) },
+        launchCwd!,
+      );
       if (recoveredSession === null) {
         mode = 'new';
       } else {
@@ -1178,18 +1313,15 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     }
     const generation = currentGeneration + 1;
     const now = Date.now() / 1000;
-    // The declared working directory is written by `acceptCwd` and by nothing
-    // else. 177's side of this hunk inlined `if (runCwd !== null) meta.cwd =
-    // runCwd` here; that line is the write 178 exists to keep in exactly one
-    // place, so it is not taken. Two inline copies of the same assignment, one
-    // per accepting branch, is precisely how the two commands drifted apart in
-    // the first place: one of them grew a second field on its own copy.
-    acceptCwd(meta);
-    // 177's run scope: the cursor into `output.log` at which this invocation's
-    // output begins, recorded in the same write that accepts the prompt.
+    // The declared working directory is written here, on the one path that
+    // starts a fresh invocation for an agent that owns no work, and nowhere
+    // else: a transaction that ends in `busy` records nothing at all, so a
+    // rejected prompt cannot leave a cwd behind that no front ever ran in.
+    if (runCwd !== null) meta.cwd = runCwd;
     beginInvocation(meta, prompt, now, promptCount, { logOffset: logSize(agentId, paths(context)) });
     meta.active_runner = true;
     meta.runner_gen = generation;
+    const ownerToken = mintRunnerReservationOwnerToken();
     meta.runner_reservation = {
       state: 'reserved',
       gen: generation,
@@ -1197,17 +1329,21 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
       owner_start_ticks: currentProcessStartTicks(),
       reserved_at: now,
       mode,
+      owner_token: ownerToken,
     };
     decision.action = 'spawn';
     decision.mode = mode;
     decision.generation = generation;
+    decision.ownerToken = ownerToken;
   }, paths(context));
 
   if (decision.action === 'busy' || decision.action === undefined) {
     throw new Error(`agent ${agentId} is still running; use --steer to redirect it`);
   }
   if (decision.action === 'spawn') {
-    spawnRunner(agentId, decision.mode!, decision.generation!, context);
+    // The token is minted only on the branches that reserve, so a spawn decision
+    // always has one; a reservation written without it could not be claimed.
+    spawnRunner(agentId, decision.mode!, decision.generation!, decision.ownerToken!, context);
     if (parsed.flags.has('--detach')) {
       await acknowledgeDetachedSpawn(agentId, decision.generation!, context);
     }
@@ -1295,13 +1431,6 @@ async function stopLike(
   args: string[],
   context: AgentCommandContext,
 ): Promise<number> {
-  // Board issue 178, residual RF4: an earlier draft of this contract also gave
-  // `stop`/`kill` a `--json` form. That is unrelated public surface with its own
-  // output and exit matrix, and a contract PR that changes commands it does not
-  // discuss is how a review gate stops being a gate, so it was dropped rather
-  // than carried. Both commands still converge the same way: they exit only
-  // after the invocation *and* the detached runner are gone, whatever they
-  // print.
   const parsed = parse(args);
   if (parsed.positionals.length !== 0) throw new UsageError(`${command}: unexpected positional arguments`);
   const agentId = requireAgentId(parsed.values.get('--id'), command);
@@ -1480,8 +1609,27 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
   const configured = parsed.values.get('--days') ?? context.env.ANTONINA_AGENT_RETENTION_DAYS ?? String(DEFAULT_RETENTION_DAYS);
   const days = nonnegativeInteger(configured, '--days');
   const cutoff = Date.now() / 1000 - days * 86_400;
-  const candidates = agentIds(context).filter((agentId) => {
-    const meta = readMeta(agentId, paths(context));
+  // Board 198: the retention sweep reads every record, so it isolates each read
+  // the way `list` does. An unreadable record is *retained and named*, never
+  // deleted: its age is exactly what cannot be established, so a record this
+  // build cannot read is not a record this build may decide has expired. The
+  // sweep therefore fails closed in the only direction that can lose data, and
+  // the operator is told which record was withheld instead of watching the
+  // command abort before it names anything.
+  // Board 198 R2: an unreadable state root is a refusal to sweep, and this
+  // enumeration is deliberately the first statement of the sweep so that the
+  // refusal arrives before anything at all has been deleted. `clean` must
+  // never remove a record on the strength of a read that failed: the set it
+  // would act on is exactly the set it could not establish, and "no records
+  // were eligible" is not something this run observed.
+  const unreadable: Array<{ agentId: string; reason: string }> = [];
+  const candidates = agentIds(context, 'clean').filter((agentId) => {
+    const read = readMetaForSweep(agentId, context);
+    if (!read.readable) {
+      unreadable.push({ agentId: read.agentId, reason: read.reason });
+      return false;
+    }
+    const meta = read.meta;
     if (meta === null || !retentionEligibleState(meta)) return false;
     const anchor = retentionAnchor(meta);
     return anchor !== null && anchor < cutoff;
@@ -1517,6 +1665,7 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
     removeAgentDirectory(agentId, paths(context));
     context.io.stdout(`deleted agent ${agentId}`);
   }
+  reportUnreadableAgents(unreadable, context, 'was retained');
   return EXIT_OK;
 }
 

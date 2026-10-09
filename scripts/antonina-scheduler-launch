@@ -20,6 +20,13 @@ def chosen_cwd_is_available(issue, cwd):
     chosen = os.path.realpath(cwd)
     return any(os.path.realpath(item.get("path", "")) == chosen for item in available_worktrees(issue))
 
+def require_open_issue(issue):
+    proc = run([ANTONINA, "board", "show", "--id", str(issue), "--page", "1", "--json"])
+    record = json.loads(proc.stdout)
+    if record.get("state") != "open":
+        raise SystemExit(f"refusing launch on non-open board issue #{issue}: {record.get('state')}")
+    return record
+
 def new_agent(agent_id, cwd, title):
     return run([ANTONINA, "agent", "new", "--id", agent_id, "--cwd", cwd, "--title", title, "--json"], check=False)
 
@@ -36,6 +43,7 @@ def main():
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
+    require_open_issue(args.issue)
     if not chosen_cwd_is_available(args.issue, args.cwd):
         raise SystemExit("selected cwd is no longer a registered existing unoccupied worktree")
 
@@ -52,6 +60,14 @@ def main():
     if agent_id is None:
         raise SystemExit("failed to allocate a unique agent id")
 
+    # A prior read or stale scheduler snapshot is not launch authorization.
+    # Revalidate immediately before executing, not just before creating.
+    try:
+        require_open_issue(args.issue)
+    except SystemExit:
+        cleanup_idle(agent_id)
+        raise
+
     started = run([
         ANTONINA, "agent", "run",
         "--id", agent_id,
@@ -64,6 +80,14 @@ def main():
         cleanup_idle(agent_id)
         sys.stderr.write(started.stderr or started.stdout)
         raise SystemExit(started.returncode or 1)
+
+    # If closure races with startup, retire the new worker instead of
+    # recording a misleading working claim on a closed issue.
+    try:
+        require_open_issue(args.issue)
+    except SystemExit:
+        run([ANTONINA, "agent", "stop", "--id", agent_id], check=False)
+        raise
 
     body = (
         "[scheduler-turn]\n"

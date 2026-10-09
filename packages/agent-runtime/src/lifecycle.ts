@@ -104,21 +104,6 @@ export interface BeginInvocationOptions {
   logOffset?: number;
 }
 
-/**
- * Accepting a prompt is a statement about work, not about a location.
- * `beginInvocation` deliberately takes no directory: the launch directory is
- * the declaration `cwd`, which the accepting command has already written in the
- * same durable transaction as this call, and `invocation_cwd` is not touched
- * here at all. It is written by the runner, once a child exists (board issue
- * 178). A function that accepted a directory and wrote it as part of acceptance
- * is exactly the pre-launch write that let `agent status` name a directory a
- * front was never in.
- *
- * Board issue 177's options object is the one shape both changes can express,
- * and it carries `logOffset` only: the directory 178 removed is not reintroduced
- * here under a new name, which is the resolution that would have silently undone
- * 178.
- */
 export function beginInvocation(
   meta: AgentMetadata,
   prompt: string,

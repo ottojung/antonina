@@ -13,9 +13,9 @@ import {
   persistedInvocationCwd,
   persistedLifecycleState,
   persistedNativeSessionId,
+  persistedOpencodeDbKey,
   persistedRunLogOffset,
   persistedTimestamp,
-  persistedVariant,
   runnerGeneration,
   runnerReservationMode,
   runnerReservationState,
@@ -25,6 +25,7 @@ import {
 
 const badAuthority = [123, true, 1.5, [], {}, ''];
 
+
 test('missing authority never receives a legacy default', () => {
   assert.throws(() => pendingPrompt({}), /not canonical/);
   assert.equal(nextPromptCount({}), null);
@@ -33,7 +34,6 @@ test('missing authority never receives a legacy default', () => {
   assert.equal(persistedLifecycleState({}), null);
   assert.deepEqual(persistedControlField({}, 'intent'), { value: null, malformed: true });
   assert.throws(() => persistedNativeSessionId({}), /missing/);
-  assert.throws(() => persistedVariant({}), /missing/);
   assert.equal(runnerReservationState(undefined), 'malformed');
 });
 
@@ -92,9 +92,6 @@ test('scalar continuation authority rejects coercion and non-finite time', () =>
   assert.equal(persistedNativeSessionId({ native_session_id: null }), null);
   assert.equal(persistedNativeSessionId({ native_session_id: 'ses_abc' }), 'ses_abc');
   assert.throws(() => persistedNativeSessionId({ native_session_id: '' }), /malformed/);
-
-  assert.equal(persistedVariant({ variant: 'high' }), 'high');
-  assert.throws(() => persistedVariant({ variant: '' }), /malformed/);
 });
 
 test('idle metadata is a complete authoritative version-4 record', () => {
@@ -121,16 +118,19 @@ test('schema v4 rejects old versions, missing fields and unknown fields', () => 
   assert.throws(() => validateAgentMetadata(old), /unsupported managed-agent metadata version/);
 
   for (const key of Object.keys(base)) {
-    // The two fields the schema deliberately tolerates absent, and no others.
+    // `invocation_cwd` (board issue 178), `run_log_offset` (board issue 177) and
+    // `opencode_db` (board issue 186) are the fields a record is allowed to
+    // omit, for the same reason: each was added after records already existed
+    // on disk, and a record written before it existed must still be canonical
+    // rather than rejected. For `opencode_db` absence additionally carries a
+    // meaning -- "predates isolation, keeps using the shared OpenCode
+    // database" -- so it is not merely tolerated but load-bearing.
     //
-    // `invocation_cwd` (board issue 178) is an observation, not lifecycle
-    // authority, and every record written before this field existed must keep
-    // validating. `run_log_offset` (board issue 177) is the same shape of
-    // tolerance for the same reason: it was added after records already existed
-    // on disk. Both sides each carried their own skip here; a closed-schema
-    // check that grows one exemption per feature is how a schema stops being
-    // closed, so the exemptions are stated once, together, and each field's
-    // shape is asserted separately below.
+    // The exemptions are read from the schema rather than restated here: a
+    // closed-schema check that grows one hard-coded skip per feature is how a
+    // schema stops being closed, and restating them here would let the test and
+    // the schema disagree about what is exempt without either noticing.
+    // `invocation_cwd`'s shapes are asserted separately, below.
     if (OPTIONAL_TOP_LEVEL_FIELDS.includes(key)) continue;
     const missing = { ...base };
     delete missing[key];
@@ -147,36 +147,42 @@ test('schema v4 rejects old versions, missing fields and unknown fields', () => 
   );
 });
 
-// Board issue 178: `invocation_cwd` is optional and validated when present.
-// Absent is canonical (every record written before this field existed), present
-// is held to the same absolute-path rule as `cwd`, and a present-but-wrong value
-// is still a rejection rather than something the runtime silently drops.
+// Board issue 178: the observation. Optional for the same reason as
+// `run_log_offset` and `opencode_db` below -- records existed before it did --
+// and held to the same rule: a present-but-wrong value is a rejection, and
+// absence reads as "nothing observed" rather than as a value synthesised from the
+// declaration.
 test('invocation_cwd is optional, canonical when absent, and validated when present', () => {
   const base = idleMeta('a11d', '/tmp/work', null, 100.5);
-  assert.equal(base.invocation_cwd, null, 'a new record observes no invocation yet');
+  // A new record has run nowhere, so it observes nothing. This is written
+  // explicitly (`null`) rather than left absent, which is what keeps the
+  // tolerated absence applying only to a pre-existing on-disk population.
+  assert.equal(base.invocation_cwd, null);
 
-  const legacy = { ...base };
-  delete legacy.invocation_cwd;
-  assert.doesNotThrow(() => validateAgentMetadata(legacy), 'a pre-178 record must still validate');
-  assert.equal(persistedInvocationCwd(legacy), null, 'absent reads as "nothing observed", never as a guess');
+  const absent = { ...base };
+  delete absent.invocation_cwd;
+  assert.doesNotThrow(() => validateAgentMetadata(absent));
+  assert.equal(persistedInvocationCwd(absent), null);
+  assert.equal(persistedInvocationCwd(base), null);
+  assert.equal(persistedInvocationCwd({ ...base, invocation_cwd: '/srv/ran-here' }), '/srv/ran-here');
 
-  assert.doesNotThrow(() => validateAgentMetadata({ ...base, invocation_cwd: '/tmp/other' }));
-  assert.equal(persistedInvocationCwd({ ...base, invocation_cwd: '/tmp/other' }), '/tmp/other');
-
-  assert.throws(
-    () => validateAgentMetadata({ ...base, invocation_cwd: 'relative/path' }),
-    /invocation_cwd is malformed/,
-  );
-  assert.throws(
-    () => validateAgentMetadata({ ...base, invocation_cwd: 42 }),
-    /invocation_cwd is malformed/,
-  );
+  // A present-but-wrong value is a rejection on both routes, not something the
+  // runtime silently reads as "nothing observed": the reader must not be able to
+  // see a corrupt observation where the record would have been refused.
+  for (const malformed of ['', 'relative/path', 42, true, {}, []]) {
+    assert.throws(
+      () => persistedInvocationCwd({ ...base, invocation_cwd: malformed }),
+      /invocation_cwd is malformed/,
+      `persistedInvocationCwd read a malformed value as null: ${JSON.stringify(malformed)}`,
+    );
+    assert.throws(
+      () => validateAgentMetadata({ ...base, invocation_cwd: malformed }),
+      /invocation_cwd is malformed/,
+      `malformed invocation_cwd unexpectedly accepted: ${JSON.stringify(malformed)}`,
+    );
+  }
 });
 
-// Board issue 177: the run-scope cursor. Same tolerated absence as
-// `invocation_cwd` above and for the same reason -- a field added after records
-// already existed -- held to the same "a present-but-wrong value is a rejection"
-// rule.
 test('a record may omit run_log_offset, but a present one must be a byte cursor', () => {
   const base = idleMeta('a11d', '/tmp/work', null, 100.5);
   assert.equal(base.run_log_offset, null);
@@ -196,6 +202,27 @@ test('a record may omit run_log_offset, but a present one must be a byte cursor'
       () => validateAgentMetadata({ ...base, run_log_offset: malformed }),
       /run_log_offset is malformed/,
       `malformed run_log_offset unexpectedly accepted: ${JSON.stringify(malformed)}`,
+    );
+  }
+});
+
+test('a record may omit opencode_db, but a present one must be an agent-id-shaped key', () => {
+  const base = idleMeta('a11d', '/tmp/work', null, 100.5);
+  // A new record names its own database from birth.
+  assert.equal(persistedOpencodeDbKey(base), 'a11d');
+
+  const absent = { ...base };
+  delete absent.opencode_db;
+  assert.doesNotThrow(() => validateAgentMetadata(absent));
+  assert.equal(persistedOpencodeDbKey(absent), null);
+  assert.equal(persistedOpencodeDbKey({ ...base, opencode_db: null }), null);
+
+  for (const malformed of [42, 'A11D', 'not an id', '', {}, []]) {
+    assert.equal(persistedOpencodeDbKey({ ...base, opencode_db: malformed }), null);
+    assert.throws(
+      () => validateAgentMetadata({ ...base, opencode_db: malformed }),
+      /opencode_db is malformed/,
+      `malformed opencode_db unexpectedly accepted: ${JSON.stringify(malformed)}`,
     );
   }
 });

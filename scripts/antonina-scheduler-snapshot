@@ -12,14 +12,21 @@ def run(args, check=True):
 def cli_json(*args):
     return json.loads(run([ANTONINA, *map(str, args)]).stdout)
 
-def live_ids():
-    proc = run(["pgrep", "-af", "opencode run --auto --title antonina-"], check=False)
-    result = set()
-    for line in proc.stdout.splitlines():
-        m = re.search(r"--title\s+antonina-([^\s]+)", line)
-        if m:
-            result.add(m.group(1))
-    return result
+def running_agents():
+    """Use Antonina's reconciled running state, including resumed sessions."""
+    agents = []
+    page = 1
+    while True:
+        inventory = cli_json("agent", "list", "--page", page, "--limit", 500, "--running", "--json")
+        if inventory.get("unreadable"):
+            raise RuntimeError("agent inventory contains unreadable records; refusing to schedule on incomplete ownership data")
+        batch = inventory["agents"]
+        if not isinstance(batch, list):
+            raise RuntimeError("agent list returned an invalid agents collection")
+        agents.extend(batch)
+        if len(batch) < 500:
+            return agents
+        page += 1
 
 def project_hint_from_title(title, number=None):
     low=(title or "").strip().lower()
@@ -52,7 +59,7 @@ def project_hint_from_cwd(cwd):
 def issue_number_from_agent_title(title):
     text = (title or "").strip()
     m = re.match(
-        r"(?:(?:AssemblyP1|Volodyslav|Kawun|QAI|Skrynia|Antonina|Lubko|Along|pyreports)\s+)?(\d+)\b",
+        r"(?:(?:AssemblyP1|Volodyslav|Kawun|QAI|Skrynia|Antonina|Lubko|Along|pyreports)\s+)?#?(\d+)\b",
         text,
         re.IGNORECASE,
     )
@@ -67,8 +74,7 @@ def open_issues():
         result.extend(batch)
     return result
 
-running = cli_json("agent", "list", "--page", 1, "--limit", 500, "--running", "--json").get("agents", [])
-live = live_ids()
+running = running_agents()
 
 issue_headers = [
     {
@@ -96,14 +102,13 @@ agents = [
         ),
     }
     for a in running
-    if str(a.get("id")) in live
 ]
 
 open_projects = sorted({
     i["project_hint"] for i in issue_headers if i.get("project_hint")
 })
 represented_projects = sorted({
-    a["project_hint"] for a in agents if a.get("project_hint")
+    a["project_hint"] for a in agents if a.get("project_hint") and issue_number_from_agent_title(a.get("title")) in issue_project_by_number
 })
 represented_project_set = set(represented_projects)
 unrepresented_projects = [
@@ -123,22 +128,22 @@ live_issue_numbers = {
     if issue_number is not None
 }
 
-represented_issue_candidates = []
-per_project = {}
-for i in issue_headers:
-    project = i.get("project_hint")
-    if not project or project not in represented_project_set:
-        continue
-    if i.get("number") in live_issue_numbers:
-        continue
-    count = per_project.get(project, 0)
-    if count >= 6:
-        continue
-    represented_issue_candidates.append(i)
-    per_project[project] = count + 1
+# The board is already in its canonical priority order. Keep EVERY actionable
+# distinct issue in that order, without a six-per-project truncation.
+# Closed-issue agents are observable but cannot represent open issue ownership.
+open_numbers = {i["number"] for i in issue_headers}
+active_issue_agents = [a for a in agents if issue_number_from_agent_title(a.get("title")) in open_numbers]
+orphan_agents = [a for a in agents if issue_number_from_agent_title(a.get("title")) not in open_numbers]
+represented_issue_candidates = [
+    i for i in issue_headers
+    if i.get("number") not in {
+        issue_number_from_agent_title(a.get("title")) for a in active_issue_agents
+    }
+]
 
 context = {
     "live_agents": agents,
+    "orphan_agents": orphan_agents,
     "represented_projects": represented_projects,
     "open_projects": open_projects,
     "unrepresented_projects": unrepresented_projects,
@@ -146,9 +151,7 @@ context = {
     "live_issue_numbers": sorted(live_issue_numbers),
     "represented_issue_candidates": represented_issue_candidates,
 }
-if unrepresented_projects:
-    context["unrepresented_issues"] = unrepresented_issues
-else:
-    context["open_issues"] = issue_headers
+context["unrepresented_issues"] = unrepresented_issues
+context["open_issues"] = issue_headers
 
 print(json.dumps(context, separators=(",", ":")))

@@ -12,6 +12,7 @@ import App, { IssuePagination } from './App';
 import { DEFAULT_FEED_LIMIT, type BoardFeedPage, type BoardFeedRequest } from './api';
 import type { BoardIssue } from './model';
 import type { BoardOverview, IssueCommentPage } from '../../packages/core/src/api';
+import { newestCommentAt } from '../../packages/core/src/api';
 import type { BoardAccessState } from '../../packages/core/src/api';
 import type { BrowserBoardSession } from './api';
 import {
@@ -28,10 +29,12 @@ import {
 
 const STAMP = '2026-09-27T12:00:00.000Z';
 
-// `closedAt` is present because the app's summaries always carry it, and
-// `visibleIssues` sorts with core's closed-issue key, which requires it.
-function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue & { closedAt: string | null } {
-  return { number, title: `Issue ${number}`, body: `Body of issue ${number}`, state, createdAt: STAMP, updatedAt: STAMP, closedAt: state === 'closed' ? STAMP : null, messages: [] };
+// Board issue 180 widened the bound `visibleIssues` sorts under, because All
+// Issues keys on last activity. These fixtures carry `lastActivityAt` alongside
+// the `BoardIssue` fields so they satisfy it; `null` is "never commented", which
+// is what every fixture here is.
+function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue & { closedAt: string | null; lastActivityAt: string | null } {
+  return { number, title: `Issue ${number}`, body: `Body of issue ${number}`, state, createdAt: STAMP, updatedAt: STAMP, closedAt: state === 'closed' ? STAMP : null, messages: [], lastActivityAt: null };
 }
 
 /** A board of `open` open issues numbered 1..open, plus `closed` closed ones after them. */
@@ -70,6 +73,9 @@ function overview(): BoardOverview {
       updatedAt: each.updatedAt,
       closedAt: each.state === 'closed' ? each.updatedAt : null,
       messageCount: each.messages.length,
+      // Board issue 180's sort key. Mirrors what core's store writes into a
+      // summary: the newest comment's time, or null when there is no comment.
+      lastActivityAt: newestCommentAt(each.messages),
       hasBody: each.body.length > 0,
     })),
     resources: [],
@@ -222,11 +228,10 @@ describe('issue list pagination state', () => {
 
   it('slices the semantic order rather than re-ordering it, for every filter', () => {
     // Deliberately awkward: the board's queue is 60, 40, 10, ... and the closed
-    // tail is not in it. Open must stay in queue order, closed in the board's
-    // closing order (here every closing time is the same stamp, so the
-    // tie-break decides and it is the reverse of ascending number), and all
-    // open-queue-first. `closed-issue-order.test.tsx` is where the closed order
-    // itself is pinned down; this case is about the slice.
+    // tail is not in it. Open must stay in queue order and closed in ascending
+    // number. `all` is board issue 180's order, which is neither: every issue
+    // here shares one timestamp, so last activity ties throughout and the order
+    // is descending issue number.
     const all = [...Array.from({ length: 60 }, (_, index) => issue(index + 1)),
       ...Array.from({ length: 20 }, (_, index) => issue(100 + index, 'closed'))];
     // A complete queue: every open issue exactly once, which is what the board
@@ -240,11 +245,12 @@ describe('issue list pagination state', () => {
     expect(open.slice(0, 3)).toEqual([60, 40, 10].map((number) => all.find((each) => each.number === number)));
     expect(issuePage(open, 1).map((each) => each.number)).toEqual(open.slice(0, ISSUE_PAGE_SIZE).map((each) => each.number));
     expect(issuePage(open, 2).map((each) => each.number)).toEqual(open.slice(50).map((each) => each.number));
-    // Closed issues keep their stable order across pages, and `all` is still the
-    // open queue first with the closed tail after it.
+    // Closed issues keep their stable order across pages.
     expect(issuePage(closed, 1).map((each) => each.number)).toEqual(closed.slice(0, 20).map((each) => each.number));
-    expect(every.slice(0, 60).map((each) => each.number)).toEqual(open.map((each) => each.number));
-    expect(every.slice(60).map((each) => each.number)).toEqual(closed.map((each) => each.number));
+    // All Issues is one order over the whole board, so it interleaves the two
+    // states and no longer has the queue's 60 open issues as a leading block.
+    expect(every.map((each) => each.number)).toEqual(
+      [...all].sort((left, right) => right.number - left.number).map((each) => each.number));
     expect(issuePage(every, 2).map((each) => each.number)).toEqual(every.slice(50, 100).map((each) => each.number));
     // No page is a re-sort: the concatenation of the pages is the whole list.
     expect([1, 2].flatMap((page) => issuePage(every, page).map((each) => each.number))).toEqual(every.map((each) => each.number));
@@ -351,11 +357,11 @@ describe('the issues list, paginated', () => {
     const container = await mountApp();
 
     await act(async () => { chooseFilter('Closed'); });
-    // The closed tail pages on its own total, in the board's closed order, and
-    // does not carry the open list's queue positions with it. This fixture
-    // closes every issue at the same instant, so the order is the tie-break
-    // (highest issue number first) rather than a closing time; the closing-time
-    // order itself is pinned in `closed-issue-order.test.tsx`.
+    // The closed tail pages on its own total, in the board's closing-time order,
+    // and does not carry the open list's queue positions with it. Every issue
+    // here closes at the same instant, so the tie-break decides and it is the
+    // reverse of ascending number; the closing-time order itself is pinned in
+    // `closed-issue-order.test.tsx`.
     expect(rangeText(container)).toBe('1–50 of 60');
     expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => 180 - index));
     await goNext(container);
@@ -366,23 +372,20 @@ describe('the issues list, paginated', () => {
 
     await act(async () => { chooseFilter('All'); });
     expect(rangeText(container)).toBe('51–100 of 180');
-    // All is open-queue-first, so the second page is still open work in queue
-    // order and paging did not reorder anything.
-    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => index + 51));
+    // Board issue 180: All Issues is one global order over the whole board. Every
+    // issue here shares one creation time and none has a comment, so last
+    // activity ties throughout and the order is descending issue number -- which
+    // puts a page boundary in the middle of what used to be a single state's
+    // block. Paging still only slices: page 2 is exactly positions 51-100 of that
+    // one order.
+    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => 130 - index));
 
     await goNext(container);
-    // The open queue ends mid-page: page 3 is the last twenty open issues
-    // followed by the first thirty closed ones, in that order.
-    expect(drawnRows(container)).toEqual([
-      ...Array.from({ length: 20 }, (_, index) => index + 101),
-      ...Array.from({ length: 30 }, (_, index) => 180 - index),
-    ]);
+    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => 80 - index));
     expect(rangeText(container)).toBe('101–150 of 180');
 
     await goNext(container);
-    // The last page is the rest of the closed tail, still in the closed order
-    // and still not re-sorted into the open list's numbering.
-    expect(drawnRows(container)).toEqual(Array.from({ length: 30 }, (_, index) => 150 - index));
+    expect(drawnRows(container)).toEqual(Array.from({ length: 30 }, (_, index) => 30 - index));
     expect(rangeText(container)).toBe('151–180 of 180');
     expect(nextButton(container).disabled).toBe(true);
 
@@ -453,21 +456,27 @@ describe('the issues list, paginated', () => {
     const container = await mountApp();
     await goNext(container);
     expect(rangeText(container)).toBe('51–51 of 51');
-    // All, so the closed issue is still listed and its thread stays open. The
-    // reader is on page 2 of 2 and page 2 is a page of this filter too.
+    // All, so the closed issue is still listed and its thread stays open. Under
+    // board issue 180's order every issue ties on activity, so All Issues is
+    // descending by number and issue 51 is now on its first page -- the reader
+    // follows it there rather than staying on a page it has left.
     await act(async () => { chooseFilter('All'); });
     expect(rangeText(container)).toBe('51–51 of 51');
+    expect(drawnRows(container)).toEqual([1]);
+    await act(async () => { fireEvent.click(previousButton(container)); });
+    expect(rangeText(container)).toBe('1–50 of 51');
+    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => 51 - index));
 
     await act(async () => { fireEvent.click(within(list(container)).getByRole('button', { name: /Issue 51/ })); });
     await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'Close issue' })); });
-    expect(rangeText(container)).toBe('51–51 of 51');
-    expect(drawnRows(container)).toEqual([51]);
+    expect(rangeText(container)).toBe('1–50 of 51');
+    expect(drawnRows(container).slice(0, 1)).toEqual([51]);
 
     // Reopening puts the issue back in the queue, and the reader is left on the
     // page that issue was on rather than sent back to the beginning of the list.
     await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'Reopen issue' })); });
-    expect(rangeText(container)).toBe('51–51 of 51');
-    expect(drawnRows(container)).toEqual([51]);
+    expect(rangeText(container)).toBe('1–50 of 51');
+    expect(drawnRows(container).slice(0, 1)).toEqual([51]);
     expect(list(container).querySelector('.state-label.open')).not.toBeNull();
   });
 
@@ -552,22 +561,15 @@ describe('the issues list, paginated', () => {
     expect(drawnRows(container)).toContain(60);
   });
 
-  it('leaves the feed its own numbered paging, separate from the list', async () => {
-    // Board 173: the feed is paged by number like everything else, but its page
-    // number is its own field, so opening the Feed tab does not renumber the
-    // Issues list and the list's Previous/Next are not the feed's.
+  it('leaves the feed its own cursor-based paging', async () => {
+    // The feed has no page controls and reads one cursor page at a time; the
+    // list's Previous/Next are the issue list's alone.
     board = boardOf(126);
     const container = await mountApp();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'feed' })); });
 
-    // The feed's own control is labelled for the feed, not for the list.
-    expect(container.querySelector('nav[aria-label="Board feed pages"]')).toBeNull();
     expect(container.querySelector('.feed-more')).toBeNull();
-    // It is absent here only because this fake feed reports 0 entries, so the
-    // log is one page and one page gets no controls.
+    expect(container.querySelector('.issue-pagination')).toBeNull();
     expect(session.readFeed).toHaveBeenCalledWith({ limit: DEFAULT_FEED_LIMIT });
-    // The list's page is untouched by the feed: back on Issues it is page 1.
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'issues' })); });
-    expect(rangeText(container)).toBe('1–50 of 126');
   });
 });

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, fstatSync, openSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, statSync } from 'node:fs';
 import { constants } from 'node:os';
 
 import {
@@ -32,6 +32,7 @@ import {
 } from './lifecycle.js';
 import {
   DEFAULT_VARIANT,
+  LAUNCH_DIRECTORY_MISSING,
   RUNNER_OWNER_TOKEN_ENV,
   activeRunnerFlag,
   deletePendingFlag,
@@ -708,6 +709,27 @@ async function runInvocation(
     return false;
   }
   if (!await claimPendingPrompt(agentId, prompt, options)) return false;
+
+  // A directory that no longer exists produces no pid and no spawn error, and
+  // the recorded reason would otherwise be `OpenCode process had no pid` with
+  // exit 127 -- a note that does not name the real cause at all. This is the
+  // launch-time half of the check the CLI also performs at acceptance: a
+  // directory can disappear in between, and an accepted prompt must still end
+  // with a named reason.
+  if (!statSync(launchCwd, { throwIfNoEntry: false })?.isDirectory()) {
+    await updateMeta(agentId, (current) => {
+      finalizeTerminal(
+        current,
+        'failed',
+        Date.now() / 1000,
+        null,
+        null,
+        `${LAUNCH_DIRECTORY_MISSING}: ${launchCwd}`,
+      );
+      setActiveRunner(current, false);
+    }, options);
+    return false;
+  }
 
   let attempt = 0;
   while (true) {

@@ -102,7 +102,7 @@ The initially attempted direct `@openclaw/opencode-provider` route showed versio
 skew relative to the installed OpenClaw version, so ACPX plus the existing OpenCode
 executable is currently the more useful path.
 
-## Space Bunny model restriction
+## OpenClaw scheduler model restriction
 
 OpenCode already has working authentication on `marceline-dev`.
 
@@ -116,7 +116,7 @@ Its intent is:
 
 - primary model: `opencode-go/step-5-preview-free`;
 - small model: `opencode-go/step-5-preview-free`;
-- the OpenCode provider whitelist contains only `space-bunny-free`.
+- the OpenCode provider whitelist contains only `longcat-2.5-preview-free`.
 
 A dedicated wrapper is used:
 
@@ -126,6 +126,18 @@ A dedicated wrapper is used:
 
 It sets `OPENCODE_CONFIG` to that dedicated configuration before invoking the
 host's OpenCode executable.
+
+The dedicated configuration is versioned at:
+
+```text
+config/opencode-openclaw.json
+```
+
+On `marceline-dev`, the `opencode-go` provider route is intentionally used instead of
+the similarly named `opencode` route. A live control-plane latency probe on 2026-10-07
+returned a trivial LongCat response in about 5 seconds through `opencode-go`, while
+the `opencode` route repeatedly exceeded 35 seconds. This changes the provider path,
+not the scheduler model.
 
 The dedicated config and wrapper were made read-only as useful friction against
 accidental agent modification. This is **not** a strong security boundary while the
@@ -140,7 +152,7 @@ opencode-go/step-5-preview-free
 
 There are therefore two useful layers:
 
-1. OpenClaw policy admits only Space Bunny for the configured agent.
+1. OpenClaw policy admits only LongCat through the `opencode-go` provider for the configured agent.
 2. The OpenCode process launched by OpenClaw sees a dedicated config in which only
    Space Bunny is available.
 

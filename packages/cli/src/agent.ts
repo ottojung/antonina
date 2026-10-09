@@ -46,6 +46,7 @@ import {
   type HostCapacity,
 } from '../../agent-runtime/src/host-capacity.js';
 import {
+  LAUNCH_DIRECTORY_MISSING,
   TERMINAL_STATES,
   activeRunnerFlag,
   deletePendingFlag,
@@ -714,6 +715,11 @@ const DISPLAYABLE_AGENT_ERRORS: readonly string[] = [
   'could not persist the spawned OpenCode process identity; the process was killed and never recorded',
   // runner.ts: a continuation was requested with no underlying session.
   'cannot continue: underlying session not available',
+  // runner.ts: the effective working directory did not exist at spawn time, so
+  // the launch was refused before a child existed. The note names the directory,
+  // so this entry is the prefix and `displayableAgentError` matches it by
+  // `startsWith` rather than by equality.
+  `${LAUNCH_DIRECTORY_MISSING}: `,
   // runner.ts: the backend process produced no pid.
   'OpenCode process had no pid',
   // runner.ts: /proc identity could not be established for a live process.
@@ -784,6 +790,10 @@ export function displayableAgentError(meta: AgentMetadata): string | null {
   const note = meta.error;
   if (typeof note !== 'string' || note.length === 0) return null;
   if (DISPLAYABLE_AGENT_ERRORS.includes(note)) return note;
+  // A note that names a value the producer supplied -- the missing directory in
+  // `LAUNCH_DIRECTORY_MISSING: <path>` -- cannot be listed verbatim. An entry
+  // ending in `: ` is a prefix, and a note that starts with it is displayable.
+  if (DISPLAYABLE_AGENT_ERRORS.some((entry) => entry.endsWith(': ') && note.startsWith(entry))) return note;
   const derived = describeSignalDeath(sanitizeBackendError(meta.backend_error));
   if (derived !== null && derived === note) return note;
   return AGENT_ERROR_WITHHELD;

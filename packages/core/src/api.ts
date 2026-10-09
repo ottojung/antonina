@@ -1,5 +1,6 @@
 import { compareClosedIssues } from './board-v3-store.js';
 import type { BoardOverview, IssueCommentPage, IssueListSummary } from './board-v3-store.js';
+import { newestCommentAt } from './board-v3-store.js';
 import {
   ANTONINA_NAMESPACE,
   BoardDeletedError,
@@ -117,8 +118,8 @@ export interface ReviewRecordInput {
   rationale: string;
 }
 
-export const MAX_ISSUE_BODY_CHARACTERS = 1_000;
-export const MAX_COMMENT_BODY_CHARACTERS = 1_000;
+export const MAX_ISSUE_BODY_CHARACTERS = 10_000;
+export const MAX_COMMENT_BODY_CHARACTERS = 10_000;
 
 function characterCount(value: string): number {
   return Array.from(value).length;
@@ -449,6 +450,7 @@ export class BoardApi {
               updatedAt: issue.updatedAt,
               closedAt: issue.state === 'closed' ? issue.updatedAt : null,
               messageCount: issue.messages.length,
+              lastActivityAt: newestCommentAt(issue.messages),
               hasBody: issue.body.length > 0,
             }));
           // The board whose pages are not materialized yet still has one closed
@@ -985,6 +987,7 @@ export type {
 } from './board-v3-store.js';
 export { closingTimeOf, compareClosedIssues } from './board-v3-store.js';
 export type { ClosedIssueOrderKey } from './board-v3-store.js';
+export { compareIssueActivity, issueLastActivityOf, newestCommentAt } from './board-v3-store.js';
 export {
   EXECUTION_TARGET_ACCESS_METHODS,
   EXECUTION_TARGET_BACKENDS,

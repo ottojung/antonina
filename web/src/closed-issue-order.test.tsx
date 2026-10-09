@@ -320,8 +320,11 @@ describe('closed issue ordering by closing time', () => {
     const closed = nonMonotonicClosed(4);
     const all = [...open, ...closed];
 
+    // The `open` filter is the shared queue, untouched. All Issues is board
+    // issue 180's last-activity order and interleaves the two states, so the
+    // queue order is asserted on the `open` filter alone; the activity order
+    // itself is pinned in `issue-activity-order.test.tsx`.
     expect(visibleIssues(all, [3, 1, 2], 'open').map((each) => each.number)).toEqual([3, 1, 2]);
-    expect(visibleIssues(all, [3, 1, 2], 'all').map((each) => each.number).slice(0, 3)).toEqual([3, 1, 2]);
   });
 });
 

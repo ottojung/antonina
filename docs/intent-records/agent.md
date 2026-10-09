@@ -35,12 +35,20 @@ The follow exists to carry the run's output to the operator who asked for it in 
 This is a statement about the attached foreground follow alone. It is not a claim that every wait in the command surface is unbounded, and it does not forbid a bound where one was deliberately asked for.
 
 $id-9448585901481383
-title: antonina uses OpenCode Space Bunny Free
+title: antonina uses OpenCode Muse Spark 1.3 Contributor Free
 date: 2026/09/23
 source: @ottojung
 kind: constraint
 
-`antonina` must use Space Bunny Free through OpenCode, identified as `opencode/space-bunny-free`. This is the configured `antonina` model and supersedes the previous Muse Spark 1.3 Contributor requirement.
+`antonina` must use Muse Spark 1.3 Contributor Free through OpenCode, identified as `opencode/muse-spark-1.3-contributor-free`. This is the configured `antonina` model and supersedes the temporary LongCat requirement.
+
+$id-5849903270418621
+title: Antonina managed agents use the low OpenCode variant
+date: 2026/10/05
+source: @ottojung
+kind: constraint
+
+Every managed OpenCode invocation launched by `antonina agent` uses `--variant high`. The OpenClaw scheduler also uses `--variant high`. The variant is an Antonina runtime setting, not a caller-selectable per-agent tuning knob. Legacy durable agent records that still contain `variant: low` remain readable for compatibility, but they do not downgrade a newly launched invocation; once that child is published, the durable record is updated to `high` so status reflects what actually ran.
 
 $id-8612645784701677
 title: Agent IDs are case-insensitive and use --id uniformly
@@ -75,3 +83,15 @@ A backend that cannot honour a request is represented as an explicit capability 
 The working directory is not inherited from the invoking shell under any circumstance, including when a directory is omitted and one was observed earlier: the launch directory is resolved from durable state alone, and when no durable value exists the launch is refused by name.
 
 A reported working directory is where the front ran, never where it was going to run. The declaration (`cwd`) is what the launch directory is resolved from, and it is written in the same durable transaction that accepts the prompt. The observation (`invocation_cwd`, `ran in:`) is a separate fact, it is written by the runner in the same durable write that publishes the spawned process identity, and nothing on the accepting side writes it. A value there is therefore only ever a directory a real front was actually launched in: an invocation that is accepted and then never launches leaves the previous observation in place rather than reporting the directory it failed to enter, and a fork reports `never ran` rather than inheriting the source's last launch directory. A pre-launch write here is a lie that outlives the invocation, because the record it leaves is terminal.
+
+$id-7512745100523122386
+title: Collecting a shared conversation database reads then unlinks, and the interval is stated
+date: 2026/10/05
+source: issue-198
+kind: constraint
+
+Removing a dedicated OpenCode database file is a two-step act: the inventory of agent records naming that key is read, and the `.db` and its `-wal` and `-shm` siblings are then unlinked only if that read was complete and named nothing. Between the read and the unlink there is an interval, and this implementation has no exclusive claim on the key across it. A record published inside that interval can name the very key whose unlink is already in flight, and the unlink then removes a conversation that a live record is about to name. This window is a property of the primitives, not of this implementation: POSIX offers no compare-and-unlink, so nothing in ordinary Node or POSIX can make the judgment and the removal one act, and no lock is held across the read and the unlink. Narrowing the interval — re-read the inventory as late as the removal decision, and refuse unless the read is complete and the key is absent from it — is the whole of what is available, and an implementation that keeps the interval is not thereby claiming it closed.
+
+What bounds the interval is the surrounding lifecycle rather than any claim about the key. A fork that reads its source after the delete tombstone is refused, because a source marked `delete_pending` blocks a fork. The reachable case is therefore the narrower one: a fork that read its source and passed that check before the tombstone was written, and that publishes its clone after the unlink has already happened. That case is not closed here, and this statement is the reason: a reader must not come away believing the re-read guarantees no record names the key, because it guarantees only that no record named it at the instant it was read. The alternative considered and rejected is to hold a lock across the read and the unlink. It is worse rather than better, for the reason recorded for the stale-lock reclaim in `hosts.md`: naming the lock would not make the judgment and the removal atomic either, it would add a second unwitnessed step to a destructive path, and the residual interval would then be larger and no longer stated. Trading this interval for a longer unstated one is not an improvement.
+
+This is a statement about the interval alone. It does not weaken what the read must establish before the unlink: an inventory that could not be enumerated, or a record whose metadata could not be read or did not validate, is not an inventory that licenses an unlink, and a key the read names is not collected.

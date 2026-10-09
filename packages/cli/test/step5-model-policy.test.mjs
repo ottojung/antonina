@@ -19,7 +19,8 @@ test('canonical Step 5 intent matches all executable model-selection surfaces', 
   assert.ok(cli.includes('configured OpenCode model ' + model + ' is unavailable'));
   const turn = source('../../../scripts/antonina-orchestrator-turn');
   assert.ok(turn.includes('--model ' + model));
-  assert.match(turn, /FINISH THE BOUNDED TURN/);
+  assert.match(turn, /FULL-FRONTIER DISPATCH/);
+  assert.match(turn, /Return only when no more independent positive-speedup fronts remain/);
   const config = JSON.parse(source('../../../config/opencode-openclaw.json'));
   assert.equal(config.model, model);
   assert.equal(config.small_model, model);

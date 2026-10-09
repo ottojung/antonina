@@ -843,3 +843,68 @@ Two more deltas this front is responsible for, stated as such:
   `--json` is an unknown option again (exit 2), and `stop`/`kill` still converge -- returning only
   once the invocation and the detached runner are both gone. The two other cases that had used
   `stop --json` as their convergence mechanism now use plain `stop`.
+
+## Addendum: the board-178 `--cwd` delta, measured on `d50e121c`'s successor
+
+Stated rather than folded into the tables above, which are keyed to `65caa73` and are not
+re-measured by this change. The per-package numbers are a `^test(` census over
+`packages/<pkg>/test/*.test.mjs`, so they are a few lower than the counts `node --test` reports
+(it counts generated and repeated cases the census does not see); the deltas are what matter and
+both sides of every delta are counted the same way. Board issue 178's first half adds the `invocation_cwd` observation and
+its second half adds the backend capability gate; together they add **11** `^test(` cases to four
+files and touch no other test file, so the per-package movement is
+**agent-runtime 187 → 190** and **cli 206 → 214**, with core, daemon and web unchanged by
+construction (`git diff --stat 7565ee11..HEAD -- 'packages/*/test/*' web/src` names those four
+files only).
+
+| file | `7565ee11` | head |
+|---|---|---|
+| `packages/agent-runtime/test/backend.test.mjs` | 22 | 24 (**+2**) |
+| `packages/agent-runtime/test/metadata.test.mjs` | 9 | 10 (**+1**) |
+| `packages/agent-runtime/test/fork.test.mjs` | 13 | 13 (changed, no case added) |
+| `packages/cli/test/agent.e2e.test.mjs` | 46 | 53 (**+7**) |
+| `packages/cli/test/agent-fork.test.mjs` | 8 | 9 (**+1**) |
+
+The two `backend.test.mjs` cases are the capability answer's own contract (`backendCapabilities`
+reports the real backend, and only an exact token withdraws a capability) and the fail-closed
+predicate (`honoursInvocationCwd`). The `agent.e2e` cases are the four capability-gate refusals
+(`run` with a directory named now and one declared earlier, `new`, `new --fork`) and the
+empty-or-whitespace `--cwd` refusal at both entry points and the accepted-then-never-launched
+observation; the `agent-fork` case is the fork that reports `never ran`. Counts were observed with `XDG_STATE_HOME` and `XDG_CONFIG_HOME` each on a
+fresh `mktemp -d`.
+
+## Addendum: the board-198 sweep-isolation delta, measured on this head's successor
+
+Board issue 198 changes **which command absorbs a metadata read refusal**, and nothing else.
+`validateAgentMetadata`, `readMeta` and every single-agent command keep the same refusal with the
+same exit code; the sweep commands `agent list` and `agent clean` now isolate each directory's
+read, report an unreadable agent by id, and serve the rest of the inventory.
+
+The measured reproduction, in a `mktemp -d` world with both XDG roots replaced and no backend
+launched: four records, three readable, one carrying `invocation_cwd` —
+
+| command | before | after |
+|---|---|---|
+| `agent list --page 1` | exit 1, `metadata for ddd4 ... fields are not canonical`, **no rows** | exit 0, three rows, `ddd4` named on stderr and in `--json` `unreadable` |
+| `agent clean --dry-run` | exit 1, same refusal, sweep aborted | exit 0, sweep runs, `ddd4` retained and named |
+| `agent status --id <readable>` | exit 0 | exit 0 (unchanged) |
+| `agent status/stop/kill/delete/run --id ddd4` | exit 1, validator's reason | exit 1, validator's reason (unchanged) |
+
+`invocation_cwd` is not a hand-written fiction: it is the board-178 field on this release line
+(`OPTIONAL_TOP_LEVEL_FIELDS`, `packages/agent-runtime/src/metadata.ts`), introduced by `d50e121c`
+"Record where an invocation actually ran, as an observation", which is 33 commits after `7565ee11`
+— the build the operator has globally installed as `antonina 0.1.2`. That installed
+`dist/packages/agent-runtime/src/metadata.js` contains zero occurrences of `invocation_cwd`, so
+the installed binary refuses every record this line writes, in either direction of the skew. The
+skew is a deployment fact, not a defect here, and is reported in
+`/workspace/BOARD198-AGENTLIST-2030Z.md` rather than changed.
+
+Coverage added: `packages/cli/test/agent-list-resilient.test.mjs`, 4 `^test(` cases (cli
+**+4**), touching no other test file except one changed assertion in
+`packages/cli/test/agent.e2e.test.mjs` (46 → 53 unchanged from board 178; the case at
+`test('status fails closed on malformed or old metadata, ...')` previously asserted that `list`
+exits 1 on the malformed record, which is the defect, and now asserts exit 0 with the record named).
+Deleting the isolation turns the new file red in 2 of 4 cases (the readable ones still list, the
+unreadable one is not named, `clean` aborts) and restores it to green on revert. All runs above
+used `XDG_STATE_HOME` and `XDG_CONFIG_HOME` each on a fresh `mktemp -d`, and no run touched the
+operator's real `$XDG_STATE_HOME/antonina`.

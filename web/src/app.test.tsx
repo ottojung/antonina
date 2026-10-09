@@ -13,6 +13,9 @@ import { DEFAULT_FEED_LIMIT, type BoardFeedEntry, type BoardFeedEntryKind, type 
 import type { BoardIssue } from './model';
 import type { BoardOverview, IssueCommentPage } from '../../packages/core/src/api';
 import type { BoardAccessState } from '../../packages/core/src/api';
+// Board issue 180's All Issues key, so this fixture mirrors what core's store
+// writes: the newest comment's time, or null when the issue has no comments.
+import { newestCommentAt } from '../../packages/core/src/api';
 import type { BrowserBoardSession } from './api';
 
 const STAMP = '2026-09-27T12:00:00.000Z';
@@ -111,6 +114,7 @@ function overview(issues: BoardIssue[]): BoardOverview {
       updatedAt: each.updatedAt,
       closedAt: each.state === 'closed' ? each.updatedAt : null,
       messageCount: each.messages.length,
+      lastActivityAt: newestCommentAt(each.messages),
       hasBody: each.body.length > 0,
     })),
     resources: [],

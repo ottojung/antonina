@@ -28,11 +28,12 @@ import {
 } from './ui-state';
 
 const timestamp = '2026-09-25T12:00:00.000Z';
-// `closedAt` is carried the way the app's summaries carry it (`null` for an
-// open issue), because `visibleIssues` orders with core's closed-issue key and
-// that key requires the field: a fixture without it is a shape no caller sends.
-function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue & { closedAt: string | null } {
-  return { number, title: `Issue ${number}`, body: '', state, createdAt: timestamp, updatedAt: timestamp, closedAt: state === 'closed' ? timestamp : null, messages: [] };
+// Board issue 180 widened the bound `visibleIssues` sorts under, because All
+// Issues keys on last activity. These fixtures carry `lastActivityAt` alongside
+// the `BoardIssue` fields so they satisfy it; `null` is "never commented", which
+// is what every fixture here is.
+function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue & { closedAt: string | null; lastActivityAt: string | null } {
+  return { number, title: `Issue ${number}`, body: '', state, createdAt: timestamp, updatedAt: timestamp, closedAt: state === 'closed' ? timestamp : null, messages: [], lastActivityAt: null };
 }
 const issues = [issue(1), issue(2), issue(3)];
 const queue = [3, 1, 2];
@@ -311,26 +312,38 @@ describe('issue queue wiring', () => {
     const withClosed = [...issues, issue(4, 'closed')];
     const all = visibleIssues(withClosed, [2, 1, 3], 'all');
     const mixed = rows({ issues: all, queue: [2, 1, 3] });
-    expect(mixed.map((row) => row.props['data-issue'])).toEqual([2, 1, 3, 4]);
+    // Board issue 180: All Issues is ordered by last activity, and every fixture
+    // here ties on it, so the order is descending issue number. This case is
+    // about which rows are drop targets, so the closed row is located by number
+    // rather than by position -- the order is not what it is asserting.
+    expect(mixed.map((row) => row.props['data-issue'])).toEqual([4, 3, 2, 1]);
     const positions = rendered({ issues: all, queue: [2, 1, 3] }).filter((node) => node.props.className === 'queue-position');
     expect(positions).toHaveLength(3);
-    expect(positions.map((node) => spokenTextOf(node))).toEqual(['Priority 1', 'Priority 2', 'Priority 3']);
+    // Each open row's priority label comes from the shared queue, not from where
+    // the row happens to be drawn. Board issue 180 moved the drawing order to last
+    // activity, so the labels now read 3, 1, 2 across the rows in the order they
+    // are drawn -- queue position and row position are deliberately independent.
+    expect(positions.map((node) => spokenTextOf(node))).toEqual(['Priority 3', 'Priority 1', 'Priority 2']);
     // A closed row would be a drop the queue cannot hold, so it is not a drop
     // target at all: the browser is never offered an accepted-drop cursor, and
     // there is no handle to start a drag from, so no drag can start that could
     // only fail. The three open rows each accept a drop on the whole row, and
     // each of them wires the draggable flag to the same single start handler.
-    const closed = mixed[3];
-    expect(closed.props['data-issue']).toBe(4);
+    const closed = mixed.find((row) => row.props['data-issue'] === 4)!;
+    expect(closed).toBeDefined();
     expect(closed.props.onDragOver).toBeUndefined();
     expect(closed.props.onDrop).toBeUndefined();
     expect(closed.props.draggable).toBeUndefined();
     expect(inside(closed).filter((node) => node.props.draggable !== undefined)).toEqual([]);
     expect(inside(closed).filter((node) => node.props.onDragOver !== undefined || node.props.onDrop !== undefined || node.props.onDragStart !== undefined)).toEqual([]);
     expect(grips({ issues: all, queue: [2, 1, 3] })).toHaveLength(3);
-    expect(mixed.slice(0, 3).every((row) => row.props.onDragOver === allowIssueDrop)).toBe(true);
-    expect(mixed.slice(0, 3).every((row) => typeof row.props.onDrop === 'function')).toBe(true);
-    expect(mixed.slice(0, 3).every((row) => gripOf(row).props.draggable === true && gripOf(row).props.onDragStart === issueDragStarted)).toBe(true);
+    // The three open rows, selected by state rather than by position: the All
+    // Issues drawing order is activity, so the closed row is no longer last.
+    const openRows = mixed.filter((row) => row.props['data-issue'] !== 4);
+    expect(openRows).toHaveLength(3);
+    expect(openRows.every((row) => row.props.onDragOver === allowIssueDrop)).toBe(true);
+    expect(openRows.every((row) => typeof row.props.onDrop === 'function')).toBe(true);
+    expect(openRows.every((row) => gripOf(row).props.draggable === true && gripOf(row).props.onDragStart === issueDragStarted)).toBe(true);
     // A closed issue is not in the shared order, so it is never the selected
     // row that carries the move-to control.
     expect(moveToControls({ issues: all, queue: [2, 1, 3] })).toHaveLength(0);

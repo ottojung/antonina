@@ -1,4 +1,4 @@
-import { BoardDeletedError, BoardTrustRequiredError, compareClosedIssues, DEFAULT_FEED_LIMIT } from './api';
+import { BoardDeletedError, BoardTrustRequiredError, compareClosedIssues, compareIssueActivity, DEFAULT_FEED_LIMIT } from './api';
 import type {
   BoardFeedEntry,
   BoardFeedEntryKind,
@@ -294,16 +294,42 @@ export function closedIssueOrder<T extends ClosedIssueOrderKey & Pick<BoardIssue
 }
 
 /**
- * The issues a filter shows. `open` is the shared queue, `closed` is the
- * unqueued tail, and `all` is the queue first with the closed tail after it, so
- * the open work a reader came for is always at the top in priority order.
+ * What the All Issues order needs to see: identity and state, plus the two
+ * fields the activity order keys on. This is the union of the closed order's
+ * bound and the activity order's bound, because `visibleIssues` applies one or
+ * the other depending on the filter.
  */
-export function visibleIssues<T extends ClosedIssueOrderKey & Pick<BoardIssue, 'state'>>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
+type ActivitySortable = Pick<BoardIssue, 'number' | 'state'> & Pick<IssueListSummary, 'createdAt' | 'lastActivityAt'>;
+
+/**
+ * Every issue, most recently active first.
+ *
+ * This is the All Issues order, and it is the only place an issue's timestamps
+ * decide its position. `open` keeps the shared queue and `closed` keeps the
+ * board's own closing-time order, both of which the board commits to; All Issues
+ * is the view a reader opens to ask "what moved recently", and answering that by
+ * issue number, by creation order or by closing time answers a different
+ * question.
+ *
+ * Open and closed issues interleave here. That is the point: an issue that was
+ * just commented on is the most recent activity on the board whether or not it
+ * has been closed.
+ */
+export function activityIssueOrder<T extends ActivitySortable>(issues: readonly T[]): T[] {
+  return [...issues].sort(compareIssueActivity);
+}
+
+/**
+ * The issues a filter shows. `open` is the shared queue, `closed` is the
+ * board's closing-time order, and `all` is every issue by last activity.
+ */
+export function visibleIssues<T extends ClosedIssueOrderKey & ActivitySortable>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
+  if (filter === 'all') return activityIssueOrder(issues);
   const byNumber = new Map(issues.map((issue) => [issue.number, issue]));
   const open = openQueueOrder(issues, queue).map((number) => byNumber.get(number)!);
   if (filter === 'open') return open;
   const closed = closedIssueOrder(issues).map((number) => byNumber.get(number)!);
-  return filter === 'closed' ? closed : [...open, ...closed];
+  return closed;
 }
 
 /**

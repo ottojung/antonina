@@ -37,6 +37,64 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const SHORT_COMMIT_LENGTH = 12;
 
+function normalizeTimestamp(value, label) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) {
+    throw new BuildIdentityError(
+      `build identity: ${label} must be a valid timestamp, got ${JSON.stringify(value)}`,
+    );
+  }
+  return date.toISOString();
+}
+
+function describeFromGit(repoRoot) {
+  try {
+    const value = git(repoRoot, ['describe']).trim();
+    return value === '' ? null : value;
+  } catch {
+    return null;
+  }
+}
+
+function commitTimeFromGit(repoRoot, commit) {
+  try {
+    const value = git(repoRoot, ['show', '-s', '--format=%cI', commit]).trim();
+    return value === '' ? null : normalizeTimestamp(value, 'Git commit time');
+  } catch {
+    return null;
+  }
+}
+
+function resolveDescribe(repoRoot, env) {
+  const override = env.ANTONINA_BUILD_DESCRIBE;
+  if (override !== undefined && override !== '') return override;
+  const value = describeFromGit(repoRoot);
+  if (value !== null) return value;
+  throw new BuildIdentityError(
+    'build identity: cannot determine `git describe` output; set ANTONINA_BUILD_DESCRIBE when Git history is unavailable',
+  );
+}
+
+function resolveCommitTime(repoRoot, env, commit) {
+  const override = env.ANTONINA_BUILD_COMMIT_TIME;
+  if (override !== undefined && override !== '') {
+    return normalizeTimestamp(override, 'ANTONINA_BUILD_COMMIT_TIME');
+  }
+  const value = commitTimeFromGit(repoRoot, commit);
+  if (value !== null) return value;
+  throw new BuildIdentityError(
+    'build identity: cannot determine commit time; set ANTONINA_BUILD_COMMIT_TIME when Git history is unavailable',
+  );
+}
+
+function resolveDeployTime(env) {
+  const value = env.ANTONINA_DEPLOY_TIME;
+  return normalizeTimestamp(
+    value === undefined || value === '' ? new Date().toISOString() : value,
+    'ANTONINA_DEPLOY_TIME',
+  );
+}
+
 export const CLI_VERSION_MANIFEST = 'packages/cli/package.json';
 export const WEB_VERSION_MANIFEST = 'web/package.json';
 
@@ -129,18 +187,22 @@ export function resolveBuildIdentity(options = {}) {
   if (resolved === null) {
     throw new BuildIdentityError(
       'build identity: cannot determine the source Git commit.'
-        + ` Neither ANTONINA_BUILD_COMMIT nor \`git rev-parse HEAD\` yielded one in ${repoRoot}.`
+        + ' Neither ANTONINA_BUILD_COMMIT nor git rev-parse HEAD yielded one in ' + repoRoot + '.'
         + ' Refusing to build an artifact that cannot name its own revision.'
         + ' In CI this is set from the checked-out revision; locally it means this'
         + ' is not a Git checkout, so pass ANTONINA_BUILD_COMMIT explicitly.',
     );
   }
 
+  const commitTime = resolveCommitTime(repoRoot, env, resolved.commit);
   const shared = {
     commit: resolved.commit,
     shortCommit: resolved.commit.slice(0, SHORT_COMMIT_LENGTH),
     dirty: resolved.dirty,
     source: resolved.source,
+    describe: resolveDescribe(repoRoot, env),
+    commitTime,
+    deployTime: resolveDeployTime(env),
   };
   return {
     cli: { version: readManifestVersion(join(repoRoot, CLI_VERSION_MANIFEST)), ...shared },
@@ -176,6 +238,12 @@ function renderModule(exportName, identity, extra = []) {
     '  readonly dirty: boolean;',
     '  /** Where the commit came from: the working tree, or an explicit override. */',
     '  readonly source: BuildIdentitySource;',
+    '  /** Exact output of `git describe` for this source revision. */',
+    '  readonly describe: string;',
+    '  /** Committer timestamp of the source revision, normalized to ISO 8601. */',
+    '  readonly commitTime: string;',
+    '  /** Timestamp when this installed artifact was produced. */',
+    '  readonly deployTime: string;',
     '}',
     '',
     `export const ${exportName}: BuildIdentity = {`,
@@ -184,6 +252,9 @@ function renderModule(exportName, identity, extra = []) {
     `  shortCommit: ${JSON.stringify(identity.shortCommit)},`,
     `  dirty: ${JSON.stringify(identity.dirty)},`,
     `  source: ${JSON.stringify(identity.source)},`,
+    `  describe: ${JSON.stringify(identity.describe)},`,
+    `  commitTime: ${JSON.stringify(identity.commitTime)},`,
+    `  deployTime: ${JSON.stringify(identity.deployTime)},`,
     '};',
     ...extra,
     '',

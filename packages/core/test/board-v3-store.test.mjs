@@ -203,6 +203,54 @@ async function overwriteStoredBlocks(server, shards, blocks) {
   }
 }
 
+/**
+ * The two positions an issue is materialized in, as predicates over a shard, so
+ * a test can put a shape in the snapshot alone or in the projection alone and
+ * read the consequence in only one of the two readers.
+ */
+function isSnapshotShard([, entry]) {
+  return entry.value?.issue !== undefined;
+}
+
+function isProjectionShard([, entry]) {
+  return Array.isArray(entry.value?.entries);
+}
+
+async function putShard(server, key, stored) {
+  const response = await server.fetch(`https://example.invalid/_skrynia/store/antonina/${key}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-Skrynia-Capability': server.capabilityOf(key) },
+    body: JSON.stringify(stored),
+  });
+  assert.equal(response.status, 200, 'the contract double must model anonymous overwrite');
+}
+
+/**
+ * Writes `value` into `field` in exactly one materialized position, leaving
+ * every other shard and every other field of the same entry as this build wrote
+ * it, so a test can put one shape in the snapshot alone or in the projection
+ * alone and read the consequence in only one reader.
+ */
+async function writeStoredField(server, shards, field, value) {
+  for (const [key] of shards) {
+    const entry = server.objects.get(key);
+    const stored = entry.value.issue !== undefined
+      ? { ...entry.value, issue: { ...entry.value.issue, [field]: value } }
+      : {
+        ...entry.value,
+        entries: entry.value.entries.map((summary) => (
+          summary[field] === undefined ? summary : { ...summary, [field]: value }
+        )),
+      };
+    await putShard(server, key, stored);
+    const reread = server.objects.get(key).value;
+    assert.deepEqual(
+      (reread.issue ?? reread.entries[0])[field], value,
+      'the overwrite must land, or the refusal below would prove nothing',
+    );
+  }
+}
+
 function findMeta(server, head) {
   return materializedObjects(server).find(([, entry]) =>
     entry.value?.schemaVersion === 2
@@ -611,6 +659,112 @@ test('a shard carrying a verdict this build does not name is refused, not read a
       /stored review verdict is malformed/,
       `readIssuePage must refuse a review whose commit is ${what}`,
     );
+  }
+});
+
+// Repairs D1 and D3 of /workspace/BOARD44-F1REVIEW-1128Z.md. Both were the same
+// one-line `=== null` arm written twice, and they failed in opposite ways: in the
+// issue-snapshot reader it mapped a stored explicit null to "absent", so a
+// blocked issue was served as never reviewed and `issue.close` completed it
+// (the false clear, and mutant M8 showed no test covered the arm); in the
+// projection reader it was meant to tolerate the null but could not take the key
+// back out of the spread of `clone(entry)` that preceded it, so a stored null
+// reached `issueFromSummary` and the mutation path died of
+// `TypeError: summary.outstandingBlocks is not iterable` instead of naming a
+// refusal.
+//
+// The shape is one no writer in this repository produces -- `coreOf` omits the
+// key -- and the model already refuses it (`isIssue` accepts `review` only when
+// it is undefined or `isReview`, and `isReview(null)` is false), so a stored null
+// is a shard written by something this build does not understand and the only
+// honest reading of it is the named refusal. Each shape is put in one
+// materialized position alone, so the assertion names the reader that refuses it.
+test('a stored null is refused by name in each materialized position, and never reads as no review', async () => {
+  const server = fakeSkrynia();
+  const store = deterministicStore(server);
+  const initialized = await store.initialize();
+  const created = await store.appendFast(initialized.credential, {
+    kind: 'issue.create',
+    payload: { number: 1, title: 'Blocked', body: '' },
+  });
+  await store.appendFast(initialized.credential, {
+    kind: 'review.record',
+    payload: {
+      number: 1,
+      commit: 'a'.repeat(40),
+      verdict: 'request-changes',
+      reviewer: 'independent',
+      rationale: 'recommend no merge',
+    },
+  }, created.state.head);
+
+  // The shard is written by this build first, so the field under test exists in
+  // both positions before anything is corrupted; otherwise a null would be
+  // indistinguishable from the absent key that legitimately means "no review".
+  assert.deepEqual((await store.getIssue(initialized.credential, 1)).outstandingBlocks, ['a'.repeat(40)]);
+  const reviewShards = shardsCarryingReview(server);
+  const blockShards = shardsCarryingBlocks(server);
+  assert.ok(reviewShards.length >= 2, 'the verdict must be materialized in both the snapshot and the projection');
+  assert.ok(blockShards.length >= 2, 'the block list must be materialized in both the snapshot and the projection');
+
+  // Each entry is [which position, which shard list, which field, which refusal].
+  // Each shape is written and then restored to the value this build wrote before
+  // the next one, so no refusal below can be the previous shape's refusal still
+  // sitting on the shard.
+  const isSnapshot = (where) => where === 'the issue snapshot';
+  const shapes = [
+    ['the issue snapshot', isSnapshotShard, 'review', /stored review verdict is malformed/],
+    ['the list projection', isProjectionShard, 'review', /stored review verdict is malformed/],
+    ['the issue snapshot', isSnapshotShard, 'outstandingBlocks', /stored outstanding review blocks are malformed/],
+    ['the list projection', isProjectionShard, 'outstandingBlocks', /stored outstanding review blocks are malformed/],
+  ];
+  for (const [where, inPosition, field, refusal] of shapes) {
+    const carried = field === 'review' ? reviewShards : blockShards;
+    const targets = carried.filter(inPosition);
+    const others = carried.filter((shard) => !inPosition(shard));
+    assert.ok(targets.length >= 1, `${where} must materialize ${field}, or the shape below proves nothing`);
+    assert.ok(others.length >= 1, `${where}'s twin position must exist, or the shape below proves nothing`);
+    const storedField = (key) => (
+      server.objects.get(key).value.issue ?? server.objects.get(key).value.entries[0]
+    )[field];
+    const pristine = targets.map(([key]) => storedField(key));
+    const otherPristine = others.map(([key]) => storedField(key));
+
+    await writeStoredField(server, targets, field, null);
+    const reader = deterministicStore(server);
+    const read = isSnapshot(where)
+      ? () => reader.getIssue(initialized.credential, 1)
+      : () => reader.readIssuePage(initialized.credential, 'open', 1);
+    // The refusal must be this build's own, at the reader under test, and not a
+    // throw from somewhere downstream of it: a `TypeError` on the way out of
+    // `issueFromSummary` would be the D3 crash wearing a different message.
+    await assert.rejects(read, refusal, `${where} must refuse a stored ${field} of null by name`);
+    await read().then(
+      (served) => assert.fail(`a stored ${field} of null in ${where} was read as a clear record`),
+      (error) => {
+        assert.equal(
+          error.constructor.name, 'SignedBoardStoreError',
+          `${where} must refuse with the store's own refusal type, not ${error.constructor.name}`,
+        );
+        assert.match(error.message, refusal);
+      },
+    );
+
+    // The twin position, untouched, still serves the intact record: what is
+    // refused is the shape, not the board.
+    const other = deterministicStore(server);
+    const served = isSnapshot(where)
+      ? (await other.readIssuePage(initialized.credential, 'open', 1)).entries[0]
+      : await other.getIssue(initialized.credential, 1);
+    const otherValue = served[field];
+    assert.ok(
+      otherPristine.some((value) => JSON.stringify(value) === JSON.stringify(otherValue)),
+      `${where}'s twin position must be unaffected by the shape written here`,
+    );
+
+    targets.forEach(([key], index) => writeStoredField(server, [[key]], field, pristine[index]));
+    const restored = targets.map(([key]) => storedField(key));
+    assert.deepEqual(restored, pristine, 'each shape must be restored before the next');
   }
 });
 

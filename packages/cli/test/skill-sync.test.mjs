@@ -16,7 +16,7 @@ test('versioned OpenClaw skill stays in sync with canonical skill docs', () => {
   const frontmatter = [
     '---',
     'name: antonina-orchestrator',
-    'description: Coordinate recurring software work through the Antonina board queue and append-only issue history.',
+    'description: Reason over the board work graph and delegate all useful independent fronts; leave repository, filesystem and implementation work to agents.',
     '---',
     '',
     '',

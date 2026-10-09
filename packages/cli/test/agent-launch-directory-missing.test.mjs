@@ -33,9 +33,16 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 import { beginInvocation } from '../dist/packages/agent-runtime/src/lifecycle.js';
-import { LAUNCH_DIRECTORY_MISSING } from '../dist/packages/agent-runtime/src/metadata.js';
+import { LAUNCH_DIRECTORY_MISSING, mintRunnerReservationOwnerToken } from '../dist/packages/agent-runtime/src/metadata.js';
+import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import { runManagedRunner } from '../dist/packages/agent-runtime/src/runner.js';
 import { metaPath, readMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
+
+// Board 197: the reservation is claimed against the owner's identity, and on the
+// `self` shape that is pid plus the process's own live start time plus the
+// per-invocation token the launcher minted. These fixtures are the launcher, so
+// they carry the same evidence a real one does rather than a name alone.
+const LAUNCHER_TOKEN = mintRunnerReservationOwnerToken();
 
 const CLI = resolve('packages/cli/dist/packages/cli/src/main.js');
 const REPO_FIXTURE_PARENT = resolve('.antonina-test-tmp');
@@ -115,6 +122,9 @@ function fixture(t) {
     // can read or write the operator's real ~/.config/antonina.
     XDG_CONFIG_HOME: join(root, 'config'),
     ANTONINA_OPENCODE_BIN: opencode,
+    // The runner this file drives directly is the one the reservation above was
+    // minted for, so it is handed the token exactly as a real launcher hands it.
+    ANTONINA_RUNNER_OWNER_TOKEN: LAUNCHER_TOKEN,
   };
   const direct = spawnSync(opencode, ['models'], { env, encoding: 'utf8', timeout: 15_000 });
   assert.equal(
@@ -147,7 +157,8 @@ function reservation(overrides = {}) {
     mode: 'new',
     reserved_at: 1,
     owner_pid: process.pid,
-    owner_start_ticks: 0,
+    owner_start_ticks: procStartTicks(process.pid) ?? 0,
+    owner_token: LAUNCHER_TOKEN,
     ...overrides,
   };
 }

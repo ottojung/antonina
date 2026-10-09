@@ -272,10 +272,13 @@ export interface BoardIssue {
    */
   review?: BoardReview;
   /**
-   * The commits a `request-changes` verdict named that no approval has yet
-   * cleared, so that the newest verdict is not the only thing that decides
-   * whether an approval is legitimate.
+   * Every commit a `request-changes` verdict on this issue has named, so that
+   * the newest verdict is not the only thing that decides whether an approval is
+   * legitimate.
    *
+   * This is the permanent record of what has been blocked, not the set of
+   * blockers still in force. The distinction is load-bearing in both
+   * directions, and it is the one the field's earlier description got backwards.
    * Keeping only the newest verdict made the override rule order-dependent: an
    * `approve` about one commit followed by a re-block about another commit left
    * the first blocked commit with nothing on the board to stop a later approval
@@ -284,7 +287,19 @@ export interface BoardIssue {
    * whatever verdicts were recorded since, and an entry is removed only by an
    * approval that names that same commit -- which is refused while it is here.
    * So the set only ever grows, which is the right direction for a record whose
-   * whole purpose is to refuse.
+   * whole purpose is to refuse, and which is what
+   * docs/skills/orchestrator.md means by "the board keeps every commit a block
+   * named, so no ordering of approvals and re-blocks can launder one out".
+   *
+   * What clears a block is a different thing, and it is the verdict, not this
+   * set: docs/skills/itinerary-antonina.md states that "a block is cleared only
+   * by an approval naming a commit that no `request-changes` on that issue has
+   * named", so `request-changes(a)` followed by `approve(c)` has cleared the
+   * blocker and the issue may complete. Reading this set as a completion gate
+   * would contradict that sentence and would also make completion unreachable
+   * for good after any single block ever existed, because the set never empties.
+   * So the set is the override rule's memory, and
+   * {@link reviewBlocksCompletion} reads the verdict alone.
    *
    * Optional and append-only, like `review`: a board signed before the field
    * existed still parses and replays.
@@ -302,6 +317,15 @@ export interface BoardIssue {
  * a `request-changes` verdict blocks; an `approve` and an absent review both
  * return `null`, so an issue that was never reviewed is not blocked by the
  * absence of a review, which is a different statement from being approved.
+ *
+ * `outstandingBlocks` is deliberately not consulted, and the reason is that the
+ * two fields answer different questions: this one answers whether the work as it
+ * stands is cleared, which is the newest verdict, and `outstandingBlocks`
+ * answers which commits may never be approved. An approval naming a commit no
+ * block named is the review that cleared the blocker, so reading the permanent
+ * block record as a second, permanent blocker would make the two rules
+ * contradict each other and would refuse the close of work the board has already
+ * cleared.
  */
 export function reviewBlocksCompletion(issue: Pick<BoardIssue, 'number' | 'review'>): string | null {
   const review = issue.review;
@@ -351,9 +375,18 @@ export function reviewMayReplace(
 /**
  * The issue's outstanding blocked commits after `next` is recorded.
  *
- * A block adds its commit; an approval removes exactly the commit it names,
- * which can only ever be one the previous state did not hold. Everything else
- * is carried forward unchanged, which is what makes the record order-independent.
+ * A block adds its commit. An approval removes exactly the commit it names,
+ * which is normally none of them: `reviewMayReplace` refuses an approval that
+ * names a commit already in the set, and an approval that names a different
+ * commit is the review that cleared the block rather than one that discharges
+ * the commit it names, so the set is carried forward and only grows. The one
+ * case the filter below does remove is the unnamed block: an approval that
+ * names a commit clears the `['']` entry, because that is the shape fix 3 in
+ * /workspace/BOARD44-REVIEW-2600.md decides explicitly -- a block that named no
+ * commit is cleared by the first approval that names one, because that approval
+ * is the review that finally looked at a tree. That makes the field's set
+ * shrink in exactly the one case the normative text says it does, and never
+ * anywhere else.
  */
 export function outstandingBlocksAfter(
   issue: Pick<BoardIssue, 'outstandingBlocks'>,

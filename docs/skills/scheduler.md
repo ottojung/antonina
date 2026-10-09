@@ -121,6 +121,10 @@ For the currently selected breadth candidate:
 
 This is a latency rule: worktree topology answers "can this front run independently?" It is not an invitation for branch archaeology.
 
+## Recover an original agent
+
+For failed work, inspect the exact agent ID in the issue's newest handoff comment. If `antonina agent status --id ID --json` confirms the agent is terminal, not alive and owns the same unoccupied registered cwd, use `antonina-scheduler-launch --resume-agent ID` with the normal required issue, cwd, title, summary and prompt flags. Supply a reconciliation prompt, not an unsafe replay of partially executed actions. Do not scan global historical inventories or reuse an unverified ID.
+
 ## Worktree and collision discipline
 
 Occupied cwd is a hard scheduling constraint.

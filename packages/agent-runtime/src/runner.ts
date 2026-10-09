@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, fstatSync, openSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, statSync } from 'node:fs';
 import { constants } from 'node:os';
 
 import {
@@ -32,6 +32,7 @@ import {
 } from './lifecycle.js';
 import {
   DEFAULT_VARIANT,
+  LAUNCH_DIRECTORY_MISSING,
   RUNNER_OWNER_TOKEN_ENV,
   activeRunnerFlag,
   deletePendingFlag,
@@ -720,6 +721,15 @@ async function runInvocation(
     if (!authorization.allowed) {
       await updateMeta(agentId, (current) => {
         finalizeTerminal(current, 'failed', Date.now() / 1000, null, null, authorization.reason!);
+        setActiveRunner(current, false);
+      }, options);
+      return false;
+    }
+    let directoryExists = false;
+    try { directoryExists = statSync(launchCwd).isDirectory(); } catch { directoryExists = false; }
+    if (!directoryExists) {
+      await updateMeta(agentId, (current) => {
+        finalizeTerminal(current, 'failed', Date.now() / 1000, null, null, LAUNCH_DIRECTORY_MISSING + ': ' + launchCwd);
         setActiveRunner(current, false);
       }, options);
       return false;

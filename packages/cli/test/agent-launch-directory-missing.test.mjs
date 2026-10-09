@@ -33,13 +33,15 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 import { beginInvocation } from '../dist/packages/agent-runtime/src/lifecycle.js';
-import { LAUNCH_DIRECTORY_MISSING } from '../dist/packages/agent-runtime/src/metadata.js';
+import { LAUNCH_DIRECTORY_MISSING, mintRunnerReservationOwnerToken } from '../dist/packages/agent-runtime/src/metadata.js';
+import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import { runManagedRunner } from '../dist/packages/agent-runtime/src/runner.js';
 import { metaPath, readMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
 
 const CLI = resolve('packages/cli/dist/packages/cli/src/main.js');
 const REPO_FIXTURE_PARENT = resolve('.antonina-test-tmp');
 const PROBE_SENTINEL = 'ANTONINA-LAUNCHDIR-EXEC-OK';
+const TEST_RESERVATION_TOKEN = mintRunnerReservationOwnerToken();
 
 // Copied in full from `agent.e2e.test.mjs` rather than imported: this file must
 // stay runnable on its own, and it deliberately shares no module state with the
@@ -115,6 +117,7 @@ function fixture(t) {
     // can read or write the operator's real ~/.config/antonina.
     XDG_CONFIG_HOME: join(root, 'config'),
     ANTONINA_OPENCODE_BIN: opencode,
+    ANTONINA_RUNNER_OWNER_TOKEN: TEST_RESERVATION_TOKEN,
   };
   const direct = spawnSync(opencode, ['models'], { env, encoding: 'utf8', timeout: 15_000 });
   assert.equal(
@@ -147,7 +150,8 @@ function reservation(overrides = {}) {
     mode: 'new',
     reserved_at: 1,
     owner_pid: process.pid,
-    owner_start_ticks: 0,
+    owner_start_ticks: procStartTicks(process.pid),
+    owner_token: TEST_RESERVATION_TOKEN,
     ...overrides,
   };
 }

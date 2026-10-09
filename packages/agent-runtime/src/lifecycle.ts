@@ -296,6 +296,21 @@ export function reconcileDeadMeta(meta: AgentMetadata, now = Date.now() / 1000):
   if (persistedLifecycleState(meta) !== 'running') return false;
   if (invocationAlive(meta) || runnerAlive(meta) || reservationInFlight(meta, now)) return false;
   if (meta.pid === null) {
+    // Board issue 207: a reserved reservation whose owner is gone and whose
+    // spawn grace has expired can never produce a pid -- no runner claimed
+    // the accepted prompt. Fail it now, with a name for what happened,
+    // instead of holding the record `running` for the rest of the startup
+    // window only to report a generic disappearance. This is the backstop
+    // for launchers that die before their own acknowledgement wait elapses.
+    const reservation = meta.runner_reservation as Record<string, unknown>;
+    if (runnerReservationState(reservation) === 'reserved' && !reservationOwnerAlive(reservation)) {
+      const reservedAt = persistedTimestamp(reservation.reserved_at);
+      if (reservedAt === null || now >= reservedAt + RUNNER_RESERVATION_GRACE_SECONDS) {
+        finalizeTerminal(meta, 'failed', now, null, null, 'runner never claimed the accepted prompt');
+        setActiveRunner(meta, false);
+        return true;
+      }
+    }
     const launched = persistedTimestamp(meta.started_at) ?? persistedTimestamp(meta.created_at);
     if (launched !== null && now >= launched && now - launched < PID_START_WINDOW_SECONDS) return false;
   }

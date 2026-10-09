@@ -356,6 +356,67 @@ test('stale reserved work is recovered without overwriting the accepted prompt',
   assertFixtureInvoked(handle, 'accepted');
 });
 
+test('detach acknowledges the runner claim and names the failure when it never lands', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', 'e207', '--cwd', work], env).status, 0);
+
+  // External tree teardown: kill the detached runner as soon as it appears,
+  // before it can claim ownership -- the Lubko short-lived-job cleanup shape
+  // from board issue 207. The killer lives in a file so its own command line
+  // never matches the pattern it searches for.
+  const killerScript = join(root, 'killer.sh');
+  writeFileSync(killerScript, `#!/bin/bash
+while true; do
+  P=$(pgrep -f "_runner e207 " | head -1)
+  if [ -n "$P" ]; then kill -9 "$P" 2>/dev/null; exit 0; fi
+  sleep 0.005
+done
+`, { mode: 0o755 });
+  const killer = spawn('bash', [killerScript], { stdio: 'ignore' });
+  t.after(() => {
+    killer.kill('SIGKILL');
+    rmSync(killerScript, { force: true });
+  });
+
+  // The 10s bounded claim acknowledgement dominates this test's runtime.
+  const started = run(['agent', 'run', '--id', 'e207', '--detach', '--prompt', 'hello', '--json'], env, { timeout: 30_000 });
+  assert.equal(started.status, 1, started.stderr);
+  assert.match(started.stderr, /never claimed ownership/);
+
+  // The record is failed immediately and specifically -- not a reserved
+  // record left to be reconciled into a generic disappearance ~60s later.
+  const meta = JSON.parse(readFileSync(metaPath(root, 'e207'), 'utf8'));
+  assert.equal(meta.state, 'failed');
+  assert.equal(meta.runner_pid, null);
+  assert.equal(meta.pid, null);
+  assert.equal(meta.error, 'detached runner never claimed ownership within 10s');
+
+  const status = run(['agent', 'status', '--id', 'e207', '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  const statusBody = JSON.parse(status.stdout);
+  assert.equal(statusBody.state, 'failed');
+  assert.equal(statusBody.last_error, 'detached runner never claimed ownership within 10s');
+  assert.deepEqual(
+    JSON.parse(run(['agent', 'list', '--page', '1', '--limit', '10', '--running', '--json'], env).stdout),
+    { agents: [] },
+  );
+});
+
+test('detach ack carries the claiming runner pid', async (t) => {
+  const handle = fixture(t);
+  const { root, work, env } = handle;
+  assert.equal(run(['agent', 'new', '--id', 'e208', '--cwd', work], env).status, 0);
+  const started = run(['agent', 'run', '--id', 'e208', '--detach', '--prompt', 'hello', '--json'], env);
+  assert.equal(started.status, 0, started.stderr);
+  const ack = JSON.parse(started.stdout);
+  assert.equal(ack.detached, true);
+  assert.equal(typeof ack.runner_pid, 'number', 'the ack must name the runner that claimed ownership');
+  const meta = JSON.parse(readFileSync(metaPath(root, 'e208'), 'utf8'));
+  assert.equal(meta.runner_pid, ack.runner_pid);
+  await waitFor(root, 'e208', (value) => value.state === 'succeeded' && value.active_runner === false);
+});
+
 test('status reconciles abandoned running metadata to an explicit failure', (t) => {
   const { root, work, env } = fixture(t);
   assert.equal(run(['agent', 'new', '--id', 'dead', '--cwd', work], env).status, 0);

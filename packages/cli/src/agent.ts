@@ -29,6 +29,7 @@ import {
   setActiveRunner,
   signalInvocation,
   signalRunner,
+  stopLikeOrMalformed,
   steerQueue,
   steerSequence,
   waitForInvocationGone,
@@ -532,7 +533,9 @@ function hostCapacityJson(capacity: HostCapacity): Record<string, unknown> {
  *   | `runner.ts:387` `spawn(...)` threw | `String(error)` | no — can carry the resolved executable path |
  *   | `runner.ts:396` no pid | fixed literal | yes |
  *   | `runner.ts:423` no `/proc` identity | fixed literal | yes |
- *   | `lifecycle.ts:250` `reconcileDeadMeta` | fixed literal | yes |
+ *   | `lifecycle.ts` `reconcileDeadMeta` (generic disappearance) | fixed literal | yes |
+ *   | `lifecycle.ts` `reconcileDeadMeta` (never-claimed reservation) | fixed literal | yes |
+ *   | `agent.ts` `failUnclaimedRunner` | fixed literal | yes |
  *
  * The two `finalizeTerminal` call sites that pass *no* note
  * (`packages/cli/src/agent.ts`, the `stop` and `kill` paths) are not producers
@@ -565,6 +568,14 @@ const DISPLAYABLE_AGENT_ERRORS: readonly string[] = [
   // gone with no captured exit status. Reached from `agent status` and
   // `agent list`, so it is an ordinary sight, not a corner case.
   'runner/model process disappeared without a captured exit status',
+  // lifecycle.ts: `reconcileDeadMeta` found a reserved reservation whose owner
+  // is gone and whose spawn grace expired, so no runner can ever claim the
+  // accepted prompt. Board issue 207: the startup-handoff death is named
+  // rather than being reported as a generic disappearance.
+  'runner never claimed the accepted prompt',
+  // agent.ts: the detach path's bounded claim acknowledgement timed out, so no
+  // runner ever owned the accepted prompt. Board issue 207.
+  'detached runner never claimed ownership within 10s',
 ];
 
 /**
@@ -824,6 +835,90 @@ function spawnRunner(
     },
   );
   child.unref();
+}
+
+// Board issue 207: a detached run used to report acceptance the instant the
+// runner process existed, which is not the instant anything owned the
+// invocation -- the runner still had to boot, claim the reservation, and spawn
+// the backend. A launching job whose process tree was torn down in that window
+// (the Lubko short-lived job shape) left records that read `running` with no
+// runner and no pid for the whole 60s pid-less startup window, then failed
+// with a generic disappearance note, invisible to the scheduler's live set
+// the entire time. The detach path now waits, bounded, for the claim that
+// hands ownership from launcher to runner, and names the failure when no
+// runner claims in time. 10s matches the runner control grace in
+// packages/agent-runtime/src/runner.ts and the observed handoff margin.
+const RUNNER_CLAIM_ACK_TIMEOUT_MS = 10_000;
+const RUNNER_CLAIM_ACK_POLL_MS = 25;
+
+async function awaitRunnerClaim(
+  agentId: string,
+  generation: number,
+  timeoutMs: number,
+  context: AgentCommandContext,
+): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const meta = readMeta(agentId, paths(context));
+    if (meta === null) return null;
+    if (persistedLifecycleState(meta) !== 'running') return null;
+    const reservation = meta.runner_reservation;
+    if (
+      runnerReservationState(reservation) === 'claimed'
+      && runnerGeneration((reservation as Record<string, unknown>)?.gen, 1) === generation
+      && typeof meta.runner_pid === 'number'
+    ) {
+      return meta.runner_pid;
+    }
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, RUNNER_CLAIM_ACK_POLL_MS));
+  }
+}
+
+async function failUnclaimedRunner(
+  agentId: string,
+  generation: number,
+  context: AgentCommandContext,
+): Promise<boolean> {
+  let failed = false;
+  await updateMeta(agentId, (meta) => {
+    if (persistedLifecycleState(meta) !== 'running') return;
+    if (stopLikeOrMalformed(meta)) return;
+    if (runnerReservationState(meta.runner_reservation) !== 'reserved') return;
+    const reservation = meta.runner_reservation as Record<string, unknown>;
+    if (runnerGeneration(reservation.gen, 1) !== generation) return;
+    if (meta.runner_pid !== null) return;
+    finalizeTerminal(
+      meta,
+      'failed',
+      Date.now() / 1000,
+      null,
+      null,
+      `detached runner never claimed ownership within ${RUNNER_CLAIM_ACK_TIMEOUT_MS / 1000}s`,
+    );
+    setActiveRunner(meta, false);
+    failed = true;
+  }, paths(context));
+  return failed;
+}
+
+async function acknowledgeDetachedSpawn(
+  agentId: string,
+  generation: number,
+  context: AgentCommandContext,
+): Promise<number> {
+  const claimedPid = await awaitRunnerClaim(agentId, generation, RUNNER_CLAIM_ACK_TIMEOUT_MS, context);
+  if (claimedPid !== null) return claimedPid;
+  if (await failUnclaimedRunner(agentId, generation, context)) {
+    throw new Error(`agent ${agentId}: detached runner never claimed ownership within ${RUNNER_CLAIM_ACK_TIMEOUT_MS / 1000}s`);
+  }
+  // The fail-write lost a race: the claim landed after the timeout, or a
+  // control path already decided this invocation. Report what the record says.
+  const meta = readMeta(agentId, paths(context));
+  if (meta !== null && persistedLifecycleState(meta) === 'running' && typeof meta.runner_pid === 'number') {
+    return meta.runner_pid;
+  }
+  throw new Error(`agent ${agentId}: detached runner never claimed ownership within ${RUNNER_CLAIM_ACK_TIMEOUT_MS / 1000}s`);
 }
 
 async function followAttached(
@@ -1113,6 +1208,9 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   }
   if (decision.action === 'spawn') {
     spawnRunner(agentId, decision.mode!, decision.generation!, context);
+    if (parsed.flags.has('--detach')) {
+      await acknowledgeDetachedSpawn(agentId, decision.generation!, context);
+    }
     if (decision.recoverBusy) {
       throw new Error(`agent ${agentId} is recovering an already accepted prompt; this prompt was rejected`);
     }
@@ -1132,7 +1230,18 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
 
   if (parsed.flags.has('--detach')) {
     if (parsed.flags.has('--json')) {
-      context.io.stdout(JSON.stringify({ id: agentId, state: 'running', detached: true }));
+      // `runner_pid` is the ownership acknowledgement: it is present only once
+      // a runner process has durably claimed the accepted prompt (board issue
+      // 207). A detach ack without it would report acceptance for a spawn
+      // nothing owns.
+      const acked = readMeta(agentId, paths(context));
+      const runnerPid = acked !== null && typeof acked.runner_pid === 'number' ? acked.runner_pid : null;
+      context.io.stdout(JSON.stringify({
+        id: agentId,
+        state: 'running',
+        detached: true,
+        ...(runnerPid !== null ? { runner_pid: runnerPid } : {}),
+      }));
     } else {
       context.io.stdout(`Started agent ${agentId} in the background. Observe it with \`antonina agent log --id ${agentId} --follow\`.`);
     }

@@ -76,33 +76,61 @@ async function boardWithComments(count) {
   return { server, store, initialized };
 }
 
-test('a bounded comment page reads one comment shard, not the whole thread', async () => {
+test('a bounded comment page reads a bounded number of comment shards, not the whole thread', async () => {
   const { server, store, initialized } = await boardWithComments(120);
   const shards = commentShardKeys(server, 1);
   assert.equal(shards.size, 3, '120 comments are stored as three 50-message shards');
 
   server.clearRequests();
-  const page = await store.readIssueCommentPage(initialized.credential, 1, 2);
+  const page = await store.readIssueCommentPage(initialized.credential, 1, 1);
   const read = commentShardReads(server, shards);
 
   assert.equal(page.total, 120);
   assert.equal(page.pageCount, 3);
-  assert.equal(page.page, 2);
+  assert.equal(page.page, 1);
   assert.equal(page.messages.length, 50);
-  assert.equal(page.messages[0].body, 'message 51');
-  assert.equal(read.length, 1, 'one comment shard was fetched for one page');
-  // Which shard matters as much as how many: the page asked for must be the
-  // shard that crossed the wire.
-  assert.equal(read[0], [...shards].find((key) => server.objects.get(key).value.page === 2));
+  // Board issue 206: page 1 is the newest window, so it ends at the newest
+  // comment on the board. A reader who opens an issue sees its current state
+  // rather than the opening of its history.
+  assert.equal(page.messages.at(-1).body, 'message 120');
+  assert.equal(page.messages[0].body, 'message 71');
+
+  // Pages are cut from the newest end while shards are filled from the oldest,
+  // so one page can straddle two shards. That straddle is the bound: at most two,
+  // and never all three, because reassembling the whole thread to draw one page
+  // of it is exactly the cost this read exists to avoid.
+  assert.ok(read.length <= 2, `one page fetched ${read.length} shards; at most two may straddle`);
+  assert.ok(read.length < shards.size, 'one page must not fetch every comment shard');
+  // Which shards matter as much as how many: only the ones the window covers.
+  const pageNumbers = read.map((key) => server.objects.get(key).value.page).sort((left, right) => left - right);
+  assert.deepEqual(pageNumbers, [2, 3], 'page 1 covers the newest window, spanning the last two shards');
 
   // The issue's own shard is read for the core fields, and no comment shard
-  // other than the requested page is touched at all.
+  // other than the requested window is touched at all.
   const issueKeys = issueShardKeys(server, 1);
   assert.equal(issueKeys.size, 1);
   assert.equal(server.requests.filter((request) => request.method === 'GET' && issueKeys.has(request.key)).length, 1);
   assert.equal(page.issue.messages.length, 0, 'the issue core carries no messages with it');
   assert.equal(page.issue.title, 'Long conversation');
   assert.equal(page.issue.body, 'the description');
+});
+
+test('a comment page aligned with a shard boundary still fetches exactly one', async () => {
+  const { server, store, initialized } = await boardWithComments(120);
+  const shards = commentShardKeys(server, 1);
+
+  // Not every page straddles. Page 3 of a 120-comment thread is the oldest
+  // window and falls entirely inside the first shard, so the boundedness claim
+  // is not "always one" and not "always two" but a ceiling -- and the ceiling
+  // has to be observed, not assumed.
+  server.clearRequests();
+  const page = await store.readIssueCommentPage(initialized.credential, 1, 3);
+  const read = commentShardReads(server, shards);
+
+  assert.equal(page.messages.length, 20);
+  assert.equal(page.messages[0].body, 'message 1');
+  assert.equal(read.length, 1, 'an aligned page fetches exactly one comment shard');
+  assert.equal(read[0], [...shards].find((key) => server.objects.get(key).value.page === 1));
 });
 
 test('the whole-thread read is what the fan-out costs, for contrast', async () => {
@@ -147,20 +175,25 @@ test('an issue with no comments needs no shard read for its only page', async ()
   assert.equal(commentShardReads(server, shards).length, 0);
 });
 
-test('paging the whole thread reproduces the stored message order exactly', async () => {
+test('paging the whole thread backward reproduces the stored message order exactly', async () => {
   const { store, initialized } = await boardWithComments(120);
 
-  const paged = [];
+  // Board issue 206: page 1 is the newest window and higher numbers walk
+  // backward, so the walk that reproduces storage order is the REVERSED page
+  // sequence. Within a page the order is still chronological -- only the page
+  // sequence is reversed, which is what keeps order inside a page stable rather
+  // than flipping it.
+  const pages = [];
   for (let page = 1; page <= 3; page += 1) {
     const read = await store.readIssueCommentPage(initialized.credential, 1, page);
     assert.equal(read.messages.length, page === 3 ? 20 : 50);
-    paged.push(...read.messages.map((message) => message.body));
+    pages.push(read.messages.map((message) => message.body));
   }
 
-  assert.deepEqual(paged, messages(120).map((message) => message.body));
+  assert.deepEqual(pages.slice().reverse().flat(), messages(120).map((message) => message.body));
 });
 
-test('the last page holds the partial shard, so a new comment lands there', async () => {
+test('a new comment lands on page 1, and the page before it is unchanged by that post', async () => {
   const { store, initialized } = await boardWithComments(120);
 
   await store.append(initialized.credential, {
@@ -168,18 +201,24 @@ test('the last page holds the partial shard, so a new comment lands there', asyn
     payload: { number: 1, author: 'poster', body: 'the newest comment' },
   });
 
-  const last = await store.readIssueCommentPage(initialized.credential, 1, 3);
-  assert.equal(last.total, 121);
-  assert.equal(last.pageCount, 3);
-  assert.equal(last.messages.length, 21);
-  assert.equal(last.messages.at(-1).body, 'the newest comment');
+  // Board issue 206: a comment is appended to the newest end, and page 1 is the
+  // newest window, so a reader on page 1 sees their own post without paging.
+  // Under oldest-first numbering this post landed on the last page and the
+  // reader had to page forward twice to find it.
+  const first = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  assert.equal(first.total, 121);
+  assert.equal(first.pageCount, 3);
+  assert.equal(first.messages.length, 50);
+  assert.equal(first.messages.at(-1).body, 'the newest comment');
+  assert.equal(first.messages[0].body, 'message 72');
 
-  // The page before the last one is unchanged by that post, which is what makes
-  // the ordering across pages stable rather than shifted.
+  // The newest page before it is unchanged by that post, which is what makes the
+  // ordering across pages stable rather than shifted.
   const second = await store.readIssueCommentPage(initialized.credential, 1, 2);
   assert.equal(second.total, 121);
   assert.equal(second.messages.length, 50);
-  assert.equal(second.messages.at(-1).body, 'message 100');
+  assert.equal(second.messages[0].body, 'message 22');
+  assert.equal(second.messages.at(-1).body, 'message 71');
 });
 
 test('a bounded read of an issue the board does not hold is null, as getIssue is', async () => {

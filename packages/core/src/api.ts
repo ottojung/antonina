@@ -1,3 +1,4 @@
+import { compareClosedIssues } from './board-v3-store.js';
 import type { BoardOverview, IssueCommentPage, IssueListSummary } from './board-v3-store.js';
 import { newestCommentAt } from './board-v3-store.js';
 import {
@@ -439,7 +440,7 @@ export class BoardApi {
         const listed = await this.store.readIssuePage(credential, issueState, page);
         if (listed === null) {
           const issues = (await this.loadBoard()).issues;
-          return issues
+          const summarized = issues
             .filter((issue) => state === undefined || issue.state === state)
             .map((issue) => ({
               number: issue.number,
@@ -451,8 +452,11 @@ export class BoardApi {
               messageCount: issue.messages.length,
               lastActivityAt: newestCommentAt(issue.messages),
               hasBody: issue.body.length > 0,
-            }))
-            .sort((left, right) => left.number - right.number);
+            }));
+          // The board whose pages are not materialized yet still has one closed
+          // order, and it is the same one the materialized pages are written in.
+          if (issueState === 'closed') return summarized.sort(compareClosedIssues);
+          return summarized.sort((left, right) => left.number - right.number);
         }
         summaries.push(...listed.entries);
         listedCount += listed.entries.length;
@@ -496,18 +500,6 @@ export class BoardApi {
   }
 
   /**
-   * Read one reverse-chronological comment page for an issue while preserving
-   * chronological order inside the page. Page 1 contains the newest comments.
-   * The issue description is returned on every page.
-   */
-  async getIssuePage(number: number, page: number): Promise<BoardIssue> {
-    const credential = await this.fastReadCredential();
-    const issue = await this.store.getIssuePage(credential, number, page, this.rememberedHead);
-    if (issue === null) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
-    return clone(issue);
-  }
-
-  /**
    * One bounded page of an issue's conversation: the issue's core fields with
    * its `messages` empty, plus the 50 messages of the requested page and the
    * whole thread's total count and page count.
@@ -524,6 +516,25 @@ export class BoardApi {
     const read = await this.store.readIssueCommentPage(credential, number, page);
     if (read === null) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
     return clone(read);
+  }
+
+  /**
+   * Read one reverse-chronological comment page for an issue while preserving
+   * chronological order inside the page. Page 1 contains the newest comments.
+   * The issue description is returned on every page.
+   *
+   * This is the read behind `antonina board issue show --page N`, which pages
+   * LOGICAL pages newest-first, so a page can straddle two physical comment
+   * shards. It is distinct from `getIssueCommentPage` above, which pages the
+   * PHYSICAL shards oldest-first and fetches at most one of them; the web
+   * conversation pager is the caller of that one. `getIssue` still returns the
+   * whole issue to its existing callers and is unchanged by either.
+   */
+  async getIssuePage(number: number, page: number): Promise<BoardIssue> {
+    const credential = await this.fastReadCredential();
+    const issue = await this.store.getIssuePage(credential, number, page, this.rememberedHead);
+    if (issue === null) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
+    return clone(issue);
   }
 
   /**
@@ -974,6 +985,8 @@ export type {
   IssueListPage,
   IssueListSummary,
 } from './board-v3-store.js';
+export { closingTimeOf, compareClosedIssues } from './board-v3-store.js';
+export type { ClosedIssueOrderKey } from './board-v3-store.js';
 export { compareIssueActivity, issueLastActivityOf, newestCommentAt } from './board-v3-store.js';
 export {
   EXECUTION_TARGET_ACCESS_METHODS,

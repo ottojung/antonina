@@ -10,8 +10,8 @@ import {
   ISSUE_FILTERS,
   DEFAULT_BOARD_URL_STATE,
   DEFAULT_COMMENT_PAGE,
-  DEFAULT_ISSUE_PAGE,
   DEFAULT_FEED_PAGE,
+  DEFAULT_ISSUE_PAGE,
   DEFAULT_RESOURCE_PAGE,
   boardHref,
   boardHomeState,
@@ -28,7 +28,7 @@ import {
   type BoardUrlState,
 } from './board-url';
 
-const READY: BoardUrlState = { view: 'issues', selectedNumber: 7, filter: 'all', settingsOpen: false, page: 2, resourcePage: DEFAULT_RESOURCE_PAGE, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE };
+const READY: BoardUrlState = { view: 'issues', selectedNumber: 7, filter: 'all', settingsOpen: false, page: 2, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE };
 
 function fakeHistory() {
   const calls: { mode: 'push' | 'replace'; url: string }[] = [];
@@ -158,7 +158,7 @@ describe('navigating between states', () => {
 
   it('leaves a tab without an open issue, and back on the first page', () => {
     const moved = tabUrlState('feed', READY);
-    expect(moved).toEqual({ ...READY, view: 'feed', selectedNumber: undefined, page: DEFAULT_ISSUE_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE });
+    expect(moved).toEqual({ ...READY, view: 'feed', selectedNumber: undefined, page: DEFAULT_ISSUE_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE });
   });
 
   it('writes and reads the Resources page, and keeps it off the Issues page', () => {
@@ -178,9 +178,9 @@ describe('navigating between states', () => {
       filter: 'all',
       settingsOpen: false,
       page: DEFAULT_ISSUE_PAGE,
-      resourcePage: DEFAULT_RESOURCE_PAGE,
       commentPage: DEFAULT_COMMENT_PAGE,
       feedPage: DEFAULT_FEED_PAGE,
+      resourcePage: DEFAULT_RESOURCE_PAGE,
     });
   });
 
@@ -195,17 +195,17 @@ describe('navigating between states', () => {
   });
 
   it('goes home to the Issues tab with nothing selected', () => {
-    expect(boardHomeState(READY)).toEqual({ view: 'issues', selectedNumber: undefined, filter: 'open', settingsOpen: false, page: DEFAULT_ISSUE_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE });
+    expect(boardHomeState(READY)).toEqual({ view: 'issues', selectedNumber: undefined, filter: 'open', settingsOpen: false, page: DEFAULT_ISSUE_PAGE, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE });
   });
 
   it('tells two states apart only by what they show', () => {
     expect(sameBoardUrl(READY, { ...READY })).toBe(true);
     expect(sameBoardUrl(READY, { ...READY, page: 3 })).toBe(false);
-    // Paging Resources is a navigation the address has to record, exactly as
-    // paging the Issues list is.
-    expect(sameBoardUrl(READY, { ...READY, resourcePage: 3 })).toBe(false);
     expect(sameBoardUrl(READY, { ...READY, commentPage: 3 })).toBe(false);
     expect(sameBoardUrl(READY, { ...READY, feedPage: 3 })).toBe(false);
+    // Paging Resources is a navigation the address has to record, exactly as
+    // paging the Issues list or a conversation is.
+    expect(sameBoardUrl(READY, { ...READY, resourcePage: 3 })).toBe(false);
     expect(sameBoardUrl(READY, { ...READY, settingsOpen: true })).toBe(false);
   });
 });

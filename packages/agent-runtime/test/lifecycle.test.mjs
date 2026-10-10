@@ -449,6 +449,37 @@ test('reconcileDeadMeta withholds the terminal failed state inside the pid-less 
   assert.equal(future.state, 'failed');
 });
 
+// Board issue 207: a reserved reservation whose owner is gone and whose spawn
+// grace has expired can never produce a pid -- no runner claimed the accepted
+// prompt. Reconcile must fail it immediately and name the never-claim instead
+// of holding the record `running` for the rest of the pid-less startup window
+// only to report a generic disappearance.
+test('a reserved reservation past its grace with a dead owner fails immediately as never-claimed', (t) => {
+  isolatedXdg(t);
+
+  const lost = idleMeta(AGENT_ID, '/tmp', null, 1);
+  beginInvocation(lost, 'work', 100, 1);
+  lost.active_runner = true;
+  lost.runner_reservation = {
+    state: 'reserved', gen: 1, mode: 'new', reserved_at: 100, owner_pid: 99999999, owner_start_ticks: 1,
+  };
+  assert.equal(reconcileDeadMeta(lost, 110), true);
+  assert.equal(lost.state, 'failed');
+  assert.equal(lost.error, 'runner never claimed the accepted prompt');
+  assert.equal(lost.active_runner, false);
+
+  // The same reservation inside the grace window is still in flight.
+  const inside = idleMeta(AGENT_ID, '/tmp', null, 1);
+  beginInvocation(inside, 'work', 100, 1);
+  inside.active_runner = true;
+  inside.runner_reservation = {
+    state: 'reserved', gen: 1, mode: 'new', reserved_at: 106, owner_pid: 99999999, owner_start_ticks: 1,
+  };
+  assert.equal(reconcileDeadMeta(inside, 110), false);
+  assert.equal(inside.state, 'running');
+  assert.equal(inside.error, null);
+});
+
 // ---------------------------------------------------------------- GAP-RT-4 ----
 
 test('a corrupt durable steer queue is rejected rather than replayed or dropped', (t) => {

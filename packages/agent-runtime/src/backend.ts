@@ -14,7 +14,7 @@ import {
 } from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
 
-export const AGENT_MODEL = 'opencode-go/step-5-preview-free';
+export const AGENT_MODEL = 'opencode-go/longcat-2.5-preview-free';
 export const OPENCODE_TITLE_PREFIX = 'antonina-';
 export const DEFAULT_OPENCODE_BIN = 'opencode';
 export const OPENCODE_BIN_ENV = 'ANTONINA_OPENCODE_BIN';
@@ -193,6 +193,27 @@ interface BackendFailureRule {
 }
 
 const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
+  // An OpenCode Go request may fail temporarily even after the previous
+  // turn has performed tool actions. Classify the outage for operators and
+  // the scheduler, but NEVER replay the same turn automatically.
+  {
+    marker: 'Endpoint is unavailable',
+    classification: 'upstream_endpoint_unavailable',
+    provider: 'opencode-go',
+    transient: true,
+    automaticRetrySafe: false,
+  },
+  // The OpenCode Go Step 5 free tier can reject requests across many sessions
+  // simultaneously. Name the provider throttle instead of reporting an
+  // unrecognized backend failure. Do not replay the turn automatically:
+  // the API error alone cannot prove no earlier tool action was committed.
+  {
+    marker: 'Rate limit exceeded. Please try again later.',
+    classification: 'upstream_rate_limited',
+    provider: 'opencode-go',
+    transient: true,
+    automaticRetrySafe: false,
+  },
   {
     marker: 'Unexpected server error',
     classification: 'transient_backend_server_error',
@@ -358,6 +379,7 @@ function probeEnv(env: Record<string, string | undefined>): Record<string, strin
 export function discoverSessionId(
   agentId: string,
   env: Record<string, string | undefined> = process.env,
+  cwd: string = process.cwd(),
 ): string | null {
   const childEnv = probeEnv(env);
   const result = spawnSync(
@@ -366,6 +388,7 @@ export function discoverSessionId(
     {
       encoding: 'utf8',
       timeout: SESSION_LIST_TIMEOUT_MS,
+      cwd,
       env: childEnv,
       stdio: ['ignore', 'pipe', 'ignore'],
     },
@@ -416,7 +439,7 @@ export function buildAgentCommand(
   const executable = resolveOpencode(env);
   if (isContinue) {
     const recorded = persistedNativeSessionId(meta);
-    const sessionId = recorded ?? discoverSessionId(agentId, env);
+    const sessionId = recorded ?? discoverSessionId(agentId, env, cwd);
     if (sessionId === null) return null;
     return [
       executable, 'run', '--auto',

@@ -15,7 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Build identity uses git describe; the default shallow checkout has no reachable tags.
           fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
@@ -52,7 +51,7 @@ jobs:
           #!/bin/sh
           case "$1" in
             models)
-              echo "opencode-go/step-5-preview-free"
+              echo "opencode-go/longcat-2.5-preview-free"
               ;;
             session)
               echo '[{"id":"ses_pkg","title":"antonina-a11d","created":100}]'
@@ -97,7 +96,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Build identity uses git describe; the default shallow checkout has no reachable tags.
           fetch-depth: 0
       - uses: actions/setup-node@v6
         with:

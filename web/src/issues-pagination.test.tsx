@@ -33,8 +33,8 @@ const STAMP = '2026-09-27T12:00:00.000Z';
 // Issues keys on last activity. These fixtures carry `lastActivityAt` alongside
 // the `BoardIssue` fields so they satisfy it; `null` is "never commented", which
 // is what every fixture here is.
-function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue & { lastActivityAt: string | null } {
-  return { number, title: `Issue ${number}`, body: `Body of issue ${number}`, state, createdAt: STAMP, updatedAt: STAMP, messages: [], lastActivityAt: null };
+function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue & { closedAt: string | null; lastActivityAt: string | null } {
+  return { number, title: `Issue ${number}`, body: `Body of issue ${number}`, state, createdAt: STAMP, updatedAt: STAMP, closedAt: state === 'closed' ? STAMP : null, messages: [], lastActivityAt: null };
 }
 
 /** A board of `open` open issues numbered 1..open, plus `closed` closed ones after them. */
@@ -357,12 +357,15 @@ describe('the issues list, paginated', () => {
     const container = await mountApp();
 
     await act(async () => { chooseFilter('Closed'); });
-    // The closed tail pages on its own total, in its own stable order, and does
-    // not carry the open list's queue positions with it.
+    // The closed tail pages on its own total, in the board's closing-time order,
+    // and does not carry the open list's queue positions with it. Every issue
+    // here closes at the same instant, so the tie-break decides and it is the
+    // reverse of ascending number; the closing-time order itself is pinned in
+    // `closed-issue-order.test.tsx`.
     expect(rangeText(container)).toBe('1–50 of 60');
-    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => index + 121));
+    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => 180 - index));
     await goNext(container);
-    expect(drawnRows(container)).toEqual(Array.from({ length: 10 }, (_, index) => index + 171));
+    expect(drawnRows(container)).toEqual(Array.from({ length: 10 }, (_, index) => 130 - index));
     expect(rangeText(container)).toBe('51–60 of 60');
     expect(previousButton(container).disabled).toBe(false);
     expect(nextButton(container).disabled).toBe(true);
@@ -404,7 +407,7 @@ describe('the issues list, paginated', () => {
     // Three closed issues are one page, so the reader lands on it and the
     // controls are gone rather than left disabled on a page that does not exist.
     expect(rangeText(container)).toBe('');
-    expect(drawnRows(container)).toEqual([127, 128, 129]);
+    expect(drawnRows(container)).toEqual([129, 128, 127]);
     expect(pagination(container)).toBeNull();
 
     await act(async () => { chooseFilter('Open'); });

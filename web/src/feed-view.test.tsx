@@ -121,7 +121,7 @@ describe('the feed container, mounted', () => {
     const { container } = mount(read);
     await screen.findByRole('list', { name: 'Board activity, newest first' });
 
-    const more = screen.getByRole('button', { name: FEED_MORE_LABEL });
+    const more = await screen.findByRole('button', { name: FEED_MORE_LABEL });
     await act(async () => { fireEvent.click(more); });
 
     await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(2));

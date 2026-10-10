@@ -121,7 +121,7 @@ function xdgScope(t, prefix) {
   return root;
 }
 
-test('Antonina is locked to Step 5 Preview Free without an alternate backend model', () => {
+test('Antonina is locked to LongCat 2.5 Preview Free without an alternate backend model', () => {
   assert.equal(AGENT_MODEL, 'opencode-go/longcat-2.5-preview-free');
 });
 

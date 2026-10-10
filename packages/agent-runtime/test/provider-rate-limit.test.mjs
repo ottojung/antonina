@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { classifyBackendFailure, backendRetryDelay } from '../dist/packages/agent-runtime/src/backend.js';
 
-test('Step 5 provider throttle is recognized without unsafe automatic replay', () => {
+test('LongCat provider throttle is recognized without unsafe automatic replay', () => {
   const d = mkdtempSync(join(tmpdir(), 'antonina-rate-'));
   try {
     const path = join(d, 'output.log');

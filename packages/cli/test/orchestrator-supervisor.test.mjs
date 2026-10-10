@@ -8,6 +8,7 @@ const loop = read('../../../scripts/antonina-orchestrator-loop');
 const turn = read('../../../scripts/antonina-orchestrator-turn');
 const scheduler = read('../../../skills/antonina-scheduler/SKILL.md');
 const skill = read('../../../skills/antonina-scheduler/SKILL.md');
+const launch = read('../../../scripts/antonina-scheduler-launch');
 const service = read('../../../config/s6/antonina-orchestrator/run');
 const restart = read('../../../scripts/antonina-orchestrator-restart');
 
@@ -31,10 +32,32 @@ test('scheduler is a single agentic OpenClaw scheduling lane owned by the superv
 test('bounded scheduler turn dispatches an entire useful frontier without idle-watching', () => {
   assert.match(turn, /FULL-FRONTIER DISPATCH/);
   assert.match(turn, /Do not return after one agent/);
+  assert.match(turn, /Return only when no more independent positive-speedup fronts remain/);
   assert.doesNotMatch(turn, /RETURN IMMEDIATELY/);
   assert.doesNotMatch(turn, /IDLE WATCH/);
   assert.doesNotMatch(turn, /sleep 20/);
   assert.doesNotMatch(turn, /retry until watchdog\/fatal error/);
+});
+
+test('scheduler turn enforces distinct-front topology and replenishes the dispatch gap', () => {
+  assert.match(turn, /DISTINCT-FRONT TOPOLOGY/);
+  assert.match(turn, /never run two live agents on the same logical front/);
+  assert.match(turn, /same worktree/);
+  assert.match(turn, /De-duplicate by canonical worktree\/cwd path AND live-agent state/);
+  assert.match(turn, /not by issue id or title alone/);
+  assert.match(turn, /DISPATCH GAP/);
+  assert.match(turn, /Count ACTUAL running sessions/);
+  assert.match(turn, /dispatch promptly to replenish the pool/);
+  assert.match(turn, /recent_terminal_agents/);
+  assert.doesNotMatch(turn, /memory\.pressure|memory\.stat|memory\.events|reclaimable file cache|oom_kill|PSI/);
+});
+
+test('scheduler launcher closes the duplicate-worktree race after the run', () => {
+  assert.match(launch, /concurrent live owner/);
+  assert.match(launch, /stopped duplicate/);
+  assert.match(launch, /agent", "stop", "--id", agent_id/);
+  assert.doesNotMatch(launch, /antonina-scheduler-worktrees/);
+  assert.doesNotMatch(launch, /antonina-scheduler-provision/);
 });
 
 test('scheduler service lifecycle keeps the supervisor wanted up', () => {

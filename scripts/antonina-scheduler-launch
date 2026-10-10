@@ -7,6 +7,7 @@ import re
 import secrets
 import subprocess
 import sys
+import time
 
 ANTONINA = os.environ.get("ANTONINA_BIN", os.path.expanduser("~/.local/bin/antonina"))
 # Antonina's runtime requires a startup cwd. This fixed launch context is not
@@ -132,6 +133,27 @@ def main():
     except SystemExit:
         run([ANTONINA, "agent", "stop", "--id", agent_id], check=False)
         raise
+
+    # Close the duplicate-worktree race: the pre-run recheck has a TOCTOU window
+    # between the snapshot and the run registering. After the run, confirm this
+    # agent is the sole live owner of the issue; a concurrent launch or resume
+    # that produced another live owner makes this agent a duplicate, so stop it.
+    deadline = time.monotonic() + 10
+    appeared = False
+    while time.monotonic() < deadline:
+        if agent_id in running_owners(args.issue):
+            appeared = True
+            break
+        time.sleep(0.2)
+    if appeared:
+        concurrent = [owner for owner in running_owners(args.issue) if owner != agent_id]
+        if concurrent:
+            run([ANTONINA, "agent", "stop", "--id", agent_id], check=False)
+            cleanup_idle(agent_id)
+            raise SystemExit(
+                f"issue #{args.issue} has concurrent live owner(s): {', '.join(concurrent)}; "
+                f"stopped duplicate {agent_id}"
+            )
 
     body = (
         "[scheduler-turn]\n"

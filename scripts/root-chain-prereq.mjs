@@ -70,9 +70,8 @@ export const PREREQ_SCRIPT = 'prereq:root-test';
 /**
  * The root `typecheck` script the chain declares as its prerequisite. Named here
  * because the contract asserted below is about *this* script's coverage: it is
- * the step a landing runs, and the one `.github/workflows/ci.yml` runs in both of
- * its Typecheck steps, so a source tree it does not compile is a tree whose type
- * errors no landing gate can see.
+ * the step a landing runs, so a source tree it does not compile is a tree whose
+ * type errors no landing gate can see.
  */
 export const TYPECHECK_SCRIPT = 'typecheck';
 
@@ -80,12 +79,13 @@ export const TYPECHECK_SCRIPT = 'typecheck';
  * The script that typechecks the web app, and the one the root `typecheck` must
  * name for the web app to be inside the gate.
  *
- * Board issue 193. The measured hole, re-derived on this line at base 7565ee11:
- * `package.json` declared no such script (`grep -c typecheck:web` on the base
- * tree: 0), so the root `typecheck` compiled `packages/*` and nothing else. The
- * failure is structural, not accidental: vitest strips types without checking
- * them, `npm test --prefix web` cannot see a type error, and `web/src` was
- * compiled only by the web *build*, which no gate step runs.
+ * Board issue 182. The measured hole: at release head 01a63216 a web-side type
+ * error (`web/src/ui-state.ts` widening its closed-issue generic) left
+ * `npm run typecheck` at 0, `npm test` at 0 across all eight chain steps and
+ * `npm test --prefix web` at 325/325, while `npm run build` exited 2. The reason
+ * is structural, not accidental: the root `typecheck` compiled `packages/*`
+ * only, vitest strips types without checking them, and the web app is compiled
+ * only by the web *build*, which is not part of the chain's prerequisite.
  */
 export const WEB_TYPECHECK_SCRIPT = 'typecheck:web';
 
@@ -183,10 +183,6 @@ const NPM_PREFIX = /--prefix\s+(\S+)/;
  * legitimately rewritten. So the walk follows `npm run` steps into the scripts
  * they name, reads the `-p` project of every `tsc` step, and attributes every
  * step that names a `--prefix` directory to that directory.
- *
- * The walk is `seen`-guarded, so a nested `npm run <name>` that resolves back to
- * a script already walked — including the common `npm run typecheck --prefix
- * web`, whose name collides with this one — terminates instead of recursing.
  *
  * @returns {Set<string>} the directories a type error in them cannot reach the
  * root `typecheck`; `web` is present when the web app is inside the gate.

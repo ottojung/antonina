@@ -32,8 +32,8 @@ const timestamp = '2026-09-25T12:00:00.000Z';
 // Issues keys on last activity. These fixtures carry `lastActivityAt` alongside
 // the `BoardIssue` fields so they satisfy it; `null` is "never commented", which
 // is what every fixture here is.
-function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue & { lastActivityAt: string | null } {
-  return { number, title: `Issue ${number}`, body: '', state, createdAt: timestamp, updatedAt: timestamp, messages: [], lastActivityAt: null };
+function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue & { closedAt: string | null; lastActivityAt: string | null } {
+  return { number, title: `Issue ${number}`, body: '', state, createdAt: timestamp, updatedAt: timestamp, closedAt: state === 'closed' ? timestamp : null, messages: [], lastActivityAt: null };
 }
 const issues = [issue(1), issue(2), issue(3)];
 const queue = [3, 1, 2];

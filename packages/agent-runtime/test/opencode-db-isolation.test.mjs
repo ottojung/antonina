@@ -304,7 +304,7 @@ test('the probe path and the spawn path are given the same database', (t) => {
   const command = buildAgentCommand(readMeta('b18608', { env }), 'work', true, backendEnv);
   assert.ok(command !== null, 'continue mode built no command');
   assert.ok(command.includes('ses_b18608'));
-  assert.ok(command.includes('opencode-go/step-5-preview-free'));
+  assert.ok(command.includes('opencode-go/longcat-2.5-preview-free'));
   assert.equal(command.at(-1), 'work');
 
   assert.equal(discoverSessionId('b18608', backendEnv), 'ses_b18608');

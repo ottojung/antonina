@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Reserve a board-owned isolated workspace for any open issue.
+
+A missing repository is not a scheduling blocker. An Antonina agent, not this
+provisioner, identifies and clones the issue's repository in its workspace.
+The board resource and live-agent inventory still prevent cwd collisions.
+"""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+ANTONINA = os.environ.get("ANTONINA_BIN", os.path.expanduser("~/.local/bin/antonina"))
+HOST = "lubko://marceline-dev"
+ROOT = Path("/workspace")
+
+
+def command(*args, check=True):
+    p = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and p.returncode:
+        raise RuntimeError(f"{args[0]} failed: {p.stderr[-1200:] or p.stdout[-1200:]}")
+    return p
+
+
+def cli(*args):
+    return json.loads(command(ANTONINA, *map(str, args), "--json").stdout)
+
+
+def issue_record(number):
+    issue = cli("board", "show", "--id", number, "--page", 1)
+    if issue.get("state") != "open":
+        raise RuntimeError(f"refusing to provision closed/non-open issue #{number}")
+    return issue
+
+
+def resource_registered(number, path):
+    for page in range(1, 100):
+        entries = cli("board", "resource", "list", "--issue", number, "--page", page)
+        if any(Path(r.get("path", "/")).resolve() == path.resolve() and
+               any(i.get("number") == number and i.get("state") == "open"
+                   for i in r.get("issues", [])) for r in entries):
+            return True
+        if not entries:
+            break
+    return False
+
+
+def is_git_checkout(path):
+    p = command("git", "-C", str(path), "rev-parse", "--show-toplevel", check=False)
+    return p.returncode == 0 and Path(p.stdout.strip()).resolve() == path.resolve()
+
+
+def provision(number, dry_run=False):
+    issue_record(number)
+    path = ROOT / f"antonina-issue-{number}"
+    if dry_run:
+        return {"issue": number, "cwd": str(path), "action": "would_reserve",
+                "clone_by_agent": True}
+
+    lockpath = Path(os.environ.get("XDG_STATE_HOME", str(Path.home()/".local/state"))) / "antonina/provision.lock"
+    lockpath.parent.mkdir(parents=True, exist_ok=True)
+    with lockpath.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        issue_record(number)
+        created = False
+        if path.is_symlink():
+            raise RuntimeError(f"refusing symlinked workspace: {path}")
+        if not path.exists():
+            path.mkdir(mode=0o700)
+            created = True
+        elif not path.is_dir():
+            raise RuntimeError(f"workspace path is not a directory: {path}")
+        elif any(path.iterdir()) and not is_git_checkout(path):
+            raise RuntimeError(f"workspace contains unexpected non-Git files: {path}")
+
+        # Recheck issue state before registering; do not claim a closed issue.
+        try:
+            issue_record(number)
+        except Exception:
+            if created:
+                path.rmdir()
+            raise
+        if not resource_registered(number, path):
+            cli("board", "resource", "add", "--issue", number, "--host", HOST, "--path", str(path))
+        if not resource_registered(number, path):
+            raise RuntimeError(f"resource registration for #{number} was not verified")
+        return {"issue": number, "cwd": str(path),
+                "action": "created" if created else "reused", "registered": True,
+                "clone_by_agent": not is_git_checkout(path)}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--issue", type=int, required=True)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    a = parser.parse_args()
+    try:
+        result = provision(a.issue, a.dry_run)
+    except Exception as e:
+        print(f"provision failed: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

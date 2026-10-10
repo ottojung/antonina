@@ -1,5 +1,4 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { useEffect, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // Test safety: nothing here may read or mutate the operator's Antonina state.
@@ -12,7 +11,7 @@ process.env.XDG_CONFIG_HOME = '/nonexistent-antonina-web-feed-mount-config';
 import { FeedView } from './App';
 import { DEFAULT_FEED_LIMIT, type BoardFeedEntry, type BoardFeedEntryKind, type BoardFeedPage, type BoardFeedRequest } from './api';
 import type { BoardIssue } from './model';
-import { FEED_EMPTY, FEED_LIST_PAGES_LABEL, FEED_MORE_LABEL, FEED_PAGE_NEXT, FEED_PAGE_PREVIOUS } from './ui-state';
+import { FEED_EMPTY } from './ui-state';
 
 afterEach(cleanup);
 
@@ -54,8 +53,56 @@ function reader(pages: BoardFeedPage[]): { read: (request?: BoardFeedRequest) =>
   return { read, seen };
 }
 
-function mount(read: (request?: BoardFeedRequest) => Promise<BoardFeedPage>, overrides: { generation?: number; issues?: BoardIssue[] } = {}) {
-  return render(<FeedView readFeed={read} issues={overrides.issues ?? [issue(1)]} generation={overrides.generation ?? 0} onOpenIssue={() => {}} />);
+/**
+ * A fake log served the way the real projection serves one: `total` counts the
+ * log and the entries handed back are those after the cursor, newest first, up to
+ * the requested limit, with a token while entries remain behind them.
+ *
+ * `reader` above replays a staged list, which is right for a test that wants to
+ * hand the view exact pages. This one is right for a test about paging, because
+ * the numbered reader asks for the newest page first to learn the log's total and
+ * then steps the cursor — a staged list would have to be written twice over for
+ * every page it lands on.
+ */
+function logFeed(total: number, kind: BoardFeedEntryKind = 'issue-created', from = 1) {
+  const seen: BoardFeedRequest[] = [];
+  // The entries are built with their POSITION as both id and order, so the fake
+  // log is stable across reads: a cursor then means what the real projection's
+  // means, and two reads of the same page return the same rows.
+  const ordered = Array.from({ length: total }, (_, index) => ({
+    id: `log-${index + 1}`,
+    kind,
+    at: STAMP,
+    position: index + 1,
+    issueNumber: from + index,
+    title: `Issue ${from + index}`,
+    state: 'open' as const,
+    messageId: null,
+    author: null,
+    body: null,
+  }));
+  const read = async (request: BoardFeedRequest = {}) => {
+    seen.push(request);
+    const limit = request.limit ?? DEFAULT_FEED_LIMIT;
+    const position = request.cursor === undefined || request.cursor === null ? null : Number(String(request.cursor).replace('v1.', ''));
+    // Newest first, and everything committed before the cursor when one is given.
+    const remaining = position === null ? [...ordered].reverse() : ordered.filter((each) => each.position < position).reverse();
+    const entries = remaining.slice(0, limit);
+    const last = entries[entries.length - 1];
+    return { entries, nextCursor: remaining.length > entries.length && last !== undefined ? `v1.${last.position}` : null, total: ordered.length, limit };
+  };
+  return { read, seen };
+}
+
+function mount(read: (request?: BoardFeedRequest) => Promise<BoardFeedPage>, overrides: { generation?: number; issues?: BoardIssue[]; page?: number; onPage?: (page: number) => void } = {}) {
+  return render(<FeedView
+    readFeed={read}
+    issues={overrides.issues ?? [issue(1)]}
+    generation={overrides.generation ?? 0}
+    page={overrides.page ?? 1}
+    onPage={overrides.onPage ?? (() => {})}
+    onOpenIssue={() => {}}
+  />);
 }
 
 describe('the feed container, mounted', () => {
@@ -94,7 +141,7 @@ describe('the feed container, mounted', () => {
 
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toBe('the board log is not readable from this browser');
-    expect(screen.queryByRole('button', { name: FEED_MORE_LABEL })).toBeNull();
+    expect(screen.queryByRole('navigation', { name: 'Board feed pages' })).toBeNull();
     expect(read).toHaveBeenCalledTimes(1);
   });
 
@@ -114,58 +161,83 @@ describe('the feed container, mounted', () => {
     expect(screen.queryByText(FEED_EMPTY.title)).toBeNull();
   });
 
-  it('asks for older entries with the token the backend issued and shows that page alone', async () => {
-    // The read still walks forward by the backend's own token, but the page it
-    // reads back becomes *the* page on screen. The inherited version of this
-    // test asserted two rows after two one-entry pages; that assertion encoded
-    // the accumulation board 173 forbids, and with one-entry pages it could not
-    // have observed the page size at all.
-    const first = entry('comment-added', 3);
-    const older = entry('issue-created', 2);
-    const { read, seen } = reader([page([first], 'v1.token', 2), page([older], null, 2)]);
+  it('shows one page and never a merge of the pages behind it', async () => {
+    // The defect board 173 names. A reader who moves from page 1 to page 2 must
+    // be left with 50 rows on screen, not 110: the container hands the view the
+    // page it read and nothing accumulates across it.
+    const { read, seen } = logFeed(60);
 
-    const { container } = mount(read);
+    const { container, rerender } = mount(read, { page: 1 });
     await screen.findByRole('list', { name: 'Board activity, newest first' });
-    expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1);
+    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(50));
+    const firstPage = Array.from(container.querySelectorAll('[data-feed-id]')).map((row) => row.getAttribute('data-feed-id'));
+    seen.length = 0;
 
-    const more = await screen.findByRole('button', { name: FEED_MORE_LABEL });
-    await act(async () => { fireEvent.click(more); });
+    await act(async () => { rerender(<FeedView readFeed={read} issues={[issue(1)]} generation={0} page={2} onPage={() => {}} onOpenIssue={() => {}} />); });
 
-    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1));
-    expect(seen).toEqual([{ limit: DEFAULT_FEED_LIMIT }, { limit: DEFAULT_FEED_LIMIT, cursor: 'v1.token' }]);
-    const rows = Array.from(container.querySelectorAll('[data-feed-id]')).map((row) => row.getAttribute('data-feed-id'));
-    // The page just read replaces the one before it: no re-sort, no append, and
-    // the exhausted token takes the forward control away again.
-    expect(rows).toEqual([older.id]);
-    expect(screen.queryByRole('button', { name: FEED_MORE_LABEL })).toBeNull();
+    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(10));
+    // Page 2 was reached by asking for the cursor the newest page returned, and
+    // the page on screen is page 2 alone.
+    // Only the two reads page 2 needed: the newest page for the log's total, then
+    // one cursor step. The open of page 1 is not counted here.
+    expect(seen).toEqual([{ limit: DEFAULT_FEED_LIMIT }, { limit: DEFAULT_FEED_LIMIT, cursor: 'v1.11' }]);
+    // The rows of page 1 are gone from the document, not merely pushed down it:
+    // this is the assertion the accumulator model could not have passed.
+    const drawn = Array.from(container.querySelectorAll('[data-feed-id]')).map((row) => row.getAttribute('data-feed-id'));
+    for (const gone of firstPage) expect(drawn).not.toContain(gone);
   });
 
-  it('never holds more than one real page in the document, however far the walk goes', async () => {
-    // The page size is the board's own: `DEFAULT_FEED_LIMIT` is 50, so pages of
-    // 1 (as the rest of this file's small fixtures use) cannot observe this at
-    // all. Four real 50-entry pages over a 180-entry feed: after walking three
-    // pages forward the document must hold 50 rows, not 150.
-    const realPage = (from: number) => page(
-      Array.from({ length: DEFAULT_FEED_LIMIT }, (_, offset) => entry('issue-created', from - offset)),
-      `v1.page.${from}`,
-      180,
-    );
-    const { read } = reader([realPage(150), realPage(100), realPage(50), realPage(0)]);
+  it('offers numbered boundaries with the right disabled edges, and reports the range', async () => {
+    const { read, seen } = logFeed(120);
 
-    const { container } = render(<AddressedFeed read={read} address={1} report={() => {}} />);
+    const { container } = mount(read, { page: 1 });
     await screen.findByRole('list', { name: 'Board activity, newest first' });
-    expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(DEFAULT_FEED_LIMIT);
 
-    for (let step = 0; step < 2; step += 1) {
-      await act(async () => { fireEvent.click(screen.getByRole('button', { name: FEED_MORE_LABEL })); });
-      await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(DEFAULT_FEED_LIMIT));
-    }
+    const nav = screen.getByRole('navigation', { name: 'Board feed pages' });
+    const [previous, next] = within(nav).getAllByRole('button');
+    expect(previous.hasAttribute('disabled')).toBe(true);
+    expect(next.hasAttribute('disabled')).toBe(false);
+    // Range and count text, both about the log rather than about what has been read.
+    expect(within(nav).getByRole('status').textContent).toBe('1–50 of 120');
+    expect(container.querySelector('.feed-count')?.textContent).toBe('50 of 120 recorded entries');
 
-    expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(DEFAULT_FEED_LIMIT);
-    // Page 3's oldest entry is on screen; page 1's newest entry is not, so the
-    // document is not holding the pages already visited.
-    expect(container.textContent).toContain('Issue 50');
-    expect(container.textContent).not.toContain('Issue 150');
+    // Next is live, Previous is not: the middle of the log.
+    expect(seen).toHaveLength(1);
+  });
+
+  it('clamps a page the log cannot fill down onto the last one that it can', async () => {
+    // A hand-edited or stale link must land on something real rather than on a
+    // blank tab, and must not walk ninety-nine pages to discover that.
+    const { read, seen } = logFeed(120);
+
+    const { container } = mount(read, { page: 99 });
+
+    await waitFor(() => expect(container.querySelectorAll('.feed-entry')).toHaveLength(20));
+    expect(within(screen.getByRole('navigation', { name: 'Board feed pages' })).getByRole('status').textContent).toBe('101–120 of 120');
+    // Clamped before the walk: the newest page for the total, then two steps.
+    expect(seen).toEqual([
+      { limit: DEFAULT_FEED_LIMIT },
+      { limit: DEFAULT_FEED_LIMIT, cursor: 'v1.71' },
+      { limit: DEFAULT_FEED_LIMIT, cursor: 'v1.21' },
+    ]);
+  });
+
+  it('hands the page control the neighbour page number, and nothing else', async () => {
+    const { read } = logFeed(400);
+    const onPage = vi.fn();
+
+    const { container } = mount(read, { page: 2, onPage });
+    await screen.findByRole('list', { name: 'Board activity, newest first' });
+
+    const nav = screen.getByRole('navigation', { name: 'Board feed pages' });
+    const [previous, next] = within(nav).getAllByRole('button');
+    await act(async () => { fireEvent.click(previous); });
+    await act(async () => { fireEvent.click(next); });
+
+    expect(onPage.mock.calls).toEqual([[1], [3]]);
+    // The control moves the number; it does not read anything itself.
+    expect(container.querySelectorAll('.feed-entry')).toHaveLength(50);
+    expect(container.querySelectorAll('.feed-entry')).toHaveLength(50);
   });
 
   it('re-reads when a verified board read bumps the generation', async () => {
@@ -181,7 +253,7 @@ describe('the feed container, mounted', () => {
     await screen.findByRole('list', { name: 'Board activity, newest first' });
     expect(seen).toHaveLength(1);
 
-    await act(async () => { rerender(<FeedView readFeed={read} issues={[issue(1)]} generation={1} onOpenIssue={() => {}} />); });
+    await act(async () => { rerender(<FeedView readFeed={read} issues={[issue(1)]} generation={1} page={1} onPage={() => {}} onOpenIssue={() => {}} />); });
 
     expect(seen).toHaveLength(2);
     expect(container.textContent).toContain('fresh read');
@@ -195,7 +267,7 @@ describe('the feed container, mounted', () => {
     const opened: number[] = [];
     const { read } = reader([page(entries, null, 1)]);
 
-    render(<FeedView readFeed={read} issues={[issue(7)]} generation={0} onOpenIssue={(number) => { opened.push(number); }} />);
+    render(<FeedView readFeed={read} issues={[issue(7)]} generation={0} page={1} onPage={() => {}} onOpenIssue={(number) => { opened.push(number); }} />);
     const list = await screen.findByRole('list', { name: 'Board activity, newest first' });
     const button = await within(list).findByRole('button', { name: '#7 Issue 7' });
     await act(async () => { fireEvent.click(button); });
@@ -218,122 +290,5 @@ describe('the feed container, mounted', () => {
     expect(seen).toHaveLength(1);
     expect(warn.mock.calls.flat().join(' ')).not.toMatch(/unmounted component|state update/i);
     warn.mockRestore();
-  });
-});
-
-/**
- * The addressable feed page, read through the container that has to read it.
- *
- * `board-url.test.ts` proves `?feed=2` parses and serialises, which is what the
- * landed run-scope repair made addressable. It cannot prove that any line of the
- * Feed surface *reads* the field — that is the seam this closes: a correct,
- * addressable field with no render site consuming it. So `address` here is the
- * query string's own value, `report` is what the view reports back to it, and
- * the state between them is what `App` does with `navigate`. A field change that
- * arrives as a prop, with no read and no click, is what makes these assertions
- * non-vacuous: a container that ignored the prop would render the whole walk on
- * every page.
- */
-function AddressedFeed({ read, address, report }: { read: (request?: BoardFeedRequest) => Promise<BoardFeedPage>; address: number; report: (page: number) => void }) {
-  const [page, setPage] = useState(address);
-  useEffect(() => { setPage(address); }, [address]);
-  return <FeedView
-    readFeed={read}
-    issues={[issue(1)]}
-    generation={0}
-    page={page}
-    onPage={(next) => { report(next); setPage(next); }}
-    onOpenIssue={() => {}}
-  />;
-}
-
-describe('the feed page the address names', () => {
-  it('draws the page the field names, and the field alone moves it back', async () => {
-    // The read side of the seam. Two pages are walked with the backend's own
-    // token, so both pages are in the container's hands; what the reader then
-    // sees is decided by the field and nothing else.
-    const newest = entry('comment-added', 3);
-    const older = entry('issue-created', 2);
-    const { read, seen } = reader([page([newest], 'v1.token', 2), page([older], null, 2)]);
-    const reported: number[] = [];
-    const report = (next: number) => { reported.push(next); };
-
-    const { container, rerender } = render(<AddressedFeed read={read} address={1} report={report} />);
-    // The feed list is rendered before the first read resolves, so finding it is
-    // not a signal that the page has arrived. The button is the first element
-    // that can only exist once the page has, so it is what is awaited: a
-    // `getByRole` here raced the read and failed under host load.
-    const more = await screen.findByRole('button', { name: FEED_MORE_LABEL });
-    await act(async () => { fireEvent.click(more); });
-
-    // Walking forward reveals the page it just read and reports that page to
-    // the address, which is what makes `?feed=2` a link a reader can send. The
-    // page drawn is the one just read, alone: one entry, not both.
-    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1));
-    expect(reported).toEqual([2]);
-    expect(container.textContent).toContain('Issue 2');
-    expect(container.textContent).not.toContain('Issue 3');
-    // The address now says what the view reported, so the two agree.
-    await act(async () => { rerender(<AddressedFeed read={read} address={2} report={report} />); });
-    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1));
-
-    // The field alone: `?feed=1` arrives as a prop change, with no read and no
-    // click. The older entry must leave the document and the newest return.
-    await act(async () => { rerender(<AddressedFeed read={read} address={1} report={report} />); });
-    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1));
-    expect(container.textContent).toContain('Issue 3');
-    expect(container.textContent).not.toContain('Issue 2');
-    // And forward again, from the field, with no further read: the pages are
-    // already in hand, so choosing a page number is never another read.
-    await act(async () => { rerender(<AddressedFeed read={read} address={2} report={report} />); });
-    await waitFor(() => expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1));
-    const rows = Array.from(container.querySelectorAll('[data-feed-id]')).map((row) => row.getAttribute('data-feed-id'));
-    expect(rows).toEqual([older.id]);
-    expect(seen).toHaveLength(2);
-  });
-
-  it('numbers only the pages the projection handed over and names the position', async () => {
-    // Numbered pagination the reader can trust: every number is a page that was
-    // actually read, `aria-current` says which one is drawn, and the position
-    // line says where that is. A page nobody has read is never offered, because
-    // the projection — not the browser — issues the tokens that fetch one.
-    const { read } = reader([page([entry('issue-created', 4)], 'v1.token', 4), page([entry('issue-created', 3)], 'v2.token', 4), page([entry('issue-created', 2)], null, 4)]);
-
-    const { container } = render(<AddressedFeed read={read} address={1} report={() => {}} />);
-    await screen.findByRole('list', { name: 'Board activity, newest first' });
-    // One page and no numbered control: there is nothing to number yet.
-    expect(screen.queryByRole('navigation', { name: FEED_LIST_PAGES_LABEL })).toBeNull();
-
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: FEED_MORE_LABEL })); });
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: FEED_MORE_LABEL })); });
-
-    const nav = await screen.findByRole('navigation', { name: FEED_LIST_PAGES_LABEL });
-    expect(Array.from(nav.querySelectorAll('button')).map((each) => each.getAttribute('aria-label'))).toEqual([
-      FEED_PAGE_PREVIOUS,
-      'Feed page 1',
-      'Feed page 2',
-      'Feed page 3',
-      FEED_PAGE_NEXT,
-    ]);
-    expect(within(nav).getByRole('status').textContent).toBe('Page 3 of 3');
-    expect(within(nav).getByRole('button', { name: 'Feed page 3' }).getAttribute('aria-current')).toBe('page');
-    expect(within(nav).getByRole('button', { name: 'Feed page 1' }).getAttribute('aria-current')).toBeNull();
-    // The walk reached the end of what the projection would hand over, so the
-    // control takes the forward step away and only going back is left.
-    expect((within(nav).getByRole('button', { name: FEED_PAGE_NEXT }) as HTMLButtonElement).disabled).toBe(true);
-    expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1);
-    expect(container.textContent).toContain('Issue 2');
-    expect(container.textContent).not.toContain('Issue 4');
-  });
-
-  it('clamps a page the walk has not reached to the newest page rather than rendering nothing', async () => {
-    // `?feed=9` on a shared link names no page, and a link must never open an
-    // empty feed. The clamp falls back to the newest page the reader holds.
-    const { read } = reader([page([entry('comment-added', 5)], null, 1)]);
-
-    const { container } = render(<FeedView readFeed={read} issues={[issue(5)]} generation={0} page={9} onOpenIssue={() => {}} />);
-    await screen.findByRole('list', { name: 'Board activity, newest first' });
-
-    expect(container.querySelectorAll('[data-feed-id]')).toHaveLength(1);
   });
 });

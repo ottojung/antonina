@@ -1,0 +1,13 @@
+$id-20261009-topology-only-admission
+title: Orchestrator admits work by topology alone
+date: 2026/10/09
+source: @ottojung
+kind: constraint
+
+The Antonina/OpenClaw orchestrator is only a work-topology reasoner and delegation controller. The **sole legitimate reason to decide not to start another useful agent** is topological: the proposed work would duplicate or merely substitute for work already genuinely underway; its predecessor has not produced necessary input; an actual logical/write-ownership conflict requires serial execution; or expected reconciliation cost outweighs the marginal wall-clock speedup. An independent or complementary front with positive marginal speedup must be delegated, regardless of how many agents are already running.
+
+The scheduler must NEVER make admission conditional on memory, CPU, storage, disk space, model quotas, available tokens, host health, runtime capacity, tool or package installation, repository presence, registered roots, local directories, checkout or worktree existence, branch management, cloning, path scans, provisioning, workspace reservations or other physical/execution machinery. It does not inspect or manage any of these. It must not invent a cap, throttle, minimum, fairness quota or batch ceiling. The agent owns every repository, branch, clone, worktree, workspace, filesystem, implementation, validation and release operation, and can arrange its own isolation. The agent runtime may require a fixed generic startup context; that is an implementation detail of the launcher, not scheduler policy or a reason to reject an issue.
+
+Operational failures (including tool or model unavailability) may cause an attempted launch to fail in fact, but **must not be interpreted as evidence that this issue is ineligible for delegation**. Record the actual failed attempt, pursue recovery through an agent or runtime path, and continue independent delegation. Never fabricate success, substitute an unapproved model, or suppress a future retry on a non-topological pretext.
+
+The orchestrator reads the canonical board, recent human instructions, issue dependency relationships, and genuinely live agent ownership; delegates via the narrow launch operation; and records the resulting agent identity and material coordination outcomes. For true topological ambiguity it may delegate a reconnaissance/front-decomposition agent instead of demanding infrastructure preparation. Other than explicit closure or completion of an issue, refusal to delegate must cite an actual **topological** reason grounded in the work graph. This rule supersedes older advice that asked the scheduler to provision worktrees, verify trusted roots, inspect repositories, or treat missing tools and directories as scheduling blockers.

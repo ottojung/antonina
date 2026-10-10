@@ -57,14 +57,14 @@ import {
 
 const timestamp = '2026-09-24T12:00:00.000Z';
 /**
- * Board issue 180 widened the bound `visibleIssues` sorts under, because All
- * Issues keys on last activity. These fixtures carry `lastActivityAt` alongside
- * the `BoardIssue` fields so they satisfy it; `null` is "never commented", which
- * is what every fixture here is, so the All Issues order these produce is the
- * creation-time order.
+ * The shape the app really passes to `visibleIssues`: an `IssueListSummary`,
+ * which always carries `closedAt` as `string | null`, derived exactly as
+ * `summarizeIssue` derives it. A bare `BoardIssue` is not what any caller hands
+ * the list helpers, so a fixture shaped like one would pin a contract the board
+ * never offers.
  */
-function issue(number: number, state: 'open' | 'closed', updatedAt = timestamp): BoardIssue & { lastActivityAt: string | null } {
-  return { number, title: `Issue ${number}`, body: '', state, createdAt: updatedAt, updatedAt, messages: [], lastActivityAt: null };
+function issue(number: number, state: 'open' | 'closed', updatedAt = timestamp): BoardIssue & { closedAt: string | null } {
+  return { number, title: `Issue ${number}`, body: '', state, createdAt: updatedAt, updatedAt, closedAt: state === 'closed' ? updatedAt : null, messages: [] };
 }
 function state(overrides: Partial<VerifiedBoardState> = {}): VerifiedBoardState {
   return {
@@ -106,17 +106,16 @@ describe('issue UI state', () => {
     expect(priorityLabel(queuePosition([2, 1], 3))).toBe('Not in the queue');
   });
 
-  it('lists closed issues outside the queue, oldest first', () => {
+  it('lists closed issues outside the queue, most recently closed first', () => {
     const issues = [issue(1, 'open'), issue(4, 'closed', '2026-09-24T23:00:00.000Z'), issue(2, 'open'), issue(3, 'closed')];
-    expect(visibleIssues(issues, [2, 1], 'closed').map((entry) => entry.number)).toEqual([3, 4]);
+    expect(visibleIssues(issues, [2, 1], 'closed').map((entry) => entry.number)).toEqual([4, 3]);
     expect(visibleIssues(issues, [2, 1], 'open').map((entry) => entry.number)).toEqual([2, 1]);
   });
 
   // Board issue 180. All Issues answers "what moved recently", so it is ordered
-  // by last activity rather than by the queue-then-number concatenation it used
-  // to be. Issue 4 is newest by creation time, and 1/2/3 all tie, so the
-  // tie-break puts the higher numbers first among them.
-  it('lists all issues by last activity, newest first, interleaving open and closed', () => {
+  // by last activity and interleaves open and closed, unlike `open` (the shared
+  // queue) and `closed` (the board's closing-time order).
+  it('orders All Issues by last activity, newest first', () => {
     const issues = [issue(1, 'open'), issue(4, 'closed', '2026-09-24T23:00:00.000Z'), issue(2, 'open'), issue(3, 'closed')];
     expect(visibleIssues(issues, [2, 1], 'all').map((entry) => entry.number)).toEqual([4, 3, 2, 1]);
   });
@@ -282,7 +281,6 @@ describe('board load state', () => {
       updatedAt: timestamp,
       closedAt: null,
       messageCount: 0,
-      lastActivityAt: null,
       hasBody: false,
     }],
     resources: [],

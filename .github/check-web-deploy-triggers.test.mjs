@@ -105,15 +105,14 @@ test('the traced make target comes from a run step, not from a comment', (t) => 
   // An earlier draft of this comment predicted 43 by counting only the new test
   // file, and `npm test` caught it as a `test:workflow` failure.
   //
-  // SEQUENCING NOTE for board 179, whose own landing will move this again.
-  // Board 179 branched from `1d432b54`, before board 171 took 42, so its added
-  // `closed-issue-order.test.tsx` is also a 43, and its committed assertion of 43
-  // will be wrong by construction once it lands on a line that is already at 44.
-  // After 180 lands, the true count is 45 and 179's landing must move the literal
-  // to 45, attributing 43 to 171 and 174, 44 to 180's two inputs, and 45 to
-  // 179's `closed-issue-order.test.tsx`. Do not resolve that by widening the
-  // assertion to a range.
-  assert.match(result.stdout, /traced bundle inputs: 44/);
+  // The reconciliation of board 179 (closing-time closed order, with its
+  // `closed-issue-order.test.tsx`) and board 180 (last-activity All Issues, with
+  // its `issue-activity-order.test.tsx` and the newly traced
+  // `packages/core/src/board-store.ts`) lands both boards' inputs on one line, so
+  // this revision is 46, not 44 or 45. Measured, not assumed: the checker reports
+  // 46 here. Do not resolve a later drift by widening the assertion to a range;
+  // move the literal and attribute the change.
+  assert.match(result.stdout, /traced bundle inputs: 46/);
 });
 
 test('a bare filename include is traced as the file it names', (t) => {

@@ -444,6 +444,41 @@ export interface IssueListSummary {
   outstandingBlocks?: string[];
 }
 
+/** What a closed issue is ordered by, and what a missing `closedAt` falls back to. */
+export interface ClosedIssueOrderKey {
+  number: number;
+  closedAt: string | null;
+  updatedAt: string;
+}
+
+/**
+ * When an issue was closed, as the board records it: the closing timestamp when
+ * the store knows one, and the issue's own last update when it does not. An
+ * issue that is closed always has a `closedAt` in a summary this board wrote;
+ * the fallback exists so a caller holding a bare issue is ordered rather than
+ * silently dropped.
+ */
+export function closingTimeOf(issue: Pick<ClosedIssueOrderKey, 'closedAt' | 'updatedAt'>): string {
+  return issue.closedAt ?? issue.updatedAt;
+}
+
+/**
+ * The board's one closed-issue order: most recently closed first, and among
+ * issues closed at the same instant the higher issue number first.
+ *
+ * This is the whole sort key, and it lives here rather than in a list view so
+ * every ordered surface agrees on it. The store orders the materialized closed
+ * list pages with it, so the order is fixed before any page size is applied and
+ * therefore survives paging; the CLI's `--state closed` list and the web's
+ * Closed view order with the same comparator rather than each inventing a sort.
+ * Ordering by issue number or creation order is not available: neither is when
+ * the work actually finished.
+ */
+export function compareClosedIssues(left: ClosedIssueOrderKey, right: ClosedIssueOrderKey): number {
+  const time = closingTimeOf(right).localeCompare(closingTimeOf(left));
+  return time || right.number - left.number;
+}
+
 /**
  * An issue's last activity time: the timestamp of its most recent comment, or
  * its creation time when it has never been commented on.
@@ -943,11 +978,12 @@ function orderedSummaries(
       })
     : state.board.issues
         .filter((issue) => issue.state === 'closed')
-        .sort((left, right) => {
-          const time = (closedAt.get(right.number) ?? right.updatedAt)
-            .localeCompare(closedAt.get(left.number) ?? left.updatedAt);
-          return time || right.number - left.number;
-        });
+        .map((issue) => ({
+          issue,
+          key: { number: issue.number, closedAt: closedAt.get(issue.number) ?? null, updatedAt: issue.updatedAt },
+        }))
+        .sort((left, right) => compareClosedIssues(left.key, right.key))
+        .map((entry) => entry.issue);
   return ordered.map((issue) => {
     const lastActivityAt = knownLastActivity(lastActivity, issue, threadsHydrated);
     return {
@@ -3648,43 +3684,6 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
   }
 
   /**
-   * Read one logical issue page newest-first without hydrating the entire
-   * append-only comment history. Storage comment shards are oldest-first, so a
-   * logical page can straddle two physical shards.
-   */
-  async getIssuePage(
-    credentialValue: BoardCredential,
-    number: number,
-    page: number,
-  ): Promise<BoardIssue | null> {
-    const { credential, meta } = await this.requirePointerForCredential(credentialValue);
-    const resolved = await this.readIssueSnapshotByNumber(credential, meta, number, false);
-    if (resolved === null) return null;
-
-    const { snapshot, issue } = resolved;
-    const end = Math.max(0, snapshot.messageCount - (page - 1) * V3_COMMENT_PAGE_SIZE);
-    const start = Math.max(0, end - V3_COMMENT_PAGE_SIZE);
-    if (start >= end) return issue;
-
-    const firstPhysicalIndex = Math.floor(start / V3_COMMENT_PAGE_SIZE);
-    const lastPhysicalIndex = Math.floor((end - 1) / V3_COMMENT_PAGE_SIZE);
-    const physicalPages = await Promise.all(
-      snapshot.commentRefs
-        .slice(firstPhysicalIndex, lastPhysicalIndex + 1)
-        .map((commentRef, offset) => this.readCommentPage(
-          credential,
-          meta,
-          number,
-          commentRef,
-          firstPhysicalIndex + offset + 1,
-        )),
-    );
-    const physicalStart = firstPhysicalIndex * V3_COMMENT_PAGE_SIZE;
-    const messages = physicalPages.flat().slice(start - physicalStart, end - physicalStart);
-    return { ...issue, messages: clone(messages) };
-  }
-
-  /**
    * One bounded page of one issue's conversation.
    *
    * This is the read that replaces "reassemble the thread" for a reader who is
@@ -3726,6 +3725,49 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       total: snapshot.messageCount,
       messages: await this.readCommentShard(credential, meta, snapshot, page - 1),
     };
+  }
+
+  /**
+   * Read one logical issue page newest-first without hydrating the entire
+   * append-only comment history. Storage comment shards are oldest-first, so a
+   * logical page can straddle two physical shards.
+   *
+   * This is the CLI's `board issue show --page N` read and is deliberately a
+   * different unit of paging from `readIssueCommentPage` above: this one pages
+   * LOGICAL pages newest-first (page 1 is the newest 50 messages), that one
+   * pages PHYSICAL shards oldest-first and fetches at most one shard. Both
+   * coexist so neither caller is asked to accept the other's page order.
+   */
+  async getIssuePage(
+    credentialValue: BoardCredential,
+    number: number,
+    page: number,
+  ): Promise<BoardIssue | null> {
+    const { credential, meta } = await this.requirePointerForCredential(credentialValue);
+    const resolved = await this.readIssueSnapshotByNumber(credential, meta, number, false);
+    if (resolved === null) return null;
+
+    const { snapshot, issue } = resolved;
+    const end = Math.max(0, snapshot.messageCount - (page - 1) * V3_COMMENT_PAGE_SIZE);
+    const start = Math.max(0, end - V3_COMMENT_PAGE_SIZE);
+    if (start >= end) return issue;
+
+    const firstPhysicalIndex = Math.floor(start / V3_COMMENT_PAGE_SIZE);
+    const lastPhysicalIndex = Math.floor((end - 1) / V3_COMMENT_PAGE_SIZE);
+    const physicalPages = await Promise.all(
+      snapshot.commentRefs
+        .slice(firstPhysicalIndex, lastPhysicalIndex + 1)
+        .map((commentRef, offset) => this.readCommentPage(
+          credential,
+          meta,
+          number,
+          commentRef,
+          firstPhysicalIndex + offset + 1,
+        )),
+    );
+    const physicalStart = firstPhysicalIndex * V3_COMMENT_PAGE_SIZE;
+    const messages = physicalPages.flat().slice(start - physicalStart, end - physicalStart);
+    return { ...issue, messages: clone(messages) };
   }
 
   private async readIssuePageFromMeta(

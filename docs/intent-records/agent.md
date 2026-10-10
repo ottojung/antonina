@@ -95,3 +95,32 @@ Removing a dedicated OpenCode database file is a two-step act: the inventory of 
 What bounds the interval is the surrounding lifecycle rather than any claim about the key. A fork that reads its source after the delete tombstone is refused, because a source marked `delete_pending` blocks a fork. The reachable case is therefore the narrower one: a fork that read its source and passed that check before the tombstone was written, and that publishes its clone after the unlink has already happened. That case is not closed here, and this statement is the reason: a reader must not come away believing the re-read guarantees no record names the key, because it guarantees only that no record named it at the instant it was read. The alternative considered and rejected is to hold a lock across the read and the unlink. It is worse rather than better, for the reason recorded for the stale-lock reclaim in `hosts.md`: naming the lock would not make the judgment and the removal atomic either, it would add a second unwitnessed step to a destructive path, and the residual interval would then be larger and no longer stated. Trading this interval for a longer unstated one is not an improvement.
 
 This is a statement about the interval alone. It does not weaken what the read must establish before the unlink: an inventory that could not be enumerated, or a record whose metadata could not be read or did not validate, is not an inventory that licenses an unlink, and a key the read names is not collected.
+
+$id-2026100923424621
+title: Merges require independent review and green exact-head integration checks
+date: 2026/10/09
+source: @ottojung
+kind: constraint
+
+A completed implementation or an agent's terminal handoff is not approval to merge.
+Before any PR, release-branch integration, rollback, or promotion, a maintainer
+must read the actual diff against its current target and obtain a substantive
+independent review of that exact proposed change. Every required CI/check run
+for the exact current head, and for the tested integration candidate when
+different, must finish successfully. Missing, failed, cancelled, pending, or
+uninspectable required checks are blockers, never tacit success; an intentional
+skip is accepted only when that check is demonstrably inapplicable. A local
+test run or an agent's summary does not substitute for GitHub/host CI.
+
+Review and CI are invalidated by any material code change or target advance:
+refresh the diff and rerun the required checks. Record the reviewed commit,
+target/base commit, reviewer verdict, required check names and outcomes, and
+resulting merge commit so that release state is auditable. After merging,
+verify the actual target tree and subsequent branch checks, and do not promote
+or deploy a known failing merge. On discovering an earlier invalid merge,
+stop promotion and prepare a reviewed, green-CI correction or exact-tree
+rollback instead of insisting the merge already happened.
+
+The orchestrator treats integration and review as actionable work when they
+can safely run in parallel, but it cannot waive their evidence gates to
+increase throughput or to keep an agent busy.

@@ -52,6 +52,32 @@ test('scheduler turn enforces distinct-front topology and replenishes the dispat
   assert.doesNotMatch(turn, /memory\.pressure|memory\.stat|memory\.events|reclaimable file cache|oom_kill|PSI/);
 });
 
+test('scheduler turn reconciles terminal succeeded against durable completion evidence', () => {
+  assert.match(turn, /TERMINAL EVIDENCE/);
+  assert.match(turn, /classifies a worker that exited 0 as succeeded/);
+  assert.match(turn, /process outcome, NOT proof/);
+  assert.match(turn, /durable completion evidence/);
+  assert.match(turn, /merged PR with green CI/);
+  assert.match(turn, /recorded review verdict/);
+  assert.match(turn, /required artifacts actually delivered/);
+  assert.match(turn, /do NOT silently retire the issue/);
+  assert.match(turn, /re-dispatch a fresh useful front/);
+  assert.match(turn, /flag the specific gap on the board/);
+  assert.match(turn, /Never retire an OPEN issue merely because a terminal agent exited successfully/);
+  assert.match(turn, /a succeeded process is not accepted work/);
+  assert.doesNotMatch(turn, /memory\.pressure|memory\.stat|memory\.events|reclaimable file cache|oom_kill|PSI/);
+});
+
+test('scheduler skill reconciles terminal succeeded against durable completion evidence', () => {
+  assert.match(scheduler, /terminal `succeeded` classification is a process outcome/);
+  assert.match(scheduler, /not evidence that an OPEN issue's work is complete or accepted/);
+  assert.match(scheduler, /durable completion evidence/);
+  assert.match(scheduler, /merged PR with green CI/);
+  assert.match(scheduler, /do NOT silently retire the issue/);
+  assert.match(scheduler, /re-dispatch a fresh useful front/);
+  assert.doesNotMatch(scheduler, /memory\.pressure|memory\.stat|memory\.events|reclaimable file cache|oom_kill|PSI/);
+});
+
 test('scheduler launcher closes the duplicate-worktree race after the run', () => {
   assert.match(launch, /concurrent live owner/);
   assert.match(launch, /stopped duplicate/);

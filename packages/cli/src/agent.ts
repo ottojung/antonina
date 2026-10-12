@@ -78,6 +78,7 @@ import {
   logSize,
   opencodeBackendEnv,
   readMeta,
+  recoverInterruptedInitialMeta,
   removeAgentDirectory,
   updateMeta,
   writeMeta,
@@ -315,6 +316,19 @@ function readMetaForSweep(agentId: string, context: AgentCommandContext): SweepR
     return { readable: true, meta: readMeta(agentId, paths(context)) };
   } catch (error) {
     if (!(error instanceof MetadataReadError)) throw error;
+    if (error.message === 'metadata file is missing for agent ' + agentId) {
+      const recovery = recoverInterruptedInitialMeta(agentId, paths(context));
+      if (recovery === 'recovered') {
+        // Revalidate the canonical publication, never the temporary itself.
+        return { readable: true, meta: readMeta(agentId, paths(context)) };
+      }
+      if (recovery === 'uncommitted') {
+        // No committed record existed to authorize a run. Skip only this
+        // pre-publication directory; do not report unknown running ownership.
+        context.io.stderr('antonina: agent ' + agentId + ' has only unpublished creation state and was not listed');
+        return { readable: true, meta: null };
+      }
+    }
     return { readable: false, agentId, reason: error.message };
   }
 }

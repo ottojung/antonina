@@ -395,6 +395,82 @@ export function readMeta(agentId: string, options: StatePathsOptions = {}): Agen
   return meta;
 }
 
+/**
+ * Recover only a provably unstarted first metadata publication (board #282).
+ * A crash after fsync(temp) but before rename leaves a complete idle record
+ * which must not stop the whole scheduler. An active agent needs committed
+ * meta.json before it can ever be launched by Antonina.
+ *
+ * Ambiguous or running-looking records remain unreadable. Publishing with an
+ * exclusive hard link prevents another reader's recovery from overwriting an
+ * existing canonical record.
+ */
+export function recoverInterruptedInitialMeta(
+  agentId: string,
+  options: StatePathsOptions = {},
+): 'recovered' | 'uncommitted' | 'unknown' {
+  if (persistedAgentId(agentId) !== agentId) return 'unknown';
+  const directory = agentDir(agentId, options);
+  let entries: nodeFs.Dirent[];
+  try {
+    entries = nodeFs.readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return 'unknown';
+  }
+  // An empty just-created directory cannot yet have accepted an invocation.
+  if (entries.length === 0) return 'uncommitted';
+  if (entries.length !== 1 || !entries[0]!.isFile()) return 'unknown';
+  const name = entries[0]!.name;
+  const match = /^\.meta-([1-9][0-9]*)-([0-9]+)-([0-9a-f]+)\.tmp$/.exec(name);
+  if (match === null) return 'unknown';
+  const writerPid = Number(match[1]);
+  if (!Number.isSafeInteger(writerPid)) return 'unknown';
+  // A live writer may still be filling its temp: leave it alone.
+  try {
+    process.kill(writerPid, 0);
+    return 'uncommitted';
+  } catch (error) {
+    if (!hasCode(error, 'ESRCH')) return 'uncommitted';
+  }
+
+  const temporary = join(directory, name);
+  let candidate: unknown;
+  try {
+    candidate = JSON.parse(nodeFs.readFileSync(temporary, 'utf8'));
+  } catch {
+    // The sole file is a torn unpublished write, with no lock/log or
+    // committed metadata that could have authorized running work. Keep it
+    // for operator diagnosis, but do not freeze every unrelated task.
+    return 'uncommitted';
+  }
+  try {
+    validateAgentMetadata(candidate as AgentMetadata);
+  } catch {
+    // Recognizable but incompatible metadata may describe prior authority.
+    return 'unknown';
+  }
+  const meta = candidate as AgentMetadata;
+  if (
+    meta.id !== agentId || meta.state !== 'idle'
+    || meta.pid !== null || meta.pgid !== null || meta.runner_pid !== null
+    || meta.active_runner !== false || meta.started_at !== null
+    || meta.invocation_id !== null || meta.native_session_id !== null
+    || meta.runner_reservation !== null || meta.prompt_count !== 0
+    || meta.pending_prompt !== null || meta.runner_gen !== 0
+  ) return 'unknown';
+
+  try {
+    nodeFs.linkSync(temporary, metaPath(agentId, options));
+    syncDirectory(directory, DEFAULT_FS);
+  } catch (error) {
+    // A concurrent repair may have published the record. The caller strictly
+    // validates the resulting canonical file before trusting the result.
+    if (!hasCode(error, 'EEXIST')) return 'unknown';
+  }
+  try { nodeFs.unlinkSync(temporary); } catch {}
+  return 'recovered';
+}
+
 function syncDirectory(path: string, fs: StoreFs): void {
   let fd: number;
   try {

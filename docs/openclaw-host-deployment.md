@@ -4,6 +4,8 @@ This document records the first OpenClaw deployment experiment on `marceline-dev
 It is intentionally an implementation log and reproducibility sketch rather than the
 final host-provisioning contract.
 
+> **Current authoritative policy (October 8, 2026):** The sole permitted model for OpenClaw scheduling and managed Antonina agents is Step 5 Preview Free, `opencode-go/step-5-preview-free`, with variant `high` and **no model/provider fallback**, per `docs/intent-records/agent.md`. The scheduler operates in bounded turns under an s6-supervised loop on Marceline; its source is `scripts/antonina-orchestrator-turn` and its dedicated OpenCode configuration is `config/opencode-openclaw.json`. This page also preserves *historical* experiments describing Space Bunny, LongCat, and foreground Gateway operation; those passages are **not** current setup or model-selection instructions. Never deploy from those older passages.
+
 The immediate goals are:
 
 - run OpenClaw on an Antonina-compatible host;
@@ -114,7 +116,7 @@ Its intent is:
 
 - primary model: `opencode-go/step-5-preview-free`;
 - small model: `opencode-go/step-5-preview-free`;
-- the OpenCode provider whitelist contains only `step-5-preview-free`.
+- the OpenCode provider whitelist contains only `longcat-2.5-preview-free`.
 
 A dedicated wrapper is used:
 

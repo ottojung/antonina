@@ -109,7 +109,14 @@ function pruneFixtureParent(t) {
 // inference from the durable record: a runner that refused must leave no child,
 // and a runner that launched must leave a child in the directory the record
 // declares, not in the directory the runner process happened to sit in.
-function fakeBackend(t, marker, body = `#!/bin/sh\nprintf '%s %s\\n' "$$" "$(pwd -P)" >> ${JSON.stringify(marker)}\nexit 0\n`) {
+// The backend under test records an *invocation* -- `opencode run` -- and only
+// that. The session-discovery probe (`opencode session list`) now runs in the
+// agent's own worktree, so it is no longer distinguishable from the invocation
+// by directory alone; the argv is what tells them apart, and a probe is not a
+// launch. Recording only the `run` argv keeps "no launch happened" and "exactly
+// one invocation ran in <cwd>" observations of the launch rather than of the
+// runner's bookkeeping.
+function fakeBackend(t, marker, body = `#!/bin/sh\n[ "$1" = run ] || exit 0\nprintf '%s %s\\n' "$$" "$(pwd -P)" >> ${JSON.stringify(marker)}\nexit 0\n`) {
   const failures = [];
   for (const parent of [tmpdir(), REPO_FIXTURE_PARENT]) {
     let root;
@@ -490,6 +497,7 @@ test('the owner token is not handed to the backend the runner spawns', async (t)
   // "ran in the declared directory" and "did not receive the token" are one
   // record of the same process rather than two records that have to be matched up.
   const backend = fakeBackend(t, marker, `#!/bin/sh
+[ "$1" = run ] || exit 0
 if [ -n "\${ANTONINA_RUNNER_OWNER_TOKEN+x}" ]; then verdict=token-present; else verdict=token-absent; fi
 printf '%s %s %s\\n' "$verdict" "$$" "$(pwd -P)" >> ${JSON.stringify(marker)}
 exit 0

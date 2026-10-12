@@ -53,6 +53,41 @@ export const V3_ISSUE_PAGE_SIZE = 50;
 export const V3_COMMENT_PAGE_SIZE = 50;
 export const V3_FEED_PAGE_SIZE = 50;
 
+/** What a closed issue is ordered by, and what a missing `closedAt` falls back to. */
+export interface ClosedIssueOrderKey {
+  number: number;
+  closedAt: string | null;
+  updatedAt: string;
+}
+
+/**
+ * When an issue was closed, as the board records it: the closing timestamp when
+ * the store knows one, and the issue's own last update when it does not. An
+ * issue that is closed always has a `closedAt` in a summary this board wrote;
+ * the fallback exists so a caller holding a bare issue is ordered rather than
+ * silently dropped.
+ */
+export function closingTimeOf(issue: Pick<ClosedIssueOrderKey, 'closedAt' | 'updatedAt'>): string {
+  return issue.closedAt ?? issue.updatedAt;
+}
+
+/**
+ * The board's one closed-issue order: most recently closed first, and among
+ * issues closed at the same instant the higher issue number first.
+ *
+ * This is the whole sort key, and it lives here rather than in a list view so
+ * every ordered surface agrees on it. The store orders the materialized closed
+ * list pages with it, so the order is fixed before any page size is applied and
+ * therefore survives paging; the CLI's `--state closed` list and the web's
+ * Closed view order with the same comparator rather than each inventing a sort.
+ * Ordering by issue number or creation order is not available: neither is when
+ * the work actually finished.
+ */
+export function compareClosedIssues(left: ClosedIssueOrderKey, right: ClosedIssueOrderKey): number {
+  const time = closingTimeOf(right).localeCompare(closingTimeOf(left));
+  return time || right.number - left.number;
+}
+
 /**
  * The pointer format this build writes and is willing to serve.
  *

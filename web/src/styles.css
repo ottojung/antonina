@@ -135,8 +135,6 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
 .feed-caveat { margin: 16px 0 0; padding: 11px 13px; border: 1px solid #e2c4b2; border-radius: 9px; background: var(--orange-soft); color: #765c4c; font-size: .8rem; line-height: 1.5; }
 .feed-untracked { margin: 14px 0 0; color: var(--muted); font-size: .78rem; line-height: 1.5; }
 .feed-error { margin: 0 0 12px; color: #762e23; font-size: .85rem; }
-.feed-more { margin-top: 16px; border: 1px solid #bdc4bb; border-radius: 8px; background: #fff; color: var(--ink); padding: 9px 14px; font-weight: 750; }
-.feed-more:disabled { background: #e5e7e2; color: #969a92; border-color: #d2d5cf; cursor: not-allowed; }
 /* The target overview is a fourth single-column view, so it declares the same
    pinned row and the same single scrolling pane the other two settled on. A
    card is a bordered block rather than a machine diagram: a persistent host and

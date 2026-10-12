@@ -27,7 +27,7 @@ import {
   type BoardCredential,
   type BoardKeyStorage,
 } from './api';
-import { appendFeedPage, readFeedFirstPage, type FeedRead } from './ui-state';
+import { readFeedPage, type FeedRead } from './ui-state';
 
 const STAMP = '2026-09-25T12:00:00.000Z';
 
@@ -582,17 +582,20 @@ describe('the board feed through the session', () => {
     for (let index = 1; index <= 55; index += 1) await owner.api.createIssue(`Issue ${index}`);
 
     const detached: FeedRead = owner.readFeed;
-    const first = await readFeedFirstPage(detached);
-    const second = await appendFeedPage(detached, first, first.nextCursor!);
+    const first = await readFeedPage(detached, 1);
+    const second = await readFeedPage(detached, 2);
 
     expect(first.limit).toBe(DEFAULT_FEED_LIMIT);
     expect(first.entries).toHaveLength(50);
     expect(first.nextCursor).not.toBeNull();
-    // The walk still reaches the whole log through the same detached read, and
-    // the newest entry is still the top of the page.
-    expect(second.entries).toHaveLength(55);
+    // The same detached read reaches the second numbered page, and that page is
+    // a page in its own right rather than a merge: 5 entries, and the whole log's
+    // 55 still reported as the total. Board 173: the caller never accumulates.
+    expect(second.entries).toHaveLength(5);
+    expect(second.total).toBe(55);
     expect(second.nextCursor).toBeNull();
     expect(first.entries[0].title).toBe('Issue 55');
+    expect(second.entries[0].title).toBe('Issue 5');
   });
 
   it('keeps its read off the prototype, so it cannot be handed over unbound', () => {

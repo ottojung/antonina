@@ -31,6 +31,7 @@ import {
   setActiveRunner,
   signalInvocation,
   signalRunner,
+  stopLikeOrMalformed,
   steerQueue,
   steerSequence,
   waitForInvocationGone,
@@ -45,6 +46,7 @@ import {
   type HostCapacity,
 } from '../../agent-runtime/src/host-capacity.js';
 import {
+  LAUNCH_DIRECTORY_MISSING,
   TERMINAL_STATES,
   activeRunnerFlag,
   deletePendingFlag,
@@ -692,7 +694,9 @@ function hostCapacityJson(capacity: HostCapacity): Record<string, unknown> {
  *   | `runner.ts:387` `spawn(...)` threw | `String(error)` | no — can carry the resolved executable path |
  *   | `runner.ts:396` no pid | fixed literal | yes |
  *   | `runner.ts:423` no `/proc` identity | fixed literal | yes |
- *   | `lifecycle.ts:250` `reconcileDeadMeta` | fixed literal | yes |
+ *   | `lifecycle.ts` `reconcileDeadMeta` (generic disappearance) | fixed literal | yes |
+ *   | `lifecycle.ts` `reconcileDeadMeta` (never-claimed reservation) | fixed literal | yes |
+ *   | `agent.ts` `failUnclaimedRunner` | fixed literal | yes |
  *
  * The two `finalizeTerminal` call sites that pass *no* note
  * (`packages/cli/src/agent.ts`, the `stop` and `kill` paths) are not producers
@@ -711,6 +715,11 @@ const DISPLAYABLE_AGENT_ERRORS: readonly string[] = [
   'could not persist the spawned OpenCode process identity; the process was killed and never recorded',
   // runner.ts: a continuation was requested with no underlying session.
   'cannot continue: underlying session not available',
+  // runner.ts: the effective working directory did not exist at spawn time, so
+  // the launch was refused before a child existed. The note names the directory,
+  // so this entry is the prefix and `displayableAgentError` matches it by
+  // `startsWith` rather than by equality.
+  `${LAUNCH_DIRECTORY_MISSING}: `,
   // runner.ts: the backend process produced no pid.
   'OpenCode process had no pid',
   // runner.ts: /proc identity could not be established for a live process.
@@ -719,6 +728,14 @@ const DISPLAYABLE_AGENT_ERRORS: readonly string[] = [
   // gone with no captured exit status. Reached from `agent status` and
   // `agent list`, so it is an ordinary sight, not a corner case.
   'runner/model process disappeared without a captured exit status',
+  // lifecycle.ts: `reconcileDeadMeta` found a reserved reservation whose owner
+  // is gone and whose spawn grace expired, so no runner can ever claim the
+  // accepted prompt. Board issue 207: the startup-handoff death is named
+  // rather than being reported as a generic disappearance.
+  'runner never claimed the accepted prompt',
+  // agent.ts: the detach path's bounded claim acknowledgement timed out, so no
+  // runner ever owned the accepted prompt. Board issue 207.
+  'detached runner never claimed ownership within 10s',
 ];
 
 /**
@@ -773,6 +790,10 @@ export function displayableAgentError(meta: AgentMetadata): string | null {
   const note = meta.error;
   if (typeof note !== 'string' || note.length === 0) return null;
   if (DISPLAYABLE_AGENT_ERRORS.includes(note)) return note;
+  // A note that names a value the producer supplied -- the missing directory in
+  // `LAUNCH_DIRECTORY_MISSING: <path>` -- cannot be listed verbatim. An entry
+  // ending in `: ` is a prefix, and a note that starts with it is displayable.
+  if (DISPLAYABLE_AGENT_ERRORS.some((entry) => entry.endsWith(': ') && note.startsWith(entry))) return note;
   const derived = describeSignalDeath(sanitizeBackendError(meta.backend_error));
   if (derived !== null && derived === note) return note;
   return AGENT_ERROR_WITHHELD;
@@ -821,7 +842,7 @@ function statusJson(
     next_steer: steers.length > 0 ? steers[0]!.prompt.split('\n', 1)[0] : null,
     steer_preempting: intent.value === 'steer',
     steer_metadata_error: null,
-    model: 'opencode-go/step-5-preview-free',
+    model: 'opencode-go/longcat-2.5-preview-free',
     variant: persistedVariant(meta),
     backend_error: sanitizeBackendError(meta.backend_error),
     host_capacity: hostCapacityJson(readHostCapacity()),
@@ -964,7 +985,7 @@ function spawnRunner(
   generation: number,
   ownerToken: string,
   context: AgentCommandContext,
-): void {
+): number | undefined {
   const entryScript = context.entryScript ?? process.argv[1];
   if (!entryScript) throw new Error('cannot locate Antonina JavaScript entry point');
   const child = spawn(
@@ -983,6 +1004,109 @@ function spawnRunner(
     },
   );
   child.unref();
+  // The runner's own pid, which is the identity its claim publishes
+  // (`runner_pid`). Handing it back lets the detach ack recognise the claim even
+  // when the runner finished its invocation before the first poll: a launch that
+  // is refused synchronously (a directory that vanished) claims and then
+  // finalizes inside one poll interval, and the ack must still see that a runner
+  // owned the prompt rather than report that none ever did.
+  return child.pid;
+}
+
+// Board issue 207: a detached run used to report acceptance the instant the
+// runner process existed, which is not the instant anything owned the
+// invocation -- the runner still had to boot, claim the reservation, and spawn
+// the backend. A launching job whose process tree was torn down in that window
+// (the Lubko short-lived job shape) left records that read `running` with no
+// runner and no pid for the whole 60s pid-less startup window, then failed
+// with a generic disappearance note, invisible to the scheduler's live set
+// the entire time. The detach path now waits, bounded, for the claim that
+// hands ownership from launcher to runner, and names the failure when no
+// runner claims in time. 10s matches the runner control grace in
+// packages/agent-runtime/src/runner.ts and the observed handoff margin.
+const RUNNER_CLAIM_ACK_TIMEOUT_MS = 10_000;
+const RUNNER_CLAIM_ACK_POLL_MS = 25;
+
+async function awaitRunnerClaim(
+  agentId: string,
+  generation: number,
+  expectedRunnerPid: number | undefined,
+  timeoutMs: number,
+  context: AgentCommandContext,
+): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const meta = readMeta(agentId, paths(context));
+    if (meta === null) return null;
+    // The runner this command spawned published its own pid as the claim. A
+    // match is the claim, whatever the lifecycle state is now: a launch refused
+    // synchronously (a directory that vanished between acceptance and spawn)
+    // claims and finalizes inside one poll interval, and the record is already
+    // terminal by the first read. The pid is the launcher's own observation of
+    // the process it started, so it cannot be a stale value from another run.
+    if (expectedRunnerPid !== undefined && meta.runner_pid === expectedRunnerPid) {
+      return expectedRunnerPid;
+    }
+    if (persistedLifecycleState(meta) !== 'running') return null;
+    const reservation = meta.runner_reservation;
+    if (
+      runnerReservationState(reservation) === 'claimed'
+      && runnerGeneration((reservation as Record<string, unknown>)?.gen, 1) === generation
+      && typeof meta.runner_pid === 'number'
+    ) {
+      return meta.runner_pid;
+    }
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, RUNNER_CLAIM_ACK_POLL_MS));
+  }
+}
+
+async function failUnclaimedRunner(
+  agentId: string,
+  generation: number,
+  context: AgentCommandContext,
+): Promise<boolean> {
+  let failed = false;
+  await updateMeta(agentId, (meta) => {
+    if (persistedLifecycleState(meta) !== 'running') return;
+    if (stopLikeOrMalformed(meta)) return;
+    if (runnerReservationState(meta.runner_reservation) !== 'reserved') return;
+    const reservation = meta.runner_reservation as Record<string, unknown>;
+    if (runnerGeneration(reservation.gen, 1) !== generation) return;
+    if (meta.runner_pid !== null) return;
+    finalizeTerminal(
+      meta,
+      'failed',
+      Date.now() / 1000,
+      null,
+      null,
+      `detached runner never claimed ownership within ${RUNNER_CLAIM_ACK_TIMEOUT_MS / 1000}s`,
+    );
+    setActiveRunner(meta, false);
+    failed = true;
+  }, paths(context));
+  return failed;
+}
+
+async function acknowledgeDetachedSpawn(
+  agentId: string,
+  generation: number,
+  expectedRunnerPid: number | undefined,
+  context: AgentCommandContext,
+): Promise<number> {
+  const claimedPid = await awaitRunnerClaim(agentId, generation, expectedRunnerPid, RUNNER_CLAIM_ACK_TIMEOUT_MS, context);
+  if (claimedPid !== null) return claimedPid;
+  if (await failUnclaimedRunner(agentId, generation, context)) {
+    throw new Error(`agent ${agentId}: detached runner never claimed ownership within ${RUNNER_CLAIM_ACK_TIMEOUT_MS / 1000}s`);
+  }
+  // The fail-write lost a race: the claim landed after the timeout, or a
+  // control path already decided this invocation. Report what the record says.
+  const meta = readMeta(agentId, paths(context));
+  if (meta !== null && typeof meta.runner_pid === 'number'
+    && (meta.runner_pid === expectedRunnerPid || persistedLifecycleState(meta) === 'running')) {
+    return meta.runner_pid;
+  }
+  throw new Error(`agent ${agentId}: detached runner never claimed ownership within ${RUNNER_CLAIM_ACK_TIMEOUT_MS / 1000}s`);
 }
 
 async function followAttached(
@@ -1080,7 +1204,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   // leaving it on the shared one would keep every `run` touching the file whose
   // lock contention this change exists to remove.
   if (configuredModelAvailable({ ...context.env, ...opencodeBackendEnv(observed, paths(context)) }) === false) {
-    throw new Error('configured OpenCode model opencode-go/step-5-preview-free is unavailable');
+    throw new Error('configured OpenCode model opencode-go/longcat-2.5-preview-free is unavailable');
   }
   const decision: {
     action?: 'busy' | 'spawn' | 'reuse';
@@ -1202,7 +1326,13 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     } else {
       // Board 186: the same database the invocation will be spawned with, so a
       // session an isolated invocation recorded is still discoverable here.
-      const recoveredSession = discoverSessionId(agentId, { ...context.env, ...opencodeBackendEnv(meta, paths(context)) });
+      // OpenCode session discovery is worktree-scoped. Probe the invocation
+      // directory, not the CLI caller's cwd.
+      const recoveredSession = discoverSessionId(
+        agentId,
+        { ...context.env, ...opencodeBackendEnv(meta, paths(context)) },
+        launchCwd!,
+      );
       if (recoveredSession === null) {
         mode = 'new';
       } else {
@@ -1242,7 +1372,10 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   if (decision.action === 'spawn') {
     // The token is minted only on the branches that reserve, so a spawn decision
     // always has one; a reservation written without it could not be claimed.
-    spawnRunner(agentId, decision.mode!, decision.generation!, decision.ownerToken!, context);
+    const spawnedRunnerPid = spawnRunner(agentId, decision.mode!, decision.generation!, decision.ownerToken!, context);
+    if (parsed.flags.has('--detach')) {
+      await acknowledgeDetachedSpawn(agentId, decision.generation!, spawnedRunnerPid, context);
+    }
     if (decision.recoverBusy) {
       throw new Error(`agent ${agentId} is recovering an already accepted prompt; this prompt was rejected`);
     }
@@ -1262,7 +1395,18 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
 
   if (parsed.flags.has('--detach')) {
     if (parsed.flags.has('--json')) {
-      context.io.stdout(JSON.stringify({ id: agentId, state: 'running', detached: true }));
+      // `runner_pid` is the ownership acknowledgement: it is present only once
+      // a runner process has durably claimed the accepted prompt (board issue
+      // 207). A detach ack without it would report acceptance for a spawn
+      // nothing owns.
+      const acked = readMeta(agentId, paths(context));
+      const runnerPid = acked !== null && typeof acked.runner_pid === 'number' ? acked.runner_pid : null;
+      context.io.stdout(JSON.stringify({
+        id: agentId,
+        state: 'running',
+        detached: true,
+        ...(runnerPid !== null ? { runner_pid: runnerPid } : {}),
+      }));
     } else {
       context.io.stdout(`Started agent ${agentId} in the background. Observe it with \`antonina agent log --id ${agentId} --follow\`.`);
     }

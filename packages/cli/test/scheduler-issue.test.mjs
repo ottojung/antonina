@@ -8,10 +8,13 @@ const helper = readFileSync(fileURLToPath(new URL('../../../scripts/antonina-sch
 test('issue helper is a bounded read-only board view', () => {
   assert.match(helper, /board", "show"/);
   assert.match(helper, /--id/);
-  assert.match(helper, /BODY_LIMIT = 1200/);
-  assert.match(helper, /MESSAGE_LIMIT = 500/);
-  assert.match(helper, /NEWEST_MESSAGES = 3/);
-  assert.match(helper, /messages\[-NEWEST_MESSAGES:\]/);
+  assert.match(helper, /BODY_LIMIT = 10000/);
+  assert.match(helper, /MESSAGE_LIMIT = 6000/);
+  assert.match(helper, /SUBSTANTIVE_LIMIT = 12/);
+  assert.match(helper, /MAX_PAGES = 12/);
+  assert.match(helper, /for message in reversed\(messages\)/);
+  assert.match(helper, /is_routine_launch/);
+  assert.match(helper, /latest_handoff_claim/);
   assert.match(helper, /newest_messages/);
   assert.doesNotMatch(helper, /memory|pressure|oom|headroom|cgroup|loadavg|cpu/i);
 });

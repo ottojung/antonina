@@ -79,3 +79,28 @@ Avoid huge comments and do not narrate routine process steps. Only a real topolo
 ## Model policy
 
 Use exclusively `opencode-go/longcat-2.5-preview-free`, variant `low`, unless the latest explicit human intent record changes that policy. Do not silently fall back to any other provider or model. An invocation failure is reported as such, not an admission refusal.
+
+
+## Evidence reconciliation for open issues
+
+An agent's succeeded process state means only that the runner exited successfully.
+The snapshot deliberately labels terminal delivery as unverified and supplies
+unverified_terminal_issues. **Never use matching terminal issue numbers as a
+completed-work set.** For each open issue without a live owner, consult
+antonina-scheduler-issue --issue N: its newest_messages contain the newest
+substantive comments across paginated history (routine scheduler launch chatter
+is separated), including human decisions and worker handoffs.
+
+A [terminal-handoff] comment is a *claim*, not an independent acceptance gate.
+It must report state, owner, artifact, validation, and next. Distinguish:
+- no handoff or interrupted transcript: delegate bounded verification/continuation;
+- partial/blocked: delegate the useful repair, or record a genuine dependency;
+- delivered but unreviewed/unmerged/undeployed: delegate review, integration,
+  CI, or deployment as separate topologically useful work;
+- verified and genuinely awaiting an explicit human decision: avoid repeating
+  the finished work and wait for that decision.
+
+A missing human response, an open board state, or a zero exit code is **not**
+evidence of a human gate. Never label all open issues covered merely because
+their most recent processes exited successfully. Keep concurrency based only
+on topology and expected constructive speedup, without resource quotas.

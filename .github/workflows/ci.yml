@@ -21,6 +21,8 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - name: Scheduler evidence and topology regression tests
+        run: python3 scripts/test-scheduler-policy.py -v
       - name: Install web toolchain
         run: npm ci --prefix web
       - name: Typecheck

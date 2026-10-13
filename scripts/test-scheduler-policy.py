@@ -64,6 +64,9 @@ class SchedulerPolicyTests(unittest.TestCase):
         self.assertIn("clone when needed", prompt)
         self.assertIn("ottojung/vau.place", prompt)
         self.assertIn("Write design", prompt)
+        self.assertIn("[terminal-handoff]\nstate: <", prompt)
+        self.assertIn("\nartifact: <", prompt)
+        self.assertIn("\nvalidation: <", prompt)
         self.assertNotIn("antonina-scheduler-provision", prompt)
 
     def test_live_owner_check_by_issue_not_paths(self):
@@ -255,8 +258,10 @@ class SubstantiveIssueTests(unittest.TestCase):
                    "body": "[terminal-handoff]\nstate: partial\nartifact: branch abc\nnext: finish tests"}
         human = {"author": "human", "createdAt": "2026-10-12T12:00:00Z",
                  "body": "Do not merge until CI passes"}
+        orchestrator = {"author": "openclaw@marceline-dev",
+                        "body": "[orchestrator]\nstate: working\nsummary: repeated turn"}
         page1 = {"number": 19, "state": "open", "title": "Kawun #19",
-                 "body": "full description", "messages": [routine] * 50}
+                 "body": "full description", "messages": [routine] * 49 + [orchestrator]}
         page2 = {"number": 19, "state": "open", "title": "Kawun #19",
                  "body": "full description", "messages": [handoff, human]}
         calls = []

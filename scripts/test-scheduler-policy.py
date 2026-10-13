@@ -290,5 +290,30 @@ class SubstantiveIssueTests(unittest.TestCase):
         self.assertEqual(result["pages_read"], 1)
 
 
+class SchedulerDeploymentTests(unittest.TestCase):
+    def test_atomic_install_and_detects_deployment_drift(self):
+        import os
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            env = dict(os.environ)
+            env["ANTONINA_BIN_DIR"] = temp + "/bin"
+            env["ANTONINA_SKILL_DIR"] = temp + "/skills"
+            env["ANTONINA_RESTART"] = "never"
+            deploy = str(ROOT / "antonina-scheduler-deploy")
+            subprocess.run([deploy, "--install"], env=env, check=True,
+                           capture_output=True, text=True)
+            subprocess.run([deploy, "--check"], env=env, check=True,
+                           capture_output=True, text=True)
+            installed = Path(temp) / "bin" / "antonina-scheduler-issue"
+            self.assertEqual(installed.read_bytes(),
+                             (ROOT / "antonina-scheduler-issue").read_bytes())
+            installed.write_text("stale")
+            result = subprocess.run([deploy, "--check"], env=env,
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("out of sync", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

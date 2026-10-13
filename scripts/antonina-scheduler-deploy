@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+bin_dir="${ANTONINA_BIN_DIR:-$HOME/.local/bin}"
+skill_dir="${ANTONINA_SKILL_DIR:-$HOME/.openclaw/skills}"
+restart="${ANTONINA_RESTART:-auto}"
+mode="${1:---install}"
+case "$mode" in
+  --install|--check) ;;
+  *) echo "usage: antonina-scheduler-deploy [--install|--check]" >&2; exit 2 ;;
+esac
+scripts=(antonina-orchestrator-loop antonina-orchestrator-restart
+         antonina-orchestrator-turn antonina-scheduler-issue
+         antonina-scheduler-launch antonina-scheduler-snapshot)
+skills=(antonina-orchestrator antonina-scheduler)
+install_atomic() {
+  local source="$1" target="$2" perm="$3" tmp
+  mkdir -p "$(dirname "$target")"
+  tmp="$(mktemp "$(dirname "$target")/.antonina-deploy.XXXXXX")"
+  if ! install -m "$perm" "$source" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$target"
+}
+verify_file() {
+  if ! cmp -s "$1" "$2"; then
+    echo "out of sync: $2" >&2
+    return 1
+  fi
+}
+for name in "${scripts[@]}"; do
+  source="$root/scripts/$name"; target="$bin_dir/$name"
+  if [[ "$mode" == --check ]]; then
+    verify_file "$source" "$target"
+  else
+    install_atomic "$source" "$target" 755
+  fi
+done
+for name in "${skills[@]}"; do
+  source="$root/skills/$name/SKILL.md"; target="$skill_dir/$name/SKILL.md"
+  if [[ "$mode" == --check ]]; then
+    verify_file "$source" "$target"
+  else
+    install_atomic "$source" "$target" 644
+  fi
+done
+if [[ "$mode" == --install && "$restart" != never &&
+      -d /run/s6/legacy-services/antonina-orchestrator ]]; then
+  "$bin_dir/antonina-orchestrator-restart"
+fi
+echo "Antonina scheduler ${mode#--} verified on $(hostname)"

@@ -42,9 +42,9 @@ test('bounded scheduler turn dispatches an entire useful frontier without idle-w
 test('scheduler turn enforces distinct-front topology and replenishes the dispatch gap', () => {
   assert.match(turn, /DISTINCT-FRONT TOPOLOGY/);
   assert.match(turn, /never run two live agents on the same logical front/);
-  assert.match(turn, /same worktree/);
-  assert.match(turn, /De-duplicate by canonical worktree\/cwd path AND live-agent state/);
-  assert.match(turn, /not by issue id or title alone/);
+  assert.doesNotMatch(turn, /same worktree/);
+  assert.match(turn, /De-duplicate by live issue ownership and logical overlapping task scope/);
+  assert.match(turn, /never by worktree\/cwd path/);
   assert.match(turn, /DISPATCH GAP/);
   assert.match(turn, /Count ACTUAL running sessions/);
   assert.match(turn, /dispatch promptly to replenish the pool/);
@@ -54,17 +54,17 @@ test('scheduler turn enforces distinct-front topology and replenishes the dispat
 
 test('scheduler turn reconciles terminal succeeded against durable completion evidence', () => {
   assert.match(turn, /TERMINAL EVIDENCE/);
-  assert.match(turn, /classifies a worker that exited 0 as succeeded/);
-  assert.match(turn, /process outcome, NOT proof/);
+  assert.match(turn, /reports process_state, not task completion/);
+  assert.match(turn, /A process exit code 0 is NOT proof of delivery or acceptance/);
   assert.match(turn, /durable completion evidence/);
   assert.match(turn, /merged PR with green CI/);
   assert.match(turn, /recorded review verdict/);
   assert.match(turn, /required artifacts actually delivered/);
   assert.match(turn, /do NOT silently retire the issue/);
-  assert.match(turn, /re-dispatch a fresh useful front/);
-  assert.match(turn, /flag the specific gap on the board/);
-  assert.match(turn, /Never retire an OPEN issue merely because a terminal agent exited successfully/);
-  assert.match(turn, /a succeeded process is not accepted work/);
+  assert.match(turn, /dispatch a bounded verifier or continuation/);
+  assert.match(turn, /record the precise blocker and next action/);
+  assert.match(turn, /Never declare all issues covered/);
+  assert.match(turn, /A terminal handoff is a CLAIM/);
   assert.doesNotMatch(turn, /memory\.pressure|memory\.stat|memory\.events|reclaimable file cache|oom_kill|PSI/);
 });
 

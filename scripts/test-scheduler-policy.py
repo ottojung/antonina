@@ -197,8 +197,21 @@ class FullFrontierTests(unittest.TestCase):
                      "<terminals>", "exec"), scope)
         result=scope["recent_terminal_agents"]()
         self.assertFalse(result["incomplete"])
-        self.assertEqual([(a["issue"], a["state"]) for a in result["agents"]],
-                         [(225, "succeeded"), (211, "failed")])
+        self.assertEqual([(a["issue"], a["process_state"], a["delivery_state"])
+                          for a in result["agents"]],
+                         [(225, "succeeded", "unverified"),
+                          (211, "failed", "unverified")])
+
+    def test_terminal_success_does_not_certify_delivery(self):
+        snapshot = (ROOT / "antonina-scheduler-snapshot").read_text()
+        turn = (ROOT / "antonina-orchestrator-turn").read_text()
+        self.assertIn('"delivery_state": "unverified"', snapshot)
+        self.assertIn('context["unverified_terminal_issues"]', snapshot)
+        self.assertIn("process_state, not task completion", turn)
+        self.assertIn("Never declare all issues covered", turn)
+        launcher = (ROOT / "antonina-scheduler-launch").read_text()
+        for field in ("[terminal-handoff]", "artifact:", "validation:", "next:"):
+            self.assertIn(field, launcher)
 
     def test_terminal_snapshot_only_contains_open_issue_latest(self):
         source = ast.parse((ROOT / "antonina-scheduler-snapshot").read_text())
@@ -230,6 +243,46 @@ class FullFrontierTests(unittest.TestCase):
         self.assertIn("awaiting review", intent.lower())
         launcher = (ROOT / "antonina-scheduler-launch").read_text()
         self.assertIn("TERMINAL HANDOFF", launcher)
+
+
+class SubstantiveIssueTests(unittest.TestCase):
+    def test_scheduler_chatter_does_not_hide_handoffs(self):
+        helper = load_helper("antonina-scheduler-issue")
+        routine = {"author": "openclaw@marceline-dev",
+                   "createdAt": "2026-10-13T10:00:00Z",
+                   "body": "[scheduler-turn]\nstate: working\nsummary: repeated launch"}
+        handoff = {"author": "agent-abc", "createdAt": "2026-10-12T11:00:00Z",
+                   "body": "[terminal-handoff]\nstate: partial\nartifact: branch abc\nnext: finish tests"}
+        human = {"author": "human", "createdAt": "2026-10-12T12:00:00Z",
+                 "body": "Do not merge until CI passes"}
+        page1 = {"number": 19, "state": "open", "title": "Kawun #19",
+                 "body": "full description", "messages": [routine] * 50}
+        page2 = {"number": 19, "state": "open", "title": "Kawun #19",
+                 "body": "full description", "messages": [handoff, human]}
+        calls = []
+        def fake_check_output(args, text=True):
+            calls.append(int(args[args.index("--page") + 1]))
+            return json.dumps(page1 if calls[-1] == 1 else page2)
+        with patch.object(helper.subprocess, "check_output", side_effect=fake_check_output):
+            result = helper.read_issue("19")
+        self.assertEqual(calls, [1, 2])
+        self.assertEqual([m["author"] for m in result["newest_messages"]],
+                         ["human", "agent-abc"])
+        self.assertEqual(len(result["latest_routine_launches"]), 2)
+        self.assertEqual(result["latest_handoff_claim"]["claimed_state"], "partial")
+        self.assertFalse(result["latest_handoff_claim"]["verified"])
+        self.assertFalse(result["handoff_is_verified"])
+
+    def test_preserves_long_issue_body_and_comment(self):
+        helper = load_helper("antonina-scheduler-issue")
+        page = {"number": 10, "state": "open", "title": "Issue",
+                "body": "b" * 9000,
+                "messages": [{"author": "human", "body": "c" * 5500}]}
+        with patch.object(helper.subprocess, "check_output", return_value=json.dumps(page)):
+            result = helper.read_issue("10")
+        self.assertEqual(len(result["body"]), 9000)
+        self.assertEqual(len(result["newest_messages"][0]["body"]), 5500)
+        self.assertEqual(result["pages_read"], 1)
 
 
 if __name__ == "__main__":

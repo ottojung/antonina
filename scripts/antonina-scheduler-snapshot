@@ -41,7 +41,9 @@ def recent_terminal_agents():
             if issue is not None:
                 entries.append({
                     "issue": issue, "id": a.get("id"),
-                    "state": a.get("state"), "finished_at": a.get("finished_at")
+                    "process_state": a.get("state"),
+                    "delivery_state": "unverified",
+                    "finished_at": a.get("finished_at")
                 })
         return {"agents": entries, "incomplete": False}
     except (OSError, subprocess.CalledProcessError, ValueError, KeyError, TypeError):
@@ -174,5 +176,12 @@ context = {
 context["unrepresented_issues"] = unrepresented_issues
 context["open_issues"] = issue_headers
 context["recent_terminal_agents"] = compact_terminal_hints(terminal_hints, open_numbers)
+# A zero-exit worker is NOT a completion certificate. Every unowned open
+# issue with a terminal process still requires a durable board handoff and
+# project-specific artifact/review/integration reconciliation.
+context["unverified_terminal_issues"] = [
+    row["issue"] for row in context["recent_terminal_agents"]["agents"]
+    if row["issue"] not in live_issue_numbers
+]
 
 print(json.dumps(context, separators=(",", ":")))

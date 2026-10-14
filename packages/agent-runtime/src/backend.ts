@@ -14,7 +14,7 @@ import {
 } from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
 
-export const AGENT_MODEL = 'opencode-go/longcat-2.5-preview-free';
+export const AGENT_MODEL = 'opencode-go/step-5-preview-free';
 export const OPENCODE_TITLE_PREFIX = 'antonina-';
 export const DEFAULT_OPENCODE_BIN = 'opencode';
 export const OPENCODE_BIN_ENV = 'ANTONINA_OPENCODE_BIN';
@@ -203,7 +203,7 @@ const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
     transient: true,
     automaticRetrySafe: false,
   },
-  // The OpenCode Go LongCat free tier can reject requests across many sessions
+  // The OpenCode Go Step 5 free tier can reject requests across many sessions
   // simultaneously. Name the provider throttle instead of reporting an
   // unrecognized backend failure. Do not replay the turn automatically:
   // the API error alone cannot prove no earlier tool action was committed.

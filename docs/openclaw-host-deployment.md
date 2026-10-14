@@ -4,13 +4,13 @@ This document records the first OpenClaw deployment experiment on `marceline-dev
 It is intentionally an implementation log and reproducibility sketch rather than the
 final host-provisioning contract.
 
-> **Current authoritative policy (October 8, 2026):** The sole permitted model for OpenClaw scheduling and managed Antonina agents is LongCat 2.5 Preview Free, `opencode-go/longcat-2.5-preview-free`, with variant `low` and **no model/provider fallback**, per `docs/intent-records/agent.md`. The scheduler operates in bounded turns under an s6-supervised loop on Marceline; its source is `scripts/antonina-orchestrator-turn` and its dedicated OpenCode configuration is `config/opencode-openclaw.json`. This page also preserves *historical* experiments describing LongCat, LongCat, and foreground Gateway operation; those passages are **not** current setup or model-selection instructions. Never deploy from those older passages.
+> **Current authoritative policy (October 8, 2026):** The sole permitted model for OpenClaw scheduling and managed Antonina agents is Step 5 Preview Free, `opencode-go/step-5-preview-free`, with variant `high` and **no model/provider fallback**, per `docs/intent-records/agent.md`. The scheduler operates in bounded turns under an s6-supervised loop on Marceline; its source is `scripts/antonina-orchestrator-turn` and its dedicated OpenCode configuration is `config/opencode-openclaw.json`. This page also preserves *historical* experiments describing Space Bunny, LongCat, and foreground Gateway operation; those passages are **not** current setup or model-selection instructions. Never deploy from those older passages.
 
 The immediate goals are:
 
 - run OpenClaw on an Antonina-compatible host;
 - use the existing OpenCode installation as the coding-agent runtime;
-- constrain OpenCode to `opencode-go/longcat-2.5-preview-free`;
+- constrain OpenCode to `opencode-go/step-5-preview-free`;
 - prove that OpenClaw can spawn and manage OpenCode work through ACP/ACPX;
 - later turn the successful procedure into a deterministic provisioning script.
 
@@ -85,7 +85,7 @@ The preferred integration path is:
 OpenClaw
   -> ACPX
   -> OpenCode ACP server
-  -> opencode-go/longcat-2.5-preview-free
+  -> opencode-go/step-5-preview-free
 ```
 
 This is preferable to making Antonina own another long-running coding-agent process
@@ -114,9 +114,9 @@ A dedicated OpenCode configuration is used for OpenClaw:
 
 Its intent is:
 
-- primary model: `opencode-go/longcat-2.5-preview-free`;
-- small model: `opencode-go/longcat-2.5-preview-free`;
-- the OpenCode provider whitelist contains only `longcat-2.5-preview-free`.
+- primary model: `opencode-go/step-5-preview-free`;
+- small model: `opencode-go/step-5-preview-free`;
+- the OpenCode provider whitelist contains only `step-5-preview-free`.
 
 A dedicated wrapper is used:
 
@@ -147,14 +147,14 @@ OpenClaw agent entries used for this experiment also have a model policy contain
 only:
 
 ```text
-opencode-go/longcat-2.5-preview-free
+opencode-go/step-5-preview-free
 ```
 
 There are therefore two useful layers:
 
-1. OpenClaw policy admits only LongCat through the `opencode-go` provider for the configured agent.
+1. OpenClaw policy admits only Step 5 Preview Free through the `opencode-go` provider for the configured agent.
 2. The OpenCode process launched by OpenClaw sees a dedicated config in which only
-   LongCat is available.
+   Step 5 Preview Free is available.
 
 The eventual deterministic deployment should create these files from declarative
 Antonina-owned inputs rather than mutate them interactively.
@@ -176,7 +176,7 @@ The correct argument list for the installed OpenCode version is currently:
 An earlier experiment attempted:
 
 ```json
-["acp", "--model", "opencode-go/longcat-2.5-preview-free"]
+["acp", "--model", "opencode-go/step-5-preview-free"]
 ```
 
 but the installed OpenCode ACP command does not accept `--model`. The model lock
@@ -201,7 +201,7 @@ OpenCode harness. Their important shape is:
     }
   },
   "modelPolicy": {
-    "allow": ["opencode-go/longcat-2.5-preview-free"]
+    "allow": ["opencode-go/step-5-preview-free"]
   }
 }
 ```
@@ -310,7 +310,7 @@ install software
   -> materialize locked OpenCode config
   -> install/enable required OpenClaw plugins
   -> inject credentials from a non-Git source
-  -> verify LongCat-only model view
+  -> verify Step 5-only model view
   -> verify ACPX/OpenCode probe
   -> install/start authenticated loopback Gateway daemon
   -> run delegation smoke test
@@ -371,14 +371,14 @@ At minimum verify:
 [ ] required plugins load
 [ ] ACPX backend initializes
 [ ] OpenCode authentication is available
-[ ] dedicated OpenCode config exposes LongCat as intended
-[ ] OpenClaw agent policy allows only LongCat
+[ ] dedicated OpenCode config exposes Step 5 Preview Free as intended
+[ ] OpenClaw agent policy allows only Step 5 Preview Free
 [ ] OpenCode ACP process starts through the configured wrapper
 [ ] Gateway reaches ready state
 [ ] Gateway is loopback-bound unless explicitly intended otherwise
 [ ] Gateway authentication is configured
 [x] an OpenClaw-controlled ACP child can complete a trivial task
-[ ] the completed child actually used the desired OpenCode/LongCat path
+[ ] the completed child actually used the desired OpenCode/Step 5 Preview Free path
 [ ] daemon/service survives a host/session restart
 ```
 
@@ -453,10 +453,10 @@ openclaw models list --provider opencode
 ```
 
 returns no models, and an explicit embedded run using
-`opencode-go/longcat-2.5-preview-free` fails as an unknown model.
+`opencode-go/step-5-preview-free` fails as an unknown model.
 
 This explains why the foreground Gateway's default heartbeat attempted the built-in
-OpenAI default even though the ACP agents were restricted to LongCat.
+OpenAI default even though the ACP agents were restricted to Space Bunny.
 
 Until the direct provider route is resolved or intentionally replaced, recurring
 heartbeats are disabled with `agents.defaults.heartbeat.every = "0m"`. OpenClaw's
@@ -465,7 +465,7 @@ allowing targeted event-driven wakes.
 
 The desired final deployment therefore has two model-related checks:
 
-1. ACP workers must continue to launch OpenCode with the dedicated LongCat-only
+1. ACP workers must continue to launch OpenCode with the dedicated Step 5-only
    OpenCode configuration.
 2. Any OpenClaw embedded/system-agent route that is enabled must also be constrained
    to the intended model rather than silently falling back to another provider.
@@ -474,7 +474,7 @@ The desired final deployment therefore has two model-related checks:
 ### Direct OpenCode provider catalog versus OpenCode CLI catalog
 
 A later check clarified why the embedded OpenClaw route cannot currently be pinned to
-LongCat even though ACP workers can use it.
+Step 5 Preview Free even though ACP workers can use it.
 
 When the OpenCode credential is explicitly exported into the process environment,
 OpenClaw's direct provider discovery works:
@@ -489,22 +489,22 @@ openclaw models list --refresh --provider opencode
 but the current direct OpenClaw/OpenCode catalog contains models such as
 `opencode/gpt-5.6-sol`, `opencode/claude-opus-5`, and
 `opencode/big-pickle`; it does **not** contain
-`opencode-go/longcat-2.5-preview-free`.
+`opencode-go/step-5-preview-free`.
 
 By contrast, the dedicated OpenCode CLI configuration used by ACP reports exactly:
 
 ```text
-opencode-go/longcat-2.5-preview-free
+opencode-go/step-5-preview-free
 ```
 
 This is an important architectural distinction:
 
-- LongCat is available through the OpenCode CLI/ACP path we are using.
-- LongCat is not presently available through OpenClaw's direct OpenCode provider
-  catalog on this host/account.
-- Therefore OpenClaw's embedded/system-agent model cannot currently be set to Space
-  Bunny through the direct provider, while ACP workers can be.
+- Step 5 Preview Free is available through the OpenCode CLI/ACP path we are using.
+- Step 5 Preview Free is not presently available through OpenClaw's direct OpenCode
+  provider catalog on this host/account.
+- Therefore OpenClaw's embedded/system-agent model cannot currently be set to
+  Step 5 Preview Free through the direct provider, while ACP workers can be.
 
 Do not work around this by silently choosing a different direct-provider model. If
-the product requirement remains LongCat-only, keep the embedded recurring agent
+the product requirement remains Step 5-only, keep the embedded recurring agent
 path disabled and use the ACP/OpenCode path until a supported direct route exists.

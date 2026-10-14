@@ -78,4 +78,4 @@ Avoid huge comments and do not narrate routine process steps. Only a real topolo
 
 ## Model policy
 
-Use exclusively `opencode-go/longcat-2.5-preview-free`, variant `low`, unless the latest explicit human intent record changes that policy. Do not silently fall back to any other provider or model. An invocation failure is reported as such, not an admission refusal.
+Use exclusively `opencode-go/step-5-preview-free`, variant `high`, unless the latest explicit human intent record changes that policy. Do not silently fall back to any other provider or model. An invocation failure is reported as such, not an admission refusal.

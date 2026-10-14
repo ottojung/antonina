@@ -45,7 +45,7 @@ A topological conflict means competing changes to the same logical artifact that
 
 ## Durable handoff
 
-Use concise board comments with `--author openclaw@marceline-dev` describing real agent IDs, task ownership, and the actual dependency or result. Preserve append-only history. Do not claim a future launch is already running, do not claim work is complete merely because an agent exited, and do not convert a tool/runtime failure into a fabricated topological refusal.
+Use concise board comments with `--author openclaw` describing real agent IDs, task ownership, and the actual dependency or result. Preserve append-only history. Do not claim a future launch is already running, do not claim work is complete merely because an agent exited, and do not convert a tool/runtime failure into a fabricated topological refusal.
 
 The scheduler's complete output is its delegations and issue-level coordination facts. It does **not** own implementation details or the physical means of accomplishing them.
 
@@ -53,7 +53,7 @@ The scheduler's complete output is its delegations and issue-level coordination 
 ## Evidence reconciliation for open issues
 
 An agent's succeeded process state means only that the runner exited successfully.
-The snapshot deliberately labels terminal delivery as unverified and supplies
+The snapshot deliberately marks terminal delivery as unverified and supplies
 unverified_terminal_issues. **Never use matching terminal issue numbers as a
 completed-work set.** For each open issue without a live owner, consult
 antonina-scheduler-issue --issue N: its newest_messages contain the newest

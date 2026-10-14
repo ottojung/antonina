@@ -82,7 +82,7 @@ def phoebe_owned_issue(issue):
     title = issue.get("title") or ""
     if number in (181, 195, 297, 298, 299):
         return True
-    if re.search(r"(?i)\\bviche\\b", title):
+    if re.search(r"(?i)\bviche\b", title):
         return True
     return project_hint_from_title(title, number) == "Kawun"
 

@@ -35,24 +35,67 @@ class SchedulerPolicyTests(unittest.TestCase):
         for script in (launcher, snapshot, turn):
             for forbidden in ("marceline-dev", "phoebe-dev", "Viche", "Kawun",
                               "Kavun", "HOST OWNERSHIP OVERRIDE",
-                              "Execution host:", "phoebe_owned_issue"):
+                              "phoebe_owned_issue"):
                 self.assertNotIn(forbidden, script)
         self.assertNotIn("project_hint", snapshot)
         self.assertNotIn("represented_projects", snapshot)
         self.assertNotIn("unrepresented_projects", snapshot)
         self.assertNotIn('"labels"', snapshot)
 
-    def test_host_or_project_words_are_not_generic_dispatch_restrictions(self):
+    def test_plain_text_host_instruction_is_host_aware_but_not_a_label(self):
         launcher = load_helper("antonina-scheduler-launch")
-        for number, title, body in (
-            (297, "Viche Town Hall", "Execution host: phoebe-dev"),
-            (181, "npm run check never runs vitest", "Execution host: phoebe-dev"),
-            (223, "Kawun: work", ""),
+        examples = (
+            ("Execution host: node-a", "node-a"),
+            ("**Execution host: node-a (EXCLUSIVE).**\\nDetails", "node-a"),
+            ("No host specified; this can run anywhere", None),
+        )
+        for body, expected in examples:
+            self.assertEqual(launcher.declared_execution_host(body), expected)
+        with self.assertRaisesRegex(SystemExit, "malformed"):
+            launcher.declared_execution_host("Execution host: ")
+        for host in ("node-a", "node-b"):
+            with patch.object(launcher.socket, "gethostname", return_value=host):
+                launcher.ensure_local_execution_host(
+                    {"number": 42, "title": "Any project", "body": "No restriction"}
+                )
+                record = {"number": 42, "body": "**Execution host: node-a (EXCLUSIVE).**"}
+                if host == "node-a":
+                    launcher.ensure_local_execution_host(record)
+                else:
+                    with self.assertRaisesRegex(SystemExit, "requires execution on node-a"):
+                        launcher.ensure_local_execution_host(record)
+
+    def test_dispatch_reads_issue_host_without_project_or_issue_blocklists(self):
+        launcher = load_helper("antonina-scheduler-launch")
+        for number, title, body, hostname, accepted in (
+            (297, "Viche Town Hall", "**Execution host: node-a (EXCLUSIVE).**",
+             "node-a", True),
+            (297, "Viche Town Hall", "**Execution host: node-a (EXCLUSIVE).**",
+             "node-b", False),
+            (181, "npm run check never runs vitest", "Execution host: node-b",
+             "node-a", False),
+            (181, "npm run check never runs vitest", "Execution host: node-b",
+             "node-b", True),
+            (223, "Kawun: work", "", "node-a", True),
+            (223, "Kawun: work", "", "node-b", True),
         ):
             record = {"number": number, "title": title, "body": body, "state": "open"}
             with patch.object(launcher, "run", return_value=types.SimpleNamespace(
-                    stdout=json.dumps(record))):
-                self.assertEqual(launcher.require_open_issue(number), record)
+                    stdout=json.dumps(record))), \
+                    patch.object(launcher.socket, "gethostname", return_value=hostname):
+                if accepted:
+                    self.assertEqual(launcher.require_open_issue(number), record)
+                else:
+                    with self.assertRaisesRegex(SystemExit, "requires execution on"):
+                        launcher.require_open_issue(number)
+
+    def test_identical_prompt_uses_runtime_hostname(self):
+        turn = (ROOT / "antonina-orchestrator-turn").read_text()
+        self.assertIn('current_host="$(hostname)"', turn)
+        self.assertIn("HOST-AWARE ISSUE INTAKE:", turn)
+        self.assertIn("antonina-scheduler-issue --issue ISSUE", turn)
+        self.assertNotIn("marceline-dev", turn)
+        self.assertNotIn("phoebe-dev", turn)
 
     def test_generic_issue_number_parsing(self):
         fn = snapshot_function("issue_number_from_agent_title")

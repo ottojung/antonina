@@ -45,6 +45,19 @@ for name in "${skills[@]}"; do
     install_atomic "$source" "$target" 644
   fi
 done
+# A running orchestrator is not allowed to have a deployment-specific
+# service entrypoint; it must use the same main-branch runner on every host.
+# Do not create a new orchestrator where none already exists.
+service_dir=/run/s6/legacy-services/antonina-orchestrator
+if [[ -d "$service_dir" ]]; then
+  service_source="$root/scripts/antonina-orchestrator-service-run"
+  service_target="$service_dir/run"
+  if [[ "$mode" == --check ]]; then
+    verify_file "$service_source" "$service_target"
+  else
+    install_atomic "$service_source" "$service_target" 755
+  fi
+fi
 if [[ "$mode" == --install && "$restart" != never &&
       -d /run/s6/legacy-services/antonina-orchestrator ]]; then
   "$bin_dir/antonina-orchestrator-restart"

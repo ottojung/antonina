@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -19,9 +20,43 @@ def run(args, check=True):
     return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
 
 
+
+def declared_execution_host(body):
+    """A host instruction is plain issue prose, never a label or board field.
+
+    Only the leading 'Execution host:' declaration is machine-interpreted.
+    Other language in the body remains available to the orchestrator itself.
+    """
+    first_line = (body or "").lstrip().split("\n", 1)[0].strip()
+    if not re.match(r"^(?:\*\*)?Execution host\s*:", first_line, re.I):
+        return None
+    match = re.match(
+        r"^(?:\*\*)?Execution host\s*:\s*([a-z0-9][a-z0-9._-]*)\b",
+        first_line,
+        re.I,
+    )
+    if not match:
+        raise SystemExit("issue has a malformed Execution host instruction")
+    return match.group(1).lower()
+
+
+def ensure_local_execution_host(record):
+    required = declared_execution_host(record.get("body"))
+    local = socket.gethostname().strip().lower()
+    if not local:
+        raise SystemExit("cannot determine local hostname; refusing issue launch")
+    if required is not None and local != required:
+        raise SystemExit(
+            f"issue #{record.get('number')} requires execution on {required}, "
+            f"not this host ({local})"
+        )
+
+
+
 def require_open_issue(issue):
     result = run([ANTONINA, "board", "show", "--id", str(issue), "--page", "1", "--json"])
     record = json.loads(result.stdout)
+    ensure_local_execution_host(record)
     if record.get("state") != "open":
         raise SystemExit(f"refusing launch on non-open board issue #{issue}: {record.get('state')}")
     return record

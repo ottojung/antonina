@@ -10,7 +10,7 @@ From a clean checkout of the desired main commit on each host:
     scripts/antonina-scheduler-deploy --check
 
 The deploy helper atomically installs six active scripts into ~/.local/bin and
-the two matching skill files into ~/.openclaw/skills. It restarts an existing
+the two matching skill files into ~/.openclaw/skills. It also installs and verifies the **same source-controlled S6 service entrypoint** wherever an `antonina-orchestrator` service already exists; no private service wrapper or host-specific alternate script is supported. The prompt template is identical everywhere. The local hostname and any explicit `Execution host: HOSTNAME` description restriction determine which issues can actually be dispatched. This is ordinary issue text, not a label or new field. It restarts an existing
 s6-supervised antonina-orchestrator using the want-up-preserving restart
 helper; it does NOT create a second orchestrator service on hosts that have
 none. To stage without restarting, set

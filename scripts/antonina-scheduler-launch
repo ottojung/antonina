@@ -28,10 +28,10 @@ def declared_execution_host(body):
     Other language in the body remains available to the orchestrator itself.
     """
     first_line = (body or "").lstrip().split("\n", 1)[0].strip()
-    if not re.match(r"^(?:\\*\\*)?Execution host\\s*:", first_line, re.I):
+    if not re.match(r"^(?:\*\*)?Execution host\s*:", first_line, re.I):
         return None
     match = re.match(
-        r"^(?:\\*\\*)?Execution host\\s*:\\s*([a-z0-9][a-z0-9._-]*)\\b",
+        r"^(?:\*\*)?Execution host\s*:\s*([a-z0-9][a-z0-9._-]*)\b",
         first_line,
         re.I,
     )

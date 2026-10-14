@@ -28,6 +28,32 @@ def snapshot_function(name):
 
 
 class SchedulerPolicyTests(unittest.TestCase):
+    def test_antonina_policy_is_host_neutral_and_without_labels(self):
+        launcher = (ROOT / "antonina-scheduler-launch").read_text()
+        snapshot = (ROOT / "antonina-scheduler-snapshot").read_text()
+        turn = (ROOT / "antonina-orchestrator-turn").read_text()
+        for script in (launcher, snapshot, turn):
+            for forbidden in ("marceline-dev", "phoebe-dev", "Viche", "Kawun",
+                              "Kavun", "HOST OWNERSHIP OVERRIDE",
+                              "Execution host:", "phoebe_owned_issue"):
+                self.assertNotIn(forbidden, script)
+        self.assertNotIn("project_hint", snapshot)
+        self.assertNotIn("represented_projects", snapshot)
+        self.assertNotIn("unrepresented_projects", snapshot)
+        self.assertNotIn('"labels"', snapshot)
+
+    def test_host_or_project_words_are_not_generic_dispatch_restrictions(self):
+        launcher = load_helper("antonina-scheduler-launch")
+        for number, title, body in (
+            (297, "Viche Town Hall", "Execution host: phoebe-dev"),
+            (181, "npm run check never runs vitest", "Execution host: phoebe-dev"),
+            (223, "Kawun: work", ""),
+        ):
+            record = {"number": number, "title": title, "body": body, "state": "open"}
+            with patch.object(launcher, "run", return_value=types.SimpleNamespace(
+                    stdout=json.dumps(record))):
+                self.assertEqual(launcher.require_open_issue(number), record)
+
     def test_generic_issue_number_parsing(self):
         fn = snapshot_function("issue_number_from_agent_title")
         scope = {"re": re}

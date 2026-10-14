@@ -13,7 +13,7 @@ The deploy helper atomically installs six active scripts into ~/.local/bin and
 the two matching skill files into ~/.openclaw/skills. It restarts an existing
 s6-supervised antonina-orchestrator using the want-up-preserving restart
 helper; it does NOT create a second orchestrator service on hosts that have
-none (for example, phoebe-dev). To stage without restarting, set
+none. To stage without restarting, set
 ANTONINA_RESTART=never. ANTONINA_BIN_DIR and ANTONINA_SKILL_DIR may be
 overridden for test or alternative installation roots.
 

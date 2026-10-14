@@ -114,3 +114,12 @@ source: @ottojung
 kind: requirement
 
 Listing or refreshing the board must use the paged issue-summary snapshots and must not fetch every issue body or comment thread. Full issue bodies and comment pages are fetched on demand for the selected issue. Normal mutations likewise operate from materialized summaries and hydrate only the issue thread they actually need, while the low-level compatibility API may still request a fully hydrated post-write state explicitly.
+
+
+$id-20261014-antonina-no-labels
+title: Antonina does not support labels
+date: 2026/10/14
+source: @ottojung
+kind: constraint
+
+Antonina must not implement labels, tags, label catalogs, label assignment, label-based filters, routing labels, or any equivalent structured classification of issues or other board records. An issue has its existing identity, title, description, comments, state, and priority; ordinary prose in those fields is not a label system. Host ownership must not be smuggled into board metadata as a label. Persisted board schemas, CLI, API and web must not gain label properties or commands. Unexpected `labels` fields remain invalid, not silently ignored or upgraded. Do not infer persistent or authoritative label-like project categories from issue titles in scheduler snapshots.

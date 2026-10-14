@@ -211,3 +211,12 @@ instead of to a target that presents as having no guidance document at all. A
 retraction is named as its own act rather than as a reserved word inside the
 list, so that a note that happens to read like a sentinel is still stored as the
 note it is.
+
+
+$id-20261014-deployment-owns-host-restrictions
+title: Host-specific scheduling restrictions belong to the host operator
+date: 2026/10/14
+source: @ottojung
+kind: constraint
+
+Physical deployment placement, jurisdiction, host exclusions and authorization to dispatch particular work belong entirely to the local operator and its external configuration. Antonina remains reusable and does not encode who owns any particular host, project or board issue. A deployment may independently guard its execution entry points and limit its scheduler's input, without introducing Antonina board labels or hard-coding those constraints in Antonina's repository. Host restrictions must be fail-closed in the local deployment when the operator's policy cannot be read, while preserving unrelated work.

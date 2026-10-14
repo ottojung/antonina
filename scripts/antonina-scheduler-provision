@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 ANTONINA = os.environ.get("ANTONINA_BIN", os.path.expanduser("~/.local/bin/antonina"))
-HOST = "lubko://marceline-dev"
+HOST = os.environ.get("ANTONINA_HOST_URI")
 ROOT = Path("/workspace")
 
 
@@ -84,6 +84,8 @@ def provision(number, dry_run=False):
                 path.rmdir()
             raise
         if not resource_registered(number, path):
+            if not HOST:
+                raise RuntimeError("ANTONINA_HOST_URI is required for resource registration")
             cli("board", "resource", "add", "--issue", number, "--host", HOST, "--path", str(path))
         if not resource_registered(number, path):
             raise RuntimeError(f"resource registration for #{number} was not verified")

@@ -1,6 +1,6 @@
 # Durable host resources
 
-Use this skill when scheduled or agentic work creates, uses, or hands off a durable host filesystem location. A resource is a host and canonical absolute POSIX path, such as `lubko://phoebe-dev` plus `/workspace/project-worktree`; the path may be a file or directory.
+Use this skill when scheduled or agentic work creates, uses, or hands off a durable host filesystem location. A resource is a host and canonical absolute POSIX path, such as `lubko://example-host` plus `/workspace/project-worktree`; the path may be a file or directory.
 
 Resource registration is dependency and liveness metadata, not exclusive ownership or a lock. Multiple open Antonina issues may depend on one resource. Every number in these commands is an **Antonina BOARD issue number**, never a GitHub issue number.
 
@@ -33,8 +33,8 @@ antonina board resource remove --issue ISSUE --host HOST --path PATH
 Two commands answer "may this path go?", and only one of them can make it go.
 
 ```sh
-antonina board collect list --host lubko://phoebe-dev --page 1
-antonina board collect delete --host lubko://phoebe-dev --path /workspace/project-worktree [--confirm]
+antonina board collect list --host lubko://example-host --page 1
+antonina board collect delete --host lubko://example-host --path /workspace/project-worktree [--confirm]
 ```
 
 `collect list` is a dry run. It prints every path on that host that one verified board revision calls collectible, each line naming the board and the revision the answer came from. It needs no managed roots, but like every board read it requires the shared board credential from `$XDG_CONFIG_HOME/antonina/credential.json`. A board it cannot access or verify is a failure on stderr with a non-zero exit, never an empty list.
@@ -42,7 +42,7 @@ antonina board collect delete --host lubko://phoebe-dev --path /workspace/projec
 `collect delete` removes a path, and needs `--confirm`. Without it the command performs the whole re-check and then reports what it would do, naming the revision it read:
 
 ```
-would delete /workspace/project-worktree on lubko://phoebe-dev (a symlink would be unlinked as a link, anything else removed recursively); board <id> rev <revision>; re-run with --confirm
+would delete /workspace/project-worktree on lubko://example-host (a symlink would be unlinked as a link, anything else removed recursively); board <id> rev <revision>; re-run with --confirm
 ```
 
 **The delete reports the revision it re-read, which may be newer than the listing you based it on.** Nothing pins the revision you read. The human line names exactly one revision, the one the command's own re-check verified; the JSON report carries `recheckHead` (the revision acted on) and `snapshotHead` (the revision the claim named, `null` when the board moved on in between), and only `recheckHead` is authority. A pending report has no `removal` key; its presence in the JSON is what marks a report as a completed removal, so a script can tell the two apart.
@@ -74,15 +74,15 @@ For example, hand off `/workspace/project-worktree` from Antonina board issue `4
 
 ```sh
 antonina board resource list --issue 412 --page 1
-antonina board resource add --issue 419 --host lubko://phoebe-dev --path /workspace/project-worktree
+antonina board resource add --issue 419 --host lubko://example-host --path /workspace/project-worktree
 antonina board resource list --issue 419 --page 1
-antonina board resource remove --issue 412 --host lubko://phoebe-dev --path /workspace/project-worktree
+antonina board resource remove --issue 412 --host lubko://example-host --path /workspace/project-worktree
 ```
 
 Unregister a path when no issue needs it:
 
 ```sh
-antonina board resource remove --issue 419 --host lubko://phoebe-dev --path /workspace/project-worktree
+antonina board resource remove --issue 419 --host lubko://example-host --path /workspace/project-worktree
 ```
 
 Host values are `lubko://<server>` with no trailing slash; paths are canonical absolute POSIX paths.

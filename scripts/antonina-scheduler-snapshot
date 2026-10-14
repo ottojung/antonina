@@ -50,22 +50,6 @@ def recent_terminal_agents():
         return {"agents": [], "incomplete": True}
 
 
-def project_hint_from_title(title, number=None):
-    low=(title or "").strip().lower()
-    if "assemblyp1" in low: return "AssemblyP1"
-    if low.startswith("volodyslav"): return "Volodyslav"
-    if low.startswith("along"): return "Along"
-    if low.startswith("lubko"): return "Lubko"
-    if low.startswith("antonina"): return "Antonina"
-    if "supernatural" in low: return "Supernatural"
-    if low.startswith("pyreports"): return "pyreports"
-    if low.startswith("qai:") or low.startswith("qai ") or "proviral" in low or low.startswith("schema.sql"): return "QAI"
-    if low.startswith("kawun:") or low.startswith("kawun ") or low.startswith("[skrynia-apps#") or "kawunapp" in low: return "Kawun"
-    if low.startswith("skrynia") or "skrynia release line" in low or "skrynia check-retired-apps" in low: return "Skrynia"
-    if number == 187: return "Skrynia"
-    if number == 206: return "Antonina"
-    return None
-
 def issue_number_from_agent_title(title):
     text = (title or "").strip()
     # Every project, including newly onboarded projects, may use "Name #N".
@@ -76,24 +60,13 @@ def issue_number_from_agent_title(title):
     match = re.match(r"^#?(\d+)\b", text)
     return int(match.group(1)) if match else None
 
-def phoebe_owned_issue(issue):
-    """Marceline must not even present Phoebe-owned work to its scheduler."""
-    number = issue.get("number")
-    title = issue.get("title") or ""
-    if number in (181, 195, 297, 298, 299):
-        return True
-    if re.search(r"(?i)\bviche\b", title):
-        return True
-    return project_hint_from_title(title, number) == "Kawun"
-
-
 def open_issues():
     result = []
     for page in range(1, 100):
         batch = cli_json("board", "list", "--state", "open", "--page", page, "--json")
         if not batch:
             break
-        result.extend(i for i in batch if not phoebe_owned_issue(i))
+        result.extend(batch)
     return result
 
 def compact_terminal_hints(hints, relevant_issues):
@@ -115,44 +88,17 @@ issue_headers = [
     {
         "number": i.get("number"),
         "title": (i.get("title") or "")[:160],
-        "project_hint": project_hint_from_title(i.get("title"), i.get("number")),
     }
     for i in open_issues()
 ]
-issue_project_by_number = {
-    i["number"]: i["project_hint"]
-    for i in issue_headers
-    if i.get("number") is not None and i.get("project_hint") is not None
-}
 
 agents = [
     {
         "id": a.get("id"),
         "title": a.get("title"),
-        "project_hint": (
-            project_hint_from_title(a.get("title"))
-            or issue_project_by_number.get(issue_number_from_agent_title(a.get("title")))
-        ),
     }
     for a in running
 ]
-
-open_projects = sorted({
-    i["project_hint"] for i in issue_headers if i.get("project_hint")
-})
-represented_projects = sorted({
-    a["project_hint"] for a in agents if a.get("project_hint") and issue_number_from_agent_title(a.get("title")) in issue_project_by_number
-})
-represented_project_set = set(represented_projects)
-unrepresented_projects = [
-    project for project in open_projects if project not in represented_project_set
-]
-unrepresented_project_set = set(unrepresented_projects)
-unrepresented_issues = [
-    issue for issue in issue_headers
-    if issue.get("project_hint") in unrepresented_project_set
-]
-
 
 live_issue_numbers = {
     issue_number
@@ -167,24 +113,12 @@ live_issue_numbers = {
 open_numbers = {i["number"] for i in issue_headers}
 active_issue_agents = [a for a in agents if issue_number_from_agent_title(a.get("title")) in open_numbers]
 orphan_agents = [a for a in agents if issue_number_from_agent_title(a.get("title")) not in open_numbers]
-represented_issue_candidates = [
-    i for i in issue_headers
-    if i.get("number") not in {
-        issue_number_from_agent_title(a.get("title")) for a in active_issue_agents
-    }
-]
-
 context = {
     "live_agents": agents,
     "orphan_agents": orphan_agents,
-    "represented_projects": represented_projects,
-    "open_projects": open_projects,
-    "unrepresented_projects": unrepresented_projects,
     "open_issue_count": len(issue_headers),
     "live_issue_numbers": sorted(live_issue_numbers),
-    "represented_issue_candidates": represented_issue_candidates,
 }
-context["unrepresented_issues"] = unrepresented_issues
 context["open_issues"] = issue_headers
 context["recent_terminal_agents"] = compact_terminal_hints(terminal_hints, open_numbers)
 # A zero-exit worker is NOT a completion certificate. Every unowned open

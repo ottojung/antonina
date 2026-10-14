@@ -63,12 +63,12 @@ When several tasks touch the same manuscript or codebase, decide logical order b
 
 ## Durable comments and constraints
 
-Append only short, factual coordination comments, using `--author openclaw@marceline-dev`:
+Append only short, factual coordination comments, using `--author openclaw`:
 
 ```text
 [orchestrator]
 state: working | handoff | blocked | completed
-owner: openclaw@marceline-dev
+owner: openclaw
 summary: <logical work and observed progress>
 resources: agent <id> | none
 next: <next logical dependency or action>
@@ -84,7 +84,7 @@ Use exclusively `opencode-go/longcat-2.5-preview-free`, variant `low`, unless th
 ## Evidence reconciliation for open issues
 
 An agent's succeeded process state means only that the runner exited successfully.
-The snapshot deliberately labels terminal delivery as unverified and supplies
+The snapshot deliberately marks terminal delivery as unverified and supplies
 unverified_terminal_issues. **Never use matching terminal issue numbers as a
 completed-work set.** For each open issue without a live owner, consult
 antonina-scheduler-issue --issue N: its newest_messages contain the newest

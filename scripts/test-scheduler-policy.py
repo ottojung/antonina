@@ -81,7 +81,7 @@ class SchedulerPolicyTests(unittest.TestCase):
         ):
             record = {"number": number, "title": title, "body": body, "state": "open"}
             with patch.object(launcher, "run", return_value=types.SimpleNamespace(
-                    stdout=json.dumps(record))), \\
+                    stdout=json.dumps(record))), \
                     patch.object(launcher.socket, "gethostname", return_value=hostname):
                 if accepted:
                     self.assertEqual(launcher.require_open_issue(number), record)

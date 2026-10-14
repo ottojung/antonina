@@ -14,7 +14,7 @@ typechecked, tested and built before it was pushed.
 
 ## Preserved behavior
 
-- **LongCat 2.5 Preview Free, `--variant low`** is the sole managed-agent
+- **Step 5 Preview Free, `--variant high`** is the sole managed-agent
   and scheduler model: `config/opencode-openclaw.json`,
   `packages/agent-runtime/src/backend.ts` (`AGENT_MODEL`),
   `packages/agent-runtime/src/metadata.ts` (`DEFAULT_VARIANT`),

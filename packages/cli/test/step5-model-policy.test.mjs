@@ -4,11 +4,11 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const source = (path) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8');
-const model = 'opencode-go/longcat-2.5-preview-free';
-const variant = 'low';
+const model = 'opencode-go/step-5-preview-free';
+const variant = 'high';
 
 const FORBIDDEN_MODELS = [
-  'opencode-go/step-5-preview-free',
+  'opencode-go/longcat-2.5-preview-free',
   'opencode/space-bunny-free',
   'opencode/muse-spark-1.3-contributor-free',
   'opencode/gpt-5.6-sol',
@@ -16,16 +16,16 @@ const FORBIDDEN_MODELS = [
   'opencode/big-pickle',
 ];
 
-test('canonical LongCat intent is the authoritative head record', () => {
+test('canonical Step 5 intent is the authoritative record', () => {
   const intent = source('../../../docs/intent-records/agent.md');
-  assert.match(intent, /^\$id-20261009-longcat-restoration/m);
-  assert.match(intent, /opencode-go\/longcat-2.5-preview-free/);
-  assert.match(intent, /--variant low/);
-  assert.match(intent, /supersedes the 2026\/10\/08 Step 5-only constraint/);
-  assert.doesNotMatch(intent.slice(0, intent.indexOf('$id-1773008474150624')), /^\$id-20261008-step5only/m);
+  assert.match(intent, /^\$id-20261008-step5only/m);
+  assert.match(intent, /Step 5 Preview Free is Antonina's sole permitted OpenCode model/);
+  assert.match(intent, /Do not substitute other models/);
+  assert.match(intent, /supersedes all earlier model-selection intent records/);
+  assert.ok(intent.includes(model));
 });
 
-test('canonical LongCat intent matches all executable model-selection surfaces', () => {
+test('canonical Step 5 intent matches all executable model-selection surfaces', () => {
   const intent = source('../../../docs/intent-records/agent.md');
   const runtime = source('../../agent-runtime/src/backend.ts');
   assert.ok(runtime.includes("export const AGENT_MODEL = '" + model + "'"));
@@ -41,10 +41,10 @@ test('canonical LongCat intent matches all executable model-selection surfaces',
   const config = JSON.parse(source('../../../config/opencode-openclaw.json'));
   assert.equal(config.model, model);
   assert.equal(config.small_model, model);
-  assert.deepEqual(config.provider['opencode-go'].whitelist, ['longcat-2.5-preview-free']);
+  assert.deepEqual(config.provider['opencode-go'].whitelist, ['step-5-preview-free']);
 });
 
-test('non-LongCat models are refused on the release line', () => {
+test('non-Step 5 models are refused on the release line', () => {
   const runtime = source('../../agent-runtime/src/backend.ts');
   const metadata = source('../../agent-runtime/src/metadata.ts');
   const cli = source('../src/agent.ts');
@@ -58,20 +58,23 @@ test('non-LongCat models are refused on the release line', () => {
       assert.ok(!text.includes(forbidden), `${name} must not select ${forbidden}`);
     }
   }
+  const deploymentDoc = source('../../../docs/openclaw-host-deployment.md');
+  assert.match(deploymentDoc, /sole permitted model for OpenClaw scheduling and managed Antonina agents is Step 5 Preview Free, `opencode-go\/step-5-preview-free`, with variant `high`/);
+  assert.doesNotMatch(deploymentDoc, /sole permitted model[\s\S]{0,200}longcat-2\.5-preview-free/);
   assert.equal(config.provider['opencode-go'].whitelist.length, 1);
-  assert.equal(config.provider['opencode-go'].whitelist[0], 'longcat-2.5-preview-free');
+  assert.equal(config.provider['opencode-go'].whitelist[0], 'step-5-preview-free');
 });
 
-test('CLI availability gate refuses to launch when LongCat is not offered', () => {
+test('CLI availability gate refuses to launch when Step 5 is not offered', () => {
   const cli = source('../src/agent.ts');
-  const gate = cli.match(/if \(configuredModelAvailable\([\s\S]*?\) === false\) \{\n\s*throw new Error\('configured OpenCode model opencode-go\/longcat-2.5-preview-free is unavailable'\);/);
-  assert.ok(gate, 'the run path must consult configuredModelAvailable before launching and refuse with the LongCat unavailable error');
+  const gate = cli.match(/if \(configuredModelAvailable\([\s\S]*?\) === false\) \{\n\s*throw new Error\('configured OpenCode model opencode-go\/step-5-preview-free is unavailable'\);/);
+  assert.ok(gate, 'the run path must consult configuredModelAvailable before launching and refuse with the Step 5 unavailable error');
   const runtime = source('../../agent-runtime/src/backend.ts');
   assert.ok(runtime.includes('export function configuredModelAvailable'));
-  assert.ok(runtime.includes(".includes(AGENT_MODEL)"));
+  assert.ok(runtime.includes('.includes(AGENT_MODEL)'));
 });
 
-test('CI fake OpenCode offers LongCat only', () => {
+test('CI fake OpenCode offers Step 5 only', () => {
   const ci = source('../../../.github/workflows/ci.yml');
   const modelsCase = ci.match(/models\)\n\s*echo "([^"]+)"/);
   assert.ok(modelsCase, 'CI must stub an opencode models probe');

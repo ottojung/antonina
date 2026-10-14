@@ -213,10 +213,12 @@ list, so that a note that happens to read like a sentinel is still stored as the
 note it is.
 
 
-$id-20261014-deployment-owns-host-restrictions
-title: Host-specific scheduling restrictions belong to the host operator
+$id-20261014-shared-host-aware-orchestration
+title: One generic orchestrator reads its hostname and the issue description
 date: 2026/10/14
 source: @ottojung
 kind: constraint
 
-Physical deployment placement, jurisdiction, host exclusions and authorization to dispatch particular work belong entirely to the local operator and its external configuration. Antonina remains reusable and does not encode who owns any particular host, project or board issue. A deployment may independently guard its execution entry points and limit its scheduler's input, without introducing Antonina board labels or hard-coding those constraints in Antonina's repository. Host restrictions must be fail-closed in the local deployment when the operator's policy cannot be read, while preserving unrelated work.
+Antonina runs the same orchestrator implementation and the same prompt on every host, installed directly from the repository's main branch. The hostname is an observed runtime fact, not a per-host configuration input or a hardcoded project/host mapping. Each candidate's actual issue description and newest comments are read before delegation. A plain-text execution-host instruction in the issue description (convention: `Execution host: HOSTNAME`, optionally Markdown-emphasized) makes that issue eligible for delegation only by a matching host; issues with no restriction are eligible everywhere subject to the ordinary topology and ownership rules. The launch operation MUST re-read the issue and refuse host-mismatched launches, including at its existing pre- and post-launch rechecks.
+
+This is neither a new board field nor a label or tag. No host-specific switch, private copy of Antonina, issue-number exclusion list, inferred project label or alternate orchestrator prompt is permitted. A host mismatch should not prevent the orchestrator from continuing other eligible independent work. Do not impose a global worker cap or treat different hosts as separate board authorities. The canonical main-branch code and prompt are the sole source of truth.

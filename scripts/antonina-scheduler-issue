@@ -40,6 +40,8 @@ def handoff_claim(message):
         "author": message.get("author"),
         "createdAt": message.get("createdAt"),
         "claimed_state": match.group(1).strip()[:120] if match else "unspecified",
+        "artifact_claim": next((line.partition(":")[2].strip() for line in body.splitlines() if line.startswith("artifact:")), None),
+        "validation_claim": next((line.partition(":")[2].strip() for line in body.splitlines() if line.startswith("validation:")), None),
         "verified": False,
     }
 

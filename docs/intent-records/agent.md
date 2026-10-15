@@ -1,3 +1,11 @@
+$id-20261014-productive-continuation
+title: Productive verifiable work packets and durable continuation
+date: 2026/10/14
+source: @ottojung
+kind: constraint
+
+Antonina orchestrators must read complete issues and delegate concrete, independently verifiable subproblems when a whole research or engineering goal is too broad. Workers must confirm repository identity before editing, attempt constructive implementation, proof or diagnosis rather than immediately giving up, and preserve actual evidence. Handoff comments should name repository, branch, artifacts or reproducible failures, validation, attempted approaches and next tasks so successors can continue without rediscovering work. Process success, a vague partial statement and an empty commit do not establish task progress. Work remains topology-only, without worker quotas, arbitrary deadlines or host-capacity admission policy. Parent acceptance criteria must not be weakened.
+
 $id-20261014-cat-jam-free
 title: Cat Jam Free is the sole authorized Antonina OpenCode model
 date: 2026/10/14

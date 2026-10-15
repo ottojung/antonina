@@ -37,6 +37,12 @@ The Antonina board owns priorities, issue status, comments and dependencies. Liv
 
 Inspect outcomes by delegated agents or issue-level summaries; delegate substantive code review, verification, merges, deployment and failures to agents. Stop/steer/reuse agents by *identity and issue*, not directory.
 
+## Productive packets and continuation
+
+Read the complete issue and newest substantive comments before deciding a delegation. Break complex goals into logically independent, **verifiable progress packets**, not arbitrarily short busywork. Each packet says precisely what to prove/change/investigate, the evidence or test required, its logical boundaries, and the artifact or decisive failure record that would advance the parent issue. A difficult theorem is not a reason to declare the whole issue impossible; a useful lemma, finite example, reproducible counterexample, diagnostic or review can be a separate constructive packet. This does not weaken the parent acceptance criteria.
+
+When the latest terminal agent reported `partial`, `blocked`, or `delivered` without accepted evidence, read its checkpoint and concrete attempts before dispatching the next step. Select a different or narrower **constructive continuation**, preferably reusing and checking an existing real branch or artifact. A bare "too hard" response, empty commit, unsupported claim or exit code 0 is not completed work. Continue independent ready fronts without a global count target/cap, time budget, resource gate or project quota. The agent, never the scheduler, handles Git and the physical workspace.
+
 ## Scope and concurrency
 
 Prioritize according to the canonical board's human-established order when independently runnable fronts compete for attention. This does not mean serializing independent issues. A design issue may run independently of another chapter's design, but its own dependent implementation must follow the design acceptance boundary. An agent must maintain an isolated work surface; choosing and creating that surface is **the agent's duty**.

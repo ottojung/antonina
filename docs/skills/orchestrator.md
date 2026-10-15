@@ -50,6 +50,12 @@ On success, record the actual agent ID and logical task ownership on the board. 
 
 The s6-supervised turn runner must delegate the ENTIRE useful independent frontier per reasoning pass, not return after one launch. After launching, immediately continue to the next independent issue. Its bounded turns are an execution mechanism, not a project cap. Do not spend turns watching an agent step by step or waiting for it to finish when more independent work is ready.
 
+## Verifiable assignments and unfinished work
+
+A delegated packet should name one precise useful change or question, its logical boundary, the test, proof, review or decisive diagnostic that would validate it, and the artifact to preserve. Read the entire parent issue and newest comments before decomposing it; smaller packets are not permission to weaken the parent requirements. A difficult proof or feature can be advanced through a valid lemma, counterexample, isolated test, review or reproducible experiment.
+
+Treat a zero-exit agent's bare "too difficult" or "cannot finish in one session" as an **unfinished attempt**, not delivery. Check its durable checkpoint (verified repository, branch, artifact, validation, concrete attempts, next action), choose a smaller constructive continuation when worthwhile, and let a fresh worker resume from that evidence. Do not repeat the same oversized instruction or fabricate success. The agent owns repository setup and tests; the scheduler remains topology-only, with no caps, host-resource admission rules or time-based work limits.
+
 ## Completion and continued execution
 
 A stopped agent, green test, submitted PR or written file does not automatically close an issue. Delegate confirmation of actual project-specific acceptance, any review verdict, merge, release, and deployment to an agent. Update the issue only from results supported by the board and worker reports. When a worker finishes, derive whether the downstream issue becomes topologically unblocked and delegate promptly.

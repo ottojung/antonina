@@ -82,6 +82,17 @@ def running_owners(issue):
     return owners
 
 
+def latest_progress_context(issue):
+    """Unverified worker context from the latest board page, never proof of delivery."""
+    messages = issue.get("messages") or []
+    candidates = [m for m in messages if (m.get("body") or "").lstrip().startswith(
+        ("[progress-checkpoint]", "[terminal-handoff]"))]
+    if not candidates:
+        return ""
+    recent = max(candidates, key=lambda m: m.get("createdAt") or "")
+    return (recent.get("body") or "")[:2500]
+
+
 def agent_prompt(issue, prompt, agent_id):
     # The agent alone decides whether/where to clone and how to isolate edits.
     return (
@@ -96,15 +107,44 @@ def agent_prompt(issue, prompt, agent_id):
         "directory is your repository. Do not ask the scheduler to provision "
         "worktrees, create directories, register paths, or manage Git. "
         "If the repository is ambiguous, investigate it yourself. "
+        "REPOSITORY IDENTITY: Confirm the actual project remote and root "
+        "against the board and project instructions before any edits. "
+        "Never treat the generic startup directory or an unrelated checkout "
+        "as the project. If source cannot be resolved, report specific lookup "
+        "attempts as a concrete blocker, not an invented artifact. "
+        "CONSTRUCTIVE CONTINUATION: Do not treat difficulty or the inability "
+        "to finish an entire issue in one invocation as a reason to exit. "
+        "Produce a checkable increment: a useful lemma, minimal reproduction, "
+        "failing or passing test, small implementation, review, or documented "
+        "diagnostic that advances the full objective. Test and preserve it. "
+        "If an approach fails, inspect the failure and try a narrower "
+        "productive approach. Do not fabricate proof, success or empty "
+        "commits. Only declare partial when recording concrete attempts, "
+        "observations, and remaining work, or a genuine blocker. "
+        "Never weaken project requirements merely to make tests pass. "
+        "DURABLE CONTINUITY: Read the newest board comments and the preceding "
+        "handoff/checkpoint before repeating an attempt. Verify claimed "
+        "branches, commits and tests before trusting them. After useful "
+        "progress or a material change of approach, append a concise "
+        "[progress-checkpoint] comment with owner, repository, branch, "
+        "artifact, validation, attempts and next; do so at meaningful "
+        "milestones, not on a timer. A successor should be able to pick "
+        "up where you left off. "
+
         f"Agent ID: {agent_id}. Issue #{issue.get('number')}: "
         f"{issue.get('title', '')}\n"
-        f"Issue description:\n{issue.get('body') or ''}\n\n"
+        f"Issue description:\n{issue.get('body') or ''}\n\n"        f"LAST UNVERIFIED CHECKPOINT (may be absent):\n"
+        f"{latest_progress_context(issue) or 'none'}\n\n"
+
         "DURABLE TERMINAL HANDOFF: Before ending ANY run, post an Antonina "
         "board comment with this newline-delimited format:\n"
         "[terminal-handoff]\n"
         "state: <delivered | partial | blocked | needs-integration | awaiting-human>\n"
         "owner: agent-<your-id>\n"
-        "artifact: <commit/PR/path or none>\n"
+        "repository: <verified project remote or unresolved>\n"
+        "branch: <branch name or none>\n"
+        "artifact: <commit/PR/path or none>\n"        "attempts: <concrete actions and observations, not vague inability>\n"
+
         "validation: <specific test/review evidence or not-run>\n"
         "next: <concrete remaining work or human decision>\n"
         "These are separate lines, not one comma-separated sentence. "

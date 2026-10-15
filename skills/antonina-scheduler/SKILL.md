@@ -23,7 +23,7 @@ A failed launch is an operational failure, **not a scheduling veto**. Record the
 
 ## Model and authority
 
-The authorized model is `opencode-go/longcat-2.5-preview-free` with `--variant low`, for both scheduler and workers. Do not substitute any other model. Follow the newest intent record in `docs/intent-records/agent.md` if an authorized model change is made.
+The authorized model is `opencode-go/cat-jam-free` with `--variant low`, for both scheduler and workers. Do not substitute any other model. Follow the newest intent record in `docs/intent-records/agent.md` if an authorized model change is made.
 
 The Antonina board owns priorities, issue status, comments and dependencies. Live Antonina agent IDs/titles are the source of active ownership. Read the full priority-ordered queue and relevant recent comments; do not equate a historical claim with a live agent. Human decisions in issue comments take precedence over speculative scheduler assumptions.
 

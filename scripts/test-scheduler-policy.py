@@ -368,6 +368,7 @@ class SchedulerDeploymentTests(unittest.TestCase):
             env = dict(os.environ)
             env["ANTONINA_BIN_DIR"] = temp + "/bin"
             env["ANTONINA_SKILL_DIR"] = temp + "/skills"
+            env["ANTONINA_OPENCODE_CONFIG"] = temp + "/config/openclaw.json"
             env["ANTONINA_RESTART"] = "never"
             deploy = str(ROOT / "antonina-scheduler-deploy")
             subprocess.run([deploy, "--install"], env=env, check=True,
@@ -377,6 +378,9 @@ class SchedulerDeploymentTests(unittest.TestCase):
             installed = Path(temp) / "bin" / "antonina-scheduler-issue"
             self.assertEqual(installed.read_bytes(),
                              (ROOT / "antonina-scheduler-issue").read_bytes())
+            config = Path(temp) / "config" / "openclaw.json"
+            self.assertEqual(config.read_bytes(),
+                             (ROOT.parent / "config/opencode-openclaw.json").read_bytes())
             installed.write_text("stale")
             result = subprocess.run([deploy, "--check"], env=env,
                                     capture_output=True, text=True)

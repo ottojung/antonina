@@ -42,6 +42,55 @@ class SchedulerPolicyTests(unittest.TestCase):
         self.assertNotIn("unrepresented_projects", snapshot)
         self.assertNotIn('"labels"', snapshot)
 
+    def test_failed_turns_back_off_without_serializing_workers(self):
+        import os
+        import subprocess
+        import tempfile
+        import time
+        import shutil
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            bin_dir = base / ".local" / "bin"
+            fake_bin = base / "bin"
+            bin_dir.mkdir(parents=True)
+            fake_bin.mkdir()
+            turn = bin_dir / "antonina-orchestrator-turn"
+            turn.write_text("#!/bin/sh\nexit 1\n")
+            turn.chmod(0o755)
+            sleep = fake_bin / "sleep"
+            sleep.write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$1" >> "$HOME/sleeps"\n'
+                f'{shutil.which("sleep")} 0.03\n'
+            )
+            sleep.chmod(0o755)
+            env = dict(os.environ)
+            env.update({
+                "HOME": home,
+                "XDG_STATE_HOME": home,
+                "PATH": str(fake_bin) + ":" + env.get("PATH", ""),
+                "ANTONINA_SCHEDULER_INTERVAL_SECONDS": "0.1",
+                "ANTONINA_SCHEDULER_FAILURE_RETRY_SECONDS": "1",
+                "ANTONINA_SCHEDULER_MAX_FAILURE_RETRY_SECONDS": "4",
+            })
+            loop = ROOT / "antonina-orchestrator-loop"
+            proc = subprocess.Popen([str(loop)], env=env)
+            try:
+                calls = []
+                for _ in range(70):
+                    if (base / "sleeps").exists():
+                        calls = (base / "sleeps").read_text().splitlines()
+                    if "4" in calls:
+                        break
+                    time.sleep(0.03)
+                self.assertIn("4", calls, calls)
+            finally:
+                proc.terminate()
+                proc.wait(timeout=4)
+            backoffs = [call for call in calls if call != "0.1"]
+            self.assertEqual(backoffs[:3], ["1", "2", "4"])
+            log = (base / "antonina" / "orchestrator-turn.log").read_text()
+            self.assertIn("next attempt in 4s", log)
+
     def test_plain_text_host_instruction_is_host_aware_but_not_a_label(self):
         launcher = load_helper("antonina-scheduler-launch")
         examples = (

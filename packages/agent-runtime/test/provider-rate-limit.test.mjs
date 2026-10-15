@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { classifyBackendFailure, backendRetryDelay } from '../dist/packages/agent-runtime/src/backend.js';
 
-test('Cat Jam provider throttle is recognized without unsafe automatic replay', () => {
+test('LongCat 2.5 Preview provider throttle is recognized without unsafe automatic replay', () => {
   const d = mkdtempSync(join(tmpdir(), 'antonina-rate-'));
   try {
     const path = join(d, 'output.log');
@@ -32,7 +32,7 @@ test('temporary endpoint outage is diagnosed without replaying partial work', ()
     const classified = classifyBackendFailure(path, Buffer.byteLength('prior successful tool action\n'), 1, true);
     assert.equal(classified?.classification, 'upstream_endpoint_unavailable');
     assert.equal(classified?.provider, 'opencode-go');
-    assert.equal(classified?.model, 'opencode-go/cat-jam-free');
+    assert.equal(classified?.model, 'opencode-go/longcat-2.5-preview-free');
     assert.equal(classified?.request_boundary, 'continuation');
     assert.equal(classified?.transient, true);
     assert.equal(classified?.automatic_retry_safe, false);

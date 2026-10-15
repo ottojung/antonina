@@ -4,13 +4,14 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const source = (path) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8');
-const model = 'opencode-go/cat-jam-free';
+const model = 'opencode-go/longcat-2.5-preview-free';
 
-test('canonical Cat Jam intent matches all executable model-selection surfaces', () => {
+test('canonical LongCat 2.5 Preview intent matches all executable model-selection surfaces', () => {
   const intent = source('../../../docs/intent-records/agent.md');
-  assert.match(intent, /Cat Jam Free is the sole authorized Antonina OpenCode model/);
-  assert.match(intent, /No fallback to a paid provider/);
-  assert.match(intent, /supersedes all earlier model-selection intent records/);
+  assert.match(intent, /^\$id-20261015-longcat-free-verified/);
+  assert.match(intent, /LongCat 2.5 Preview Free is Antonina's sole authorized OpenCode model/);
+  assert.match(intent, /no automatic paid or other fallback/i);
+  assert.match(intent, /supersedes the prior Cat Jam Free sole-model intent/);
   assert.ok(intent.includes(model));
   const runtime = source('../../agent-runtime/src/backend.ts');
   assert.ok(runtime.includes("export const AGENT_MODEL = '" + model + "'"));
@@ -24,7 +25,8 @@ test('canonical Cat Jam intent matches all executable model-selection surfaces',
   const config = JSON.parse(source('../../../config/opencode-openclaw.json'));
   assert.equal(config.model, model);
   assert.equal(config.small_model, model);
-  assert.deepEqual(config.provider['opencode-go'].whitelist, ['cat-jam-free']);
+  assert.deepEqual(config.provider['opencode-go'].whitelist, ['longcat-2.5-preview-free']);
+  assert.match(turn, /--variant low/);
 });
 
 
@@ -41,6 +43,6 @@ test('active model docs and scripts cannot retain the retired model identifiers'
     '../src/agent.ts',
   ];
   for (const path of activePaths) {
-    assert.doesNotMatch(source(path), /opencode-go\/(?:step-5-preview-free|longcat-2\.5-preview-free)/, path);
+    assert.doesNotMatch(source(path), /opencode-go\/(?:step-5-preview-free|cat-jam-free)/, path);
   }
 });

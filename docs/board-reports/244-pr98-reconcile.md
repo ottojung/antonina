@@ -1,4 +1,4 @@
-Historical report: its model references describe the earlier policy, superseded by the Cat Jam Free decision in docs/intent-records/agent.md.
+Historical report: its model references describe the earlier policy, superseded by the newest LongCat 2.5 Preview Free decision in docs/intent-records/agent.md (the intervening Cat Jam policy is also historical).
 
 # Board 244: reconcile PR #98 against main
 

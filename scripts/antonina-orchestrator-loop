@@ -66,7 +66,7 @@ while :; do
             failure_backoff="$max_failure_retry"
           fi
         fi
-        printf "Antonina scheduler failed; next attempt in %ss (Cat Jam only)\n" "$failure_backoff" >>"$state_dir/orchestrator-turn.log"
+        printf "Antonina scheduler turn failed; next attempt in %ss\n" "$failure_backoff" >>"$state_dir/orchestrator-turn.log"
       fi
       child_pid=""
     fi

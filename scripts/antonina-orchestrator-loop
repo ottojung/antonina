@@ -2,10 +2,37 @@
 set -u
 
 interval="${ANTONINA_SCHEDULER_INTERVAL_SECONDS:-2}"
+failure_retry="${ANTONINA_SCHEDULER_FAILURE_RETRY_SECONDS:-30}"
+max_failure_retry="${ANTONINA_SCHEDULER_MAX_FAILURE_RETRY_SECONDS:-600}"
+# Backoff applies only to FAILED orchestrator invocations; no worker caps.
+for delay in "$failure_retry" "$max_failure_retry"; do
+  case "$delay" in
+    ""|*[!0-9]*) echo "invalid failure retry duration: $delay" >&2; exit 2 ;;
+  esac
+  [ "$delay" -ge 1 ] || { echo "failure retry must be positive" >&2; exit 2; }
+done
+[ "$max_failure_retry" -ge "$failure_retry" ] || { echo "max failure retry must not be smaller" >&2; exit 2; }
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/antonina"
 mkdir -p "$state_dir"
 
 child_pid=""
+sleep_pid=""
+failure_backoff=0
+
+stop_sleep() {
+  if [ -n "$sleep_pid" ]; then
+    kill -TERM "$sleep_pid" 2>/dev/null || true
+    wait "$sleep_pid" 2>/dev/null || true
+    sleep_pid=""
+  fi
+}
+
+pause_for() {
+  sleep "$1" &
+  sleep_pid=$!
+  wait "$sleep_pid" 2>/dev/null || true
+  sleep_pid=""
+}
 
 stop_child() {
   if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
@@ -16,6 +43,7 @@ stop_child() {
 }
 
 on_exit() {
+  stop_sleep
   stop_child
   exit 0
 }
@@ -27,17 +55,30 @@ while :; do
     if kill -0 "$child_pid" 2>/dev/null; then
       :
     else
-      wait "$child_pid" 2>/dev/null || true
+      if wait "$child_pid" 2>/dev/null; then
+        failure_backoff=0
+      else
+        if [ "$failure_backoff" -eq 0 ]; then
+          failure_backoff="$failure_retry"
+        else
+          failure_backoff=$((failure_backoff * 2))
+          if [ "$failure_backoff" -gt "$max_failure_retry" ]; then
+            failure_backoff="$max_failure_retry"
+          fi
+        fi
+        printf "Antonina scheduler turn failed; next attempt in %ss\n" "$failure_backoff" >>"$state_dir/orchestrator-turn.log"
+      fi
       child_pid=""
     fi
   fi
 
   if [ -z "$child_pid" ]; then
+    if [ "$failure_backoff" -gt 0 ]; then
+      pause_for "$failure_backoff"
+    fi
     "$HOME/.local/bin/antonina-orchestrator-turn" >>"$state_dir/orchestrator-turn.log" 2>&1 </dev/null &
     child_pid=$!
   fi
 
-  sleep "$interval" &
-  sleep_pid=$!
-  wait "$sleep_pid" 2>/dev/null || true
+  pause_for "$interval"
 done

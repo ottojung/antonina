@@ -1,3 +1,5 @@
+Historical report: its model references describe the earlier policy, superseded by the Cat Jam Free decision in docs/intent-records/agent.md.
+
 # Board 244: reconcile PR #98 against main
 
 PR #98 (`release/2026-09-27-5`) was `dirty`: a real `git merge` against

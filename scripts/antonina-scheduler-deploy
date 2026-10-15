@@ -37,6 +37,15 @@ for name in "${scripts[@]}"; do
     install_atomic "$source" "$target" 755
   fi
 done
+# Keep the dedicated restricted OpenCode configuration synchronized with
+# the authorized model in main; install atomically and fail on drift.
+config_source="$root/config/opencode-openclaw.json"
+config_target="${ANTONINA_OPENCODE_CONFIG:-$HOME/.config/opencode/openclaw.json}"
+if [[ "$mode" == --check ]]; then
+  verify_file "$config_source" "$config_target"
+else
+  install_atomic "$config_source" "$config_target" 600
+fi
 for name in "${skills[@]}"; do
   source="$root/skills/$name/SKILL.md"; target="$skill_dir/$name/SKILL.md"
   if [[ "$mode" == --check ]]; then

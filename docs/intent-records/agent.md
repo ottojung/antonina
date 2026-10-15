@@ -1,3 +1,11 @@
+$id-20261014-cat-jam-free
+title: Cat Jam Free is the sole authorized Antonina OpenCode model
+date: 2026/10/14
+source: @ottojung
+kind: constraint
+
+Antonina managed agents, orchestrators, CLI defaults, model checks, OpenClaw integration, restricted model configuration, tests and current documentation must exclusively use `opencode-go/cat-jam-free` (Cat Jam Free), with `--variant low`. The restricted OpenCode provider whitelist contains only `cat-jam-free`; both primary and small models use exactly this identifier. No fallback to a paid provider or any other model. Fail visibly when unavailable. Deploy consistently across hosts. This explicit decision supersedes all earlier model-selection intent records, including Step 5 and LongCat, retained below for historical provenance.
+
 $id-20261009-longcat-restoration
 title: Switch Antonina to LongCat 2.5 Preview Free with low variant
 date: 2026/10/09

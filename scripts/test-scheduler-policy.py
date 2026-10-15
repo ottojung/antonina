@@ -359,6 +359,8 @@ class SubstantiveIssueTests(unittest.TestCase):
         self.assertEqual(len(result["latest_routine_launches"]), 2)
         self.assertEqual(result["latest_handoff_claim"]["claimed_state"], "partial")
         self.assertFalse(result["latest_handoff_claim"]["verified"])
+        self.assertEqual(result["latest_handoff_claim"]["artifact_claim"], "branch abc")
+        self.assertIsNone(result["latest_handoff_claim"]["validation_claim"])
         self.assertFalse(result["handoff_is_verified"])
 
     def test_preserves_long_issue_body_and_comment(self):

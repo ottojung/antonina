@@ -1,3 +1,11 @@
+$id-20261015-longcat-free-verified
+title: LongCat 2.5 Preview Free is Antonina's sole authorized OpenCode model
+date: 2026/10/15
+source: @ottojung
+kind: constraint
+
+After live verification of successful real OpenCode responses on both marceline-dev and phoebe-dev, user directs switching literally all active Antonina managed agents, orchestrators, CLI, restricted configuration, documentation, checks, and tests to exactly `opencode-go/longcat-2.5-preview-free` (LongCat 2.5 Preview Free), using `--variant low`. The OpenCode Go provider whitelist contains only `longcat-2.5-preview-free` and both primary and small models equal this identifier. There is no automatic paid or other fallback. If the model fails, report it visibly without switching models. Deploy from the same canonical main branch on both hosts. This decision supersedes the prior Cat Jam Free sole-model intent as well as all earlier model-selection instructions, preserved below as historical records.
+
 $id-20261014-productive-continuation
 title: Productive verifiable work packets and durable continuation
 date: 2026/10/14

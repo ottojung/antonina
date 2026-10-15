@@ -1,11 +1,11 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "opencode-go/cat-jam-free",
-  "small_model": "opencode-go/cat-jam-free",
+  "model": "opencode-go/longcat-2.5-preview-free",
+  "small_model": "opencode-go/longcat-2.5-preview-free",
   "provider": {
     "opencode-go": {
       "whitelist": [
-        "cat-jam-free"
+        "longcat-2.5-preview-free"
       ]
     }
   }

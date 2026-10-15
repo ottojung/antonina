@@ -138,6 +138,20 @@ class SchedulerPolicyTests(unittest.TestCase):
         self.assertIn("\nvalidation: <", prompt)
         self.assertNotIn("antonina-scheduler-provision", prompt)
 
+    def test_worker_packets_are_concrete_and_resume_checkpoints(self):
+        launcher = load_helper("antonina-scheduler-launch")
+        issue = {"number": 33, "title": "Theorem", "body": "Prove result",
+                 "messages": [
+                     {"body": "[terminal-handoff]\\nartifact: old", "createdAt": "2026-10-14T09:00:00Z"},
+                     {"body": "[progress-checkpoint]\\nartifact: newer", "createdAt": "2026-10-14T11:00:00Z"}]}
+        prompt = launcher.agent_prompt(issue, "Prove lemma and replay Lean", "abc123")
+        self.assertIn("artifact: newer", prompt)
+        self.assertNotIn("artifact: old", prompt)
+        for term in ("REPOSITORY IDENTITY", "CONSTRUCTIVE CONTINUATION",
+                     "DURABLE CONTINUITY", "attempts: <", "branch: <",
+                     "Prove lemma and replay Lean"):
+            self.assertIn(term, prompt)
+
     def test_live_owner_check_by_issue_not_paths(self):
         launcher = load_helper("antonina-scheduler-launch")
         records = [

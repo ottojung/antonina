@@ -79,8 +79,6 @@ function overview(): BoardOverview {
       hasBody: each.body.length > 0,
     })),
     resources: [],
-    targets: [],
-    dispatches: [],
   };
 }
 

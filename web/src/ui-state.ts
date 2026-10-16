@@ -18,7 +18,7 @@ export type IssueFilter = 'open' | 'closed' | 'all';
  * status here without a queue: a board whose order has not been read is a
  * `failed` load, never a list quietly sorted some other way.
  */
-export type BoardSummary = Pick<BoardOverview, 'issues' | 'resources' | 'targets' | 'dispatches'>;
+export type BoardSummary = Pick<BoardOverview, 'issues' | 'resources'>;
 
 export type BoardLoad =
   | { status: 'loading' }
@@ -155,8 +155,6 @@ export function boardLoaded(state: VerifiedBoardState | null): BoardLoad {
     board: {
       issues: state.board.issues.map(summarizeIssue),
       resources: state.board.resources,
-      targets: state.board.targets,
-      dispatches: state.board.dispatches,
     },
     queue: state.queue,
     head: state.head,
@@ -170,8 +168,6 @@ export function overviewLoaded(overview: BoardOverview | null): BoardLoad {
     board: {
       issues: overview.issues,
       resources: overview.resources,
-      targets: overview.targets,
-      dispatches: overview.dispatches,
     },
     queue: overview.queue,
     head: overview.head,

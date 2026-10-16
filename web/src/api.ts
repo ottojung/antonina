@@ -44,7 +44,7 @@ export interface BoardReadFailure {
   readonly kind: BoardDefectKind | 'other';
   /** The field the parser named, or `null` when it named none. */
   readonly field: string | null;
-  /** The subject the parser named, such as `board execution target at index 1`. */
+  /** The subject the parser named, such as `board resource at index 1`. */
   readonly subject: string | null;
 }
 

@@ -495,6 +495,7 @@ test('a board at a supported version is readable, including at the next version 
 
   const boards = new Map([
     [migrations.CURRENT_PERSISTED_BOARD_VERSION, model.emptyBoard()],
+    [model.PREVIOUS_BOARD_SCHEMA_VERSION, { schemaVersion: model.PREVIOUS_BOARD_SCHEMA_VERSION, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] }],
     [model.LEGACY_BOARD_SCHEMA_VERSION, storedLog().operations[0].payload.board],
   ]);
   for (const version of model.PERSISTED_BOARD_VERSIONS) {
@@ -634,7 +635,7 @@ test('a migration that produced an invalid current board is refused rather than 
   // The first step out of the oldest version is the one that adds the two
   // collections; later steps are added by bumps and are not this test's subject.
   assert.equal(chain[0].from, legacy);
-  assert.match(chain[0].summary, /execution-target catalog/);
+  assert.match(chain[0].summary, /legacy|historical/);
 });
 
 // ---------------------------------------------------------------------------
@@ -738,8 +739,6 @@ function expectedMigratedBoard() {
         updatedAt: '2026-09-20T09:08:00.000Z',
       },
     ],
-    targets: [],
-    dispatches: [],
   };
 }
 
@@ -768,8 +767,8 @@ test('the migrated board reads through the public model, and reads deterministic
   assert.deepEqual(model.resourceViews(board).map((view) => [view.host, view.path, view.protected]), [
     ['lubko://gpu-01', '/srv/work', true],
   ]);
-  assert.deepEqual(model.targetViews(board), []);
-  assert.equal(model.selectExecutionTarget(board).outcome, 'no-eligible-target');
+  assert.equal(Object.hasOwn(board, 'targets'), false);
+  assert.equal(Object.hasOwn(board, 'dispatches'), false);
   assert.deepEqual(board.issues.map((issue) => issue.number), [1, 2, 3, 4, 5, 6]);
 });
 
@@ -823,8 +822,6 @@ test('a legacy board rewritten into the current format in storage is rejected, n
   log.operations[0].payload.board = {
     ...board,
     schemaVersion: migrations.CURRENT_PERSISTED_BOARD_VERSION,
-    targets: [],
-    dispatches: [],
   };
   await assert.rejects(
     () => verifyAndReplayOperationLog(log, fixtureAnchor()),
@@ -843,7 +840,7 @@ test('a legacy history re-signed under the current format still cannot be rolled
   let previous = null;
   for (const original of log.operations) {
     const payload = original.kind === 'board.initialize'
-      ? { board: { ...original.payload.board, schemaVersion: current, targets: [], dispatches: [] } }
+      ? { board: { ...original.payload.board, schemaVersion: current } }
       : original.payload;
     const operation = await signBoardOperation({
       boardId: log.boardId,

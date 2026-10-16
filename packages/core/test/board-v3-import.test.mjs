@@ -62,7 +62,7 @@ function legacyServer() {
 async function withLegacyBoard(run) {
   const { server, store } = legacyServer();
   const bootstrap = await store.initialize({
-    schemaVersion: 3,
+    schemaVersion: 4,
     nextIssueNumber: 2,
     issues: [{
       number: 1,
@@ -74,8 +74,6 @@ async function withLegacyBoard(run) {
       messages: [],
     }],
     resources: [],
-    targets: [],
-    dispatches: [],
   });
   const credential = bootstrap.credential;
   const fixture = buildLegacyBoard(credential.storageCapability, {
@@ -134,11 +132,9 @@ test('an import plan reports what would be carried across and writes nothing', a
     assert.equal(report.feedEntries, fixture.feedEntryCount);
     assert.equal(report.queueLength, 3);
     assert.equal(report.resources, 1);
-    assert.equal(report.targets, 1);
-    assert.equal(report.dispatches, 1);
     assert.equal(report.equivalent, true, JSON.stringify(report.checks));
     // The checks are named, so a failure says which property broke.
-    for (const name of ['issues', 'queue', 'resources', 'targets', 'dispatches', 'feed', 'feedServedNewestFirst', 'nextIssueNumber', 'feedCount', 'openIssueCount', 'closedIssueCount']) {
+    for (const name of ['issues', 'queue', 'resources', 'feed', 'feedServedNewestFirst', 'nextIssueNumber', 'feedCount', 'openIssueCount', 'closedIssueCount']) {
       assert.ok(
         report.checks.some((check) => check.name === name && check.equal),
         `check ${name} must be present and passing`,
@@ -188,8 +184,8 @@ test('an import reproduces the board exactly, and the runtime serves the new sto
     assert.equal(closed.total, 1);
     // The catalog.
     assert.equal(board.resources[0].path, '/srv/legacy');
-    assert.equal(board.targets[0].id, 'legacy-target');
-    assert.equal(board.dispatches[0].issueNumber, 1);
+    assert.equal(Object.hasOwn(board, 'targets'), false);
+    assert.equal(Object.hasOwn(board, 'dispatches'), false);
     // The feed, in order, across its pages, with the deleted issue's comments
     // resolved even though the issue does not exist.
     const { entries, total } = await readAllFeed(store, credential);

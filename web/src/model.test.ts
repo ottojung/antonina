@@ -20,11 +20,11 @@ function resource(overrides: Partial<BoardResource> = {}): BoardResource {
 
 describe('board schema', () => {
   it('rejects non-canonical schemas', () => {
-    expect(() => parseBoard({ schemaVersion: UNREADABLE_BOARD_SCHEMA_VERSION, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] })).toThrow(`schema version is ${UNREADABLE_BOARD_SCHEMA_VERSION}, but this build reads schema version ${BOARD_SCHEMA_VERSION}`);
+    expect(() => parseBoard({ schemaVersion: UNREADABLE_BOARD_SCHEMA_VERSION, nextIssueNumber: 1, issues: [], resources: [] })).toThrow(`schema version is ${UNREADABLE_BOARD_SCHEMA_VERSION}, but this build reads schema version ${BOARD_SCHEMA_VERSION}`);
   });
 
   it('enforces exact keys, canonical resources, and referenced issues', () => {
-    const valid: Board = { schemaVersion: BOARD_SCHEMA_VERSION, nextIssueNumber: 3, issues: [issue(1), issue(2, 'closed')], resources: [resource({ issueNumbers: [1, 2] })], targets: [], dispatches: [] };
+    const valid: Board = { schemaVersion: BOARD_SCHEMA_VERSION, nextIssueNumber: 3, issues: [issue(1), issue(2, 'closed')], resources: [resource({ issueNumbers: [1, 2] })] };
     expect(parseBoard(valid)).toEqual(valid);
     expect(() => parseBoard({ ...valid, resources: [resource({ issueNumbers: [3] })] })).toThrow('issueNumbers index 0: found a number, expected an issue number that exists on this board');
     expect(() => parseBoard({ ...valid, resources: [resource(), resource()] })).toThrow('duplicate resource');

@@ -10,13 +10,11 @@ import {
   formatHostBytes,
   hostBytes,
   hostLiveness,
-  hostViewForTarget,
   measurementDefect,
   parseDaemonHostReport,
   unavailableHostBytes,
   DAEMON_REPORT_SCHEMA_VERSION,
 } from '../dist/host-daemon.js';
-import { emptyBoard } from '../dist/model.js';
 
 const STAMP = '2026-09-25T12:00:00.000Z';
 const MINUTE = 60_000;
@@ -138,41 +136,20 @@ test('an unusable observation time is offline, never assumed to be now', () => {
   assert.match(liveness.reason, /unusable observation time/);
 });
 
-test('a view reports each host once, in host-id order, related to the target catalog', () => {
-  const board = emptyBoard();
-  board.targets.push({
-    id: 'phoebe-dev',
-    backend: 'lubko',
-    kind: 'persistent-host',
-    status: 'available',
-    capabilities: ['persistent-filesystem'],
-    address: 'lubko://phoebe-dev',
-    description: '',
-    createdAt: STAMP,
-    updatedAt: STAMP,
-  });
+test('host reports remain useful without enrollment in a target catalog', () => {
   const views = daemonHostViews([
     parseDaemonHostReport(report({ hostId: 'zeta-host', address: 'lubko://zeta-host' })),
     parseDaemonHostReport(report()),
-    // A second report from the same host is the same host, not a second one.
     parseDaemonHostReport(report({ heartbeatCount: 9 })),
-  ], { nowMs: Date.parse(STAMP), board });
-
+  ], { nowMs: Date.parse(STAMP) });
   assert.deepEqual(views.map((view) => view.hostId), ['phoebe-dev', 'zeta-host']);
-  assert.equal(views[0].targetId, 'phoebe-dev', 'a report is related to a target by its canonical address');
-  assert.equal(views[0].heartbeatCount, 9, 'the newest report for a host is the one reported');
-  assert.equal(views[1].targetId, null, 'a host no target claims is not attached to the nearest one');
+  assert.equal(views[0].heartbeatCount, 9);
   assert.equal(views[0].liveness.status, 'online');
   assert.equal(views[0].telemetry.memory.total.bytes, 64 * 1024 ** 3);
+  assert.equal(Object.hasOwn(views[0], 'targetId'), false);
 });
 
-test('a view with no board still reports liveness and telemetry', () => {
-  const views = daemonHostViews([parseDaemonHostReport(report())], { nowMs: Date.parse(STAMP) });
-  assert.equal(views[0].targetId, null);
-  assert.equal(views[0].liveness.status, 'online');
-});
-
-test('the board surface is read-only: an unreadable board yields hosts, not an error', async () => {
+test('host telemetry is available without a board credential', async () => {
   const client = new BoardApi({
     fetch: async () => new Response(null, { status: 404 }),
     now: () => new Date(STAMP),
@@ -180,37 +157,9 @@ test('the board surface is read-only: an unreadable board yields hosts, not an e
   const views = await client.daemonHosts([parseDaemonHostReport(report())], { nowMs: Date.parse(STAMP) });
   assert.equal(views.length, 1);
   assert.equal(views[0].hostId, 'phoebe-dev');
-  assert.equal(views[0].targetId, null);
-  assert.equal(client.hasWriteAccess(), false, 'reading host state grants nothing');
-  assert.equal(client.getCredential(), null, 'reporting host telemetry requires no board credential');
-});
-
-test('the host view related to a target is the one place that relation is decided', () => {
-  // The board view and the CLI both ask this question, so it is answered here
-  // rather than written twice in the two surfaces that render it.
-  const board = emptyBoard();
-  const target = {
-    id: 'phoebe-dev',
-    backend: 'lubko',
-    kind: 'persistent-host',
-    status: 'available',
-    capabilities: ['persistent-filesystem'],
-    address: 'lubko://phoebe-dev',
-    description: '',
-    createdAt: STAMP,
-    updatedAt: STAMP,
-  };
-  board.targets.push(target);
-  const [related, uncatalogued] = daemonHostViews([
-    parseDaemonHostReport(report()),
-    parseDaemonHostReport(report({ hostId: 'zeta-host', address: 'lubko://zeta-host' })),
-  ], { nowMs: Date.parse(STAMP), board });
-
-  assert.equal(hostViewForTarget(target, [uncatalogued, related])?.hostId, 'phoebe-dev');
-  assert.equal(hostViewForTarget(target, [uncatalogued]), undefined,
-    'a report no target claims is never attached to the nearest one');
-  assert.equal(hostViewForTarget({ id: 'nowhere', address: null }, [related]), undefined);
-  assert.equal(hostViewForTarget(target, []), undefined);
+  assert.equal(views[0].liveness.status, 'online');
+  assert.equal(client.hasWriteAccess(), false);
+  assert.equal(client.getCredential(), null);
 });
 
 test('a byte count is printed at one scale everywhere it is printed', () => {

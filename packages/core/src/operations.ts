@@ -2,17 +2,8 @@ import { canonicalBytes, keyIdFromPublicKey, sha256Id, signBytes, verifyBytes, t
 import {
   canonicalHost,
   canonicalPath,
-  canonicalTargetId,
-  executionTargetDefect,
   parseBoard,
   parsePersistedBoard,
-  parseExecutionTargetBackend,
-  parseExecutionTargetAccessMethod,
-  parseExecutionTargetCapability,
-  parseExecutionTargetGarbageCollection,
-  parseExecutionTargetKind,
-  parseExecutionTargetPersistence,
-  parseExecutionTargetStatus,
   canonicalReviewCommit,
   outstandingBlocksAfter,
   parseReviewVerdict,
@@ -23,13 +14,6 @@ import {
   type BoardIssue,
   type BoardReview,
   type ReviewVerdict,
-  type ExecutionTargetAccessMethod,
-  type ExecutionTargetBackend,
-  type ExecutionTargetCapability,
-  type ExecutionTargetGarbageCollection,
-  type ExecutionTargetKind,
-  type ExecutionTargetPersistence,
-  type ExecutionTargetStatus,
 } from './model.js';
 import {
   CURRENT_PERSISTED_BOARD_VERSION,
@@ -51,8 +35,6 @@ export const BOARD_CAPABILITIES = [
   'review.record',
   'resource.read',
   'resource.modify',
-  'target.read',
-  'target.modify',
   'board.delete',
   'authority.delegate',
   'authority.revoke',
@@ -139,44 +121,6 @@ export interface ResourcePayload {
 }
 
 /**
- * The descriptive fields a target registration may carry. They are optional on
- * the payload and on the record alike: an operation written before they existed
- * still has to verify, and a target that states none of them reads through the
- * defaults `executionTargetAccess` resolves. Only the parts an operator can
- * correct later are settable through `TargetSetPayload`; the backend, the kind
- * and the address are fixed at registration because changing any of them makes
- * a different target, not a reconfigured one.
- */
-export interface TargetDescriptionFields {
-  displayName?: string;
-  accessMethod?: ExecutionTargetAccessMethod;
-  persistence?: ExecutionTargetPersistence;
-  garbageCollection?: ExecutionTargetGarbageCollection;
-  limitations?: string[];
-  guidance?: string[];
-}
-
-export interface TargetRegisterPayload extends TargetDescriptionFields {
-  id: string;
-  backend: ExecutionTargetBackend;
-  kind: ExecutionTargetKind;
-  capabilities: ExecutionTargetCapability[];
-  /** The canonical `lubko://` address of a persistent host, else `null`. */
-  address: string | null;
-  description: string;
-}
-
-export interface TargetSetPayload {
-  id: string;
-  status: ExecutionTargetStatus;
-  capabilities: ExecutionTargetCapability[];
-  description: string;
-  displayName?: string;
-  limitations?: string[];
-  guidance?: string[];
-}
-
-/**
  * One review verdict about one exact commit of one issue's work.
  *
  * `commit` is either a full 40-character lowercase hex object id or empty;
@@ -201,12 +145,6 @@ export interface ReviewRecordPayload {
   rationale: string;
 }
 
-export interface DispatchRecordPayload {
-  number: number;
-  targetId: string;
-  rationale: string;
-}
-
 export interface QueueReorderPayload {
   numbers: number[];
 }
@@ -220,9 +158,6 @@ export type BoardOperationPayload =
   | IssueReferencePayload
   | IssueCommentPayload
   | ResourcePayload
-  | TargetRegisterPayload
-  | TargetSetPayload
-  | DispatchRecordPayload
   | ReviewRecordPayload
   | QueueReorderPayload
   | Record<string, never>;
@@ -324,118 +259,6 @@ function parseCapabilities(value: unknown): BoardCapability[] {
   return capabilities;
 }
 
-function parseTargetCapabilityList(value: unknown): ExecutionTargetCapability[] {
-  if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string')) {
-    throw new Error('Execution target capabilities are malformed');
-  }
-  const capabilities = (value as string[]).map(parseExecutionTargetCapability);
-  const sorted = [...capabilities].sort();
-  if (capabilities.some((capability, index) => capability !== sorted[index])) {
-    throw new Error('Execution target capabilities must be sorted');
-  }
-  if (new Set(capabilities).size !== capabilities.length) {
-    throw new Error('Execution target capabilities contain duplicates');
-  }
-  return capabilities;
-}
-
-/** A sorted, duplicate-free list of non-empty strings, or a refusal by name. */
-function parseNoteList(value: unknown, label: string): string[] {
-  if (!Array.isArray(value) || !value.every(isText)) {
-    throw new Error(`${label} are malformed`);
-  }
-  const notes = value as string[];
-  const sorted = [...notes].sort();
-  if (notes.some((note, index) => note !== sorted[index])) {
-    throw new Error(`${label} must be sorted`);
-  }
-  if (new Set(notes).size !== notes.length) {
-    throw new Error(`${label} contain duplicates`);
-  }
-  return [...notes];
-}
-
-/**
- * How each descriptive field is read back off a signed payload. The set is
- * closed, so the field list a caller reads is a choice about *which* fields
- * apply and never about how one is spelled.
- */
-const DESCRIPTION_FIELD_READERS = {
-  displayName(value: unknown): string {
-    if (!isText(value)) throw new Error('Execution target display name is malformed');
-    return value;
-  },
-  accessMethod: (value: unknown) => parseExecutionTargetAccessMethod(String(value)),
-  persistence: (value: unknown) => parseExecutionTargetPersistence(String(value)),
-  garbageCollection: (value: unknown) => parseExecutionTargetGarbageCollection(String(value)),
-  limitations: (value: unknown) => parseNoteList(value, 'Execution target limitations'),
-  guidance: (value: unknown) => parseNoteList(value, 'Execution target guidance'),
-} satisfies { [F in keyof TargetDescriptionFields]-?: (value: unknown) => NonNullable<TargetDescriptionFields[F]> };
-
-/** Every descriptive field a `target.register` payload may carry. */
-const REGISTERED_FIELDS = ['displayName', 'accessMethod', 'persistence', 'garbageCollection', 'limitations', 'guidance'] as const;
-
-/**
- * The subset a `target.set` payload may carry. The backend, the kind, the
- * address, the access method, the persistence and the cleanup mode are fixed at
- * registration because changing any of them makes a different target, not a
- * reconfigured one; what an operator can still correct is what the target says
- * about itself.
- */
-const CORRECTABLE_FIELDS = ['displayName', 'limitations', 'guidance'] as const;
-
-type Fields<F extends readonly (keyof TargetDescriptionFields)[]> = Pick<TargetDescriptionFields, F[number]>;
-
-/**
- * The named fields of a payload, present only where the payload carried them.
- * An absent field is never read as `undefined`: under `exactOptionalPropertyTypes`
- * that is a different value from an absent one, and a target registered with
- * these fields must read exactly as one registered without them did.
- */
-function parseDescriptionFields<F extends readonly (keyof TargetDescriptionFields)[]>(
-  value: Record<string, unknown>,
-  fields: F,
-): Fields<F> {
-  const parsed: Record<string, unknown> = {};
-  for (const field of fields) {
-    if (value[field] !== undefined) parsed[field] = DESCRIPTION_FIELD_READERS[field](value[field]);
-  }
-  return parsed as Fields<F>;
-}
-
-/**
- * The same carry-over onto a board record, omitting the ones the payload did not
- * carry. Spreading the payload directly would write absent fields as explicit
- * `undefined`, which is a different stored value and would make a record written
- * two ways compare unequal for no reason.
- *
- * A note list the payload carries as empty is omitted here too, and that is how
- * a note is retracted: an empty list is the caller's way of saying the field
- * should not be there, and a record that stored it would be a claim that there
- * are no caveats or no guidance document at all. Dropping it leaves the field
- * absent, which is the one spelling of "says nothing" the reader resolves
- * against the backend. The consequence is that a payload carrying `[]` and one
- * omitting the field reach the same record; the omission is not otherwise a
- * retraction, because `target.set` carries the previous value forward.
- */
-function descriptionRecord<F extends readonly (keyof TargetDescriptionFields)[]>(
-  payload: TargetDescriptionFields,
-  fields: F,
-): Fields<F> {
-  const carried: Record<string, unknown> = {};
-  for (const field of fields) {
-    const value = payload[field];
-    if (value === undefined) continue;
-    if (Array.isArray(value)) {
-      if (value.length === 0) continue;
-      carried[field] = [...value];
-      continue;
-    }
-    carried[field] = value;
-  }
-  return carried as Fields<F>;
-}
-
 function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationPayload {
   if (!isRecord(value)) throw new Error(`Operation payload for ${kind} is malformed`);
   switch (kind) {
@@ -505,55 +328,11 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
       }
       return { number: value.number, host: value.host, path: value.path };
     }
-    case 'target.register': {
-      if (!hasOnlyKeys(value, ['id', 'backend', 'kind', 'capabilities', 'address', 'description'],
-          ['displayName', 'accessMethod', 'persistence', 'garbageCollection', 'limitations', 'guidance'])
-          || !isText(value.id)
-          || !isText(value.backend)
-          || !isText(value.kind)
-          || !(value.address === null || isText(value.address))
-          || typeof value.description !== 'string') {
-        throw new Error('Target-register payload is malformed');
-      }
-      return {
-        id: canonicalTargetId(value.id),
-        backend: parseExecutionTargetBackend(value.backend),
-        kind: parseExecutionTargetKind(value.kind),
-        capabilities: parseTargetCapabilityList(value.capabilities),
-        address: value.address === null ? null : canonicalHost(value.address),
-        description: value.description,
-        ...parseDescriptionFields(value, REGISTERED_FIELDS),
-      };
-    }
-    case 'target.set': {
-      if (!hasOnlyKeys(value, ['id', 'status', 'capabilities', 'description'],
-          ['displayName', 'limitations', 'guidance'])
-          || !isText(value.id)
-          || !isText(value.status)
-          || typeof value.description !== 'string') {
-        throw new Error('Target-set payload is malformed');
-      }
-      return {
-        id: canonicalTargetId(value.id),
-        status: parseExecutionTargetStatus(value.status),
-        capabilities: parseTargetCapabilityList(value.capabilities),
-        description: value.description,
-        ...parseDescriptionFields(value, CORRECTABLE_FIELDS),
-      };
-    }
-    case 'dispatch.record': {
-      if (!hasExactKeys(value, ['number', 'targetId', 'rationale'])
-          || !isPositiveSafeInteger(value.number)
-          || !isText(value.targetId)
-          || !isText(value.rationale)) {
-        throw new Error('Dispatch-record payload is malformed');
-      }
-      return {
-        number: value.number,
-        targetId: canonicalTargetId(value.targetId),
-        rationale: value.rationale,
-      };
-    }
+    // Read-only legacy events remain valid signed history, but are inert.
+    case 'target.register':
+    case 'target.set':
+    case 'dispatch.record':
+      return structuredClone(value) as BoardOperationPayload;
     case 'review.record': {
       if (!hasExactKeys(value, ['number', 'commit', 'verdict', 'reviewer', 'rationale'])
           || !isPositiveSafeInteger(value.number)
@@ -775,7 +554,7 @@ function requiredCapability(kind: BoardOperationKind): BoardCapability | null {
     case 'resource.remove': return 'resource.modify';
     case 'target.register':
     case 'target.set':
-    case 'dispatch.record': return 'target.modify';
+    case 'dispatch.record': return null;
     case 'review.record': return 'review.record';
     case 'queue.reorder': return 'queue.reorder';
     case 'board.delete': return 'board.delete';
@@ -901,10 +680,6 @@ export function applyBoardMutation(
         const issueNumbers = resource.issueNumbers.filter((number) => number !== payload.number);
         return issueNumbers.length === 0 ? [] : [{ ...resource, issueNumbers, updatedAt: operation.timestamp }];
       });
-      // A dispatch names an issue, so it goes with the issue it named rather
-      // than surviving as a record the board can no longer hold.
-      candidate.dispatches = candidate.dispatches.filter(
-        (dispatch) => dispatch.issueNumber !== payload.number);
       nextQueue = nextQueue.filter((number) => number !== payload.number);
       break;
     }
@@ -947,80 +722,11 @@ export function applyBoardMutation(
       else current.updatedAt = operation.timestamp;
       break;
     }
-    case 'target.register': {
-      const payload = operation.payload as TargetRegisterPayload;
-      if (candidate.targets.some((target) => target.id === payload.id)) {
-        throw new OperationLogVerificationError('Execution target is already registered');
-      }
-      const registered = {
-        id: payload.id,
-        backend: payload.backend,
-        kind: payload.kind,
-        status: 'available' as const,
-        capabilities: [...payload.capabilities],
-        address: payload.address,
-        description: payload.description,
-        ...descriptionRecord(payload, REGISTERED_FIELDS),
-        createdAt: operation.timestamp,
-        updatedAt: operation.timestamp,
-      };
-      const defect = executionTargetDefect(registered);
-      if (defect !== null) throw new OperationLogVerificationError(defect);
-      if (payload.address !== null && candidate.targets.some((target) => target.address === payload.address)) {
-        throw new OperationLogVerificationError('Another execution target already answers to this Lubko address');
-      }
-      candidate.targets.push(registered);
-      candidate.targets.sort((left, right) => (left.id === right.id ? 0 : left.id < right.id ? -1 : 1));
+    // Archived signed operations from the old registry are intentionally inert.
+    case 'target.register':
+    case 'target.set':
+    case 'dispatch.record':
       break;
-    }
-    case 'target.set': {
-      const payload = operation.payload as TargetSetPayload;
-      const target = candidate.targets.find((entry) => entry.id === payload.id);
-      if (!target) throw new OperationLogVerificationError('Execution target is not registered');
-      const updated = {
-        ...target,
-        status: payload.status,
-        capabilities: [...payload.capabilities],
-        description: payload.description,
-        ...descriptionRecord(payload, CORRECTABLE_FIELDS),
-        updatedAt: operation.timestamp,
-      };
-      // A note list the payload carries as empty retracts the field. Omitting
-      // it from the carry-over is not enough on its own, because this update is
-      // built on top of the record as it stands, so the previous value would
-      // survive the omission; a retraction has to remove what was there. An
-      // operation that never carried the field is unaffected, which is what
-      // keeps a correction that says nothing about the notes from dropping them.
-      for (const field of CORRECTABLE_FIELDS) {
-        const value = payload[field];
-        if (Array.isArray(value) && value.length === 0) delete (updated as Record<string, unknown>)[field];
-      }
-      const defect = executionTargetDefect(updated);
-      if (defect !== null) throw new OperationLogVerificationError(defect);
-      candidate.targets[candidate.targets.indexOf(target)] = updated;
-      break;
-    }
-    case 'dispatch.record': {
-      const payload = operation.payload as DispatchRecordPayload;
-      const issue = requireIssue(candidate, payload.number);
-      if (issue.state !== 'open') throw new OperationLogVerificationError('Only an open issue can be dispatched');
-      if (!candidate.targets.some((target) => target.id === payload.targetId)) {
-        throw new OperationLogVerificationError('Dispatch names an unregistered execution target');
-      }
-      const index = candidate.dispatches.findIndex((dispatch) => dispatch.issueNumber === payload.number);
-      const record = {
-        issueNumber: payload.number,
-        targetId: payload.targetId,
-        rationale: payload.rationale,
-        recordedAt: operation.timestamp,
-      };
-      // One job per issue: a re-dispatch replaces the record rather than
-      // accumulating several, so "what ran this issue" has one answer.
-      if (index < 0) candidate.dispatches.push(record);
-      else candidate.dispatches[index] = record;
-      candidate.dispatches.sort((left, right) => left.issueNumber - right.issueNumber);
-      break;
-    }
     case 'review.record': {
       const payload = operation.payload as ReviewRecordPayload;
       const issue = requireIssue(candidate, payload.number);

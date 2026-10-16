@@ -118,8 +118,6 @@ function overview(issues: BoardIssue[]): BoardOverview {
       hasBody: each.body.length > 0,
     })),
     resources: [],
-    targets: [],
-    dispatches: [],
   };
 }
 
@@ -171,7 +169,6 @@ describe('the board app, mounted', () => {
       ['issues', '/board'],
       ['resources', '/board?view=resources'],
       ['feed', '/board?view=feed'],
-      ['targets', '/board?view=targets'],
     ]);
     // The verified read, not a fixture: the issue the board reported is on
     // screen, the closed one is behind the Open filter, and the access pill

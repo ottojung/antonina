@@ -38,37 +38,15 @@ import {
   MAX_SAFE_INTEGER,
   canonicalHost,
   canonicalPath,
-  canonicalTargetId,
   emptyBoard,
-  parseExecutionTargetAccessMethod,
-  parseExecutionTargetBackend,
-  parseExecutionTargetCapability,
-  parseExecutionTargetGarbageCollection,
-  parseExecutionTargetKind,
-  parseExecutionTargetPersistence,
-  parseExecutionTargetStatus,
   resourceViews,
-  selectExecutionTarget,
-  targetViews,
   type Board,
-  type BoardDispatch,
-  type BoardExecutionTarget,
   type BoardIssue,
   type BoardResource,
   type BoardReview,
   type ReviewVerdict,
-  type ExecutionTargetAccessMethod,
-  type ExecutionTargetBackend,
-  type ExecutionTargetCapability,
-  type ExecutionTargetGarbageCollection,
-  type ExecutionTargetKind,
-  type ExecutionTargetPersistence,
-  type ExecutionTargetStatus,
   type IssueState,
   type ResourceView,
-  type TargetRequest,
-  type TargetSelection,
-  type TargetView,
 } from './model.js';
 import {
   daemonHostViews,
@@ -131,57 +109,6 @@ function requireMaximumCharacters(value: string, maximum: number, label: string)
   }
 }
 
-/**
- * The descriptive fields of a target operation, canonicalized and carried only
- * where the caller supplied them. A caller who omits a field does not write an
- * empty one: an absent field reads through the backend's and kind's own defaults,
- * which is what a target registered before these fields existed reads as, so
- * omitting a field never has to mean "clear it".
- *
- * A note list is canonicalized all the way here rather than left half-done for
- * the model: the record a caller builds is refused downstream if it repeats a
- * note or carries a blank one, and a refusal that arrives only after the
- * operation has been signed is a refusal the caller never gets to act on. So
- * the API produces the sorted, duplicate-free list of non-empty notes the model
- * requires, or refuses before anything is signed.
- *
- * An empty list is passed through rather than refused, because it is how a
- * caller retracts a note: it is the field saying it should not be there, and
- * `operations.ts` omits the field from the record for exactly that reason. The
- * model refuses an empty list on a *record*, which is where an empty list would
- * be a stored claim rather than a retraction.
- */
-function canonicalNoteList(notes: readonly string[], label: string): string[] {
-  if (notes.some((note) => note.trim() === '')) {
-    throw new AntoninaApiError(`An execution target ${label} cannot be blank`);
-  }
-  return [...new Set(notes)].sort();
-}
-
-function canonicalTargetNotes(input: {
-  displayName?: string;
-  accessMethod?: ExecutionTargetAccessMethod;
-  persistence?: ExecutionTargetPersistence;
-  garbageCollection?: ExecutionTargetGarbageCollection;
-  limitations?: readonly string[];
-  guidance?: readonly string[];
-}): Record<string, unknown> {
-  const displayName = input.displayName;
-  if (displayName !== undefined && displayName.trim() === '') {
-    throw new AntoninaApiError('An execution target display name cannot be blank');
-  }
-  return {
-    ...(displayName !== undefined ? { displayName: displayName.trim() } : {}),
-    ...(input.accessMethod !== undefined ? { accessMethod: parseExecutionTargetAccessMethod(input.accessMethod) } : {}),
-    ...(input.persistence !== undefined ? { persistence: parseExecutionTargetPersistence(input.persistence) } : {}),
-    ...(input.garbageCollection !== undefined
-      ? { garbageCollection: parseExecutionTargetGarbageCollection(input.garbageCollection) }
-      : {}),
-    ...(input.limitations !== undefined ? { limitations: canonicalNoteList(input.limitations, 'limitation') } : {}),
-    ...(input.guidance !== undefined ? { guidance: canonicalNoteList(input.guidance, 'guidance reference') } : {}),
-  };
-}
-
 /** The board exists but this client has not been given its board credential. */
 export class BoardTrustRequiredError extends AntoninaApiError {}
 
@@ -193,20 +120,6 @@ export class BoardTrustRequiredError extends AntoninaApiError {}
 export class BoardStorageRejectedError extends AntoninaApiError {
   constructor(cause: unknown) {
     super('Skrynia refused the storage capability in this board credential; copy a fresh credential from a board editor', { cause });
-  }
-}
-
-/**
- * A selection that named no target. It carries the whole selection so a caller
- * can see which targets were considered and why each was refused, instead of
- * reading only the message.
- */
-export class TargetSelectionError extends AntoninaApiError {
-  readonly selection: TargetSelection;
-
-  constructor(selection: TargetSelection) {
-    super(selection.rationale);
-    this.selection = selection;
   }
 }
 
@@ -694,135 +607,11 @@ export class BoardApi {
     return clone(committed.state.board.resources);
   }
 
-  /**
-   * The canonical catalog of execution targets, each with the durable
-   * resources its host carries and the issues dispatched to it.
-   */
-  async listTargets(): Promise<TargetView[]> {
-    return targetViews(await this.loadBoard());
-  }
-
-  async getTarget(id: string): Promise<BoardExecutionTarget> {
-    const target = (await this.loadBoard()).targets.find((entry) => entry.id === id);
-    if (!target) throw new AntoninaApiError('Antonina execution target ' + id + ' is not registered');
-    return clone(target);
-  }
-
-  /**
-   * The persistent hosts a daemon has reported, each related to the target
-   * catalog, and how fresh each report is.
-   *
-   * This is a read of a caller-supplied set of host-local reports joined
-   * against the verified board. It appends nothing, needs no credential, and
-   * never rewrites a target's recorded status: a report is evidence about a
-   * host, not an edit to the registration an operator placed in the catalog. A
-   * board that is not readable yields no hosts rather than an error, so a host
-   * with telemetry to report is still reportable on a machine with no board.
-   */
   async daemonHosts(
     reports: readonly DaemonHostReport[],
     options: { nowMs: number; staleAfterMs?: number },
   ): Promise<DaemonHostView[]> {
-    const board = await this.readBoard();
-    return clone(daemonHostViews(reports, { ...options, board }));
-  }
-
-  /**
-   * Registers a target and refuses before it is signed anything an internally
-   * inconsistent record would state, so the catalog never holds a target whose
-   * kind and capabilities disagree.
-   */
-  async registerTarget(input: {
-    id: string;
-    backend: ExecutionTargetBackend;
-    kind: ExecutionTargetKind;
-    capabilities: readonly ExecutionTargetCapability[];
-    address: string | null;
-    description?: string;
-    displayName?: string;
-    accessMethod?: ExecutionTargetAccessMethod;
-    persistence?: ExecutionTargetPersistence;
-    garbageCollection?: ExecutionTargetGarbageCollection;
-    limitations?: readonly string[];
-    guidance?: readonly string[];
-  }): Promise<BoardExecutionTarget> {
-    const id = canonicalTargetId(input.id);
-    const address = input.address === null ? null : canonicalHost(input.address);
-    const capabilities = [...input.capabilities].sort();
-    const committed = await this.append(
-      'target.register',
-      {
-        id,
-        backend: parseExecutionTargetBackend(input.backend),
-        kind: parseExecutionTargetKind(input.kind),
-        capabilities: capabilities.map(parseExecutionTargetCapability),
-        address,
-        description: input.description ?? '',
-        ...canonicalTargetNotes(input),
-      },
-    );
-    return this.requireTarget(committed.state.board, id);
-  }
-
-  /**
-   * Replaces the mutable part of a target record. Backend, kind, and address
-   * are fixed at registration: a different backend or host is a different
-   * target, not a reconfigured one.
-   */
-  async setTarget(
-    id: string,
-    changes: {
-      status: ExecutionTargetStatus;
-      capabilities: readonly ExecutionTargetCapability[];
-      description: string;
-      displayName?: string;
-      limitations?: readonly string[];
-      guidance?: readonly string[];
-    },
-  ): Promise<BoardExecutionTarget> {
-    const targetId = canonicalTargetId(id);
-    const committed = await this.append(
-      'target.set',
-      {
-        id: targetId,
-        status: parseExecutionTargetStatus(changes.status),
-        capabilities: [...changes.capabilities].sort().map(parseExecutionTargetCapability),
-        description: changes.description,
-        ...canonicalTargetNotes(changes),
-      },
-    );
-    return this.requireTarget(committed.state.board, targetId);
-  }
-
-  /**
-   * Decides where a job runs, without recording anything. The selection is a
-   * pure function of the verified board and the request, so the same request
-   * against the same board answers the same way and says why.
-   */
-  async selectTarget(request: TargetRequest = {}): Promise<TargetSelection> {
-    const selection = selectExecutionTarget(await this.loadBoard(), request);
-    if (selection.outcome !== 'selected') throw new TargetSelectionError(selection);
-    return selection;
-  }
-
-  /**
-   * Records which target a job ran on. The target is chosen by the same
-   * deterministic selection every caller uses, and a request that cannot be
-   * satisfied is refused with the rationale attached rather than resolved to
-   * some other target.
-   */
-  async recordDispatch(issueNumber: number, request: TargetRequest = {}): Promise<BoardDispatch> {
-    const selection = selectExecutionTarget(await this.loadBoard(), { ...request });
-    if (selection.outcome !== 'selected' || selection.target === null) {
-      throw new TargetSelectionError(selection);
-    }
-    const committed = await this.append(
-      'dispatch.record',
-      { number: issueNumber, targetId: selection.target.id, rationale: selection.rationale },
-    );
-    const dispatch = committed.state.board.dispatches.find((entry) => entry.issueNumber === issueNumber);
-    if (!dispatch) throw new AntoninaApiError('Antonina dispatch record disappeared after mutation');
-    return clone(dispatch);
+    return clone(daemonHostViews(reports, options));
   }
 
   async comment(number: number, author: string, body: string): Promise<BoardIssue> {
@@ -899,12 +688,6 @@ export class BoardApi {
     const issue = issues.find((candidate) => candidate.number === number);
     if (!issue) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
     return issue;
-  }
-
-  private requireTarget(board: Board, id: string): BoardExecutionTarget {
-    const target = board.targets.find((candidate) => candidate.id === id);
-    if (!target) throw new AntoninaApiError('Antonina execution target disappeared after mutation');
-    return clone(target);
   }
 
   private async refreshEffectiveAuthority(_state: VerifiedBoardState): Promise<void> {
@@ -998,33 +781,6 @@ export { closingTimeOf, compareClosedIssues } from './board-v3-store.js';
 export type { ClosedIssueOrderKey } from './board-v3-store.js';
 export { compareIssueActivity, issueLastActivityOf, newestCommentAt } from './board-v3-store.js';
 export {
-  EXECUTION_TARGET_ACCESS_METHODS,
-  EXECUTION_TARGET_BACKENDS,
-  EXECUTION_TARGET_CAPABILITIES,
-  EXECUTION_TARGET_GARBAGE_COLLECTION,
-  EXECUTION_TARGET_GUIDANCE,
-  EXECUTION_TARGET_KINDS,
-  EXECUTION_TARGET_PERSISTENCE,
-  EXECUTION_TARGET_STATUSES,
-  canonicalTargetId,
-  canonicalTargetRequirements,
-  defaultExecutionTargetAccessMethod,
-  defaultExecutionTargetPersistence,
-  executionTargetAccess,
-  guidancePathDefect,
-  parseExecutionTargetAccessMethod,
-  parseExecutionTargetBackend,
-  parseExecutionTargetCapability,
-  parseExecutionTargetGarbageCollection,
-  parseExecutionTargetKind,
-  parseExecutionTargetPersistence,
-  parseExecutionTargetStatus,
-  selectExecutionTarget,
-  targetIdForHost,
-  targetViews,
-  type ExecutionTargetAccess,
-} from './model.js';
-export {
   DAEMON_HEALTHS,
   DEFAULT_STALE_AFTER_MS,
   HOST_LIVENESSES,
@@ -1032,7 +788,6 @@ export {
   formatHostBytes,
   hostBytes,
   hostLiveness,
-  hostViewForTarget,
   unavailableHostBytes,
   type DaemonHostReport,
   type DaemonHostView,
@@ -1056,21 +811,6 @@ export {
   unverifiedCollectionSnapshot,
 } from './collection.js';
 export type { Board, BoardIssue, BoardResource, IssueState, ResourceView } from './model.js';
-export type {
-  BoardDispatch,
-  BoardExecutionTarget,
-  ExecutionTargetBackend,
-  ExecutionTargetCapability,
-  ExecutionTargetKind,
-  ExecutionTargetStatus,
-  TargetConsideration,
-  TargetRequest,
-  TargetRequirementMiss,
-  TargetRequirements,
-  TargetSelection,
-  TargetSelectionOutcome,
-  TargetView,
-} from './model.js';
 export type {
   AuthorizedCollection,
   CandidateFactsGatherer,

@@ -103,8 +103,6 @@ function overview(issues: BoardIssue[]): BoardOverview {
     queue: issues.filter((each) => each.state === 'open').map((each) => each.number),
     issues: issues.map((each) => ({ number: each.number, title: each.title, state: each.state, createdAt: STAMP, updatedAt: STAMP, closedAt: each.state === 'closed' ? STAMP : null, messageCount: 0, hasBody: false })),
     resources: [],
-    targets: [],
-    dispatches: [],
   };
 }
 

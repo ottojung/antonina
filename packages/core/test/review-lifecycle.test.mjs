@@ -183,7 +183,7 @@ test('reviewBlocksCompletion is the predicate, and it reads a parsed board', () 
   // A board carrying the field still parses, and one carrying a verdict this
   // build does not know is refused rather than read as "no blocker".
   const base = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     nextIssueNumber: 2,
     issues: [{
       number: 1, title: 'T', body: '', state: 'open',
@@ -191,8 +191,6 @@ test('reviewBlocksCompletion is the predicate, and it reads a parsed board', () 
       review: { commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', verdict: 'request-changes', reviewer: 'a', rationale: 'r', recordedAt: '2026-10-02T22:00:00.000Z' },
     }],
     resources: [],
-    targets: [],
-    dispatches: [],
   };
   assert.equal(parseBoard(base).issues[0].review.verdict, 'request-changes');
   assert.throws(

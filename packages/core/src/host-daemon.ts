@@ -1,10 +1,4 @@
-import {
-  canonicalHost,
-  canonicalTargetId,
-  targetIdForHost,
-  type Board,
-  type BoardExecutionTarget,
-} from './model.js';
+import { canonicalHost } from './model.js';
 
 /**
  * The host-local Antonina daemon, described as shared vocabulary.
@@ -12,7 +6,7 @@ import {
  * Everything in this file is the *model* of what a persistent hardware host
  * reports about itself: the shape of a telemetry report, how a report is judged
  * malformed, when a host reads as online, stale or offline, and how a report is
- * related to the execution-target catalog. It is deliberately free of I/O so
+ * reported independently of any registration. It is deliberately free of I/O so
  * that the CLI, the daemon process and any board view all read one definition
  * rather than three.
  *
@@ -20,8 +14,7 @@ import {
  *
  *  - A daemon report is host-local observation. It is not a board mutation, it
  *    is never stored in the materialized board snapshots, and reading it
- *    requires no board credential. The catalog of execution targets stays a registration; the
- *    report is the freshness of one host behind that registration.
+ *    requires no board credential. A report is evidence about the host and makes no registration claim.
  *  - A report describes capacity. It carries no command-execution surface, so a
  *    daemon can never become a second transport to a host. Lubko remains the
  *    transport for a Lubko-managed host.
@@ -124,7 +117,7 @@ export interface DaemonProcessIdentity {
 
 export interface DaemonHostReport {
   readonly schemaVersion: typeof DAEMON_REPORT_SCHEMA_VERSION;
-  /** The stable host identity, a target-id slug so it can be compared with the catalog. */
+  /** Stable host identity, independent of any board registry. */
   readonly hostId: string;
   /** The canonical `lubko://` address this host is known by, or `null` when it has none. */
   readonly address: string | null;
@@ -219,8 +212,6 @@ export function hostLiveness(
 export interface DaemonHostView {
   readonly hostId: string;
   readonly address: string | null;
-  /** The catalogued target this host is, or `null` when the catalog claims no such address. */
-  readonly targetId: string | null;
   readonly liveness: HostLiveness;
   /** The daemon's own health at the last heartbeat, or `null` when nothing was reported. */
   readonly health: DaemonHealth | null;
@@ -230,19 +221,8 @@ export interface DaemonHostView {
   readonly heartbeatCount: number;
 }
 
-export interface DaemonHostViewOptions extends HostLivenessOptions {
-  /** The board whose target catalog the view is related to. */
-  readonly board?: Board | null;
-}
+export type DaemonHostViewOptions = HostLivenessOptions;
 
-/**
- * The publishing surface: host reports joined against the execution-target
- * catalog, read-only, and in a deterministic order.
- *
- * A host Antonina has no target for is reported with `targetId: null` rather
- * than attached to the nearest one, for the same reason a resource on an
- * uncatalogued host is: the catalog, not this function, decides what is a target.
- */
 export function daemonHostViews(
   reports: readonly DaemonHostReport[],
   options: DaemonHostViewOptions,
@@ -252,13 +232,9 @@ export function daemonHostViews(
   return [...byHost.values()]
     .sort((left, right) => (left.hostId < right.hostId ? -1 : left.hostId > right.hostId ? 1 : 0))
     .map((report) => {
-      const targetId = options.board === undefined || options.board === null || report.address === null
-        ? null
-        : targetIdForHost(options.board, report.address);
       return {
         hostId: report.hostId,
         address: report.address,
-        targetId,
         liveness: hostLiveness(report, options),
         health: report.health,
         telemetry: report.telemetry,
@@ -266,25 +242,6 @@ export function daemonHostViews(
         heartbeatCount: report.heartbeatCount,
       };
     });
-}
-
-/**
- * The one host view that reports about this target, or `undefined` when none
- * does.
- *
- * A report is related to a target by address, which is what
- * {@link daemonHostViews} already resolved into `targetId`; a view whose
- * `targetId` is `null` belongs to a host the catalog does not claim, and is
- * never attached to the nearest target. This is the single place that relation
- * is decided, so a board view and a CLI command cannot disagree about which
- * report belongs to which target.
- */
-export function hostViewForTarget(
-  target: Pick<BoardExecutionTarget, 'id' | 'address'>,
-  hosts: readonly DaemonHostView[],
-): DaemonHostView | undefined {
-  return hosts.find((host) => host.targetId === target.id
-    || (target.address !== null && host.address === target.address));
 }
 
 const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'] as const;
@@ -427,7 +384,7 @@ function parseTelemetry(value: unknown): HostTelemetry {
 /**
  * What a persisted report is internally inconsistent about, or `null`.
  *
- * This is the same shape of check as `executionTargetDefect`: a reason string
+ * This is the same shape of validation as the board record parsers: a reason string
  * rather than a thrown error, so a reader of a state file can decide what a
  * damaged record means instead of catching an exception to find out.
  */
@@ -481,13 +438,13 @@ export function parseDaemonHostReport(value: unknown): DaemonHostReport {
   const hostId = isText(value.hostId)
     ? (() => {
       try {
-        return canonicalTargetId(value.hostId);
+        return canonicalDaemonHostId(value.hostId);
       } catch (error) {
-        throw new MalformedDaemonHostReportError('a report must name its host with a target-id slug', { cause: error });
+        throw new MalformedDaemonHostReportError('a report must name its host with a host-id slug', { cause: error });
       }
     })()
     : null;
-  if (hostId === null) throw new MalformedDaemonHostReportError('a report must name its host with a target-id slug');
+  if (hostId === null) throw new MalformedDaemonHostReportError('a report must name its host with a host-id slug');
   if (value.address !== null) {
     if (!isText(value.address)) throw new MalformedDaemonHostReportError('a report address must be a string or null');
     try {
@@ -536,4 +493,13 @@ export function parseDaemonHostReport(value: unknown): DaemonHostReport {
   const defect = daemonHostReportDefect(report);
   if (defect !== null) throw new MalformedDaemonHostReportError(defect);
   return report;
+}
+
+/** Shared host identity validation, independent of the board and schedulers. */
+export function canonicalDaemonHostId(value: string): string {
+  const id = value.trim();
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(id)) {
+    throw new Error('Host ID must be a lowercase alphanumeric or dash slug');
+  }
+  return id;
 }

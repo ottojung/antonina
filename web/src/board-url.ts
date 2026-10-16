@@ -21,9 +21,9 @@ import type { IssueFilter } from './ui-state';
  * it. See `board-url.test.ts`.
  */
 
-export type BoardView = 'issues' | 'resources' | 'feed' | 'targets';
+export type BoardView = 'issues' | 'resources' | 'feed';
 
-export const BOARD_VIEWS: readonly BoardView[] = ['issues', 'resources', 'feed', 'targets'];
+export const BOARD_VIEWS: readonly BoardView[] = ['issues', 'resources', 'feed'];
 
 export const ISSUE_FILTERS: readonly IssueFilter[] = ['open', 'closed', 'all'];
 

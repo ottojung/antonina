@@ -72,8 +72,6 @@ function overview(): BoardOverview {
     // carries all of them. This file is about what the view draws, not about
     // bounding that read — see the bounded-read note in ui-state.ts.
     resources: registered,
-    targets: [],
-    dispatches: [],
   };
 }
 

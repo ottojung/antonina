@@ -19,9 +19,8 @@ import {
   type BoardFeedRequest,
 } from './feed.js';
 import {
+  BOARD_SCHEMA_VERSION,
   type Board,
-  type BoardDispatch,
-  type BoardExecutionTarget,
   type BoardIssue,
   type BoardMessage,
   type BoardResource,
@@ -564,8 +563,6 @@ export interface BoardOverview {
   queue: number[];
   issues: IssueListSummary[];
   resources: BoardResource[];
-  targets: BoardExecutionTarget[];
-  dispatches: BoardDispatch[];
 }
 
 interface QueueSnapshot {
@@ -578,8 +575,6 @@ interface CatalogSnapshot {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;
   resources: BoardResource[];
-  targets: BoardExecutionTarget[];
-  dispatches: BoardDispatch[];
 }
 
 /**
@@ -942,8 +937,6 @@ function latestBoardTimestamp(board: Board, fallback: string): string {
     for (const message of issue.messages) timestamps.push(message.createdAt);
   }
   for (const resource of board.resources) timestamps.push(resource.createdAt, resource.updatedAt);
-  for (const target of board.targets) timestamps.push(target.createdAt, target.updatedAt);
-  for (const dispatch of board.dispatches) timestamps.push(dispatch.recordedAt);
   return new Date(Math.max(...timestamps.map((value) => Date.parse(value)))).toISOString();
 }
 
@@ -1247,8 +1240,6 @@ export interface BoardImportReport {
   feedEntries: number;
   queueLength: number;
   resources: number;
-  targets: number;
-  dispatches: number;
   checks: EquivalenceCheck[];
   /** True only when every check passed. */
   equivalent: boolean;
@@ -1888,17 +1879,13 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     if (!isRecord(value)
         || value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
         || value.boardId !== meta.boardId
-        || !Array.isArray(value.resources)
-        || !Array.isArray(value.targets)
-        || !Array.isArray(value.dispatches)) {
+        || !Array.isArray(value.resources)) {
       throw new ShardedBoardStoreError('Antonina catalog snapshot is malformed');
     }
     return {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId: meta.boardId,
       resources: clone(value.resources as BoardResource[]),
-      targets: clone(value.targets as BoardExecutionTarget[]),
-      dispatches: clone(value.dispatches as BoardDispatch[]),
     };
   }
 
@@ -1937,12 +1924,10 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     const queue = await this.readQueue(credential, meta);
     const catalog = await this.readCatalog(credential, meta);
     const board: Board = {
-      schemaVersion: 3,
+      schemaVersion: BOARD_SCHEMA_VERSION,
       nextIssueNumber: meta.nextIssueNumber,
       issues,
       resources: catalog.resources,
-      targets: catalog.targets,
-      dispatches: catalog.dispatches,
     };
     return {
       meta,
@@ -2004,13 +1989,11 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       meta,
       state: {
         board: {
-          schemaVersion: 3,
+          schemaVersion: BOARD_SCHEMA_VERSION,
           nextIssueNumber: meta.nextIssueNumber,
           issues,
           resources: catalog.resources,
-          targets: catalog.targets,
-          dispatches: catalog.dispatches,
-        },
+                },
         queue,
         authorities: [],
         deleted: meta.deleted,
@@ -2225,8 +2208,6 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId,
       resources: clone(board.resources),
-      targets: clone(board.targets),
-      dispatches: clone(board.dispatches),
     };
     return this.writeShard(credential.storageCapability, value);
   }
@@ -2650,9 +2631,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     const catalogValue = await get(single('catalogRef'));
     if (!isRecord(queueValue) || !Array.isArray(queueValue.numbers)
         || !isRecord(catalogValue)
-        || !Array.isArray(catalogValue.resources)
-        || !Array.isArray(catalogValue.targets)
-        || !Array.isArray(catalogValue.dispatches)) {
+        || !Array.isArray(catalogValue.resources)) {
       throw new ShardedBoardStoreError('Antonina pre-cutover queue or catalog is malformed');
     }
 
@@ -2675,12 +2654,10 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     const nextIssueNumber = requireSafeCount(metaValue.nextIssueNumber, 'next issue number');
     return {
       board: {
-        schemaVersion: 3,
+        schemaVersion: BOARD_SCHEMA_VERSION,
         nextIssueNumber,
         issues,
         resources: catalogValue.resources as BoardResource[],
-        targets: catalogValue.targets as BoardExecutionTarget[],
-        dispatches: catalogValue.dispatches as BoardDispatch[],
       },
       queue: [...(queueValue.numbers as number[])],
       feed,
@@ -2780,8 +2757,6 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       })) as unknown as CanonicalValue,
       queue: logical.queue,
       resources: logical.board.resources as unknown as CanonicalValue,
-      targets: logical.board.targets as unknown as CanonicalValue,
-      dispatches: logical.board.dispatches as unknown as CanonicalValue,
       feedCount: logical.feed.length,
     }));
 
@@ -2973,8 +2948,6 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       feedEntries: logical.feed.length,
       queueLength: logical.queue.length,
       resources: logical.board.resources.length,
-      targets: logical.board.targets.length,
-      dispatches: logical.board.dispatches.length,
       checks,
       equivalent,
       legacyStore: {
@@ -3015,8 +2988,8 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
    *
    * Both sides are compared as `LogicalBoard`, so the check cannot pass by
    * comparing the wrong things: it covers issue bodies and every comment with its
-   * author and timestamps, open/closed state, the queue order, resources, targets,
-   * dispatches, the feed's ordering and content, and the counters a client reads.
+   * author and timestamps, open/closed state, the queue order, resources,
+   * the feed's ordering and content, and the counters a client reads.
    *
    * The new side is read through the public readers, not by re-walking the shards
    * the importer just wrote. That is deliberate: a check that inspected the
@@ -3081,8 +3054,6 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     );
     same('queue', intended.queue, bundle.state.queue);
     same('resources', intended.board.resources, bundle.state.board.resources);
-    same('targets', intended.board.targets, bundle.state.board.targets);
-    same('dispatches', intended.board.dispatches, bundle.state.board.dispatches);
     // The feed is *served* newest-first, which is the order a reader pages in,
     // and *stored* in position order. Compared in position order, and the served
     // order is checked separately below so neither is left unasserted.
@@ -3158,8 +3129,6 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       feedEntries: meta.feedCount,
       queueLength: bundle.state.queue.length,
       resources: bundle.state.board.resources.length,
-      targets: bundle.state.board.targets.length,
-      dispatches: bundle.state.board.dispatches.length,
       checks: [],
       equivalent: true,
       legacyStore: {
@@ -3439,13 +3408,9 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
 
       const beforeCatalog = {
         resources: bundle.state.board.resources,
-        targets: bundle.state.board.targets,
-        dispatches: bundle.state.board.dispatches,
       };
       const afterCatalog = {
         resources: candidate.board.resources,
-        targets: candidate.board.targets,
-        dispatches: candidate.board.dispatches,
       };
       const catalogChanged = !jsonSame(beforeCatalog, afterCatalog);
       const catalogRef = catalogChanged
@@ -3912,8 +3877,6 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         ...closedPages.flatMap((page) => page.entries),
       ],
       resources: catalog.resources,
-      targets: catalog.targets,
-      dispatches: catalog.dispatches,
     };
   }
 

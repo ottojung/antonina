@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { homedir, hostname as osHostname } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import { canonicalTargetId } from '../../core/src/model.js';
+import { canonicalDaemonHostId } from '../../core/src/host-daemon.js';
 import type { DaemonConfig } from './config.js';
 import { DEFAULT_DAEMON_FS, hasCode, type DaemonFs } from './fs.js';
 
@@ -26,7 +26,7 @@ import { DEFAULT_DAEMON_FS, hasCode, type DaemonFs } from './fs.js';
  *
  * If no step produces an identity the daemon refuses to start rather than
  * inventing one. A fabricated identity would be a plausible-looking host that
- * no board target can ever relate to.
+ * no durable resource can ever relate to.
  */
 
 export type HostIdSource = 'configured' | 'durable-state' | 'machine-id' | 'dbus-machine-id' | 'hostname';
@@ -36,7 +36,7 @@ export const HOST_ID_SOURCES: readonly HostIdSource[] = [
 ];
 
 export interface HostIdentity {
-  /** A lowercase target-id slug, so it can be compared with the execution catalog. */
+  /** A stable lowercase host-id slug. */
   readonly hostId: string;
   readonly source: HostIdSource;
 }
@@ -71,16 +71,16 @@ export function hostIdFromHostname(hostname: string): string | null {
   const lowered = hostname.trim().toLowerCase();
   const slug = lowered.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   if (slug.length === 0) return null;
-  if (slug.length <= MAX_SLUG_LENGTH) return canonicalTargetId(slug);
+  if (slug.length <= MAX_SLUG_LENGTH) return canonicalDaemonHostId(slug);
   const digest = createHash('sha256').update(lowered).digest('hex').slice(0, 8);
-  return canonicalTargetId(slug.slice(0, MAX_SLUG_LENGTH - 9).replace(/-+$/g, '') + '-' + digest);
+  return canonicalDaemonHostId(slug.slice(0, MAX_SLUG_LENGTH - 9).replace(/-+$/g, '') + '-' + digest);
 }
 
 /** The slug a machine id yields, or `null` when the file held something else. */
 export function hostIdFromMachineId(raw: string): string | null {
   const value = raw.trim().toLowerCase();
   if (!MACHINE_ID.test(value)) return null;
-  return canonicalTargetId('host-' + value);
+  return canonicalDaemonHostId('host-' + value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -121,9 +121,9 @@ export function readDurableHostIdentity(
   }
   let hostId: string;
   try {
-    hostId = canonicalTargetId(value.hostId);
+    hostId = canonicalDaemonHostId(value.hostId);
   } catch (error) {
-    throw new HostIdentityError('the recorded host id at ' + path + ' is not a target-id slug', { cause: error });
+    throw new HostIdentityError('the recorded host id at ' + path + ' is not a host-id slug', { cause: error });
   }
   return { hostId, source: value.source as HostIdSource, recordedAt: value.recordedAt };
 }

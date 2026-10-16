@@ -42,12 +42,26 @@ jobs:
       - uses: actions/checkout@v4
       - name: Web deploy trigger coverage
         run: node .github/check-web-deploy-triggers.mjs
+      - name: Deployment Git provenance checkout regression
+        run: node --test .github/deploy-build-identity.test.mjs
 
   deploy:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # The build identity generator uses both git describe (annotated tags)
+      # and git show (commit timestamp). A shallow checkout has the correct
+      # GITHUB_SHA but lacks the tag ancestry required for git describe.
+      # CI already fetches full history; the deploy build must do so as well.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify checkout provenance
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git describe
+          git show -s --format=%cI "$GITHUB_SHA"
       # ANTONINA_BUILD_COMMIT is what makes the deployed artifact identifiable
       # without a Git checkout. `make build` runs in the pinned builder container
       # with the working tree bind-mounted; passing the revision explicitly means

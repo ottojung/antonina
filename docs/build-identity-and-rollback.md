@@ -89,17 +89,18 @@ naming both. There is no `unknown` sentinel and no fallback. This is deliberate:
 an artifact that cannot name its revision is the exact condition this issue was
 filed against, and producing one silently is worse than refusing to build.
 
-This is not a fragility in the deploy path. `.github/workflows/web-deploy.yml`
-passes the checked-out revision in explicitly:
+The build also records the exact output of `git describe` and the source
+commit time. These require tag ancestry and a commit object, not just the hash.
+`.github/workflows/web-deploy.yml` therefore checks out full history and tags
+(`fetch-depth: 0`), verifies `git describe` and `git show`, and passes the
+revision into its builder container as `ANTONINA_BUILD_COMMIT`. Skrynia's deploy
+service performs its own full clone before running the same builder remotely.
 
-```yaml
--e ANTONINA_BUILD_COMMIT="$GITHUB_SHA"
-```
-
-so the deploy never depends on a usable `.git` inside the builder container. A
-builder image with a dirty or absent `.git` still produces a correctly identified
-artifact, because the value comes from the workflow rather than from the
-container's working copy.
+When building outside a full Git checkout, supply all three provenance values:
+`ANTONINA_BUILD_COMMIT`, `ANTONINA_BUILD_DESCRIBE`, and
+`ANTONINA_BUILD_COMMIT_TIME`. The commit override alone is not enough when
+`git describe` or `git show` cannot run; an unidentifiable version should fail
+the build, not silently degrade.
 
 A malformed `ANTONINA_BUILD_COMMIT` is an error, not a reason to fall through to
 Git. Falling through would let a typo produce a build carrying a different

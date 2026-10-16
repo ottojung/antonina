@@ -39,3 +39,18 @@ test('deployment verifies the exact Git metadata required by the builder', () =>
   assert.match(job, /^          git describe\s*$/m);
   assert.match(job, /^          git show -s --format=%cI "\$GITHUB_SHA"\s*$/m);
 });
+
+test('deployment test containers reap orphaned build subprocesses', () => {
+  const job = deployJob(workflow);
+  const verifyBuild = job.split('      - name: Verify build\n')[1]
+    ?.split(/^      - name: /m)[0] ?? '';
+  const commands = verifyBuild.split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('docker run '));
+
+  assert.equal(commands.length, 2, 'verify both production build and web test container commands');
+  for (const command of commands) {
+    assert.match(command, /^docker run --rm --init --user /,
+      'Docker test builders need a PID 1 subreaper for timed-out process groups');
+  }
+});

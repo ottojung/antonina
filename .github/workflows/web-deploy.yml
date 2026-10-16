@@ -62,13 +62,11 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git describe
           git show -s --format=%cI "$GITHUB_SHA"
-      # ANTONINA_BUILD_COMMIT is what makes the deployed artifact identifiable
-      # without a Git checkout. `make build` runs in the pinned builder container
-      # with the working tree bind-mounted; passing the revision explicitly means
-      # the identity does not depend on that container having a usable .git, and
-      # it cannot be satisfied by a stale or substituted commit. `build/version.json`
-      # in the deployed output carries this value, and the deploy step below reads
-      # it back out as the record of what was actually published.
+      # Pin the revision independently of the builder container's git HEAD.
+      # The full checkout above supplies git describe and commit timestamps;
+      # ANTONINA_BUILD_COMMIT supplies the exact workflow revision. Skrynia
+      # independently clones full history when performing the remote build.
+      # build/version.json carries the revision for the post-deploy check.
       - name: Verify build
         env:
           ANTONINA_BUILD_COMMIT: ${{ github.sha }}

@@ -186,6 +186,11 @@ test('a board written before lastActivityAt existed keeps its recorded activity 
   const before = await allOpenSummaries(store, initialized.credential);
   const flat = before.flat();
   assert.equal(flat.length, 51);
+  // The activity key also consults `updatedAt` (board issue 306). This fixture
+  // keeps every `updatedAt` at or before its `createdAt`, so the documented
+  // creation-time fallback is still the answer and the assertion below is a claim
+  // about the fixture rather than a coincidence of the two keys agreeing.
+  for (const summary of flat) assert.ok(summary.updatedAt <= summary.createdAt);
   for (const summary of flat) {
     assert.equal(summary.lastActivityAt, undefined);
     assert.equal(issueLastActivityOf(summary), summary.createdAt);

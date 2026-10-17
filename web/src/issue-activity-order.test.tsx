@@ -1,10 +1,13 @@
-// Board issue 180: in the All Issues view, sort by last activity, newest first.
+// Board issue 180 introduced the All Issues activity order; board issue 306
+// extended it (a description edit is activity too) and gave the Closed view the
+// same key, newest first.
 //
-// "Last activity" is the timestamp of an issue's most recent comment, or the
-// issue's creation time when it has never been commented on. This file pins all
-// three parts of that: the key itself, the never-commented fallback (the case a
-// `updatedAt` sort gets wrong and the one this board is most likely to regress),
-// and that the order is one global order which pagination only slices.
+// "Last activity" is the newest of an issue's most recent comment, its last
+// update (a description edit), and its creation time. This file pins all parts of
+// that: the key itself, the never-commented fallback (the case a comment-only key
+// gets wrong and the one this board is most likely to regress), the description
+// edit and comment cases from the acceptance criteria, and that the order is one
+// global order which pagination only slices.
 //
 // Test safety: nothing here may read or mutate the operator's Antonina state.
 // The session `App` is given is a hand-built stub and the XDG roots are pointed
@@ -148,16 +151,26 @@ describe('last activity is the newest comment, or creation time when there is no
     expect(issueLastActivityOf(untouched)).toBe('2026-09-27T12:00:00.000Z');
   });
 
-  it('keys on the newest comment rather than on updatedAt', () => {
-    // `updatedAt` moves on a title or body edit and on close, and the issue
-    // forbids both as the key. Here updatedAt is far later than every comment,
-    // so an updatedAt sort would produce a completely different order.
-    const edited = summary(1, {
+  it('takes the later of the newest comment and the last update', () => {
+    // Board issue 306: a description edit is activity too, so the key is the
+    // newer of the comment and the update rather than the comment alone. Here the
+    // edit is far later than the comment, so a comment-only key would answer the
+    // comment's time and this asserts the edit's.
+    const editedAfterComment = summary(1, {
       createdAt: '2026-09-27T12:00:00.000Z',
       commentAt: '2026-09-27T13:00:00.000Z',
       updatedAt: '2026-09-28T23:00:00.000Z',
     });
-    expect(issueLastActivityOf(edited)).toBe('2026-09-27T13:00:00.000Z');
+    expect(issueLastActivityOf(editedAfterComment)).toBe('2026-09-28T23:00:00.000Z');
+
+    // And the comment still wins when it is the newer of the two, so the update
+    // did not simply replace the comment as the key.
+    const commentedAfterEdit = summary(2, {
+      createdAt: '2026-09-27T12:00:00.000Z',
+      commentAt: '2026-09-28T23:00:00.000Z',
+      updatedAt: '2026-09-27T13:00:00.000Z',
+    });
+    expect(issueLastActivityOf(commentedAfterEdit)).toBe('2026-09-28T23:00:00.000Z');
   });
 
   it('reads the newest comment rather than assuming append order is chronological', () => {
@@ -173,7 +186,9 @@ describe('last activity is the newest comment, or creation time when there is no
 
   it('treats a summary that never carried the field as never commented', () => {
     // A summary from a shard written before this key existed. It must read as
-    // creation time rather than throwing or sorting on undefined.
+    // creation time rather than throwing or sorting on undefined. The cast also
+    // omits `updatedAt`, which a real summary always carries; the reader must
+    // tolerate that too rather than dereference it.
     const legacy = { number: 1, createdAt: CREATED } as IssueListSummary;
     expect(issueLastActivityOf(legacy)).toBe(CREATED);
   });
@@ -194,12 +209,43 @@ describe('the All Issues order', () => {
     const issues = nonMonotonicByActivity(12);
     const ordered = activityIssueOrder(issues);
     const expected = [...issues]
-      .sort((left, right) => issueLastActivityOf(right).localeCompare(issueLastActivityOf(left)))
+      .sort((left, right) =>
+        issueLastActivityOf(right).localeCompare(issueLastActivityOf(left)) || right.number - left.number)
       .map((entry) => entry.number);
     expect(numbers(ordered)).toEqual(expected);
     // Guard against the fixture having degenerated into something issue number
     // would also produce, which would make every ordering assertion above vacuous.
     expect(numbers(ordered)).not.toEqual(numbers(issues));
+  });
+
+  it('moves an old issue to the top when its description is edited', () => {
+    // Acceptance criterion: editing an old issue's description updates its
+    // position. Issue 1 was created long ago and never commented on; issue 2 is
+    // newer and commented. A description edit at the newest instant -- carried on
+    // `updatedAt` -- puts issue 1 first even though every other clock says it is
+    // the oldest.
+    const issues = [
+      summary(1, { createdAt: '2026-09-27T06:00:00.000Z', updatedAt: '2026-09-27T23:00:00.000Z' }),
+      summary(2, { createdAt: '2026-09-27T12:00:00.000Z', commentAt: '2026-09-27T13:00:00.000Z' }),
+      summary(3, { createdAt: '2026-09-27T10:00:00.000Z', commentAt: '2026-09-27T11:00:00.000Z' }),
+    ];
+    expect(numbers(activityIssueOrder(issues))).toEqual([1, 2, 3]);
+    // Non-vacuity: by creation order and by comment order alone, issue 1 is last.
+    expect(numbers([...issues].sort((left, right) => right.createdAt.localeCompare(left.createdAt)))).toEqual([2, 3, 1]);
+    expect(numbers([...issues].sort((left, right) => (right.lastActivityAt ?? '').localeCompare(left.lastActivityAt ?? '')))).toEqual([2, 3, 1]);
+  });
+
+  it('moves an old issue to the top when it is commented on', () => {
+    // Acceptance criterion: adding a comment to an old issue moves it to the top.
+    // Issue 1 is the oldest issue and has the oldest description, but its newest
+    // comment is the newest activity on the board.
+    const issues = [
+      summary(1, { createdAt: '2026-09-27T06:00:00.000Z', commentAt: '2026-09-27T23:00:00.000Z' }),
+      summary(2, { createdAt: '2026-09-27T12:00:00.000Z', commentAt: '2026-09-27T13:00:00.000Z' }),
+      summary(3, { createdAt: '2026-09-27T10:00:00.000Z', commentAt: '2026-09-27T11:00:00.000Z' }),
+    ];
+    expect(numbers(activityIssueOrder(issues))).toEqual([1, 2, 3]);
+    expect(numbers([...issues].sort((left, right) => right.createdAt.localeCompare(left.createdAt)))).toEqual([2, 3, 1]);
   });
 
   it('is the core comparator applied to the whole list', () => {
@@ -217,9 +263,9 @@ describe('the All Issues order', () => {
       summary(3, { createdAt: '2026-09-27T09:00:00.000Z', commentAt: '2026-09-27T12:00:00.000Z' }),
     ];
     expect(numbers(activityIssueOrder(issues))).toEqual([3, 2, 1]);
-    // An updatedAt sort would answer 2, 1, 3 instead, because issue 1 was edited
-    // more recently than issue 2 was created even though issue 1's last comment
-    // is older than issue 2's creation.
+    // A pure `updatedAt` sort would answer 2, 1, 3 instead: it would ignore issue
+    // 3's later comment and rank issue 2 (created 11:00) above issue 1 (updated
+    // 10:00). The activity key keeps issue 3 first on its comment.
     expect(numbers([...issues].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)))).toEqual([2, 1, 3]);
   });
 
@@ -406,12 +452,14 @@ describe('the drawn All Issues view', () => {
 
   it('draws a never-commented issue by its creation time', async () => {
     board = [
-      summary(1, { createdAt: '2026-09-27T12:00:00.000Z', commentAt: '2026-09-27T09:00:00.000Z' }),
-      summary(2, { createdAt: '2026-09-27T11:00:00.000Z' }),
-      summary(3, { createdAt: '2026-09-27T09:00:00.000Z', commentAt: '2026-09-27T20:00:00.000Z' }),
+      summary(1, { createdAt: '2026-09-27T06:00:00.000Z', commentAt: '2026-09-27T07:00:00.000Z' }),
+      summary(2, { createdAt: '2026-09-27T08:00:00.000Z' }),
+      summary(3, { createdAt: '2026-09-27T05:00:00.000Z', commentAt: '2026-09-27T09:00:00.000Z' }),
     ].map(boardIssueOf);
     const container = await mountAllIssues();
-    // Issue 2 has no comments at all and is drawn between the two that do.
+    // Issue 2 has no comments at all and is drawn between the two that do, by its
+    // creation time: issue 3 (comment 09:00) then issue 2 (created 08:00) then
+    // issue 1 (comment 07:00).
     expect(drawnRows(container)).toEqual([3, 2, 1]);
   });
 });

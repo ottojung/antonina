@@ -106,15 +106,16 @@ describe('issue UI state', () => {
     expect(priorityLabel(queuePosition([2, 1], 3))).toBe('Not in the queue');
   });
 
-  it('lists closed issues outside the queue, most recently closed first', () => {
+  it('lists closed issues outside the queue, most recently active first', () => {
     const issues = [issue(1, 'open'), issue(4, 'closed', '2026-09-24T23:00:00.000Z'), issue(2, 'open'), issue(3, 'closed')];
     expect(visibleIssues(issues, [2, 1], 'closed').map((entry) => entry.number)).toEqual([4, 3]);
     expect(visibleIssues(issues, [2, 1], 'open').map((entry) => entry.number)).toEqual([2, 1]);
   });
 
-  // Board issue 180. All Issues answers "what moved recently", so it is ordered
-  // by last activity and interleaves open and closed, unlike `open` (the shared
-  // queue) and `closed` (the board's closing-time order).
+  // Board issue 180 ordered All Issues by last activity; board issue 306 extended
+  // that to the Closed view and made a description edit count as activity. Both
+  // answer "what moved recently" and interleave by activity, unlike `open` (the
+  // shared queue).
   it('orders All Issues by last activity, newest first', () => {
     const issues = [issue(1, 'open'), issue(4, 'closed', '2026-09-24T23:00:00.000Z'), issue(2, 'open'), issue(3, 'closed')];
     expect(visibleIssues(issues, [2, 1], 'all').map((entry) => entry.number)).toEqual([4, 3, 2, 1]);

@@ -479,25 +479,34 @@ export interface IssueListSummary {
 }
 
 /**
- * An issue's last activity time: the timestamp of its most recent comment, or
- * its creation time when it has never been commented on.
+ * An issue's last activity time: the newest of its most recent comment, its last
+ * update, and its creation time.
  *
- * The fallback is `createdAt` and deliberately not `updatedAt`. `updatedAt` moves
- * on a title or body edit and on close, so keying activity on it would sort by
- * editing and by closing time, neither of which is what "last activity" means.
+ * These are the three events the board records as activity. The newest comment is
+ * `lastActivityAt`; the last update is `updatedAt`, which an `issue.edit` moves
+ * when the description changes (and which a comment, a close and a reopen also
+ * move); and creation time is the floor every issue has even when nothing has
+ * happened since it was filed.
  *
- * Tolerates a missing `lastActivityAt` (a summary carried by a caller, or a
- * shard written before the field existed, that never saw it) by falling back to
- * creation time, which is the same answer the fallback would give either way. The
- * fallback is what an unknown value must sort by: absence is not a value, so it
- * must not be allowed to masquerade as a recorded one.
+ * The maximum is taken rather than trusting any one field. `updatedAt` alone
+ * would drag an issue backwards if an operation were applied out of timestamp
+ * order, and `lastActivityAt` alone would miss a description edit. Tolerates a
+ * missing `lastActivityAt` (a summary carried by a caller, or a shard written
+ * before the field existed, that never saw it) by falling back to creation time,
+ * which is the same answer the fallback would give either way. The fallback is
+ * what an unknown value must sort by: absence is not a value, so it must not be
+ * allowed to masquerade as a recorded one. `updatedAt` is still consulted for
+ * such a summary, so a legacy issue edited or closed after filing keeps that
+ * later activity.
  */
-export function issueLastActivityOf(summary: Pick<IssueListSummary, 'createdAt' | 'lastActivityAt'>): string {
-  return summary.lastActivityAt ?? summary.createdAt;
+export function issueLastActivityOf(summary: Pick<IssueListSummary, 'createdAt' | 'updatedAt' | 'lastActivityAt'>): string {
+  const commented = summary.lastActivityAt ?? summary.createdAt;
+  const updated = summary.updatedAt ?? summary.createdAt;
+  return updated.localeCompare(commented) > 0 ? updated : commented;
 }
 
 /**
- * Most recently active first, for the All Issues view.
+ * Most recently active first, for the All Issues and Closed views.
  *
  * A tie on activity time breaks by higher issue number first, which is the same
  * tie-break the closed-issue order uses so the two orders do not disagree about
@@ -509,8 +518,8 @@ export function issueLastActivityOf(summary: Pick<IssueListSummary, 'createdAt' 
  * reads and across page boundaries rather than depending on input order.
  */
 export function compareIssueActivity(
-  left: Pick<IssueListSummary, 'number' | 'createdAt' | 'lastActivityAt'>,
-  right: Pick<IssueListSummary, 'number' | 'createdAt' | 'lastActivityAt'>,
+  left: Pick<IssueListSummary, 'number' | 'createdAt' | 'updatedAt' | 'lastActivityAt'>,
+  right: Pick<IssueListSummary, 'number' | 'createdAt' | 'updatedAt' | 'lastActivityAt'>,
 ): number {
   return issueLastActivityOf(right).localeCompare(issueLastActivityOf(left)) || right.number - left.number;
 }

@@ -1,11 +1,10 @@
-import { BoardDeletedError, BoardTrustRequiredError, compareClosedIssues, compareIssueActivity, DEFAULT_FEED_LIMIT } from './api';
+import { BoardDeletedError, BoardTrustRequiredError, compareIssueActivity, DEFAULT_FEED_LIMIT } from './api';
 import type {
   BoardFeedEntry,
   BoardFeedEntryKind,
   BoardFeedPage,
   BoardFeedRequest,
   BoardOverview,
-  ClosedIssueOrderKey,
   FeedRead,
   IssueListSummary,
 } from './api';
@@ -262,70 +261,53 @@ export function openQueueOrder<T extends Pick<BoardIssue, 'number' | 'state'>>(i
 }
 
 /**
- * Closed issues, in the board's own closed order: most recently closed first,
- * ties broken by the higher issue number.
+ * What the activity orders need to see: identity and state, plus the three
+ * timestamps the activity key is built from.
  *
- * The queue holds open issues by construction, so a closed issue has no
- * priority position to take, and issue number is not one either -- it says when
- * an issue was filed, not when the work finished. The key is the closing
- * timestamp, and the comparator is core's `compareClosedIssues`, which is the
- * same one the store wrote the materialized closed list pages with. So this is
- * not a second sort of an order core invented differently: it is that order,
- * re-derived for the flat summary list the browser holds. It is applied to the
- * whole filtered list, before `issuePage` slices it, so the order is global and
- * pages are windows onto it rather than independently sorted pages.
- *
- * The key is required, not optional: every row here is an `IssueListSummary`,
- * which carries `closedAt` as `string | null`, so an absent closing time is
- * spelled `null` and core's comparator is what resolves it to `updatedAt`.
- * Declaring `closedAt?` here would let a caller pass a shape the board never
- * produces, and would silently order such rows by `undefined` instead.
+ * `closedAt` is deliberately not part of this: board issue 306 makes Closed and
+ * All order by last activity, so the closing timestamp no longer decides a
+ * position and a shape without it is still orderable.
  */
-export function closedIssueOrder<T extends ClosedIssueOrderKey & Pick<BoardIssue, 'state'>>(issues: readonly T[]): number[] {
-  const closed = issues.filter((issue) => issue.state === 'closed');
-  return closed
-    .slice()
-    .sort((left, right) => compareClosedIssues(left, right))
-    .map((issue) => issue.number);
-}
+type ActivitySortable = Pick<BoardIssue, 'number' | 'state'> & Pick<IssueListSummary, 'createdAt' | 'updatedAt' | 'lastActivityAt'>;
 
 /**
- * What the All Issues order needs to see: identity and state, plus the two
- * fields the activity order keys on. This is the union of the closed order's
- * bound and the activity order's bound, because `visibleIssues` applies one or
- * the other depending on the filter.
+ * Closed issues, most recently active first, ties broken by the higher issue
+ * number.
+ *
+ * The queue holds open issues by construction, so a closed issue has no priority
+ * position to take, and issue number is not one either -- it says when an issue
+ * was filed, not when the work last moved. Board issue 306 replaces the closing
+ * time with the same activity key the All Issues view uses, so a comment or a
+ * description edit on an old closed issue brings it back to the top here rather
+ * than leaving it buried where it was closed. It is applied to the whole filtered
+ * list, before `issuePage` slices it, so the order is global and pages are
+ * windows onto it rather than independently sorted pages.
  */
-type ActivitySortable = Pick<BoardIssue, 'number' | 'state'> & Pick<IssueListSummary, 'createdAt' | 'lastActivityAt'>;
+export function closedIssueOrder<T extends ActivitySortable>(issues: readonly T[]): number[] {
+  return activityIssueOrder(issues.filter((issue) => issue.state === 'closed')).map((issue) => issue.number);
+}
 
 /**
  * Every issue, most recently active first.
  *
- * This is the All Issues order, and it is the only place an issue's timestamps
- * decide its position. `open` keeps the shared queue and `closed` keeps the
- * board's own closing-time order, both of which the board commits to; All Issues
- * is the view a reader opens to ask "what moved recently", and answering that by
- * issue number, by creation order or by closing time answers a different
- * question.
- *
- * Open and closed issues interleave here. That is the point: an issue that was
- * just commented on is the most recent activity on the board whether or not it
- * has been closed.
+ * This is the All Issues order. `open` keeps the shared queue, which the board
+ * commits to; Closed and All both ask "what moved recently", so both answer with
+ * the activity order and an issue that was just commented on or edited is the
+ * most recent activity on the board whether or not it has been closed.
  */
 export function activityIssueOrder<T extends ActivitySortable>(issues: readonly T[]): T[] {
   return [...issues].sort(compareIssueActivity);
 }
 
 /**
- * The issues a filter shows. `open` is the shared queue, `closed` is the
- * board's closing-time order, and `all` is every issue by last activity.
+ * The issues a filter shows. `open` is the shared queue; `closed` and `all` are
+ * ordered by last activity, with `closed` restricted to closed issues.
  */
-export function visibleIssues<T extends ClosedIssueOrderKey & ActivitySortable>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
+export function visibleIssues<T extends ActivitySortable>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
   if (filter === 'all') return activityIssueOrder(issues);
   const byNumber = new Map(issues.map((issue) => [issue.number, issue]));
-  const open = openQueueOrder(issues, queue).map((number) => byNumber.get(number)!);
-  if (filter === 'open') return open;
-  const closed = closedIssueOrder(issues).map((number) => byNumber.get(number)!);
-  return closed;
+  if (filter === 'closed') return closedIssueOrder(issues).map((number) => byNumber.get(number)!);
+  return openQueueOrder(issues, queue).map((number) => byNumber.get(number)!);
 }
 
 /**

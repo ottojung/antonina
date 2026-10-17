@@ -82,6 +82,7 @@ describe('board shell height chain', () => {
     for (const pane of ['.issue-pane', '.thread']) {
       expect(desktop(pane), pane).toMatchObject({ 'min-height': '0', 'overflow-y': 'auto' });
     }
+    expect(desktop('.issue-pane')).toMatchObject({ contain: 'layout' });
   });
 
   it('keeps the fixed-height chrome out of the panes height', () => {
@@ -135,7 +136,7 @@ describe('board shell height chain', () => {
     for (const selector of ['.workspace.resources-view', '.workspace.feed-view']) {
       expect(mobile(selector), selector).toMatchObject({ display: 'block' });
     }
-    expect(mobile('.issue-pane')).toMatchObject({ 'overflow-y': 'visible' });
+    expect(mobile('.issue-pane')).toMatchObject({ contain: 'none', 'overflow-y': 'visible' });
     expect(mobile('.thread')).toMatchObject({ 'overflow-y': 'visible' });
   });
 });

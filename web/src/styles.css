@@ -71,7 +71,10 @@ h1, h2, h3, p { overflow-wrap: anywhere; }
 /* `min-height: 0` on a grid or flex item overrides the `auto` minimum, which
    would otherwise be the item's content height and defeat the pane's own
    `overflow-y: auto` by making the item grow instead of scroll. */
-.issue-pane { min-height: 0; overflow-y: auto; border-right: 1px solid var(--line); background: var(--paper); min-width: 0; }
+/* Keep tall issue lists from expanding the document's scrollable overflow
+   even when the grid row and pane itself are correctly height-bounded.
+   Layout containment avoids clipping paint or disabling pane scrolling. */
+.issue-pane { contain: layout; min-height: 0; overflow-y: auto; border-right: 1px solid var(--line); background: var(--paper); min-width: 0; }
 .pane-heading { padding: 30px 28px 20px; }
 .eyebrow { margin: 0 0 5px; color: var(--orange); text-transform: uppercase; letter-spacing: .11em; font-size: .68rem; font-weight: 800; }
 .pane-heading h1 { margin: 0; font-size: 2rem; letter-spacing: -.04em; line-height: 1.15; }
@@ -327,7 +330,7 @@ input:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px 
      composer sticks to the bottom of the window again. */
   .app-shell { height: auto; min-height: 100vh; display: block; overflow: visible; }
   .workspace { display: block; min-height: 0; grid-template-rows: none; }
-  .issue-pane { min-height: 0; overflow-y: visible; }
+  .issue-pane { contain: none; min-height: 0; overflow-y: visible; }
   .thread { min-height: calc(100vh - 66px); overflow-y: visible; }
   .composer-area { position: sticky; bottom: 0; }
   .workspace.resources-view .resources-view { padding: 0 20px 28px; }

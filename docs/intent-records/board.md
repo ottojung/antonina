@@ -97,7 +97,7 @@ date: 2026/09/28
 source: @ottojung
 kind: constraint
 
-Antonina's live board state is stored as materialized snapshots split across Skrynia keys. Normal reads and writes do not reconstruct state by replaying an operation history. Issue summaries are paged separately from issue bodies and comment pages; queue, resource/target catalog, feed, metadata, and issue directories are separate materialized objects. A client reads only the objects needed for the operation it is performing. The legacy board-v2 signed operation log may be verified and replayed only as a one-time migration source for an existing old board; it is not the live v3 storage model, and newly initialized boards do not create a replay log.
+Antonina's live board state is stored as materialized snapshots split across Skrynia keys. Normal reads and writes do not reconstruct state by replaying an operation history. Issue summaries are paged separately from issue bodies and comment pages; queue, resource catalog, feed, metadata, and issue directories are separate materialized objects. A client reads only the objects needed for the operation it is performing. Execution placement is not a board object: there is no execution-target registry or dispatch record, and execution processes discover their own capabilities and placement. The legacy board-v2 signed operation log may be verified and replayed only as a one-time migration source for an existing old board; it is not the live v3 storage model, and newly initialized boards do not create a replay log.
 
 $id-1486327095748216
 title: One shared board key grants all board access

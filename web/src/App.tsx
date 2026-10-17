@@ -186,7 +186,7 @@ export default function App() {
   }, [hasBoard, refresh]);
 
   // One href builder for every issue link outside the issue list, so a link
-  // copied from Resources, Targets or Feed names the same route the app opens.
+  // copied from Resources or Feed names the same route the app opens.
   const issueHrefHere = useCallback((number: number) => issueHref(number, location, window.location.pathname), [location]);
   const visible = ready ? visibleIssues(ready.board.issues, ready.queue, filter) : [];
   // The page is a slice of the ordered list, never a second ordering of it: the

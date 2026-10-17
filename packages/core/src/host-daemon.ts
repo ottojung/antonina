@@ -168,9 +168,8 @@ export interface HostLivenessOptions {
  * Whether a host is answering right now.
  *
  * Liveness is a property of how old the last report is, and of nothing else. It
- * is never inferred from a process name, from a pid alone, or from a catalog
- * status: `unavailable` on a target is a registration an operator set, while
- * this is what the host last said about itself.
+ * is never inferred from a process name, from a pid alone, or from any
+ * operator-set registration; this is what the host last said about itself.
  */
 export function hostLiveness(
   report: DaemonHostReport | null,

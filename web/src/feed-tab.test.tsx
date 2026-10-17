@@ -339,8 +339,8 @@ describe('the feed tab in the app shell', () => {
   const app = readFileSync(resolve(import.meta.dirname, 'App.tsx'), 'utf8');
 
   it('is a top-level tab beside Issues and Resources', () => {
-    // The tab list grew a fourth entry for the target overview, so the pinned list
-    // names all four rather than the three that existed when the feed landed.
+    // The pinned list is the nav's own view list, so a tab the URL can name and a
+    // tab the nav renders are the same list rather than two that can drift.
     expect(app).toMatch(/const TABS: readonly View\[\] = BOARD_VIEWS/);
     // A tab is a link with its own address, not only a click handler, so it can
     // be copied and opened in a new tab. Board issue 139.

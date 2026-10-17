@@ -11,6 +11,13 @@
   is written to be consistent with its stated security constraint and says so
   where it is not.
 
+**Superseded by a later schema change.** This design predates the removal of the
+execution-target abstraction (board issue #304). The persisted board schema no
+longer carries the `targets` and `dispatches` collections, and `canonicalTargetId`
+no longer exists: persisted board format version 4 drops those collections
+(`packages/core/src/migrations.ts`). Read the `targets`/`dispatches` references
+below as a description of the older schema, not of current state.
+
 ## What this document is
 
 This is the design answer to #70. It specifies a bounded-chunk primitive, the

@@ -564,10 +564,10 @@ describe('the board addressed by URL, mounted', () => {
   });
 
   it('cancels the browser navigation on the shared issue-link handler', async () => {
-    // The other three anchors — the issue links on Resources, Targets and Feed —
+    // The other two anchors — the issue links on Resources and Feed —
     // share one exported handler rather than an inline one, so it is checked where
     // it can be: `issueLinkClick` must call `preventDefault` on the event it is
-    // given, and open the issue. Dropping the `preventDefault` leaves all three
+    // given, and open the issue. Dropping the `preventDefault` leaves both
     // callers navigating, and nothing else in the suite would notice. The issue
     // rows inside the Issues list are `<button>`s, not anchors, so they are not
     // part of this contract.

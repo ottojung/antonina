@@ -43,7 +43,7 @@
  *   so the offending record can be found without reading the whole board.
  * - `corrupt`: the individual records are each well formed but disagree with
  *   each other — a duplicated identity, a counter that contradicts its issues,
- *   a dispatch naming an unregistered target.
+ *   a contradictory resource dependency.
  */
 export type BoardDefectKind =
   | 'not-a-record'
@@ -55,7 +55,7 @@ export type BoardDefectKind =
 
 export interface BoardDefect {
   readonly kind: BoardDefectKind;
-  /** Which object the defect is in: `board`, `board.issues`, `board.targets`. */
+  /** Which object the defect is in: `board`, `board.issues`, `board.resources`. */
   readonly subject: string;
   /** The field at fault, or `''` for a defect in the object as a whole. */
   readonly field: string;

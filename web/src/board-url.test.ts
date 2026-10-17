@@ -114,7 +114,7 @@ describe('writing the board URL', () => {
 
   it('writes one parameter per non-default field, in a stable order', () => {
     expect(boardSearch(READY)).toBe('?issue=7&filter=all&page=2');
-    expect(boardSearch({ ...DEFAULT_BOARD_URL_STATE, view: 'targets' })).toBe('?view=targets');
+    expect(boardSearch({ ...DEFAULT_BOARD_URL_STATE, view: 'feed' })).toBe('?view=feed');
     expect(boardSearch({ ...DEFAULT_BOARD_URL_STATE, settingsOpen: true })).toBe('?settings=1');
     expect(boardSearch({ ...READY, commentPage: 3 })).toBe('?issue=7&filter=all&page=2&thread=3');
   });
@@ -233,8 +233,8 @@ describe('writing to the address bar', () => {
 
   it('keeps the path it is served from', () => {
     const { calls, history } = fakeHistory();
-    writeBoardUrl({ ...DEFAULT_BOARD_URL_STATE, view: 'targets' }, { pathname: '/deep/base/board.html', search: '' }, history, 'push');
-    expect(calls[0].url).toBe('/deep/base/board.html?view=targets');
+    writeBoardUrl({ ...DEFAULT_BOARD_URL_STATE, view: 'feed' }, { pathname: '/deep/base/board.html', search: '' }, history, 'push');
+    expect(calls[0].url).toBe('/deep/base/board.html?view=feed');
   });
 });
 
@@ -285,7 +285,7 @@ describe('credential safety', () => {
 
 describe('the view and filter vocabularies', () => {
   it('names every tab and every filter', () => {
-    expect([...BOARD_VIEWS]).toEqual(['issues', 'resources', 'feed', 'targets']);
+    expect([...BOARD_VIEWS]).toEqual(['issues', 'resources', 'feed']);
     expect([...ISSUE_FILTERS]).toEqual(['open', 'closed', 'all']);
     for (const view of BOARD_VIEWS) expect(parseBoardUrl(`?view=${view}`).view).toBe(view);
     for (const filter of ISSUE_FILTERS) expect(parseBoardUrl(`?filter=${filter}`).filter).toBe(filter);

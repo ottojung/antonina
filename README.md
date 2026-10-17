@@ -4,6 +4,8 @@ Antonina is a coordination system for shared software work. Its core is the Anto
 
 An Antonina host is a provisioned execution environment that can access the board and run whatever tools are appropriate there: human-operated commands, scripts, coding agents, or other automation. Antonina is not defined by any particular agent runtime, model provider, or coding harness.
 
+**Execution placement is an autonomous process responsibility, not a board feature.** The board has no execution-target registry, selection mechanism, or dispatch records. An orchestrator discovers suitable hosts, tools, and capabilities through whatever mechanisms it chooses, while retaining task-level requirements such as a mandated host. Generic agent lifecycle, host telemetry, and durable resource dependencies are independent of execution placement.
+
 ## Current implementation
 
 Antonina uses TypeScript/Node.js for its CLI, managed-agent runtime, shared board core, and web application. The repository currently includes a local managed-agent runtime built around OpenCode. Managed Antonina agents and the OpenClaw scheduler must use only `opencode-go/longcat-2.5-preview-free` (LongCat 2.5 Preview Free) with OpenCode `--variant low`; no other model or fallback is permitted, and legacy records carrying an older model or variant value do not downgrade new invocations. That runtime is an implementation available to hosts, not the product boundary of Antonina. The authoritative constraint is `docs/intent-records/agent.md`.
@@ -136,7 +138,7 @@ The host is named by `hostId` in `$XDG_CONFIG_HOME/antonina/daemon.json` when yo
 }
 ```
 
-A report is read, never written, through `BoardApi.daemonHosts(reports, { nowMs })`, which joins host reports with the execution-target catalog and reports each host as `online`, `stale` or `offline`. It requires the board credential to join reports with board state and appends nothing to the signed board.
+A report is read, never written, through `BoardApi.daemonHosts(reports, { nowMs })`, which reports each observed host as `online`, `stale` or `offline` independently of any central catalog. It requires no board credential and appends nothing to the signed board.
 
 ## Development
 

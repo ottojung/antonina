@@ -177,7 +177,7 @@ function isFeedPage(value) {
 async function seed(server, issueCount, stepMs) {
   const { board, clock } = makeStore(server, makeClock(Date.UTC(2026, 8, 29, 12, 0, 0), stepMs));
   const initialized = await board.initialize({
-    schemaVersion: 3,
+    schemaVersion: 4,
     nextIssueNumber: issueCount + 1,
     issues: Array.from({ length: issueCount }, (_, index) => ({
       number: index + 1,
@@ -189,8 +189,6 @@ async function seed(server, issueCount, stepMs) {
       messages: [],
     })),
     resources: [],
-    targets: [],
-    dispatches: [],
   });
   return { board, credential: initialized.credential, clock };
 }
@@ -822,7 +820,7 @@ test('a server that refuses DELETE is counted, reported, and never silent', asyn
     newId: () => `refused-${++id}`,
   });
   const initialized = await board.initialize({
-    schemaVersion: 3,
+    schemaVersion: 4,
     nextIssueNumber: 2,
     issues: [{
       number: 1,
@@ -834,8 +832,6 @@ test('a server that refuses DELETE is counted, reported, and never silent', asyn
       messages: [],
     }],
     resources: [],
-    targets: [],
-    dispatches: [],
   });
   const credential = initialized.credential;
 
@@ -917,7 +913,7 @@ test('a delete that finds the object already gone is a goal state, not a refusal
     newId: () => `absent-${++id}`,
   });
   const initialized = await board.initialize({
-    schemaVersion: 3,
+    schemaVersion: 4,
     nextIssueNumber: 2,
     issues: [{
       number: 1,
@@ -929,8 +925,6 @@ test('a delete that finds the object already gone is a goal state, not a refusal
       messages: [],
     }],
     resources: [],
-    targets: [],
-    dispatches: [],
   });
   const credential = initialized.credential;
   await board.appendFast(credential, {
@@ -1159,7 +1153,7 @@ test('an externally overwritten shard is detected when it is next rewritten', as
     newId: () => `overwrite-${++id}`,
   });
   const initialized = await board.initialize({
-    schemaVersion: 3,
+    schemaVersion: 4,
     nextIssueNumber: 2,
     issues: [{
       number: 1,
@@ -1171,8 +1165,6 @@ test('an externally overwritten shard is detected when it is next rewritten', as
       messages: [],
     }],
     resources: [],
-    targets: [],
-    dispatches: [],
   });
   // A fixed timestamp on every edit, so "second body" at this instant is
   // byte-identical each time. That is what makes the rewrite below re-post the
@@ -1295,7 +1287,7 @@ test('Antonina itself only ever POSTs a shard, and never replaces one in place',
   });
 
   const initialized = await board.initialize({
-    schemaVersion: 3,
+    schemaVersion: 4,
     nextIssueNumber: 2,
     issues: [{
       number: 1,
@@ -1307,8 +1299,6 @@ test('Antonina itself only ever POSTs a shard, and never replaces one in place',
       messages: [],
     }],
     resources: [],
-    targets: [],
-    dispatches: [],
   });
   const credential = initialized.credential;
 

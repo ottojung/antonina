@@ -109,8 +109,6 @@ function overview(issues: BoardIssue[]): BoardOverview {
       hasBody: each.body.length > 0,
     })),
     resources: [],
-    targets: [],
-    dispatches: [],
   };
 }
 
@@ -242,8 +240,8 @@ describe('the board addressed by URL, mounted', () => {
     expect(search()).toBe('?view=feed');
     expect(screen.getByRole('complementary', { name: 'Board activity feed' })).toBeDefined();
 
-    await clickTab('targets');
-    expect(search()).toBe('?view=targets');
+    await clickTab('resources');
+    expect(search()).toBe('?view=resources');
 
     await clickTab('issues');
     expect(search()).toBe('');
@@ -478,8 +476,8 @@ describe('the board addressed by URL, mounted', () => {
   it('restores the previous board screen on Back and Forward', async () => {
     await openAt('/board');
     await clickTab('feed');
-    await clickTab('targets');
-    expect(search()).toBe('?view=targets');
+    await clickTab('resources');
+    expect(search()).toBe('?view=resources');
 
     await goBack();
     expect(await screen.findByRole('complementary', { name: 'Board activity feed' })).toBeDefined();
@@ -490,7 +488,7 @@ describe('the board addressed by URL, mounted', () => {
     await goForward();
     expect(await screen.findByRole('complementary', { name: 'Board activity feed' })).toBeDefined();
     await goForward();
-    expect(await screen.findByRole('complementary', { name: 'Execution target overview' })).toBeDefined();
+    expect(await screen.findByRole('complementary', { name: 'Registered resources' })).toBeDefined();
   });
 
   it('restores an open issue on Back after leaving it', async () => {
@@ -510,7 +508,7 @@ describe('the board addressed by URL, mounted', () => {
     // A full-page reload would tear the app down and rebuild it. Nothing here
     // does: every screen change is a state change in the mounted tree.
     await openAt('/board');
-    await clickTab('targets');
+    await clickTab('resources');
     await clickTab('issues');
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Issue 1/ })); });
     expect(await screen.findByRole('heading', { name: 'Issue 1' })).toBeDefined();
@@ -534,16 +532,16 @@ describe('the board addressed by URL, mounted', () => {
     const tabs = anchors('.main-nav a');
     const filters = anchors('.filters a');
     expect(brand.getAttribute('href')).toBeTruthy();
-    expect(tabs).toHaveLength(4);
+    expect(tabs).toHaveLength(3);
     expect(filters).toHaveLength(3);
     expect(fireEvent.click(brand)).toBe(false);
     // The filter nav is only rendered on the Issues tab, so it is clicked before
     // the tab changes — a detached node has no listener left to cancel with.
     expect(fireEvent.click(filters[2]!)).toBe(false);
     await waitFor(() => expect(search()).toBe('?filter=all'));
-    expect(fireEvent.click(tabs[3]!)).toBe(false);
+    expect(fireEvent.click(tabs[1]!)).toBe(false);
     // The app state really did move, so the cancellation did not also stop it.
-    await waitFor(() => expect(search()).toBe('?view=targets&filter=all'));
+    await waitFor(() => expect(search()).toBe('?view=resources&filter=all'));
   });
 
   it('keeps the nav anchors natively keyboard-activatable', async () => {
@@ -554,7 +552,7 @@ describe('the board addressed by URL, mounted', () => {
     // itself. That is assertable here even though the activation is not.
     await openAt('/board');
     const nav = Array.from(document.querySelectorAll('.main-nav a')) as HTMLAnchorElement[];
-    expect(nav).toHaveLength(4);
+    expect(nav).toHaveLength(3);
     for (const anchor of nav) {
       // An anchor with no href is not focusable and not Enter-activatable, and
       // would silently have been a div with a click handler.
@@ -566,10 +564,10 @@ describe('the board addressed by URL, mounted', () => {
   });
 
   it('cancels the browser navigation on the shared issue-link handler', async () => {
-    // The other three anchors — the issue links on Resources, Targets and Feed —
+    // The other two anchors — the issue links on Resources and Feed —
     // share one exported handler rather than an inline one, so it is checked where
     // it can be: `issueLinkClick` must call `preventDefault` on the event it is
-    // given, and open the issue. Dropping the `preventDefault` leaves all three
+    // given, and open the issue. Dropping the `preventDefault` leaves both
     // callers navigating, and nothing else in the suite would notice. The issue
     // rows inside the Issues list are `<button>`s, not anchors, so they are not
     // part of this contract.
@@ -638,7 +636,7 @@ describe('the board addressed by URL, mounted', () => {
     await openAt('/board');
     await clickTab('resources');
     await clickTab('feed');
-    await clickTab('targets');
+    await clickTab('resources');
     await clickTab('issues');
     await clickFilter('Closed');
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Issue 3/ })); });

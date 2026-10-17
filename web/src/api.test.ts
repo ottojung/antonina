@@ -650,8 +650,6 @@ const board = (overrides: Record<string, unknown> = {}) => ({
   nextIssueNumber: 2,
   issues: [{ number: 1, title: 'Issue 1', body: '', state: 'open', createdAt: timestamp, updatedAt: timestamp, messages: [] }],
   resources: [],
-  targets: [],
-  dispatches: [],
   ...overrides,
 });
 

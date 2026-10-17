@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import {
   DEFAULT_HEARTBEAT_INTERVAL_MS,
   DEFAULT_STALE_AFTER_MS,
+  canonicalDaemonHostId,
 } from '../../core/src/host-daemon.js';
-import { canonicalHost, canonicalPath, canonicalTargetId, pathFormDefect } from '../../core/src/model.js';
+import { canonicalHost, canonicalPath, pathFormDefect } from '../../core/src/model.js';
 
 /**
  * Daemon configuration: what this host is told to report about itself.
@@ -105,7 +106,7 @@ export function parseDaemonConfig(value: unknown): DaemonConfig {
   }
   const hostId = value.hostId === undefined || value.hostId === null
     ? null
-    : canonicalTargetId(String(value.hostId));
+    : canonicalDaemonHostId(String(value.hostId));
   const address = value.address === undefined || value.address === null
     ? null
     : canonicalHost(String(value.address));

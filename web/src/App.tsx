@@ -1,27 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { createBrowserBoardApi, targetViews, type BoardFeedEntry, type BoardFeedPage, type DaemonHostView, type IssueCommentPage, type IssueListSummary, type TargetView } from './api';
+import { createBrowserBoardApi, type BoardFeedEntry, type BoardFeedPage, type IssueCommentPage, type IssueListSummary } from './api';
 import { resourceState, type BoardIssue, type BoardResource } from './model';
 import {BOARD_VIEWS, DEFAULT_BOARD_URL_STATE, DEFAULT_COMMENT_PAGE, DEFAULT_FEED_PAGE, DEFAULT_ISSUE_PAGE, DEFAULT_RESOURCE_PAGE, ISSUE_FILTERS, boardHomeState, boardHref, boardUrlFor, issueHref, issueUrlState, parseBoardUrl, tabHref, type BoardUrlState, type BoardView, writeBoardUrl} from './board-url';
-import { TARGETS_EMPTY, TARGETS_HINT, TARGET_ACCESS_LABEL, TARGET_CLEANUP_LABEL, TARGET_KIND_LABEL, TARGET_PERSISTENCE_LABEL, TARGET_STATUS_LABEL, targetCatalogRows } from './targets';
 import { clampCommentPage, clampIssuePage, COMMENT_PAGE_SIZE, COMMENT_PAGES_LABEL, commentPageRange, hasCommentPages, lastCommentPage, FIRST_COMMENT_PAGE, ISSUE_PAGE_NEXT, ISSUE_PAGE_PREVIOUS, COMMENT_PAGE_NEWER, COMMENT_PAGE_OLDER, ISSUE_PAGE_SIZE, hasIssuePages, issuePage, issuePageCount, issuePageRange, COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, ISSUE_LIST_PAGES_LABEL, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, overviewLoaded, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedPage, clampFeedPage, hasFeedPages, feedPageRange, trustRequired, unplacedIssueNumbers, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, FEED_PAGES_LABEL, FEED_PAGE_SIZE, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type BoardSummary, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess, clampResourcePage, RESOURCE_LIST_PAGES_LABEL, RESOURCE_PAGE_SIZE, resourcePage } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
 type View = BoardView;
 const TABS: readonly View[] = BOARD_VIEWS;
-const TAB_TITLE: { readonly [V in View]: string } = { issues: 'Issues', resources: 'Resources', feed: 'Feed', targets: 'Targets' };
+const TAB_TITLE: { readonly [V in View]: string } = { issues: 'Issues', resources: 'Resources', feed: 'Feed' };
 const TAB_PANE_LABEL: { readonly [V in View]: string } = {
   issues: 'Shared issue list',
   resources: 'Registered resources',
   feed: 'Board activity feed',
-  targets: 'Execution target overview',
 };
 /** The tab's own sentence, so no view has to spell its case out inline. */
 const TAB_HINT: { readonly [V in View]: string } = {
   issues: QUEUE_HINT,
   resources: 'Registered paths are protected while at least one dependent Antonina issue remains open.',
   feed: FEED_HINT,
-  targets: TARGETS_HINT,
 };
 
 type IssueListRow = IssueListSummary | BoardIssue;
@@ -189,7 +186,7 @@ export default function App() {
   }, [hasBoard, refresh]);
 
   // One href builder for every issue link outside the issue list, so a link
-  // copied from Resources, Targets or Feed names the same route the app opens.
+  // copied from Resources or Feed names the same route the app opens.
   const issueHrefHere = useCallback((number: number) => issueHref(number, location, window.location.pathname), [location]);
   const visible = ready ? visibleIssues(ready.board.issues, ready.queue, filter) : [];
   // The page is a slice of the ordered list, never a second ordering of it: the
@@ -417,14 +414,6 @@ export default function App() {
           <IssuePagination total={visible.length} page={pageIndex} onPage={setIssuePageIndex} />
         </>           : view === 'resources'
           ? <ResourcesView resources={board!.resources} issues={board!.issues} access={access} page={resourceIndex} onPage={setResourcePageIndex} onOpenIssue={openIssue} onAdd={(host, path, number) => run(() => api.addResourceDependency(host, path, number), 'Resource dependency added')} onRemove={(resource, number) => run(() => api.removeResourceDependency(resource.host, resource.path, number), resource.issueNumbers.length === 1 ? 'Dependency removed; resource unregistered' : 'Resource dependency removed')} onEnableEditing={() => setSettingsOpen(true)} hrefForIssue={issueHrefHere} />
-          : view === 'targets'
-          // The browser cannot read a host's daemon report: those are files on
-          // the operator's own machine, and a page that fetched them would be
-          // claiming telemetry it did not receive. So the page is handed no host
-          // views and states `unknown` for every persistent host's live capacity,
-          // which is the truth from here. `antonina board target list
-          // --telemetry` is where a host's own numbers come from.
-          ? <TargetsView targets={targetViews(board!)} hosts={[]} onOpenIssue={openIssue} hrefForIssue={issueHrefHere} />
           : <FeedView readFeed={session.readFeed} issues={board!.issues} generation={feedGeneration} page={feedPage} onPage={setFeedPageIndex} onOpenIssue={openIssue} hrefForIssue={issueHrefHere} />}
       </aside>
       {view === 'issues' ? selected ? <Thread conversation={selected} page={threadIndex} onPage={setCommentPageIndex} access={access} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.issue.number, body), 'Description updated')} close={() => void run(() => api.close(selected.issue.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.issue.number), 'Issue reopened')} back={() => setSelectedNumber(undefined)} />
@@ -944,65 +933,6 @@ export function FeedThread({ entries, total, page, issues, loading, error, onPag
     {untracked.length > 0 && <p className="feed-caveat" role="note">{FEED_TRUNCATED_COPY(untracked)}</p>}
     <p className="feed-untracked">{FEED_UNTRACKED_COPY}</p>
     <IssuePagination total={total} page={page} pageSize={FEED_PAGE_SIZE} onPage={onPage} label={FEED_PAGES_LABEL} />
-  </div>;
-}
-
-/**
- * The execution-target overview.
- *
- * Each target is drawn from what is true of *that* target rather than from one
- * machine-shaped template. A persistent host shows its access method, its
- * durability, who cleans up after it, and — when a daemon report reached the
- * page — its real capacity. An ephemeral environment shows the same four
- * questions answered `not applicable` or `unknown`, each with the reason, and
- * never a RAM or disk figure, because there is no host to measure and a number
- * here would be one an orchestrator schedules against.
- *
- * The target's own record points at the guidance document that says how to
- * reach and use it. The page links to the reference rather than repeating the
- * procedure: the procedure changes when the backend changes, and a second copy
- * in board state is a second copy that goes stale.
- */
-export function TargetsView({ targets, hosts, onOpenIssue, hrefForIssue }: {
-  targets: TargetView[];
-  hosts: DaemonHostView[];
-  onOpenIssue: (number: number) => void;
-  hrefForIssue?: (number: number) => string;
-}) {
-  const rows = targetCatalogRows(targets, hosts);
-  return <div className="targets-view">
-    <p className="targets-scope">A target is an execution environment a job may be dispatched to. It is not a resource: only a persistent host carries durable paths, and those are registered separately under Resources.</p>
-    {rows.map(({ target, access, state }) => <article className={`target-card target-${access.kind}`} key={target.id} data-target-id={target.id}>
-      <header className="target-header">
-        <div>
-          <p className="eyebrow">{TARGET_KIND_LABEL[access.kind]}</p>
-          <h2>{access.displayName}</h2>
-          <code className="target-identity">{access.targetId}{access.address === null ? ' · no host address' : ' · ' + access.address}</code>
-        </div>
-        <span className={`target-status ${access.status}`}>{TARGET_STATUS_LABEL[access.status]}</span>
-      </header>
-      {access.description !== '' && <p className="target-description">{access.description}</p>}
-      <dl className="target-facts">
-        <div><dt>Access method</dt><dd>{TARGET_ACCESS_LABEL[access.accessMethod]}</dd></div>
-        <div><dt>Persistence</dt><dd>{TARGET_PERSISTENCE_LABEL[access.persistence]}</dd></div>
-        <div><dt>Cleanup</dt><dd>{TARGET_CLEANUP_LABEL[access.garbageCollection]}</dd></div>
-        <div><dt>Capabilities</dt><dd>{access.capabilities.length === 0 ? 'none declared' : access.capabilities.join(', ')}</dd></div>
-      </dl>
-      <section className="target-state" aria-label={`Live state of ${access.displayName}`}>
-        <h3>Live state</h3>
-        <dl>{state.map((line) => <div key={line.label} data-state={line.absent ? 'absent' : 'reported'}><dt>{line.label}</dt>
-          <dd><span className={line.absent ? 'state-unknown' : 'state-value'}>{line.value}</span>
-            {line.absent && line.reason !== undefined && <small>{line.reason}</small>}
-            {line.note !== undefined && <small>{line.note}</small>}</dd></div>)}</dl>
-      </section>
-      {access.limitations.length > 0 && <section className="target-caveats"><h3>Caveats</h3><ul>{access.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}</ul></section>}
-      <section className="target-guidance"><h3>Guidance</h3><ul>{access.guidance.map((path) => <li key={path}><code>{path}</code></li>)}</ul></section>
-      <footer className="target-links">
-        {target.resources.length > 0 && <p>{target.resources.length} registered resource{target.resources.length === 1 ? '' : 's'} on this host — registered paths live under Resources, not here.</p>}
-        {target.dispatchedIssues.length > 0 && <p className="target-dispatched">Dispatched: {target.dispatchedIssues.map((number) => <a role="button" key={number} href={hrefForIssue?.(number)} onClick={issueLinkClick(onOpenIssue, number)}>#{number}</a>)}</p>}
-      </footer>
-    </article>)}
-    {rows.length === 0 && <div className="empty-state"><h2>{TARGETS_EMPTY.title}</h2><p>{TARGETS_EMPTY.body}</p></div>}
   </div>;
 }
 

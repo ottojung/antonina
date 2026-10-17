@@ -9,40 +9,19 @@
  *
  * ## The trust-preserving mechanism, chosen once and explicitly
  *
- * A board format transition takes the first of these two mechanisms, and this
- * build uses the first for v2 -> v3:
- *
- * 1. **Verify the legacy signed representation exactly as persisted, then lift
- *    it into the current in-memory representation.** The migration is a
- *    replay-time projection. The stored log keeps its v2 `board.initialize`
- *    payload and its signature forever; the migrated board exists only inside
- *    this process.
- * 2. **Append an explicitly signed migration/checkpoint operation.** This is
- *    for the case where the *persisted* bytes themselves must change, and it
- *    costs a signer: a checkpoint is an operation like any other, so it can
- *    only be written by a key holding the capability that authorizes it.
- *
- * v2 -> v3 needs no checkpoint, and adding one would be strictly worse. The
- * transition adds two collections (`targets`, `dispatches`) that the old format
- * did not have, so every old board lifts to the same value: the v2 board with
- * two empty collections. There is no operator decision, no timestamp, and no
- * re-signing to record, so there is nothing for a checkpoint operation to say.
- * It would also make migration require a *write*, which is exactly what an
- * ordinary board open must not do, and would break read-only opens.
- *
- * The rule that makes this safe is: **the migration is never allowed to feed
- * back into what is verified or what is stored.** A migration may only produce
- * the current in-memory board. It may not rewrite a payload, so a signature
- * that covered the legacy bytes still covers exactly the bytes it signed, and
- * tampering with legacy signed state stays a signature failure rather than
- * becoming a silently accepted rewrite.
+ * Legacy signed snapshots are verified before being projected into the current
+ * model. Migration never changes signed bytes. V2 lifts to V3, then V3 lifts to
+ * V4 by discarding only the obsolete target catalog and dispatch assignments.
+ * Issues and resources are carried forward unchanged, including in read-only opens.
  */
 import {
   BOARD_SCHEMA_VERSION,
   LEGACY_BOARD_SCHEMA_VERSION,
+  PREVIOUS_BOARD_SCHEMA_VERSION,
   PERSISTED_BOARD_VERSIONS,
   parseBoard,
   parseLegacyBoardV2,
+  parseLegacyBoardV3,
   type Board,
   type LegacyBoardV2,
   type PersistedBoardVersion,
@@ -114,17 +93,25 @@ export interface PersistedBoardMigration {
 const PERSISTED_BOARD_MIGRATIONS: { [V in SupersededPersistedBoardVersion]: PersistedBoardMigration } = {
   [LEGACY_BOARD_SCHEMA_VERSION]: {
     from: LEGACY_BOARD_SCHEMA_VERSION,
-    to: BOARD_SCHEMA_VERSION,
-    summary: 'adds the execution-target catalog and the dispatch records v3 introduced, both empty',
-    /**
-     * The whole of the v2 -> v3 transition: the v2 board with the two
-     * collections v3 added. Every v2 board lifts to the same value, which is
-     * why no operator decision and therefore no signed checkpoint is involved.
-     * The v2 fields are carried over untouched and unreordered.
-     */
+    to: PREVIOUS_BOARD_SCHEMA_VERSION,
+    summary: 'lifts the legacy issue and resource registry into its historical v3 board shape',
     migrate(value: unknown): Record<string, unknown> {
       const legacy = parseLegacyBoardV2(value);
-      return { ...legacy, schemaVersion: BOARD_SCHEMA_VERSION, targets: [], dispatches: [] };
+      return { ...legacy, schemaVersion: PREVIOUS_BOARD_SCHEMA_VERSION, targets: [], dispatches: [] };
+    },
+  },
+  [PREVIOUS_BOARD_SCHEMA_VERSION]: {
+    from: PREVIOUS_BOARD_SCHEMA_VERSION,
+    to: BOARD_SCHEMA_VERSION,
+    summary: 'retires centralized execution-target registrations and dispatch assignments',
+    migrate(value: unknown): Record<string, unknown> {
+      const legacy = parseLegacyBoardV3(value);
+      return {
+        schemaVersion: BOARD_SCHEMA_VERSION,
+        nextIssueNumber: legacy.nextIssueNumber,
+        issues: legacy.issues,
+        resources: legacy.resources,
+      };
     },
   },
 };

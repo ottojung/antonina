@@ -284,8 +284,6 @@ describe('board load state', () => {
       hasBody: false,
     }],
     resources: [],
-    targets: [],
-    dispatches: [],
   };
   const ready: BoardLoad = { status: 'ready', board: summaryBoard, queue: [1], head: 'head' };
 

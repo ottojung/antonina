@@ -109,10 +109,10 @@ test('the traced make target comes from a run step, not from a comment', (t) => 
   // `closed-issue-order.test.tsx`) and board 180 (last-activity All Issues, with
   // its `issue-activity-order.test.tsx` and the newly traced
   // `packages/core/src/board-store.ts`) lands both boards' inputs on one line, so
-  // this revision is 46, not 44 or 45. Measured, not assumed: the checker reports
-  // 46 here. Do not resolve a later drift by widening the assertion to a range;
+  // this revision is 44, after retiring two Targets UI files. Measured, not assumed: the checker reports
+  // 44 here. Do not resolve a later drift by widening the assertion to a range;
   // move the literal and attribute the change.
-  assert.match(result.stdout, /traced bundle inputs: 46/);
+  assert.match(result.stdout, /traced bundle inputs: 44/);
 });
 
 test('a bare filename include is traced as the file it names', (t) => {

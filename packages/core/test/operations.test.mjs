@@ -62,8 +62,8 @@ test('legacy-signed initialization verifies unchanged and replays as current sta
 
   const replayed = await verifyAndReplayOperationLog(log, anchor);
   assert.equal(replayed.board.schemaVersion, BOARD_SCHEMA_VERSION);
-  assert.deepEqual(replayed.board.targets, []);
-  assert.deepEqual(replayed.board.dispatches, []);
+  assert.equal(Object.hasOwn(replayed.board, 'targets'), false);
+  assert.equal(Object.hasOwn(replayed.board, 'dispatches'), false);
   assert.deepEqual(replayed.board.issues.map((issue) => issue.title), ['Legacy', 'Current']);
 
   const tampered = clone(log);
@@ -276,8 +276,6 @@ test('initialization attests a non-empty starting board as root-signed state', a
       messages: [],
     }],
     resources: [],
-    targets: [],
-    dispatches: [],
   };
   await append(log, root, 'board.initialize', { board: initial }, 1);
 

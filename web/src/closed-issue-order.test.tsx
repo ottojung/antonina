@@ -113,8 +113,6 @@ function overview(): BoardOverview {
     queue: [],
     issues: summaries,
     resources: [],
-    targets: [],
-    dispatches: [],
   };
 }
 

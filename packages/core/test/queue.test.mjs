@@ -235,8 +235,6 @@ test('board initialization seeds the queue from the imported open issues in issu
       nextIssueNumber: 4,
       issues: [issue(1, 'closed'), issue(2, 'open'), issue(3, 'open')],
       resources: [],
-      targets: [],
-      dispatches: [],
     },
   }, 1);
 

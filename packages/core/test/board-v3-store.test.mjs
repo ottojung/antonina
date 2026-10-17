@@ -329,12 +329,10 @@ test('overview reads list pages without fetching issue bodies or comments', asyn
     }] : [],
   }));
   const initialized = await store.initialize({
-    schemaVersion: 3,
+    schemaVersion: 4,
     nextIssueNumber: 52,
     issues,
     resources: [],
-    targets: [],
-    dispatches: [],
   });
 
   const detailKeys = new Set(
@@ -375,12 +373,10 @@ test('fast mutations read summaries plus only the touched issue thread', async (
     }] : [],
   }));
   const initialized = await store.initialize({
-    schemaVersion: 3,
+    schemaVersion: 4,
     nextIssueNumber: 52,
     issues,
     resources: [],
-    targets: [],
-    dispatches: [],
   });
 
   const unrelatedKeys = new Set(
@@ -540,12 +536,10 @@ test('commenting rewrites only the affected issue-list page plus snapshot leaves
     messages: [],
   }));
   const initialized = await store.initialize({
-    schemaVersion: 3,
+    schemaVersion: 4,
     nextIssueNumber: 52,
     issues,
     resources: [],
-    targets: [],
-    dispatches: [],
   });
 
   server.clearRequests();

@@ -89,7 +89,7 @@ async function boardWithComments(count) {
   const server = fakeSkrynia();
   const h = harness(server);
   const initialized = await h.store.initialize({
-    schemaVersion: 3,
+    schemaVersion: 4,
     nextIssueNumber: 2,
     issues: [{
       number: 1,
@@ -101,8 +101,6 @@ async function boardWithComments(count) {
       messages: Array.from({ length: count }, (_, index) => message(index)),
     }],
     resources: [],
-    targets: [],
-    dispatches: [],
   });
   return { server, ...h, initialized };
 }
@@ -348,7 +346,7 @@ test('an interrupted commit leaves commentRefs naming only resolvable shards', a
   const server = fakeSkrynia();
   const h = harness(server, { maxAttempts: 3 });
   const initialized = await h.store.initialize({
-    schemaVersion: 3,
+    schemaVersion: 4,
     nextIssueNumber: 2,
     issues: [{
       number: 1,
@@ -360,8 +358,6 @@ test('an interrupted commit leaves commentRefs naming only resolvable shards', a
       messages: Array.from({ length: 60 }, (_, index) => message(index)),
     }],
     resources: [],
-    targets: [],
-    dispatches: [],
   });
 
   const published = liveSnapshot(server, initialized.credential);
@@ -503,7 +499,7 @@ test('a ref re-established by a later generation survives the sweep that recorde
   const server = fakeSkrynia();
   const h = harness(server);
   const initialized = await h.store.initialize({
-    schemaVersion: 3,
+    schemaVersion: 4,
     nextIssueNumber: 2,
     issues: [{
       number: 1,
@@ -515,8 +511,6 @@ test('a ref re-established by a later generation survives the sweep that recorde
       messages: [message(0)],
     }],
     resources: [],
-    targets: [],
-    dispatches: [],
   });
 
   await h.store.appendFast(initialized.credential, { kind: 'issue.close', payload: { number: 1 } });

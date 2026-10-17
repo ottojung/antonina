@@ -19,153 +19,13 @@ export {
   type BoardDefectKind,
 } from './board-diagnostics.js';
 
-export const BOARD_SCHEMA_VERSION = 3 as const;
+export const BOARD_SCHEMA_VERSION = 4 as const;
+export const PREVIOUS_BOARD_SCHEMA_VERSION = 3 as const;
 export const LEGACY_BOARD_SCHEMA_VERSION = 2 as const;
 export const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 
 export type IssueState = 'open' | 'closed';
 export type ResourceState = 'protected' | 'collectible';
-
-/**
- * The execution backends an execution target can name. A backend is what
- * actually runs the work, not a description of it: `lubko` transport to a
- * Lubko host, `github-actions` a workflow run. Antonina orchestrates the
- * choice and never reimplements the transport behind one of these.
- */
-export const EXECUTION_TARGET_BACKENDS = ['lubko', 'github-actions'] as const;
-export type ExecutionTargetBackend = (typeof EXECUTION_TARGET_BACKENDS)[number];
-
-/**
- * What kind of environment a target is, independently of which backend runs
- * it. A persistent host keeps a filesystem between jobs; an ephemeral
- * environment exists for one job and is gone afterwards, so it is not
- * describable by a `lubko://` address at all.
- */
-export const EXECUTION_TARGET_KINDS = ['persistent-host', 'ephemeral-environment'] as const;
-export type ExecutionTargetKind = (typeof EXECUTION_TARGET_KINDS)[number];
-
-export const EXECUTION_TARGET_STATUSES = ['available', 'unavailable'] as const;
-export type ExecutionTargetStatus = (typeof EXECUTION_TARGET_STATUSES)[number];
-
-/**
- * How a job is actually handed to the environment behind a target.
- *
- * The backend names who does the running; the access method names the mechanism
- * by which work reaches it. They are related but not the same question: the
- * backend is what Antonina selects against, and the access method is what an
- * orchestrator has to arrange before it can submit anything. It is a closed
- * vocabulary for the same reason capabilities are — "how do I reach this" is a
- * question about typed membership, not about reading prose.
- */
-export const EXECUTION_TARGET_ACCESS_METHODS = ['lubko-transport', 'github-workflow-dispatch'] as const;
-export type ExecutionTargetAccessMethod = (typeof EXECUTION_TARGET_ACCESS_METHODS)[number];
-
-/**
- * What survives between two jobs on the same target.
- *
- * `durable-host-filesystem` is a real filesystem a later job can find the
- * earlier one's work in; `per-job-workspace` is a workspace the provider builds
- * for one job and destroys afterwards. The second is the only honest answer for
- * an ephemeral environment, and stating it is what stops an orchestrator from
- * planning a two-step job that assumes a directory the provider already deleted.
- */
-export const EXECUTION_TARGET_PERSISTENCE = ['durable-host-filesystem', 'per-job-workspace'] as const;
-export type ExecutionTargetPersistence = (typeof EXECUTION_TARGET_PERSISTENCE)[number];
-
-/**
- * Who removes what a job left behind.
- *
- * `host-local-collector-available` is the Antonina collector, which can only be
- * pointed at a path a human registered and which no open issue depends on. The
- * name states what the host offers and not what any job will cause to happen:
- * a collector with no configured managed roots is refused by name and never
- * proceeds, and the board cannot see a host's managed-roots configuration from
- * here, so a registration that says the collector is available is not promising
- * that anything will be collected.
- * `provider-managed` means the external service expires the environment on its
- * own schedule and Antonina has no part in it. `none` means nothing removes it,
- * which is a real and common state for a host with no configured managed roots.
- *
- * A target may narrow this and never widen it, so the vocabulary is what it is
- * and the default is the widest answer the target's kind can honestly give.
- */
-export const EXECUTION_TARGET_GARBAGE_COLLECTION = [
-  'host-local-collector-available', 'provider-managed', 'none',
-] as const;
-export type ExecutionTargetGarbageCollection = (typeof EXECUTION_TARGET_GARBAGE_COLLECTION)[number];
-
-/**
- * The released spelling of the collector value, kept so a board signed before the
- * rename keeps verifying and keeps reading. It is the same claim under the older
- * name, not a narrower or a wider one, and it is read as the current value by
- * every reader rather than being carried through as a second meaning: a record
- * that says `host-local-collector` is a record whose collector was available.
- *
- * It stays readable rather than being refused because a signed log is immutable,
- * so refusing it would make a board written by a released Antonina unreadable
- * and offer the operator nothing to do about it.
- */
-export const LEGACY_EXECUTION_TARGET_GARBAGE_COLLECTION = ['host-local-collector'] as const;
-export type LegacyExecutionTargetGarbageCollection =
-  (typeof LEGACY_EXECUTION_TARGET_GARBAGE_COLLECTION)[number];
-
-/**
- * What a record may carry, as opposed to what the vocabulary holds. This is the
- * type on the record and on nothing an operator can write: a caller names a
- * current value, and only a record read back from a board can hold the released
- * spelling.
- */
-export type RecordedExecutionTargetGarbageCollection =
-  | ExecutionTargetGarbageCollection
-  | LegacyExecutionTargetGarbageCollection;
-
-/** The one spelling a reader reports, whichever of the two a record carries. */
-export function canonicalGarbageCollection(
-  value: RecordedExecutionTargetGarbageCollection,
-): ExecutionTargetGarbageCollection {
-  return value === 'host-local-collector' ? 'host-local-collector-available' : value;
-}
-
-/** Whether a stored value is one this release reads, the current name or the released one. */
-function isRecordedGarbageCollection(value: string): value is RecordedExecutionTargetGarbageCollection {
-  return (EXECUTION_TARGET_GARBAGE_COLLECTION as readonly string[]).includes(value)
-    || (LEGACY_EXECUTION_TARGET_GARBAGE_COLLECTION as readonly string[]).includes(value);
-}
-
-/**
- * The guidance document each backend points at when a target names none of its
- * own. A target carries a reference, never the procedure: the procedure is a
- * document that changes when the backend changes, and copying it into board
- * state would give the board a second spelling to keep current.
- */
-export const EXECUTION_TARGET_GUIDANCE: { readonly [B in ExecutionTargetBackend]: string } = {
-  lubko: 'docs/skills/target-lubko-persistent-host.md',
-  'github-actions': 'docs/skills/target-github-actions-ephemeral.md',
-};
-
-/** The access method a backend provides, which is the only one it may declare. */
-export function defaultExecutionTargetAccessMethod(backend: ExecutionTargetBackend): ExecutionTargetAccessMethod {
-  return backend === 'lubko' ? 'lubko-transport' : 'github-workflow-dispatch';
-}
-
-/** The persistence a kind of environment has, which is the only one it may declare. */
-export function defaultExecutionTargetPersistence(kind: ExecutionTargetKind): ExecutionTargetPersistence {
-  return kind === 'persistent-host' ? 'durable-host-filesystem' : 'per-job-workspace';
-}
-
-/**
- * The closed vocabulary of what a target can do. Requirements are matched
- * against these names only, so "can it run a GPU job" is a question about
- * typed membership rather than a substring search over free-form metadata.
- */
-export const EXECUTION_TARGET_CAPABILITIES = [
-  'persistent-filesystem',
-  'ephemeral-lifetime',
-  'network-egress',
-  'container-isolation',
-  'accelerated-compute',
-] as const;
-export type ExecutionTargetCapability = (typeof EXECUTION_TARGET_CAPABILITIES)[number];
 
 export interface BoardMessage {
   id: string;
@@ -413,86 +273,11 @@ export interface BoardResource {
   updatedAt: string;
 }
 
-/**
- * One entry of the canonical catalog of places a job may run.
- *
- * A target is not a resource. A resource is a durable filesystem path an open
- * issue depends on; a target is an execution environment that can be selected
- * for a job. A target of kind `ephemeral-environment` has no durable filesystem
- * at all, and therefore no resource anywhere in the board.
- */
-export interface BoardExecutionTarget {
-  /** The stable identity a job names to request this target. */
-  id: string;
-  backend: ExecutionTargetBackend;
-  kind: ExecutionTargetKind;
-  status: ExecutionTargetStatus;
-  /** Sorted, duplicate-free, from `EXECUTION_TARGET_CAPABILITIES`. */
-  capabilities: ExecutionTargetCapability[];
-  /**
-   * The canonical `lubko://` address of a persistent Lubko host, and `null` for
-   * a target that has no such address. This is the one value that relates a
-   * target to the resources registered against that host, so it is derived
-   * from the target record rather than spelled independently beside it.
-   */
-  address: string | null;
-  description: string;
-  /**
-   * The human name a catalog and a board view print, or absent to print the id.
-   * It is display metadata and is never an identity: nothing matches on it.
-   */
-  displayName?: string;
-  /**
-   * How work is handed to this target. Absent means the backend's own method,
-   * which {@link defaultExecutionTargetAccessMethod} names; a record that
-   * declares a different one is refused, because a Lubko target cannot be
-   * reached by a workflow dispatch and claiming so would be a lie an
-   * orchestrator could act on.
-   */
-  accessMethod?: ExecutionTargetAccessMethod;
-  /**
-   * What survives between two jobs here. Absent means the kind's own answer,
-   * which is the only one that kind can have.
-   */
-  persistence?: ExecutionTargetPersistence;
-  /**
-   * Who removes what a job left behind. Absent means the widest honest answer
-   * for the backend; a persistent host may narrow this to `none`, and an
-   * ephemeral environment may narrow it to `none` when the provider is not the
-   * one expiring it. It may never widen: no target can claim a host-local
-   * collector when it has no host, or provider management when it is a host.
-   * The released spelling of the collector value also reads here, because a
-   * board signed before the rename is a record the board still has to hold.
-   */
-  garbageCollection?: RecordedExecutionTargetGarbageCollection;
-  /** Sorted, duplicate-free operational caveats stated about this target. */
-  limitations?: string[];
-  /**
-   * Sorted, duplicate-free repository-relative paths of the guidance documents
-   * that say how to reach and use this target. Absent means the backend's own
-   * document, named by {@link EXECUTION_TARGET_GUIDANCE}.
-   */
-  guidance?: string[];
-  createdAt: string;
-  updatedAt: string;
-}
-
-/** The record of which target a job actually ran on. */
-export interface BoardDispatch {
-  issueNumber: number;
-  targetId: string;
-  /** The selection rationale, kept so the board itself explains the choice. */
-  rationale: string;
-  recordedAt: string;
-}
-
 export interface Board {
   schemaVersion: typeof BOARD_SCHEMA_VERSION;
   nextIssueNumber: number;
   issues: BoardIssue[];
   resources: BoardResource[];
-  targets: BoardExecutionTarget[];
-  dispatches: BoardDispatch[];
 }
 
 export interface LegacyBoardV2 {
@@ -502,7 +287,17 @@ export interface LegacyBoardV2 {
   resources: BoardResource[];
 }
 
-export type PersistedBoard = Board | LegacyBoardV2;
+export interface LegacyBoardV3 {
+  schemaVersion: typeof PREVIOUS_BOARD_SCHEMA_VERSION;
+  nextIssueNumber: number;
+  issues: BoardIssue[];
+  resources: BoardResource[];
+  /** Deprecated data is accepted only for migration; it is never exposed as a domain object. */
+  targets: unknown[];
+  dispatches: unknown[];
+}
+
+export type PersistedBoard = Board | LegacyBoardV2 | LegacyBoardV3;
 
 export interface ResourceDependencyView {
   number: number;
@@ -511,82 +306,10 @@ export interface ResourceDependencyView {
 
 export interface ResourceView {
   host: string;
-  /**
-   * The registered persistent target whose address is this resource's host, or
-   * `null` when no catalogued target claims that address. The host string
-   * remains the resource's own coordinate; the target id is the relation, and
-   * it is derived rather than stored twice.
-   */
-  targetId: string | null;
   path: string;
   issues: ResourceDependencyView[];
   protected: boolean;
   collectible: boolean;
-}
-
-export interface TargetView extends BoardExecutionTarget {
-  /** The durable resources this target's host carries, if it has a host. */
-  resources: BoardResource[];
-  /** The issues currently dispatched to this target. */
-  dispatchedIssues: number[];
-}
-
-/**
- * One target as an operator or an orchestrator reads it: identity, what kind of
- * thing it is, how work reaches it, what survives, who cleans up, and where the
- * procedure is written down.
- *
- * This is a projection, not a stored record. Every field is either already on
- * the target or derived from a closed vocabulary by one function here, so a
- * board view, a CLI command and a scheduler all answer these questions the same
- * way and none of them re-derives them. Nothing dynamic lives here: capacity,
- * liveness and quota are observations, they are not part of a registration, and
- * a reader with none of them is missing data rather than reading zeros.
- */
-export interface ExecutionTargetAccess {
-  readonly targetId: string;
-  readonly displayName: string;
-  readonly backend: ExecutionTargetBackend;
-  readonly kind: ExecutionTargetKind;
-  readonly status: ExecutionTargetStatus;
-  readonly accessMethod: ExecutionTargetAccessMethod;
-  readonly persistence: ExecutionTargetPersistence;
-  readonly garbageCollection: ExecutionTargetGarbageCollection;
-  readonly capabilities: readonly ExecutionTargetCapability[];
-  readonly address: string | null;
-  readonly description: string;
-  readonly limitations: readonly string[];
-  readonly guidance: readonly string[];
-}
-
-/** One target's access facts, with every absent field resolved from its kind and backend. */
-export function executionTargetAccess(target: BoardExecutionTarget): ExecutionTargetAccess {
-  // An empty note list is absence, spelled as absence, at every point where a
-  // record is read. The parse rule already refuses one, so a record read back
-  // from a board never carries it; a caller that hands a hand-built target
-  // straight to this function still gets the backend's own guidance rather than
-  // a target that presents as having no guidance document at all.
-  const limitations = target.limitations ?? [];
-  const guidance = target.guidance !== undefined && target.guidance.length > 0
-    ? target.guidance
-    : [EXECUTION_TARGET_GUIDANCE[target.backend]];
-  return {
-    targetId: target.id,
-    displayName: target.displayName ?? target.id,
-    backend: target.backend,
-    kind: target.kind,
-    status: target.status,
-    accessMethod: target.accessMethod ?? defaultExecutionTargetAccessMethod(target.backend),
-    persistence: target.persistence ?? defaultExecutionTargetPersistence(target.kind),
-    garbageCollection: target.garbageCollection !== undefined
-      ? canonicalGarbageCollection(target.garbageCollection)
-      : (target.kind === 'persistent-host' ? 'host-local-collector-available' : 'provider-managed'),
-    capabilities: [...target.capabilities],
-    address: target.address,
-    description: target.description,
-    limitations: [...limitations],
-    guidance: [...guidance],
-  };
 }
 
 export function emptyBoard(): Board {
@@ -595,8 +318,6 @@ export function emptyBoard(): Board {
     nextIssueNumber: 1,
     issues: [],
     resources: [],
-    targets: [],
-    dispatches: [],
   };
 }
 
@@ -721,281 +442,6 @@ export function canonicalPath(value: string): string {
   return path;
 }
 
-/**
- * A target identity is a lowercase slug. It is compared and ordered by code
- * unit, never by locale, so a selection made on one machine is the selection
- * every other machine makes.
- */
-const TARGET_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
-
-export function canonicalTargetId(value: string): string {
-  const id = value.trim();
-  if (!TARGET_ID.test(id)) {
-    throw new Error('Execution target ID must be a lowercase alphanumeric or dash slug');
-  }
-  return id;
-}
-
-export function parseExecutionTargetBackend(value: string): ExecutionTargetBackend {
-  if (!(EXECUTION_TARGET_BACKENDS as readonly string[]).includes(value)) {
-    throw new Error('Unknown Antonina execution target backend: ' + value);
-  }
-  return value as ExecutionTargetBackend;
-}
-
-export function parseExecutionTargetKind(value: string): ExecutionTargetKind {
-  if (!(EXECUTION_TARGET_KINDS as readonly string[]).includes(value)) {
-    throw new Error('Unknown Antonina execution target kind: ' + value);
-  }
-  return value as ExecutionTargetKind;
-}
-
-export function parseExecutionTargetStatus(value: string): ExecutionTargetStatus {
-  if (!(EXECUTION_TARGET_STATUSES as readonly string[]).includes(value)) {
-    throw new Error('Unknown Antonina execution target status: ' + value);
-  }
-  return value as ExecutionTargetStatus;
-}
-
-export function parseExecutionTargetCapability(value: string): ExecutionTargetCapability {
-  if (!(EXECUTION_TARGET_CAPABILITIES as readonly string[]).includes(value)) {
-    throw new Error('Unknown Antonina execution target capability: ' + value);
-  }
-  return value as ExecutionTargetCapability;
-}
-
-export function parseExecutionTargetAccessMethod(value: string): ExecutionTargetAccessMethod {
-  if (!(EXECUTION_TARGET_ACCESS_METHODS as readonly string[]).includes(value)) {
-    throw new Error('Unknown Antonina execution target access method: ' + value);
-  }
-  return value as ExecutionTargetAccessMethod;
-}
-
-export function parseExecutionTargetPersistence(value: string): ExecutionTargetPersistence {
-  if (!(EXECUTION_TARGET_PERSISTENCE as readonly string[]).includes(value)) {
-    throw new Error('Unknown Antonina execution target persistence: ' + value);
-  }
-  return value as ExecutionTargetPersistence;
-}
-
-export function parseExecutionTargetGarbageCollection(value: string): ExecutionTargetGarbageCollection {
-  if ((LEGACY_EXECUTION_TARGET_GARBAGE_COLLECTION as readonly string[]).includes(value)) {
-    return canonicalGarbageCollection(value as LegacyExecutionTargetGarbageCollection);
-  }
-  if (!(EXECUTION_TARGET_GARBAGE_COLLECTION as readonly string[]).includes(value)) {
-    throw new Error('Unknown Antonina execution target garbage collection: ' + value);
-  }
-  return value as ExecutionTargetGarbageCollection;
-}
-
-/**
- * Why a guidance reference is not a repository-relative document path, or `null`
- * when it is. A guidance entry is a pointer a reader can follow, so an absolute
- * path, a URL, or anything that climbs out of the repository is refused rather
- * than rendered as a link to nowhere.
- */
-export function guidancePathDefect(path: string): string | null {
-  if (path.length === 0) return 'empty';
-  if (path.startsWith('/')) return 'absolute';
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(path)) return 'not-a-repository-path';
-  if (path.split('/').some((segment) => segment === '..')) return 'parent-traversal';
-  if (!path.endsWith('.md')) return 'not-a-markdown-document';
-  if (path.includes('//')) return 'non-canonical';
-  return null;
-}
-
-/**
- * A sorted, duplicate-free, non-empty list of non-empty strings, or `null` when
- * the value is not one.
- *
- * An empty list is refused here rather than accepted as a trivially well-formed
- * one, because a note list on a stored record is a claim, and `[]` claims that
- * there is nothing to say. For limitations that is a harmless way of spelling
- * absence; for guidance it is not, since an absent list means the backend's own
- * document and an empty one would silently suppress it. One rule for both keeps
- * the board from holding a value that reads as one thing and is another, so
- * "retract this note" means the field is absent rather than that it is empty.
- */
-function canonicalNoteList(value: unknown): string[] | null {
-  if (!Array.isArray(value) || !value.every(isText)) return null;
-  const notes = value as string[];
-  if (notes.length === 0) return null;
-  const sorted = [...notes].sort();
-  if (notes.some((note, index) => note !== sorted[index])) return null;
-  if (new Set(notes).size !== notes.length) return null;
-  return [...notes];
-}
-
-function parseTargetCapabilities(value: unknown): ExecutionTargetCapability[] {
-  if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string'
-      && (EXECUTION_TARGET_CAPABILITIES as readonly string[]).includes(entry))) {
-    throw new Error('Execution target capabilities are malformed');
-  }
-  const capabilities = value as ExecutionTargetCapability[];
-  const sorted = [...capabilities].sort();
-  if (capabilities.some((capability, index) => capability !== sorted[index])) {
-    throw new Error('Execution target capabilities must be sorted');
-  }
-  if (new Set(capabilities).size !== capabilities.length) {
-    throw new Error('Execution target capabilities contain duplicates');
-  }
-  return [...capabilities];
-}
-
-/**
- * What a target record claims about itself, once the record is internally
- * consistent. A persistent host and an ephemeral environment are different
- * shapes of thing, so the record says which it is rather than letting the
- * backend name stand in for it: a persistent host has an address and a durable
- * filesystem, an ephemeral environment has neither.
- */
-export function executionTargetDefect(target: BoardExecutionTarget): string | null {
-  if (target.kind === 'persistent-host') {
-    if (target.address === null) return 'a persistent host requires a Lubko address';
-    if (!target.capabilities.includes('persistent-filesystem')) {
-      return 'a persistent host requires the persistent-filesystem capability';
-    }
-    if (target.capabilities.includes('ephemeral-lifetime')) {
-      return 'a persistent host cannot declare the ephemeral-lifetime capability';
-    }
-  } else {
-    if (target.address !== null) return 'an ephemeral environment has no Lubko address';
-    if (!target.capabilities.includes('ephemeral-lifetime')) {
-      return 'an ephemeral environment requires the ephemeral-lifetime capability';
-    }
-    if (target.capabilities.includes('persistent-filesystem')) {
-      return 'an ephemeral environment cannot declare the persistent-filesystem capability';
-    }
-  }
-  if (target.backend === 'github-actions' && target.kind !== 'ephemeral-environment') {
-    return 'the github-actions backend runs ephemeral environments only';
-  }
-  // The descriptive fields are optional, so this is where a record that does
-  // carry one is held to it. A target may narrow what its backend and kind
-  // provide, but it may not contradict them: every one of these is a claim an
-  // orchestrator would otherwise act on.
-  if (target.accessMethod !== undefined
-      && !(EXECUTION_TARGET_ACCESS_METHODS as readonly string[]).includes(target.accessMethod)) {
-    return 'an execution target must declare a known access method';
-  }
-  if (target.persistence !== undefined
-      && !(EXECUTION_TARGET_PERSISTENCE as readonly string[]).includes(target.persistence)) {
-    return 'an execution target must declare a known persistence';
-  }
-  if (target.garbageCollection !== undefined
-      && !isRecordedGarbageCollection(target.garbageCollection)) {
-    return 'an execution target must declare a known garbage collection';
-  }
-  if (target.accessMethod !== undefined && target.accessMethod !== defaultExecutionTargetAccessMethod(target.backend)) {
-    return 'an execution target must declare the access method its backend provides';
-  }
-  if (target.persistence !== undefined && target.persistence !== defaultExecutionTargetPersistence(target.kind)) {
-    return 'an execution target must declare the persistence its kind has';
-  }
-  if (target.garbageCollection !== undefined) {
-    // The released spelling is allowed here for the same claim, so a board
-    // signed before the rename is not a board that has to be rewritten to be
-    // readable; it is narrowed to the current value before any reader sees it.
-    const allowed: readonly RecordedExecutionTargetGarbageCollection[] = target.kind === 'persistent-host'
-      ? ['host-local-collector-available', 'host-local-collector', 'none']
-      : ['provider-managed', 'none'];
-    if (!allowed.includes(target.garbageCollection)) {
-      return target.kind === 'persistent-host'
-        ? 'a persistent host cannot declare that the provider manages its garbage collection'
-        : 'an ephemeral environment cannot declare that a host-local collector manages it';
-    }
-  }
-  if (target.displayName !== undefined && !isText(target.displayName)) {
-    return 'an execution target display name must be a non-empty string';
-  }
-  if (target.limitations !== undefined && canonicalNoteList(target.limitations) === null) {
-    return 'execution target limitations must be a sorted, duplicate-free, non-empty list of notes';
-  }
-  if (target.guidance !== undefined) {
-    if (canonicalNoteList(target.guidance) === null) {
-      return 'execution target guidance must be a sorted, duplicate-free, non-empty list of document paths';
-    }
-    for (const path of target.guidance) {
-      const defect = guidancePathDefect(path);
-      if (defect !== null) return `execution target guidance path is unusable: ${defect}`;
-    }
-  }
-  return null;
-}
-
-const TARGET_REQUIRED_KEYS = [
-  'id', 'backend', 'kind', 'status', 'capabilities', 'address', 'description', 'createdAt', 'updatedAt',
-] as const;
-const TARGET_OPTIONAL_KEYS = [
-  'displayName', 'accessMethod', 'persistence', 'garbageCollection', 'limitations', 'guidance',
-] as const;
-
-/**
- * A target record may carry any of the descriptive fields and must carry all of
- * the original ones. A record written before those fields existed is still a
- * valid record: those fields were added to this shared API rather than
- * substituted into it, so a board signed without them has to keep verifying and
- * keeps reading through the defaults {@link executionTargetAccess} resolves.
- */
-function hasTargetKeys(value: Record<string, unknown>): boolean {
-  return TARGET_REQUIRED_KEYS.every((key) => Object.hasOwn(value, key))
-    && Object.keys(value).every((key) =>
-      (TARGET_REQUIRED_KEYS as readonly string[]).includes(key)
-      || (TARGET_OPTIONAL_KEYS as readonly string[]).includes(key));
-}
-
-function isTarget(value: unknown): value is BoardExecutionTarget {
-  if (!isRecord(value)
-      || !hasTargetKeys(value)
-      || !isText(value.id)
-      || !TARGET_ID.test(value.id)
-      || typeof value.backend !== 'string'
-      || !(EXECUTION_TARGET_BACKENDS as readonly string[]).includes(value.backend)
-      || typeof value.kind !== 'string'
-      || !(EXECUTION_TARGET_KINDS as readonly string[]).includes(value.kind)
-      || !isText(value.status)
-      || !(EXECUTION_TARGET_STATUSES as readonly string[]).includes(value.status)
-      || (value.address !== null && !isText(value.address))
-      || typeof value.description !== 'string'
-      || !isTimestamp(value.createdAt)
-      || !isTimestamp(value.updatedAt)) {
-    return false;
-  }
-  if (value.address !== null && !isValidHost(value.address)) return false;
-  if (value.accessMethod !== undefined
-      && !(EXECUTION_TARGET_ACCESS_METHODS as readonly string[]).includes(value.accessMethod as string)) return false;
-  if (value.persistence !== undefined
-      && !(EXECUTION_TARGET_PERSISTENCE as readonly string[]).includes(value.persistence as string)) return false;
-  if (value.garbageCollection !== undefined && !isRecordedGarbageCollection(value.garbageCollection as string)) return false;
-  let capabilities: ExecutionTargetCapability[];
-  try {
-    capabilities = parseTargetCapabilities(value.capabilities);
-  } catch {
-    return false;
-  }
-  return executionTargetDefect({
-    ...(value as unknown as BoardExecutionTarget),
-    capabilities,
-  }) === null;
-}
-
-function isDispatch(value: unknown, issueNumbers: Set<number>): value is BoardDispatch {
-  return isRecord(value)
-    && hasExactKeys(value, ['issueNumber', 'targetId', 'rationale', 'recordedAt'])
-    && isPositiveSafeInteger(value.issueNumber)
-    && issueNumbers.has(value.issueNumber)
-    && isText(value.targetId)
-    && TARGET_ID.test(value.targetId)
-    && isText(value.rationale)
-    && isTimestamp(value.recordedAt);
-}
-
-/** Code-unit comparison, so ordering never depends on a locale. */
-function compareIds(left: string, right: string): number {
-  if (left === right) return 0;
-  return left < right ? -1 : 1;
-}
-
 function isResource(value: unknown, issueNumbers: Set<number>): value is BoardResource {
   return isRecord(value)
     && hasExactKeys(value, ['host', 'path', 'issueNumbers', 'createdAt', 'updatedAt'])
@@ -1012,7 +458,7 @@ function isResource(value: unknown, issueNumbers: Set<number>): value is BoardRe
 }
 
 const CANONICAL_BOARD_KEYS = [
-  'schemaVersion', 'nextIssueNumber', 'issues', 'resources', 'targets', 'dispatches',
+  'schemaVersion', 'nextIssueNumber', 'issues', 'resources',
 ] as const;
 
 const LEGACY_BOARD_V2_KEYS = [
@@ -1220,134 +666,6 @@ function resourceDefect(value: unknown, issueNumbers: Set<number>, index: number
   return unclassifiedElementDefect(where, index);
 }
 
-/** {@link isDispatch}, explained. Consulted only after {@link isDispatch} has refused. */
-function dispatchDefect(value: unknown, issueNumbers: Set<number>, index: number): BoardDefect {
-  const where = `board dispatch record at index ${index}`;
-  const at = { kind: 'element' } as const;
-  if (!isRecord(value)) return { ...notARecordDefect(where, value), ...at };
-  if (!hasExactKeys(value, ['issueNumber', 'targetId', 'rationale', 'recordedAt'])) {
-    const defect = keySetDefect(where, ['issueNumber', 'targetId', 'rationale', 'recordedAt'], value);
-    return { ...defect, ...at };
-  }
-  const field = firstDefect(where, [
-    {
-      field: 'issueNumber',
-      expected: 'a positive safe integer naming an issue on this board',
-      ok: isPositiveSafeInteger(value.issueNumber) && issueNumbers.has(value.issueNumber),
-      value: value.issueNumber,
-    },
-    {
-      field: 'targetId',
-      expected: 'a lowercase alphanumeric or dash slug',
-      ok: isText(value.targetId) && TARGET_ID.test(value.targetId),
-      value: value.targetId,
-    },
-    { field: 'rationale', expected: 'a non-empty string', ok: isText(value.rationale), value: value.rationale },
-    {
-      field: 'recordedAt',
-      expected: 'a parseable timestamp string',
-      ok: isTimestamp(value.recordedAt),
-      value: value.recordedAt,
-    },
-  ]);
-  if (field !== null) return { ...field, ...at };
-  return unclassifiedElementDefect(where, index);
-}
-
-/** {@link isTarget}, explained. Consulted only after {@link isTarget} has refused. */
-function targetDefect(value: unknown, index: number): BoardDefect {
-  const where = `board execution target at index ${index}`;
-  const at = { kind: 'element' } as const;
-  if (!isRecord(value)) return { ...notARecordDefect(where, value), ...at };
-  if (!hasTargetKeys(value)) return { ...targetKeySetDefect(where, value), ...at };
-  const field = firstDefect(where, [
-    { field: 'id', expected: 'a lowercase alphanumeric or dash slug', ok: isText(value.id) && TARGET_ID.test(value.id), value: value.id },
-    {
-      field: 'backend',
-      expected: `one of ${EXECUTION_TARGET_BACKENDS.join(', ')}`,
-      ok: typeof value.backend === 'string' && (EXECUTION_TARGET_BACKENDS as readonly string[]).includes(value.backend),
-      value: value.backend,
-    },
-    {
-      field: 'kind',
-      expected: `one of ${EXECUTION_TARGET_KINDS.join(', ')}`,
-      ok: typeof value.kind === 'string' && (EXECUTION_TARGET_KINDS as readonly string[]).includes(value.kind),
-      value: value.kind,
-    },
-    {
-      field: 'status',
-      expected: `one of ${EXECUTION_TARGET_STATUSES.join(', ')}`,
-      ok: isText(value.status) && (EXECUTION_TARGET_STATUSES as readonly string[]).includes(value.status),
-      value: value.status,
-    },
-    {
-      field: 'address',
-      expected: 'a "lubko://" host string, or null',
-      ok: value.address === null || (isText(value.address) && isValidHost(value.address)),
-      value: value.address,
-    },
-    { field: 'description', expected: 'a string', ok: typeof value.description === 'string', value: value.description },
-    {
-      field: 'createdAt',
-      expected: 'a parseable timestamp string',
-      ok: isTimestamp(value.createdAt),
-      value: value.createdAt,
-    },
-    {
-      field: 'updatedAt',
-      expected: 'a parseable timestamp string',
-      ok: isTimestamp(value.updatedAt),
-      value: value.updatedAt,
-    },
-    {
-      field: 'capabilities',
-      expected: 'a sorted, duplicate-free array of capability names',
-      ok: targetCapabilitiesOk(value.capabilities),
-      value: value.capabilities,
-    },
-  ]);
-  if (field !== null) return { ...field, ...at };
-  const consistency = executionTargetDefect({
-    ...(value as unknown as BoardExecutionTarget),
-    capabilities: value.capabilities as ExecutionTargetCapability[],
-  });
-  if (consistency !== null) {
-    return { ...corruptDefect(`${where}.index ${index}`, '', consistency, `Antonina board execution target at index ${index} is inconsistent: ${consistency}`), ...at };
-  }
-  return unclassifiedElementDefect(where, index);
-}
-
-/** `parseTargetCapabilities` as a predicate, so a capability list can be checked without a throw. */
-function targetCapabilitiesOk(value: unknown): boolean {
-  try {
-    parseTargetCapabilities(value);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * `hasTargetKeys` explained. A target has required keys and permitted optional
- * ones rather than one exact set, so this reports which required key is absent
- * and which present key is not permitted, and never enumerates the record.
- */
-function targetKeySetDefect(subject: string, value: Record<string, unknown>): BoardDefect {
-  const missing = TARGET_REQUIRED_KEYS.filter((key) => !Object.hasOwn(value, key));
-  const unexpected = Object.keys(value).filter((key) =>
-    !(TARGET_REQUIRED_KEYS as readonly string[]).includes(key)
-    && !(TARGET_OPTIONAL_KEYS as readonly string[]).includes(key));
-  return {
-    kind: 'key-set',
-    subject,
-    field: '',
-    found: 'a different set of keys',
-    expected: `the required keys ${TARGET_REQUIRED_KEYS.join(', ')}, optionally plus ${TARGET_OPTIONAL_KEYS.join(', ')}`,
-    missingKeys: missing,
-    unexpectedKeys: unexpected.map(readKeyName),
-  };
-}
-
 /**
  * The defect reported when the element is refused but no named field explains
  * it. This is a deliberately uninformative fallback rather than a guess: it
@@ -1380,8 +698,6 @@ function canonicalBoardDefect(value: unknown): BoardDefect {
     },
     { field: 'issues', expected: 'an array of issues', ok: Array.isArray(value.issues), value: value.issues },
     { field: 'resources', expected: 'an array of resources', ok: Array.isArray(value.resources), value: value.resources },
-    { field: 'targets', expected: 'an array of execution targets', ok: Array.isArray(value.targets), value: value.targets },
-    { field: 'dispatches', expected: 'an array of dispatch records', ok: Array.isArray(value.dispatches), value: value.dispatches },
   ]);
   if (field !== null) return field;
   const issues = value.issues as unknown[];
@@ -1455,6 +771,26 @@ export function parseLegacyBoardV2(value: unknown): LegacyBoardV2 {
   return structuredClone(board);
 }
 
+export function parseLegacyBoardV3(value: unknown): LegacyBoardV3 {
+  const keys = [...LEGACY_BOARD_V2_KEYS, 'targets', 'dispatches'];
+  if (!isRecord(value) || value.schemaVersion !== PREVIOUS_BOARD_SCHEMA_VERSION
+      || !hasExactKeys(value, keys) || !Array.isArray(value.targets) || !Array.isArray(value.dispatches)) {
+    throw new BoardIncompatibilityError(keySetDefect('legacy v3 board', keys, isRecord(value) ? value : {}));
+  }
+  const validated = parseLegacyBoardV2({
+    schemaVersion: LEGACY_BOARD_SCHEMA_VERSION,
+    nextIssueNumber: value.nextIssueNumber,
+    issues: value.issues,
+    resources: value.resources,
+  });
+  return {
+    ...validated,
+    schemaVersion: PREVIOUS_BOARD_SCHEMA_VERSION,
+    targets: structuredClone(value.targets),
+    dispatches: structuredClone(value.dispatches),
+  };
+}
+
 /**
  * Every persisted board version this build can read, oldest first. Adding a
  * version here is the declaration "boards of this version still exist in the
@@ -1468,6 +804,7 @@ export function parseLegacyBoardV2(value: unknown): LegacyBoardV2 {
  */
 export const PERSISTED_BOARD_VERSIONS = [
   LEGACY_BOARD_SCHEMA_VERSION,
+  PREVIOUS_BOARD_SCHEMA_VERSION,
   BOARD_SCHEMA_VERSION,
 ] as const;
 
@@ -1517,6 +854,7 @@ const PERSISTED_BOARD_PARSERS: {
   [V in PersistedBoardVersion]: (value: unknown) => PersistedBoardOfVersion<V>;
 } = {
   [LEGACY_BOARD_SCHEMA_VERSION]: parseLegacyBoardV2,
+  [PREVIOUS_BOARD_SCHEMA_VERSION]: parseLegacyBoardV3,
   [BOARD_SCHEMA_VERSION]: parseCanonicalBoard,
 };
 
@@ -1576,8 +914,7 @@ export function parseCanonicalBoard(value: unknown): Board {
       || !Array.isArray(value.issues)
       || !value.issues.every(isIssue)
       || !Array.isArray(value.resources)
-      || !Array.isArray(value.targets)
-      || !Array.isArray(value.dispatches)) {
+      ) {
     throw new BoardIncompatibilityError(canonicalBoardDefect(value));
   }
 
@@ -1635,60 +972,10 @@ export function parseCanonicalBoard(value: unknown): Board {
     resources.add(key);
   }
 
-  const targetIds = new Set<string>();
-  const targetAddresses = new Set<string>();
-  for (let index = 0; index < board.targets.length; index += 1) {
-    const target = board.targets[index];
-    if (target === undefined || !isTarget(target)) {
-      throw new BoardIncompatibilityError(targetDefect(target, index));
-    }
-    if (targetIds.has(target.id)) {
-      throw new BoardIncompatibilityError(corruptDefect(
-        `board.targets`, `index ${index}`,
-        'reuses an execution target identity already on the board',
-        'Antonina board contains duplicate execution target identities'));
-    }
-    targetIds.add(target.id);
-    if (target.address !== null) {
-      // Two targets answering to one host address would make "the host of this
-      // resource" ambiguous, so the address is as identifying as the id here.
-      if (targetAddresses.has(target.address)) {
-        throw new BoardIncompatibilityError(corruptDefect(
-          `board.targets`, `index ${index}.address`,
-          'is a Lubko address another execution target already answers to',
-          'Antonina board contains two execution targets for one Lubko address'));
-      }
-      targetAddresses.add(target.address);
-    }
-  }
-
-  const dispatchedIssues = new Set<number>();
-  for (let index = 0; index < board.dispatches.length; index += 1) {
-    const dispatch = board.dispatches[index];
-    if (dispatch === undefined || !isDispatch(dispatch, numbers)) {
-      throw new BoardIncompatibilityError(dispatchDefect(dispatch, numbers, index));
-    }
-    if (!targetIds.has(dispatch.targetId)) {
-      throw new BoardIncompatibilityError(corruptDefect(
-        `board.dispatches`, `index ${index}.targetId`,
-        'names an execution target that is not registered on this board',
-        'Antonina board dispatch record names an unregistered execution target'));
-    }
-    if (dispatchedIssues.has(dispatch.issueNumber)) {
-      throw new BoardIncompatibilityError(corruptDefect(
-        `board.dispatches`, `index ${index}.issueNumber`,
-        'dispatches an issue another dispatch record already dispatches',
-        'Antonina board contains duplicate dispatch records for one issue'));
-    }
-    dispatchedIssues.add(dispatch.issueNumber);
-  }
-
   return {
     ...board,
     resources: [...board.resources].sort((left, right) =>
       left.host.localeCompare(right.host) || left.path.localeCompare(right.path)),
-    targets: [...board.targets].sort((left, right) => compareIds(left.id, right.id)),
-    dispatches: [...board.dispatches].sort((left, right) => left.issueNumber - right.issueNumber),
   };
 }
 
@@ -1717,251 +1004,10 @@ export function resourceViews(board: Board, host?: string, issueNumber?: number)
       const isProtected = dependencies.some((dependency) => dependency.state === 'open');
       return {
         host: resource.host,
-        targetId: targetIdForHost(board, resource.host),
         path: resource.path,
         issues: dependencies,
         protected: isProtected,
         collectible: !isProtected,
       };
     });
-}
-
-/**
- * The catalogued target whose address is this host, or `null` when the board
- * has catalogued no such host. It is `null` rather than an invented identity
- * because a resource on a host Antonina has no target for is a real state: the
- * resource registry is not required to be a subset of the execution catalog.
- */
-export function targetIdForHost(board: Board, host: string): string | null {
-  return board.targets.find((target) => target.address === host)?.id ?? null;
-}
-
-/**
- * The catalogued targets joined with the resources and dispatches that name
- * them.
- *
- * The parameter is the narrow projection of a board this actually needs — the
- * target catalog, the resource registry, and the dispatch list — rather than a
- * whole `Board`, because the reading web client holds is a materialized
- * summary carrying exactly those three, and a whole-board read to render the
- * target tab would contradict "a client reads only the objects it needs".
- */
-export function targetViews(
-  board: Pick<Board, 'resources' | 'targets' | 'dispatches'>,
-): TargetView[] {
-  return board.targets.map((target) => ({
-    ...target,
-    capabilities: [...target.capabilities],
-    resources: board.resources.filter((resource) => resource.host === target.address),
-    dispatchedIssues: board.dispatches
-      .filter((dispatch) => dispatch.targetId === target.id)
-      .map((dispatch) => dispatch.issueNumber)
-      .sort((left, right) => left - right),
-  }));
-}
-
-export interface TargetRequirements {
-  /** The backend a job needs, or `null` when it does not care. */
-  backend: ExecutionTargetBackend | null;
-  /** The kind of environment a job needs, or `null` when it does not care. */
-  kind: ExecutionTargetKind | null;
-  /** Every one of these capabilities must be present, not merely one. */
-  capabilities: ExecutionTargetCapability[];
-}
-
-export interface TargetRequest {
-  /** The target a job explicitly asked for, or `null` to have one selected. */
-  targetId?: string | null;
-  backend?: ExecutionTargetBackend | null;
-  kind?: ExecutionTargetKind | null;
-  capabilities?: readonly ExecutionTargetCapability[];
-}
-
-/**
- * Why one candidate is not selectable. Each miss names the requirement it
- * fails, so a caller can read the reason off the selection instead of
- * re-deriving it by comparing capabilities itself.
- */
-export type TargetRequirementMiss =
-  | 'unavailable'
-  | `backend=${ExecutionTargetBackend}`
-  | `kind=${ExecutionTargetKind}`
-  | `capability=${ExecutionTargetCapability}`;
-
-export interface TargetConsideration {
-  targetId: string;
-  backend: ExecutionTargetBackend;
-  kind: ExecutionTargetKind;
-  status: ExecutionTargetStatus;
-  eligible: boolean;
-  unmet: TargetRequirementMiss[];
-  /** Capabilities the target has that the requirements never asked for. */
-  surplus: ExecutionTargetCapability[];
-}
-
-export type TargetSelectionOutcome =
-  | 'selected'
-  | 'unknown-target'
-  | 'unavailable-target'
-  | 'ineligible-target'
-  | 'no-eligible-target';
-
-export interface TargetSelection {
-  outcome: TargetSelectionOutcome;
-  target: BoardExecutionTarget | null;
-  requestedTargetId: string | null;
-  requirements: TargetRequirements;
-  /**
-   * Every registered target, in ascending target-id order, with the reason it
-   * was or was not selectable. The order is the tie-break order below.
-   */
-  considered: TargetConsideration[];
-  /** The rule that decided this outcome, named so it can be checked. */
-  rule: 'requested-target' | 'least-surplus-capabilities' | 'no-rule-applies';
-  rationale: string;
-}
-
-export function canonicalTargetRequirements(request: TargetRequest = {}): TargetRequirements {
-  // A request is not a persisted record, so an unordered capability list is
-  // canonicalized here instead of refused: two callers who named the same
-  // capabilities are making the same request however they ordered them. A
-  // repeated capability is still a defect in what was asked for.
-  const named = request.capabilities ?? [];
-  const capabilities = named.map(parseExecutionTargetCapability);
-  if (new Set(capabilities).size !== capabilities.length) {
-    throw new Error('Requested execution target capabilities contain duplicates');
-  }
-  return {
-    backend: request.backend ?? null,
-    kind: request.kind ?? null,
-    capabilities: [...capabilities].sort(),
-  };
-}
-
-function requirementMisses(target: BoardExecutionTarget, requirements: TargetRequirements): TargetRequirementMiss[] {
-  const misses: TargetRequirementMiss[] = [];
-  if (target.status !== 'available') misses.push('unavailable');
-  if (requirements.backend !== null && target.backend !== requirements.backend) {
-    misses.push(`backend=${requirements.backend}`);
-  }
-  if (requirements.kind !== null && target.kind !== requirements.kind) {
-    misses.push(`kind=${requirements.kind}`);
-  }
-  for (const capability of requirements.capabilities) {
-    if (!target.capabilities.includes(capability)) misses.push(`capability=${capability}`);
-  }
-  return misses;
-}
-
-function describeMisses(misses: readonly TargetRequirementMiss[]): string {
-  return misses.join(', ');
-}
-
-/**
- * Selects the target a job runs on, or explains why none was selected.
- *
- * The decision is a pure function of the board and the request: candidates are
- * considered in ascending target-id order, an explicitly requested target is
- * taken as given or refused by name, and otherwise the eligible target with the
- * fewest undeclared capabilities wins, ties broken by the lower target id.
- * Nothing here consults the clock, the registry order, or a host's liveness, so
- * identical board state and an identical request always select the same target.
- */
-export function selectExecutionTarget(board: Board, request: TargetRequest = {}): TargetSelection {
-  const requirements = canonicalTargetRequirements(request);
-  const requestedTargetId = request.targetId ?? null;
-  const targets = [...board.targets].sort((left, right) => compareIds(left.id, right.id));
-  const considered: TargetConsideration[] = targets.map((target) => {
-    const unmet = requirementMisses(target, requirements);
-    return {
-      targetId: target.id,
-      backend: target.backend,
-      kind: target.kind,
-      status: target.status,
-      eligible: unmet.length === 0,
-      unmet,
-      surplus: target.capabilities.filter((capability) => !requirements.capabilities.includes(capability)),
-    };
-  });
-
-  const finish = (
-    outcome: TargetSelectionOutcome,
-    target: BoardExecutionTarget | null,
-    rule: TargetSelection['rule'],
-    rationale: string,
-  ): TargetSelection => ({ outcome, target, requestedTargetId, requirements, considered, rule, rationale });
-
-  if (requestedTargetId !== null) {
-    const target = targets.find((candidate) => candidate.id === requestedTargetId);
-    if (!target) {
-      return finish(
-        'unknown-target',
-        null,
-        'requested-target',
-        `requested target ${requestedTargetId} is not registered; ${targets.length} target(s) are registered`,
-      );
-    }
-    const consideration = considered.find((entry) => entry.targetId === requestedTargetId)!;
-    if (consideration.unmet.includes('unavailable')) {
-      return finish(
-        'unavailable-target',
-        null,
-        'requested-target',
-        `requested target ${requestedTargetId} is registered but unavailable`,
-      );
-    }
-    if (consideration.unmet.length > 0) {
-      return finish(
-        'ineligible-target',
-        null,
-        'requested-target',
-        `requested target ${requestedTargetId} does not meet the declared requirements: `
-          + describeMisses(consideration.unmet),
-      );
-    }
-    return finish(
-      'selected',
-      target,
-      'requested-target',
-      `requested target ${requestedTargetId} is registered, available, and meets the declared requirements`,
-    );
-  }
-
-  const eligible = targets
-    .map((target) => considered.find((entry) => entry.targetId === target.id)!)
-    .filter((entry) => entry.eligible);
-  if (eligible.length === 0) {
-    if (targets.length === 0) {
-      return finish(
-        'no-eligible-target',
-        null,
-        'no-rule-applies',
-        'no execution targets are registered',
-      );
-    }
-    const closest = considered.reduce((best, entry) =>
-      (entry.unmet.length < best.unmet.length ? entry : best));
-    return finish(
-      'no-eligible-target',
-      null,
-      'no-rule-applies',
-      `no registered available target meets the declared requirements; closest was ${closest.targetId}, `
-        + `missing ${describeMisses(closest.unmet)}`,
-    );
-  }
-
-  const chosen = eligible.reduce((best, entry) =>
-    (entry.surplus.length < best.surplus.length
-      || (entry.surplus.length === best.surplus.length && compareIds(entry.targetId, best.targetId) < 0)
-      ? entry
-      : best));
-  const target = targets.find((candidate) => candidate.id === chosen.targetId)!;
-  return finish(
-    'selected',
-    target,
-    'least-surplus-capabilities',
-    `target ${chosen.targetId} declares the fewest capabilities the request did not ask for `
-      + `(${chosen.surplus.length} of ${chosen.surplus.length + requirements.capabilities.length}) `
-      + `among ${eligible.length} eligible target(s); ties break on the lower target id`,
-  );
 }

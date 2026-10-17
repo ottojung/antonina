@@ -316,8 +316,6 @@ function overview(): BoardOverview {
     queue: board.filter((each) => each.state === 'open').map((each) => each.number),
     issues: board.map(boardIssueOfSummary),
     resources: [],
-    targets: [],
-    dispatches: [],
   };
 }
 
@@ -546,7 +544,7 @@ describe('the store mints the field the web order consumes', () => {
       body: 'newest comment on the whole board, on the lowest-numbered issue',
       createdAt: COMMENTED,
     });
-    return { schemaVersion: 3 as const, nextIssueNumber: 4, issues, resources: [], targets: [], dispatches: [] };
+    return { schemaVersion: 4 as const, nextIssueNumber: 4, issues, resources: [] };
   }
 
   it('reads back a minted activity time and orders by it, and depends on it', async () => {

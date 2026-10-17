@@ -109,9 +109,8 @@ export function startDaemon(options: DaemonServiceOptions): DaemonHandle {
     nowMs: now(),
     fs,
   });
-  // The canonical address of a host Antonina knows by name: the same `lubko://`
-  // spelling the target catalog uses, so a report and a target relate by
-  // address rather than by a second invented identifier.
+  // The canonical address of a host Antonina knows by name: the `lubko://`
+  // spelling keeps a host report addressable by a single identifier.
   const address = options.config.address ?? 'lubko://' + identity.hostId;
   const pid = options.pid ?? process.pid;
   const startTicks = options.startTicks !== undefined

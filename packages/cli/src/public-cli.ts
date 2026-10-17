@@ -383,7 +383,7 @@ const SPECS: Readonly<Record<PublicNamespace, readonly CommandSpec[]>> = {
 
 const GROUPS: Readonly<Record<PublicNamespace, readonly string[]>> = {
   agent: [],
-  board: ['credential', 'queue', 'resource', 'target', 'dispatch', 'collect'],
+  board: ['credential', 'queue', 'resource', 'collect'],
   daemon: [],
 };
 

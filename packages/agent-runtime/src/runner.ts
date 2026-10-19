@@ -58,6 +58,59 @@ import {
 
 const CONTROL_POLL_MS = 200;
 const CONTROL_GRACE_MS = 10_000;
+const RETRY_CLEANUP_MAX_MS = 2_000;
+const RETRY_CLEANUP_POLL_MS = 100;
+const RETRY_CONTROL_POLL_MS = 200;
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Reap verified descendants of the previous invocation before replaying work.
+ * The leader was already reaped by childResult. Descendants may have moved to
+ * new process groups; both inherited invocation markers are required.
+ * An inaccessible or unkillable process must not permanently prevent recovery.
+ */
+async function settlePreviousInvocation(agentId: string, invocationId: string): Promise<void> {
+  const deadline = Date.now() + RETRY_CLEANUP_MAX_MS;
+  while (true) {
+    const matched = signalMarkedInvocationProcesses(agentId, invocationId, 'SIGKILL');
+    if (matched === 0 || Date.now() >= deadline) return;
+    await sleep(RETRY_CLEANUP_POLL_MS);
+  }
+}
+
+/** Observe operator control during backoff instead of re-launching a stopped agent. */
+async function waitForRecovery(
+  agentId: string, delayMs: number, options: RunnerOptions,
+): Promise<'retry' | 'stop' | 'steer'> {
+  const deadline = Date.now() + Math.max(0, delayMs);
+  while (true) {
+    const meta = readMeta(agentId, options);
+    if (meta === null || meta.state !== 'running') return 'stop';
+    const intent = persistedControlField(meta, 'intent');
+    if (intent.malformed || intent.value === 'stop' || intent.value === 'kill') {
+      await updateMeta(agentId, (current) => {
+        if (current.state !== 'running') return;
+        const latest = persistedControlField(current, 'intent');
+        if (latest.value !== 'stop' && latest.value !== 'kill') return;
+        current.stop_reason = latest.value;
+        finalizeTerminal(current, latest.value === 'kill' ? 'killed' : 'stopped', Date.now() / 1000, null, null);
+        setActiveRunner(current, false);
+      }, options);
+      return 'stop';
+    }
+    if (intent.value === 'steer') {
+      await updateMeta(agentId, (current) => {
+        if (current.state !== 'running') return;
+        if (persistedControlField(current, 'intent').value !== 'steer') return;
+        current.intent = null;
+        current.stop_reason = 'steer';
+      }, options);
+      return 'steer';
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return 'retry';
+    await sleep(Math.min(remaining, RETRY_CONTROL_POLL_MS));
+  }
+}
 
 /**
  * The one identity the launcher hands the runner it spawns, beside the argv it
@@ -732,6 +785,7 @@ async function runInvocation(
   }
 
   let attempt = 0;
+  let retryAsContinue = isContinue;
   while (true) {
     // Inside the loop, not above it: a retry is a launch too, so every spawn
     // this invocation can perform is decided by the same gate against the
@@ -881,16 +935,37 @@ async function runInvocation(
 
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);
-    const backendError = classifyBackendFailure(logFile, invocationLogStart, code, isContinue);
+    const backendError = classifyBackendFailure(logFile, invocationLogStart, code, retryAsContinue);
     const retryDelay = options.retryDelayMs !== undefined
       ? options.retryDelayMs(attempt)
       : backendRetryDelay(backendError, attempt);
-    if (retryDelay !== null) {
+    if (retryDelay !== null && result.signal === null && !result.operatorSignalled) {
+      // If a failed fresh invocation created a session, resume that session.
+      // If not, at-least-once replay of the original request is acceptable.
+      if (!retryAsContinue && backendError?.classification === 'upstream_endpoint_unavailable') {
+        await rememberFreshSession(agentId, options);
+        const latest = readMeta(agentId, options);
+        if (latest !== null && persistedNativeSessionId(latest) !== null) {
+          const resumed = buildAgentCommand(
+            latest, prompt, true, { ...options.env, ...opencodeBackendEnv(latest, options) },
+          );
+          if (resumed !== null) {
+            command = resumed;
+            retryAsContinue = true;
+          }
+        }
+      }
+      await settlePreviousInvocation(agentId, invocationId);
       await updateMeta(agentId, (current) => {
+        if (current.state !== 'running') return;
         current.backend_error = backendError;
+        current.error = 'recovering from ' + (backendError?.classification ?? 'backend failure')
+          + '; retry ' + (attempt + 1);
         current.last_activity_at = Date.now() / 1000;
       }, options);
-      await new Promise((resolve) => setTimeout(resolve, retryDelay));
+      const next = await waitForRecovery(agentId, retryDelay, options);
+      if (next === 'stop') return false;
+      if (next === 'steer') return true;
       attempt += 1;
       continue;
     }
@@ -898,11 +973,16 @@ async function runInvocation(
     // A fresh OpenCode invocation may create its session before a steer/stop
     // interrupts it. Preserve that session whenever it can be discovered so
     // queued steering continues the same native conversation.
-    if (!isContinue) await rememberFreshSession(agentId, options);
+    if (!retryAsContinue) await rememberFreshSession(agentId, options);
     // Only read for a note: a successful exit and a signalled death both ignore
     // it, so the file is not read on the paths where nothing is written.
     const tailExcerpt = code !== 0 && result.signal === null ? lastLogLineExcerpt(logFile, invocationLogStart) : null;
-    await finalizeInvocation(agentId, result, backendError, options, oom, isContinue, tailExcerpt);
+    await finalizeInvocation(agentId, result, backendError, options, oom, retryAsContinue, tailExcerpt);
+    if (code === 0 && attempt > 0) {
+      await updateMeta(agentId, (current) => {
+        if (typeof current.error === 'string' && current.error.startsWith('recovering from ')) current.error = null;
+      }, options);
+    }
     return true;
   }
 }

@@ -195,13 +195,13 @@ interface BackendFailureRule {
 const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
   // An OpenCode Go request may fail temporarily even after the previous
   // turn has performed tool actions. Classify the outage for operators and
-  // the scheduler, but NEVER replay the same turn automatically.
+  // the scheduler, and the operator explicitly accepts at-least-once tool effects on recovery.
   {
     marker: 'Endpoint is unavailable',
     classification: 'upstream_endpoint_unavailable',
     provider: 'opencode-go',
     transient: true,
-    automaticRetrySafe: false,
+    automaticRetrySafe: true,
   },
   // The OpenCode Go Step 5 free tier can reject requests across many sessions
   // simultaneously. Name the provider throttle instead of reporting an
@@ -575,6 +575,13 @@ export function classifyBackendFailure(
 }
 
 export function backendRetryDelay(error: BackendError | null, attempt: number): number | null {
+  // Endpoint outages are recoverable even if earlier tool calls may replay.
+  // Retry without an attempt cap; cap the delay to prevent excessive latency.
+  if (error?.classification === 'upstream_endpoint_unavailable'
+      && error.transient === true && error.automatic_retry_safe === true
+      && Number.isSafeInteger(attempt) && attempt >= 0) {
+    return Math.min(30_000, BACKEND_RETRY_BASE_MS * (2 ** Math.min(attempt, 6)));
+  }
   if (
     error === null
     || !Number.isSafeInteger(attempt)

@@ -19,7 +19,7 @@ test('LongCat 2.5 Preview provider throttle is recognized without unsafe automat
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test('temporary endpoint outage is diagnosed without replaying partial work', () => {
+test('temporary endpoint outage is automatically recoverable even after partial work', () => {
   const d = mkdtempSync(join(tmpdir(), 'antonina-endpoint-'));
   try {
     const path = join(d, 'output.log');
@@ -35,7 +35,9 @@ test('temporary endpoint outage is diagnosed without replaying partial work', ()
     assert.equal(classified?.model, 'opencode-go/longcat-2.5-preview-free');
     assert.equal(classified?.request_boundary, 'continuation');
     assert.equal(classified?.transient, true);
-    assert.equal(classified?.automatic_retry_safe, false);
-    assert.equal(backendRetryDelay(classified, 0), null);
+    assert.equal(classified?.automatic_retry_safe, true);
+    assert.equal(backendRetryDelay(classified, 0), 500);
+    assert.equal(backendRetryDelay(classified, 1), 1000);
+    assert.equal(backendRetryDelay(classified, 100), 30_000);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

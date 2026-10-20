@@ -35,7 +35,7 @@ Use `CURRENT_SNAPSHOT` for the open issue list and live-agent identities; refres
 
 ```sh
 antonina-scheduler-issue --issue NUMBER
-antonina board show --id NUMBER --page 1 --json
+antonina board show --id ISSUE_ID --page 1 --json
 ```
 
 For a distinct topologically ready packet, invoke:

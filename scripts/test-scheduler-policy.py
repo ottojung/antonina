@@ -156,6 +156,7 @@ class SchedulerPolicyTests(unittest.TestCase):
         self.assertEqual(parse("[Supernatural] #223: Prologue design"), 223)
         self.assertEqual(parse("QAI #82: migration"), 82)
         self.assertEqual(parse("#211: proof"), 211)
+        self.assertEqual(parse("AssemblyP1 #7Ka9mQ2xP4vT8nB3cR5dH1-otter: work"), "7Ka9mQ2xP4vT8nB3cR5dH1-otter")
         self.assertIsNone(parse("AssemblyP1 freeform"))
 
     def test_scheduler_does_not_discover_filesystem_state(self):
@@ -239,7 +240,7 @@ class SchedulerPolicyTests(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stdout="{}", stderr="")
         with patch.object(launcher,"require_open_issue",return_value=record), \
              patch.object(launcher,"running_owners",return_value=[]), \
-             patch.object(launcher,"new_agent",return_value=types.SimpleNamespace(returncode=0,stdout="{}",stderr="")), \
+             patch.object(launcher,"new_agent",return_value=types.SimpleNamespace(returncode=0,stdout='{"id":"7Ka9mQ2xP4vT8nB3cR5dH1-otter"}',stderr="")), \
              patch.object(launcher,"run",side_effect=fake_run), \
              patch("sys.argv",["launcher","--issue","223","--title","Supernatural #223",
                                "--summary","design","--prompt","Write design","--json"]):
@@ -264,7 +265,7 @@ class SchedulerPolicyTests(unittest.TestCase):
             return types.SimpleNamespace(returncode=0,stdout="{}",stderr="")
         with patch.object(launcher,"require_open_issue",side_effect=open_then_close), \
              patch.object(launcher,"running_owners",return_value=[]), \
-             patch.object(launcher,"new_agent",return_value=types.SimpleNamespace(returncode=0,stdout="{}",stderr="")), \
+             patch.object(launcher,"new_agent",return_value=types.SimpleNamespace(returncode=0,stdout='{"id":"7Ka9mQ2xP4vT8nB3cR5dH1-otter"}',stderr="")), \
              patch.object(launcher,"run",side_effect=fake_run), \
              patch("sys.argv",["launcher","--issue","223","--title","Supernatural #223",
                                "--summary","design","--prompt","Write design"]):

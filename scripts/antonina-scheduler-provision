@@ -96,7 +96,7 @@ def provision(number, dry_run=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--issue", type=int, required=True)
+    parser.add_argument("--issue", required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true")
     a = parser.parse_args()

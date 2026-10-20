@@ -52,13 +52,15 @@ def recent_terminal_agents():
 
 def issue_number_from_agent_title(title):
     text = (title or "").strip()
-    # Every project, including newly onboarded projects, may use "Name #N".
-    match = re.search(r"(?:^|\s)#(\d+)\b", text)
-    if match:
-        return int(match.group(1))
-    # Preserve legacy numeric prefixes on older managed sessions.
-    match = re.match(r"^#?(\d+)\b", text)
-    return int(match.group(1)) if match else None
+    # Both legacy numeric issue numbers and modern opaque word IDs.
+    pattern = r"([0-9A-Za-z]{22}-[a-z]+|[0-9]+)"
+    match = re.search(r"(?:^|\s)#" + pattern + r"(?![\w-])", text)
+    if not match:
+        match = re.match(r"^#?" + pattern + r"(?![\w-])", text)
+    if not match:
+        return None
+    value = match.group(1)
+    return int(value) if value.isdigit() else value
 
 def open_issues():
     result = []
@@ -117,7 +119,7 @@ context = {
     "live_agents": agents,
     "orphan_agents": orphan_agents,
     "open_issue_count": len(issue_headers),
-    "live_issue_numbers": sorted(live_issue_numbers),
+    "live_issue_numbers": sorted(live_issue_numbers, key=str),
 }
 context["open_issues"] = issue_headers
 context["recent_terminal_agents"] = compact_terminal_hints(terminal_hints, open_numbers)

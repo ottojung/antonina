@@ -30,8 +30,8 @@ The Antonina board owns priorities, issue status, comments and dependencies. Liv
 ## Fast delegation cycle
 
 1. Read `CURRENT_SNAPSHOT` of the full priority-ordered open-issue list and live agent ownership. When stale, refresh with the Antonina board and `agent list` APIs, not filesystem or repository inspection.
-2. Read the selected candidate through `antonina-scheduler-issue --issue N` or `antonina board show --id N --page 1 --json`. Derive the task graph and determine which independent fronts have positive marginal speedup.
-3. Delegate the WHOLE useful independent frontier in this same pass, not just one agent. Delegate directly: `antonina-scheduler-launch --issue N --title 'Project #N: task' --summary SUMMARY --prompt PROMPT --json`. **Do not pass a cwd** and do not call `antonina-scheduler-worktrees` or `antonina-scheduler-provision`. The launch helper owns all runtime mechanics; the agent owns repository/filesystem setup. There is no workspace-preparation phase.
+2. Read the selected candidate through `antonina-scheduler-issue --issue ISSUE_ID` or `antonina board show --id ISSUE_ID --page 1 --json`. Derive the task graph and determine which independent fronts have positive marginal speedup.
+3. Delegate the WHOLE useful independent frontier in this same pass, not just one agent. Delegate directly: `antonina-scheduler-launch --issue ISSUE_ID --title 'Project #ISSUE_ID: task' --summary SUMMARY --prompt PROMPT --json`. **Do not pass a cwd** and do not call `antonina-scheduler-worktrees` or `antonina-scheduler-provision`. The launch helper owns all runtime mechanics; the agent owns repository/filesystem setup. There is no workspace-preparation phase.
 4. Record the agent ID and actionable board state. Do not invent paths or resource reservations. Avoid launching duplicate work on the same logical front.
 5. Continue dispatching in this same pass until ALL remaining fronts have actual topological reasons to wait; the supervised turn runner may split these decisions into repeated bounded invocations. Never stop merely because N agents are already active.
 
@@ -62,7 +62,7 @@ An agent's succeeded process state means only that the runner exited successfull
 The snapshot deliberately marks terminal delivery as unverified and supplies
 unverified_terminal_issues. **Never use matching terminal issue numbers as a
 completed-work set.** For each open issue without a live owner, consult
-antonina-scheduler-issue --issue N: its newest_messages contain the newest
+antonina-scheduler-issue --issue ISSUE_ID: its newest_messages contain the newest
 substantive comments across paginated history (routine scheduler launch chatter
 is separated), including human decisions and worker handoffs.
 

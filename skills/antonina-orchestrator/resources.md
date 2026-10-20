@@ -73,16 +73,16 @@ Deletion additionally requires managed collection roots, configured as a `:`-sep
 For example, hand off `/workspace/project-worktree` from Antonina board issue `412` to open follow-up issue `419`:
 
 ```sh
-antonina board resource list --issue 412 --page 1
-antonina board resource add --issue 419 --host lubko://example-host --path /workspace/project-worktree
-antonina board resource list --issue 419 --page 1
-antonina board resource remove --issue 412 --host lubko://example-host --path /workspace/project-worktree
+antonina board resource list --issue 8Kq6Mz3vR7nL2pC4hF9aBw-lion --page 1
+antonina board resource add --issue 7Xb4Qm8Np2Tw5Fa9Dr6KcL-otter --host lubko://example-host --path /workspace/project-worktree
+antonina board resource list --issue 7Xb4Qm8Np2Tw5Fa9Dr6KcL-otter --page 1
+antonina board resource remove --issue 8Kq6Mz3vR7nL2pC4hF9aBw-lion --host lubko://example-host --path /workspace/project-worktree
 ```
 
 Unregister a path when no issue needs it:
 
 ```sh
-antonina board resource remove --issue 419 --host lubko://example-host --path /workspace/project-worktree
+antonina board resource remove --issue 7Xb4Qm8Np2Tw5Fa9Dr6KcL-otter --host lubko://example-host --path /workspace/project-worktree
 ```
 
 Host values are `lubko://<server>` with no trailing slash; paths are canonical absolute POSIX paths.

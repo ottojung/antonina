@@ -8,6 +8,22 @@ Git and the package manifests at build time, and `web/build-identity-plugin.ts`,
 which writes it into the web bundle. Nothing in this repository declares a
 version-and-commit pair by hand.
 
+## Current operational verification (issue #320, observed 2026-10-20)
+
+At the successful issue-320 deployment, `main`, both installed CLIs, and the public board reported commit `db67f89ffbca967235be45039152f762e7d46394` (CLI 0.1.2, web 0.1.0). **These are dated observations, not permanently pinned current-version values**: always query each host and `https://vau.place/a/antonina/version.json` when deploying or troubleshooting.
+
+One actual deployment trap was found on `marceline-dev`: the older executable `~/.openclaw/tools/node-v24.21.0/bin/antonina` was earlier on one shell's `PATH` than the newly installed `~/.local/bin/antonina`. Thus a successful install and a correct `~/.local/bin/antonina --version` did **not** guarantee that a bare `antonina` invoked the new build. Before calling a deployment healthy, run:
+
+```sh
+command -v antonina                     # reveals the winning PATH entry
+antonina --version                      # what commands will actually execute
+"$HOME/.local/bin/antonina" --version   # intended host-local installation
+# In Bash, type -a antonina lists every matching executable on PATH.
+```
+
+If these resolve to different commits, make the intended bin directory take precedence in the process supervisor's environment or retire the stale installation; **do not** mark the host verified based solely on `npm install`. The scheduler uses an explicit `~/.local/bin/antonina` path, so also run `scripts/antonina-scheduler-deploy --check` from the matching clean source checkout. Never change or discard unrelated dirty developer worktrees to fix PATH precedence.
+
+
 ## Identifying what is running
 
 ### The CLI
@@ -17,7 +33,7 @@ antonina --version          # or -V
 antonina --version --json   # same identity, machine-readable
 ```
 
-Output is four fields and the process exits 0:
+The following is an **older recorded example**, not the current executable's output. `--version` exits 0 and reports the checked-out package's actual identity:
 
 ```
 antonina 0.1.2 (079a5cc91776)
@@ -122,12 +138,12 @@ ANTONINA_BUILD_COMMIT="$(git rev-parse HEAD)" npm run build
 Two deployments, two procedures. In both, the target is chosen by **commit**,
 never by version string: a version can be re-tagged, a commit cannot.
 
-### The previous known-good targets at this revision
+### Historical rollback example for issue #76 (not the current deployment)
 
 Named here because the point of the issue is that this should not have to be
 reconstructed during an incident:
 
-| Surface | Current | Previous known-good | Anchor |
+| Surface | Current *at issue #76* | Previous known-good *at issue #76* | Anchor |
 | --- | --- | --- | --- |
 | CLI | `0.1.2` at `079a5cc` | `0.1.1` at `65caa73` | tag `v0.1.1` |
 | CLI (further back) | | `0.1.0` at `6a7c832` | tag `v0.1.0` |
@@ -170,6 +186,8 @@ Verify, and only then consider the rollback done:
 /path/to/antonina-install/node_modules/.bin/antonina --version
 # must print version 0.1.1 and commit 65caa735bbf00fab3acf092784d93e86fcc45280
 ```
+
+In addition to verifying the chosen commit, run the **PATH-resolution check above** after any CLI install or rollback. A shadowing executable can make a correct reinstall appear to have failed, or can silently keep an old version running.
 
 Two things this procedure depends on, stated plainly because they are what make
 it fail:

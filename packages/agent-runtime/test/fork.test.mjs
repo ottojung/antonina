@@ -1,4 +1,5 @@
-// Board issue 126: `antonina agent new --id <NEW> --fork <OLD>`.
+// Board issue 126 added forks; current syntax is `antonina agent new --fork <SOURCE_ID>`.
+// The clone receives a newly generated opaque ID.
 //
 // The contract this file pins, in the order the tests pin it:
 //

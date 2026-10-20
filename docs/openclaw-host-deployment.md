@@ -1,6 +1,8 @@
 # OpenClaw deployment on Antonina hosts
 
 This document records the first OpenClaw deployment experiment on `marceline-dev`.
+
+**Current deployment procedure:** use `docs/scheduler-deployment.md` and the checked-in `scripts/antonina-scheduler-deploy`. The installation observations in this experiment are historical, not instructions for deploying current Antonina. Follow `docs/intent-records/identifiers.md` for opaque board and agent IDs.
 It is intentionally an implementation log and reproducibility sketch rather than the
 final host-provisioning contract.
 

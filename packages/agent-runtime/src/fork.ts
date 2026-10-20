@@ -1,5 +1,6 @@
 /**
- * Board issue 126: `antonina agent new --id <NEW> --fork <OLD>`.
+ * Board issue 126 introduced forks; the current syntax is `antonina agent new --fork <SOURCE_ID>`.
+ * The clone receives a newly generated opaque ID, printed on stdout (or in `--json`).
  *
  * What a managed agent's durable state actually IS, as this package owns it:
  * exactly one canonical JSON record at `<state>/antonina/agents/<id>/meta.json`,

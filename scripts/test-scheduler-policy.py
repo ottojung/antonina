@@ -146,18 +146,58 @@ class SchedulerPolicyTests(unittest.TestCase):
         self.assertNotIn("marceline-dev", turn)
         self.assertNotIn("phoebe-dev", turn)
 
-    def test_generic_issue_number_parsing(self):
-        fn = snapshot_function("issue_number_from_agent_title")
+    def test_opaque_issue_id_parsing_from_agent_titles(self):
+        fn = snapshot_function("issue_id_from_agent_title")
         scope = {"re": re}
         exec(compile(ast.Module(body=[fn], type_ignores=[]), "<snapshot>", "exec"), scope)
         parse = scope[fn.name]
-        self.assertEqual(parse("AssemblyP1 #94: old research"), 94)
-        self.assertEqual(parse("Supernatural #223: Prologue design"), 223)
-        self.assertEqual(parse("[Supernatural] #223: Prologue design"), 223)
-        self.assertEqual(parse("QAI #82: migration"), 82)
-        self.assertEqual(parse("#211: proof"), 211)
+        self.assertEqual(parse("AssemblyP1 #94: old research"), "94")
+        self.assertEqual(parse("Supernatural #223: Prologue design"), "223")
+        self.assertEqual(parse("[Supernatural] #223: Prologue design"), "223")
+        self.assertEqual(parse("QAI #82: migration"), "82")
+        self.assertEqual(parse("#211: proof"), "211")
         self.assertEqual(parse("AssemblyP1 #7Ka9mQ2xP4vT8nB3cR5dH1-otter: work"), "7Ka9mQ2xP4vT8nB3cR5dH1-otter")
+        self.assertEqual(parse("AssemblyP1 #arbitrary-ID_7: work"), "arbitrary-ID_7")
+        self.assertEqual(parse("AssemblyP1 #A/B: work"), "A/B")
         self.assertIsNone(parse("AssemblyP1 freeform"))
+
+    def test_helpers_never_inspect_issue_id_shapes(self):
+        import io
+        from contextlib import redirect_stdout
+
+        issue_reader = load_helper("antonina-scheduler-issue")
+        worktrees = load_helper("antonina-scheduler-worktrees")
+        ids = ("320", "7Ka9mQ2xP4vT8nB3cR5dH1-otter", "arbitrary_ID.v2")
+        for issue_id in ids:
+            with self.subTest(issue_id=issue_id):
+                out = io.StringIO()
+                with patch.object(issue_reader, "read_issue", return_value={"number": issue_id}) as read, \
+                     patch("sys.argv", ["issue-reader", "--issue", issue_id]), \
+                     redirect_stdout(out):
+                    issue_reader.main()
+                read.assert_called_once_with(issue_id)
+                self.assertEqual(json.loads(out.getvalue())["number"], issue_id)
+
+                out = io.StringIO()
+                with patch.object(worktrees, "running_agents", return_value=[]), \
+                     patch.object(worktrees, "resources", return_value=[]) as read, \
+                     patch("sys.argv", ["worktrees", "--issue", issue_id]), \
+                     redirect_stdout(out):
+                    worktrees.main()
+                read.assert_called_once_with(issue_id)
+                self.assertEqual(json.loads(out.getvalue()), [])
+
+        for invalid_id in ("", " ", " 320 "):
+            with self.subTest(invalid_id=invalid_id):
+                for helper in (issue_reader, worktrees):
+                    with patch("sys.argv", ["helper", "--issue", invalid_id]):
+                        with self.assertRaises(SystemExit):
+                            helper.main()
+
+    def test_scheduler_deployer_checks_orchestrator_resource_companion(self):
+        deploy = (ROOT / "antonina-scheduler-deploy").read_text()
+        self.assertIn('skills/antonina-orchestrator/resources.md', deploy)
+        self.assertIn('verify_file "$resource_source" "$resource_target"', deploy)
 
     def test_scheduler_does_not_discover_filesystem_state(self):
         turn = (ROOT / "antonina-orchestrator-turn").read_text()
@@ -315,7 +355,7 @@ class FullFrontierTests(unittest.TestCase):
 
     def test_terminal_hints_are_bounded_and_issue_keyed(self):
         snapshot = (ROOT / "antonina-scheduler-snapshot").read_text()
-        self.assertIn('context["recent_terminal_agents"] = compact_terminal_hints(terminal_hints, open_numbers)', snapshot)
+        self.assertIn('context["recent_terminal_agents"] = compact_terminal_hints(terminal_hints, open_ids)', snapshot)
         func = next(x for x in ast.parse(snapshot).body
                     if isinstance(x, ast.FunctionDef) and x.name == "recent_terminal_agents")
         def fake_cli(*args):
@@ -327,16 +367,16 @@ class FullFrontierTests(unittest.TestCase):
                  "title": "AssemblyP1 #211: proof", "finished_at": 90},
             ], "unreadable": []}
         scope = {"cli_json": fake_cli, "subprocess": __import__("subprocess"),
-                 "issue_number_from_agent_title": lambda title:
-                    int(re.search(r"#(\d+)", title).group(1)) if re.search(r"#(\d+)", title) else None}
+                 "issue_id_from_agent_title": lambda title:
+                    re.search(r"#(\d+)", title).group(1) if re.search(r"#(\d+)", title) else None}
         exec(compile(ast.Module(body=[func], type_ignores=[]),
                      "<terminals>", "exec"), scope)
         result=scope["recent_terminal_agents"]()
         self.assertFalse(result["incomplete"])
         self.assertEqual([(a["issue"], a["process_state"], a["delivery_state"])
                           for a in result["agents"]],
-                         [(225, "succeeded", "unverified"),
-                          (211, "failed", "unverified")])
+                         [("225", "succeeded", "unverified"),
+                          ("211", "failed", "unverified")])
 
     def test_terminal_success_does_not_certify_delivery(self):
         snapshot = (ROOT / "antonina-scheduler-snapshot").read_text()
@@ -356,12 +396,12 @@ class FullFrontierTests(unittest.TestCase):
         ns = {}
         exec(compile(ast.Module(body=[f], type_ignores=[]), "<compact>", "exec"), ns)
         hints = {"agents": [
-            {"issue": 225, "state": "succeeded", "id": "latest"},
-            {"issue": 900, "state": "succeeded", "id": "closed"},
-            {"issue": 225, "state": "failed", "id": "older"},
-            {"issue": 229, "state": "succeeded", "id": "maxwell"},
+            {"issue": "225", "state": "succeeded", "id": "latest"},
+            {"issue": "900", "state": "succeeded", "id": "closed"},
+            {"issue": "225", "state": "failed", "id": "older"},
+            {"issue": "229", "state": "succeeded", "id": "maxwell"},
         ], "incomplete": False}
-        result = ns["compact_terminal_hints"](hints, {225, 229})
+        result = ns["compact_terminal_hints"](hints, {"225", "229"})
         self.assertEqual([a["id"] for a in result["agents"]],
                          ["latest", "maxwell"])
         self.assertFalse(result["incomplete"])

@@ -1,4 +1,6 @@
-# Verification baseline
+# Verification baseline (historical, pinned to `65caa73`)
+
+**Not the current test count.** This is the reproducible regression baseline for the specific earlier commit recorded below. For the latest branch, run the full `npm test` chain and report its results against the actual checked-out head; do not promote the historical figures here into a current release status.
 
 This note is the objective baseline that the scheduled-work completion predicate
 ("repository verification passes on the exact resulting head") refers to. Changing a count in

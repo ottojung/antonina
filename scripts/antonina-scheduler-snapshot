@@ -37,7 +37,7 @@ def recent_terminal_agents():
             return {"agents": [], "incomplete": True}
         entries = []
         for a in data.get("agents", []):
-            issue = issue_number_from_agent_title(a.get("title"))
+            issue = issue_id_from_agent_title(a.get("title"))
             if issue is not None:
                 entries.append({
                     "issue": issue, "id": a.get("id"),
@@ -50,17 +50,12 @@ def recent_terminal_agents():
         return {"agents": [], "incomplete": True}
 
 
-def issue_number_from_agent_title(title):
+def issue_id_from_agent_title(title):
     text = (title or "").strip()
-    # Both legacy numeric issue numbers and modern opaque word IDs.
-    pattern = r"([0-9A-Za-z]{22}-[a-z]+|[0-9]+)"
-    match = re.search(r"(?:^|\s)#" + pattern + r"(?![\w-])", text)
-    if not match:
-        match = re.match(r"^#?" + pattern + r"(?![\w-])", text)
-    if not match:
-        return None
-    value = match.group(1)
-    return int(value) if value.isdigit() else value
+    # Titles contain a "#<issue ID>:" marker; the ID itself is opaque.
+    # The delimiter is syntax belonging to the title, not to the ID.
+    match = re.search(r"(?:^|\s)#([^\s:]+)(?=:|\s|$)", text)
+    return match.group(1) if match else None
 
 def open_issues():
     result = []
@@ -102,33 +97,33 @@ agents = [
     for a in running
 ]
 
-live_issue_numbers = {
-    issue_number
+live_issue_ids = {
+    issue_id
     for a in agents
-    for issue_number in [issue_number_from_agent_title(a.get("title"))]
-    if issue_number is not None
+    for issue_id in [issue_id_from_agent_title(a.get("title"))]
+    if issue_id is not None
 }
 
 # The board is already in its canonical priority order. Keep EVERY actionable
 # distinct issue in that order, without a six-per-project truncation.
 # Closed-issue agents are observable but cannot represent open issue ownership.
-open_numbers = {i["number"] for i in issue_headers}
-active_issue_agents = [a for a in agents if issue_number_from_agent_title(a.get("title")) in open_numbers]
-orphan_agents = [a for a in agents if issue_number_from_agent_title(a.get("title")) not in open_numbers]
+open_ids = {i["number"] for i in issue_headers}
+active_issue_agents = [a for a in agents if issue_id_from_agent_title(a.get("title")) in open_ids]
+orphan_agents = [a for a in agents if issue_id_from_agent_title(a.get("title")) not in open_ids]
 context = {
     "live_agents": agents,
     "orphan_agents": orphan_agents,
     "open_issue_count": len(issue_headers),
-    "live_issue_numbers": sorted(live_issue_numbers, key=str),
+    "live_issue_ids": sorted(live_issue_ids, key=str),
 }
 context["open_issues"] = issue_headers
-context["recent_terminal_agents"] = compact_terminal_hints(terminal_hints, open_numbers)
+context["recent_terminal_agents"] = compact_terminal_hints(terminal_hints, open_ids)
 # A zero-exit worker is NOT a completion certificate. Every unowned open
 # issue with a terminal process still requires a durable board handoff and
 # project-specific artifact/review/integration reconciliation.
 context["unverified_terminal_issues"] = [
     row["issue"] for row in context["recent_terminal_agents"]["agents"]
-    if row["issue"] not in live_issue_numbers
+    if row["issue"] not in live_issue_ids
 ]
 
 print(json.dumps(context, separators=(",", ":")))

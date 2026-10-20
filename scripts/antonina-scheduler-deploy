@@ -54,6 +54,15 @@ for name in "${skills[@]}"; do
     install_atomic "$source" "$target" 644
   fi
 done
+# The orchestrator skill links this companion file. Installing only SKILL.md
+# leaves deployed guidance stale even when --check reports success.
+resource_source="$root/skills/antonina-orchestrator/resources.md"
+resource_target="$skill_dir/antonina-orchestrator/resources.md"
+if [[ "$mode" == --check ]]; then
+  verify_file "$resource_source" "$resource_target"
+else
+  install_atomic "$resource_source" "$resource_target" 644
+fi
 # A running orchestrator is not allowed to have a deployment-specific
 # service entrypoint; it must use the same main-branch runner on every host.
 # Do not create a new orchestrator where none already exists.

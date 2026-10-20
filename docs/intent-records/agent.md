@@ -82,6 +82,8 @@ kind: requirement
 
 Agent IDs entering `antonina` at every input boundary are canonicalized to lowercase via the shared runtime ID normalizer. All subcommands of the public `agent` and `board` command surface that accept an agent ID use the `--id <ID>` option; no public command accepts the ID positionally. The sole positional form of an agent ID is the private `_runner` spawn seam, an internal managed-runner hand-off that is not a user command and is not reachable from the public command surface. The canonical form is stored, compared, and dispatched in lowercase. Mixed-case spellings such as `ABCD1234` and `abcd1234` identify the same agent.
 
+**Superseded by `$id-20261019-opaque-agent-identity` below.** This older requirement is retained solely as historical intent. Current ID consumers preserve case and never interpret the ID's shape.
+
 $id-6028741935162408
 title: Agent launch is not host-capacity policy
 date: 2026/09/27

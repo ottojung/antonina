@@ -29,8 +29,6 @@ import test from 'node:test';
 // delivered SIGKILL for two seconds. See the note at the bottom of this file.
 const CLI = resolve('packages/cli/dist/packages/cli/src/main.js');
 
-const AGENT_ID = '0c0de1';
-
 function harness(t) {
   const root = mkdtempSync(join(tmpdir(), 'antonina-delete-force-runner-'));
   // Both homes are test-owned: nothing here can read or write the operator's
@@ -44,9 +42,11 @@ function harness(t) {
   mkdirSync(work, { recursive: true });
   mkdirSync(join(root, 'config', 'antonina'), { recursive: true });
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const created = spawnSync(process.execPath, [CLI, 'agent', 'new', '--id', AGENT_ID, '--cwd', work], { env, encoding: 'utf8', timeout: 15_000 });
+  // Board issue 320: the id is generated, so it is captured from stdout.
+  const created = spawnSync(process.execPath, [CLI, 'agent', 'new', '--cwd', work], { env, encoding: 'utf8', timeout: 15_000 });
   assert.equal(created.status, 0, created.stderr);
-  return { root, env, work, metaPath: join(root, 'state', 'antonina', 'agents', AGENT_ID, 'meta.json') };
+  const agentId = created.stdout.trim();
+  return { root, env, work, agentId, metaPath: join(root, 'state', 'antonina', 'agents', agentId, 'meta.json') };
 }
 
 function run(args, env) {
@@ -99,13 +99,13 @@ async function waitForGone(pid) {
 }
 
 test('delete --force SIGKILLs a runner that the invocation group signal cannot reach', async (t) => {
-  const { env, root, work, metaPath } = harness(t);
+  const { env, root, work, agentId, metaPath } = harness(t);
 
   // A real, live, detached process carrying the runner's ownership marker. It is
   // in its own process group, so the SIGKILL that stopLike sends to the (here
   // absent) invocation group cannot touch it.
   const runner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
-    env: { ...env, ANTONINA_AGENT_ID: AGENT_ID },
+    env: { ...env, ANTONINA_AGENT_ID: agentId },
     detached: true,
     stdio: 'ignore',
   });
@@ -138,12 +138,12 @@ test('delete --force SIGKILLs a runner that the invocation group signal cannot r
   writeFileSync(metaPath, JSON.stringify(meta));
 
   const startedAt = Date.now();
-  const forced = run(['agent', 'delete', '--id', AGENT_ID, '--force'], env);
+  const forced = run(['agent', 'delete', '--id', agentId, '--force'], env);
   const elapsed = Date.now() - startedAt;
 
   assert.equal(forced.status, 0, forced.stderr);
   assert.doesNotMatch(forced.stderr, /did not terminate/, 'the fallback SIGKILL must reap the runner');
-  assert.match(forced.stdout, new RegExp(`deleted agent ${AGENT_ID}`));
+  assert.ok(forced.stdout.includes(`deleted agent ${agentId}`), forced.stdout);
   assert.ok(
     elapsed >= 2_000,
     `the first runner wait must have timed out before the fallback SIGKILL (took ${elapsed}ms); ` +
@@ -153,7 +153,7 @@ test('delete --force SIGKILLs a runner that the invocation group signal cannot r
     await waitForGone(runner.pid),
     `runner ${runner.pid} must be reaped before delete --force returns`,
   );
-  assert.ok(!existsSync(join(root, 'state', 'antonina', 'agents', AGENT_ID)));
+  assert.ok(!existsSync(join(root, 'state', 'antonina', 'agents', agentId)));
 });
 
 // Why the throw at agent.ts:762 has no test and cannot get one here:

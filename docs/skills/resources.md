@@ -2,7 +2,7 @@
 
 Use this skill when scheduled or agentic work creates, uses, or hands off a durable host filesystem location. A resource is a host and canonical absolute POSIX path, such as `lubko://example-host` plus `/workspace/project-worktree`; the path may be a file or directory.
 
-Resource registration is dependency and liveness metadata, not exclusive ownership or a lock. Multiple open Antonina issues may depend on one resource. Every number in these commands is an **Antonina BOARD issue number**, never a GitHub issue number.
+Resource registration is dependency and liveness metadata, not exclusive ownership or a lock. Multiple open Antonina issues may depend on one resource. Every issue identifier in these commands is an **Antonina BOARD issue ID** (an opaque string, including legacy digit-only IDs), never a GitHub issue number.
 
 ## Paging contract
 
@@ -21,7 +21,7 @@ A path is collectible only when it is registered on that host and no open Antoni
 ## Commands
 
 ```sh
-antonina board resource list --page PAGE [--host HOST] [--issue NUMBER]
+antonina board resource list --page PAGE [--host HOST] [--issue ISSUE_ID]
 antonina board resource add --issue ISSUE --host HOST --path PATH
 antonina board resource remove --issue ISSUE --host HOST --path PATH
 ```
@@ -73,16 +73,16 @@ Deletion additionally requires managed collection roots, configured as a `:`-sep
 For example, hand off `/workspace/project-worktree` from Antonina board issue `412` to open follow-up issue `419`:
 
 ```sh
-antonina board resource list --issue 412 --page 1
-antonina board resource add --issue 419 --host lubko://example-host --path /workspace/project-worktree
-antonina board resource list --issue 419 --page 1
-antonina board resource remove --issue 412 --host lubko://example-host --path /workspace/project-worktree
+antonina board resource list --issue 8Kq6Mz3vR7nL2pC4hF9aBw-lion --page 1
+antonina board resource add --issue 7Xb4Qm8Np2Tw5Fa9Dr6KcL-otter --host lubko://example-host --path /workspace/project-worktree
+antonina board resource list --issue 7Xb4Qm8Np2Tw5Fa9Dr6KcL-otter --page 1
+antonina board resource remove --issue 8Kq6Mz3vR7nL2pC4hF9aBw-lion --host lubko://example-host --path /workspace/project-worktree
 ```
 
 Unregister a path when no issue needs it:
 
 ```sh
-antonina board resource remove --issue 419 --host lubko://example-host --path /workspace/project-worktree
+antonina board resource remove --issue 7Xb4Qm8Np2Tw5Fa9Dr6KcL-otter --host lubko://example-host --path /workspace/project-worktree
 ```
 
 Host values are `lubko://<server>` with no trailing slash; paths are canonical absolute POSIX paths.

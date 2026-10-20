@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+
 const STAT_MIN_FIELDS = 20;
 const STAT_STATE_FIELD_INDEX = 0;
 const STAT_PPID_FIELD_INDEX = 1;
@@ -10,7 +11,6 @@ const STAT_STIME_FIELD_INDEX = 12;
 const STAT_STARTTIME_FIELD_INDEX = 19;
 
 export const INVOCATION_ID_HEX_LENGTH = 32;
-const HEX = /^[0-9a-f]+$/;
 const HEX_CASE_INSENSITIVE = /^[0-9a-f]+$/i;
 
 export interface ProcStat {
@@ -163,10 +163,15 @@ export function signalMarkedInvocationProcesses(
   return signalled;
 }
 
+/**
+ * An agent ID is opaque and case-sensitive. This guard only checks that it can
+ * safely be used as a single filesystem path component; it does not recognise
+ * legacy or generated shapes, lengths, alphabets, or word suffixes.
+ */
 export function normalizeAgentId(raw: unknown): string | null {
-  if (typeof raw !== 'string' || raw.length === 0) return null;
-  const value = raw.trim().toLowerCase();
-  return value.length > 0 && HEX.test(value) ? value : null;
+  if (typeof raw !== 'string') return null;
+  const value = raw.trim();
+  return /^[A-Za-z0-9_-]+$/.test(value) ? value : null;
 }
 
 export function persistedAgentId(raw: unknown): string | null {

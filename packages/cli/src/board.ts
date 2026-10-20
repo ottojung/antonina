@@ -23,6 +23,7 @@ import {
   type BoardFeedPage,
 } from '../../core/src/feed.js';
 import {
+  type Board,
   type BoardIssue,
   type BoardResource,
   parseReviewVerdict,
@@ -30,6 +31,7 @@ import {
   type BoardReview,
   type IssueState,
   type ResourceView,
+  type ReviewVerdict,
 } from '../../core/src/model.js';
 import {
   formatHostBytes,
@@ -63,6 +65,69 @@ const DEFAULT_COLLECTION_PAGE_SIZE = 50;
 // name, and `collect delete` imports it from there. One constant, one owner, one
 // import path.
 
+/**
+ * A board issue identifier.
+ *
+ * Every issue has exactly one opaque string identity, and it is the issue's
+ * `number` field. A client never inspects, parses or validates that string: a
+ * minted identity and a legacy decimal are both opaque, and the client cannot
+ * and must not tell them apart. The only check is that a reference is a
+ * non-empty string; the core owns both the generator and the resolution. The
+ * whole reference is always passed through unchanged, so the client never
+ * derives a lookup key from part of it, never converts it to a number, and
+ * never orders issues by interpreting it as a number.
+ */
+export type IssueId = string;
+
+function requireIssueId(raw: string | undefined, name: string): IssueId {
+  if (raw === undefined || raw === '') {
+    throw new AntoninaApiError(name + ' must be a non-empty issue ID');
+  }
+  return raw;
+}
+
+/**
+ * The string-id operations the board commands need.
+ *
+ * This is the shape the board command layer calls. Every reference is the
+ * issue's own opaque `number` string, handed through unchanged; the core
+ * resolves both a minted id and a legacy decimal string. It exists as a named
+ * interface only so the command layer and the core can be read against the same
+ * contract while the core migration lands.
+ */
+interface BoardClient {
+  initialize(): Promise<BoardInitialization>;
+  verifyCredential(): Promise<BoardAccessState>;
+  getCredential(): BoardCredential | null;
+  getQueue(): Promise<IssueId[]>;
+  reorderQueue(ids: readonly IssueId[]): Promise<IssueId[]>;
+  readFeed(request?: { limit?: number; cursor?: string | null }): Promise<BoardFeedPage>;
+  listIssueSummaries(state?: IssueState): Promise<IssueListSummary[]>;
+  getIssuePage(id: IssueId, page: number): Promise<BoardIssue>;
+  createIssue(title: string, body?: string): Promise<BoardIssue>;
+  editIssueBody(id: IssueId, body: string): Promise<BoardIssue>;
+  comment(id: IssueId, author: string, body: string): Promise<BoardIssue>;
+  recordReview(input: {
+    number: IssueId;
+    commit: string;
+    verdict: ReviewVerdict;
+    reviewer: string;
+    rationale: string;
+  }): Promise<BoardReview>;
+  close(id: IssueId): Promise<BoardIssue>;
+  reopen(id: IssueId): Promise<BoardIssue>;
+  deleteIssue(id: IssueId): Promise<Board>;
+  deleteBoard(): Promise<void>;
+  listResources(host?: string, id?: IssueId): Promise<ResourceView[]>;
+  addResourceDependency(host: string, path: string, id: IssueId): Promise<BoardResource>;
+  removeResourceDependency(host: string, path: string, id: IssueId): Promise<BoardResource[]>;
+  importBoard(options?: { confirm?: boolean }): Promise<BoardImportReport>;
+}
+
+function boardClient(api: BoardApi): BoardClient {
+  return api as unknown as BoardClient;
+}
+
 export interface BoardCommandIo {
   stdout(text: string): void;
   stderr(text: string): void;
@@ -95,7 +160,7 @@ type CommandValue =
   | CollectDeleteReportBase
   | BoardImportReport
   | BoardFeedPage
-  | number[]
+  | IssueId[]
   | null;
 
 interface ParsedCommand {
@@ -107,8 +172,8 @@ interface ParsedCommand {
 interface CommandResult {
   mode: string;
   value: CommandValue;
-  /** The issue number a result is about, for the modes that print one line. */
-  number?: number;
+  /** The issue id a result is about, for the modes that print one line. */
+  id?: IssueId;
 }
 
 function requireArg(raw: string | undefined, name: string): string {
@@ -136,20 +201,26 @@ function pageSlice<T>(values: readonly T[], page: number, pageSize = DEFAULT_COL
   return values.slice(start, start + pageSize);
 }
 
-function issuePriorityOrder(summaries: readonly IssueListSummary[], queue: readonly number[]): IssueListSummary[] {
-  const priority = new Map(queue.map((number, index) => [number, index]));
+function issuePriorityOrder(summaries: readonly IssueListSummary[], queue: readonly IssueId[]): IssueListSummary[] {
+  const priority = new Map(queue.map((id, index) => [id, index]));
   return [...summaries].sort((left, right) => {
     if (left.state !== right.state) return left.state === 'open' ? -1 : 1;
     if (left.state === 'open') {
-      const leftPriority = priority.get(left.number) ?? Number.MAX_SAFE_INTEGER;
-      const rightPriority = priority.get(right.number) ?? Number.MAX_SAFE_INTEGER;
-      if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+      const leftPriority = priority.get(String(left.number));
+      const rightPriority = priority.get(String(right.number));
+      if (leftPriority !== undefined || rightPriority !== undefined) {
+        if (leftPriority === undefined) return 1;
+        if (rightPriority === undefined) return -1;
+        if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+      }
     }
-    return left.number - right.number;
+    // Ties keep the store's own order. Issue ids are opaque strings and are
+    // deliberately never compared as numbers.
+    return 0;
   });
 }
 
-async function readNumberedFeedPage(client: BoardApi, page: number, limit: number): Promise<BoardFeedPage> {
+async function readNumberedFeedPage(client: BoardClient, page: number, limit: number): Promise<BoardFeedPage> {
   let current = await client.readFeed({ limit, cursor: null });
   for (let number = 1; number < page; number += 1) {
     if (current.nextCursor === null) {
@@ -292,7 +363,8 @@ function boardStateAdvice(error: unknown): string | null {
 
 async function execute(
   parsed: ParsedCommand,
-  client: BoardApi,
+  client: BoardClient,
+  raw: BoardApi,
   context: BoardCommandContext,
 ): Promise<CommandResult> {
   switch (parsed.command) {
@@ -339,8 +411,8 @@ async function execute(
         };
       }
       if (subcommand === 'reorder') {
-        if (args.length === 0) throw new AntoninaApiError('queue reorder requires issue numbers');
-        return { mode: 'queue', value: await client.reorderQueue(args.map((arg) => parsePositiveInteger(arg, 'ISSUE'))) };
+        if (args.length === 0) throw new AntoninaApiError('queue reorder requires issue IDs');
+        return { mode: 'queue', value: await client.reorderQueue(args.map((arg) => requireIssueId(arg, 'ISSUE'))) };
       }
       throw new AntoninaApiError('queue requires list or reorder');
     }
@@ -370,11 +442,11 @@ async function execute(
     }
     case 'show': {
       const pageOption = option(parsed.args, '--page');
-      if (pageOption.rest.length !== 1) throw new AntoninaApiError('show requires NUMBER');
+      if (pageOption.rest.length !== 1) throw new AntoninaApiError('show requires ISSUE');
       return {
         mode: 'issue',
         value: await client.getIssuePage(
-          parsePositiveInteger(pageOption.rest[0], 'NUMBER'),
+          requireIssueId(pageOption.rest[0], 'ISSUE'),
           pageNumber(pageOption.value),
         ),
       };
@@ -382,30 +454,31 @@ async function execute(
     case 'create': {
       const bodyOption = option(parsed.args, '--body');
       if (bodyOption.rest.length !== 1) throw new AntoninaApiError('create requires TITLE');
-      return {
-        mode: 'issue',
-        value: await client.createIssue(requireArg(bodyOption.rest[0], 'TITLE'), bodyOption.value ?? ''),
-      };
+      const created = await client.createIssue(requireArg(bodyOption.rest[0], 'TITLE'), bodyOption.value ?? '');
+      // The default output of `create` is exactly the new issue's public id and
+      // a newline, so a caller can capture it without parsing prose. `--json`
+      // carries the whole created issue instead.
+      return { mode: 'created-issue', id: String(created.number), value: created };
     }
     case 'edit': {
       const bodyOption = option(parsed.args, '--body');
       if (bodyOption.value === undefined || bodyOption.rest.length !== 1) {
-        throw new AntoninaApiError('edit requires NUMBER --body BODY');
+        throw new AntoninaApiError('edit requires ISSUE --body BODY');
       }
       return {
         mode: 'issue',
-        value: await client.editIssueBody(parsePositiveInteger(bodyOption.rest[0], 'NUMBER'), bodyOption.value),
+        value: await client.editIssueBody(requireIssueId(bodyOption.rest[0], 'ISSUE'), bodyOption.value),
       };
     }
     case 'comment': {
       const authorOption = option(parsed.args, '--author');
-      if (authorOption.rest.length !== 2) throw new AntoninaApiError('comment requires NUMBER BODY');
+      if (authorOption.rest.length !== 2) throw new AntoninaApiError('comment requires ISSUE BODY');
       const author = authorOption.value ?? context.env[BOARD_AUTHOR_ENV];
       if (!author) throw new AntoninaApiError('Message author is required; use --author or ' + BOARD_AUTHOR_ENV);
       return {
         mode: 'issue',
         value: await client.comment(
-          parsePositiveInteger(authorOption.rest[0], 'NUMBER'),
+          requireIssueId(authorOption.rest[0], 'ISSUE'),
           author,
           requireArg(authorOption.rest[1], 'BODY'),
         ),
@@ -417,18 +490,18 @@ async function execute(
       const reviewerOption = option(commitOption.rest, '--reviewer');
       const rationaleOption = option(reviewerOption.rest, '--rationale');
       if (rationaleOption.rest.length !== 1 || rationaleOption.value === undefined) {
-        throw new AntoninaApiError('review requires NUMBER --verdict VERDICT --rationale TEXT [--commit SHA] [--reviewer NAME]');
+        throw new AntoninaApiError('review requires ISSUE --verdict VERDICT --rationale TEXT [--commit SHA] [--reviewer NAME]');
       }
       const verdict = verdictOption.value;
       if (verdict === undefined) throw new AntoninaApiError('review requires --verdict request-changes or approve');
       const reviewer = reviewerOption.value ?? context.env[BOARD_AUTHOR_ENV];
       if (!reviewer) throw new AntoninaApiError('Review reviewer is required; use --reviewer or ' + BOARD_AUTHOR_ENV);
-      const number = parsePositiveInteger(rationaleOption.rest[0], 'NUMBER');
+      const id = requireIssueId(rationaleOption.rest[0], 'ISSUE');
       return {
         mode: 'review',
-        number,
+        id,
         value: await client.recordReview({
-          number,
+          number: id,
           commit: commitOption.value ?? '',
           verdict: parseReviewVerdict(verdict),
           reviewer,
@@ -438,16 +511,16 @@ async function execute(
     }
     case 'close':
     case 'reopen': {
-      if (parsed.args.length !== 1) throw new AntoninaApiError(parsed.command + ' requires NUMBER');
-      const number = parsePositiveInteger(parsed.args[0], 'NUMBER');
+      if (parsed.args.length !== 1) throw new AntoninaApiError(parsed.command + ' requires ISSUE');
+      const id = requireIssueId(parsed.args[0], 'ISSUE');
       return {
         mode: 'issue',
-        value: parsed.command === 'close' ? await client.close(number) : await client.reopen(number),
+        value: parsed.command === 'close' ? await client.close(id) : await client.reopen(id),
       };
     }
     case 'delete': {
-      if (parsed.args.length !== 1) throw new AntoninaApiError('delete requires NUMBER');
-      await client.deleteIssue(parsePositiveInteger(parsed.args[0], 'NUMBER'));
+      if (parsed.args.length !== 1) throw new AntoninaApiError('delete requires ISSUE');
+      await client.deleteIssue(requireIssueId(parsed.args[0], 'ISSUE'));
       return { mode: 'deleted-issue', value: null };
     }
     case 'delete-board':
@@ -461,9 +534,9 @@ async function execute(
         const issueOption = option(hostOption.rest, '--issue');
         const pageOption = option(issueOption.rest, '--page');
         if (pageOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for resource list');
-        const issueNumber = issueOption.value === undefined
+        const issueId = issueOption.value === undefined
           ? undefined
-          : parsePositiveInteger(issueOption.value, '--issue');
+          : requireIssueId(issueOption.value, '--issue');
         return {
           mode: 'resources',
           // NOT a bounded read, and deliberately still not one. `--page` bounds
@@ -478,19 +551,19 @@ async function execute(
           // states the same limit rather than implying the UI alone fixes
           // scaling; see the note above `RESOURCE_PAGE_SIZE` in
           // `web/src/ui-state.ts`.
-          value: pageSlice(await client.listResources(hostOption.value, issueNumber), pageNumber(pageOption.value)),
+          value: pageSlice(await client.listResources(hostOption.value, issueId), pageNumber(pageOption.value)),
         };
       }
       if (subcommand === 'add' || subcommand === 'remove') {
         if (args.length !== 3) {
           throw new AntoninaApiError('resource ' + subcommand + ' requires ISSUE HOST PATH');
         }
-        const issueNumber = parsePositiveInteger(args[0], 'ISSUE');
+        const issueId = requireIssueId(args[0], 'ISSUE');
         const host = requireArg(args[1], 'HOST');
         const path = requireArg(args[2], 'PATH');
         return subcommand === 'add'
-          ? { mode: 'resource-added', value: await client.addResourceDependency(host, path, issueNumber) }
-          : { mode: 'resource-removed', value: await client.removeResourceDependency(host, path, issueNumber) };
+          ? { mode: 'resource-added', value: await client.addResourceDependency(host, path, issueId) }
+          : { mode: 'resource-removed', value: await client.removeResourceDependency(host, path, issueId) };
       }
       throw new AntoninaApiError('resource requires list, add, or remove');
     }
@@ -517,7 +590,7 @@ async function execute(
         const hostOption = option(args, '--host');
         const pageOption = option(hostOption.rest, '--page');
         if (pageOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for collect list');
-        const entries = (await collectList(client, requireArg(hostOption.value, 'collect list --host'))).value;
+        const entries = (await collectList(raw, requireArg(hostOption.value, 'collect list --host'))).value;
         return { mode: 'collect-list', value: pageSlice(entries, pageNumber(pageOption.value)) };
       }
       if (subcommand === 'delete') {
@@ -525,7 +598,7 @@ async function execute(
         const pathOption = option(hostOption.rest, '--path');
         const confirmFlag = flag(pathOption.rest, '--confirm');
         if (confirmFlag.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for collect delete');
-        const collected = await collectDelete(client, {
+        const collected = await collectDelete(raw, {
           host: requireArg(hostOption.value, 'collect delete --host'),
           path: requireArg(pathOption.value, 'collect delete --path'),
           confirm: confirmFlag.value,
@@ -619,9 +692,10 @@ function humanLines(result: CommandResult): string[] {
     ];
   }
   if (result.mode === 'queue') {
-    return [(result.value as number[]).map((number) => '#' + number).join(' ')];
+    return [(result.value as IssueId[]).map((id) => '#' + id).join(' ')];
   }
   if (result.mode === 'feed') return humanFeed(result.value as BoardFeedPage);
+  if (result.mode === 'created-issue') return [result.id ?? ''];
   if (result.mode === 'deleted-issue') return ['Issue deleted.'];
   if (result.mode === 'deleted-board') return ['Board deleted.'];
 
@@ -728,7 +802,7 @@ function humanLines(result: CommandResult): string[] {
   if (result.mode === 'review') {
     const review = result.value as BoardReview;
     return [
-      'Review #' + result.number + ' ' + review.verdict + ' by ' + review.reviewer
+      'Review #' + result.id + ' ' + review.verdict + ' by ' + review.reviewer
         + ' about ' + (review.commit === '' ? 'no named commit' : review.commit),
       '  ' + review.rationale,
     ];
@@ -737,15 +811,18 @@ function humanLines(result: CommandResult): string[] {
   const value = result.value;
   if (!Array.isArray(value)) return [humanIssue(value as BoardIssue)];
   return value.map((item) => {
-    if (typeof item === 'number') return '#' + item;
+    if (typeof item === 'string' || typeof item === 'number') return '#' + item;
     if ('protected' in item) {
       const view = item as ResourceView;
-      const states = view.issues.map((entry) => '#' + entry.number + ' [' + entry.state + ']').join(', ');
+      const states = view.issues
+        .map((entry) => '#' + entry.number + ' [' + entry.state + ']')
+        .join(', ');
       return view.host + ' ' + view.path + ' ' + states + ' ' + (view.protected ? 'protected' : 'collectible');
     }
     if ('host' in item) {
       const resource = item as BoardResource;
-      return resource.host + ' ' + resource.path + ' -> ' + resource.issueNumbers.map((number) => '#' + number).join(', ');
+      return resource.host + ' ' + resource.path + ' -> '
+        + resource.issueNumbers.map((id) => '#' + id).join(', ');
     }
     const issue = item as BoardIssue;
     return '#' + issue.number + ' [' + issue.state + '] ' + issue.title;
@@ -755,8 +832,9 @@ function humanLines(result: CommandResult): string[] {
 export async function runBoardCommand(argv: string[], context: BoardCommandContext): Promise<number> {
   try {
     const parsed = parseCommand(argv);
-    const client = context.createClient?.() ?? defaultClient(context);
-    const result = await execute(parsed, client, context);
+    const raw = context.createClient?.() ?? defaultClient(context);
+    const client = boardClient(raw);
+    const result = await execute(parsed, client, raw, context);
     if (parsed.json) {
       // A JSON reader that asked for telemetry must receive it. Leaving the
       // hosts out would make `--telemetry` look honoured in the human form and

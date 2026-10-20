@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import re
-import secrets
 import socket
 import subprocess
 import sys
@@ -74,7 +73,7 @@ def running_owners(issue):
         agents = result["agents"]
         for agent in agents:
             title = agent.get("title") or ""
-            if re.search(r"(?<!\w)#" + str(issue) + r"\b", title):
+            if re.search(r"(?<!\w)#" + re.escape(str(issue)) + r"(?![\w-])", title):
                 owners.append(agent["id"])
         if len(agents) < 500:
             break
@@ -158,8 +157,8 @@ def agent_prompt(issue, prompt, agent_id):
     )
 
 
-def new_agent(agent_id, title):
-    return run([ANTONINA, "agent", "new", "--id", agent_id,
+def new_agent(title):
+    return run([ANTONINA, "agent", "new",
                 "--cwd", START_DIR, "--title", title, "--json"], check=False)
 
 
@@ -169,7 +168,7 @@ def cleanup_idle(agent_id):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--issue", required=True, type=int)
+    parser.add_argument("--issue", required=True)
     parser.add_argument("--title", required=True)
     parser.add_argument("--summary", required=True)
     parser.add_argument("--prompt", required=True)
@@ -181,18 +180,11 @@ def main():
     if owners:
         raise SystemExit(f"issue #{args.issue} already has live agent(s): {', '.join(owners)}")
 
-    agent_id = None
-    for _ in range(2):
-        candidate = secrets.token_hex(6)
-        proc = new_agent(candidate, args.title)
-        if proc.returncode == 0:
-            agent_id = candidate
-            break
-        if "already exists" not in (proc.stdout + proc.stderr).lower():
-            sys.stderr.write(proc.stderr or proc.stdout)
-            raise SystemExit(proc.returncode or 1)
-    if agent_id is None:
-        raise SystemExit("failed to allocate a unique agent id")
+    proc = new_agent(args.title)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr or proc.stdout)
+        raise SystemExit(proc.returncode or 1)
+    agent_id = json.loads(proc.stdout)["id"]
 
     # Both rechecks guard against stale queue and agent-state snapshots.
     try:

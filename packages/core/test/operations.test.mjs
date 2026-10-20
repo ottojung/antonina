@@ -82,8 +82,8 @@ test('valid root operations verify and replay deterministically', async () => {
   assert.deepEqual(second, first);
   assert.equal(first.board.issues[0].title, 'First');
   assert.equal(first.board.issues[0].messages[0].body, 'hello');
-  assert.deepEqual(first.queue, [1]);
-  assert.deepEqual(first.board.resources[0].issueNumbers, [1]);
+  assert.deepEqual(first.queue, ['1']);
+  assert.deepEqual(first.board.resources[0].issueNumbers, ['1']);
 });
 
 test('equal and attenuated delegated capabilities are accepted', async () => {
@@ -281,7 +281,7 @@ test('initialization attests a non-empty starting board as root-signed state', a
 
   const replayed = await verifyAndReplayOperationLog(log, anchor);
   assert.equal(replayed.board.issues[0].title, 'Imported');
-  assert.equal(replayed.queue[0], 1);
+  assert.equal(replayed.queue[0], '1');
 });
 
 test('root has the complete capability vocabulary and board deletion is terminal', async () => {
@@ -313,7 +313,7 @@ test('repeated resource registration is a deterministic no-op', async () => {
   await append(log, root, 'resource.add', { number: 1, host: 'lubko://host', path: '/workspace' }, 3);
   const replayed = await verifyAndReplayOperationLog(log, anchor);
   assert.equal(replayed.board.resources.length, 1);
-  assert.deepEqual(replayed.board.resources[0].issueNumbers, [1]);
+  assert.deepEqual(replayed.board.resources[0].issueNumbers, ['1']);
   assert.equal(replayed.board.resources[0].updatedAt, timestamp(2));
 });
 

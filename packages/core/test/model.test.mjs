@@ -98,7 +98,7 @@ test('resource schema is strict and resource views derive protection from open d
   assert.deepEqual(resourceViews(board), [{
     host: 'lubko://server',
     path: '/workspace/project',
-    issues: [{ number: 1, state: 'open' }, { number: 2, state: 'closed' }],
+    issues: [{ number: '1', state: 'open' }, { number: '2', state: 'closed' }],
     protected: true,
     collectible: false,
   }]);

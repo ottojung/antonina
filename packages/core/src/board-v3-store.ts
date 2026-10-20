@@ -54,7 +54,7 @@ export const V3_FEED_PAGE_SIZE = 50;
 
 /** What a closed issue is ordered by, and what a missing `closedAt` falls back to. */
 export interface ClosedIssueOrderKey {
-  number: number;
+  number: string;
   closedAt: string | null;
   updatedAt: string;
 }
@@ -84,7 +84,7 @@ export function closingTimeOf(issue: Pick<ClosedIssueOrderKey, 'closedAt' | 'upd
  */
 export function compareClosedIssues(left: ClosedIssueOrderKey, right: ClosedIssueOrderKey): number {
   const time = closingTimeOf(right).localeCompare(closingTimeOf(left));
-  return time || right.number - left.number;
+  return time || right.number.localeCompare(left.number);
 }
 
 /**
@@ -359,7 +359,7 @@ export interface ShardedBoardMeta {
 
 
 interface DirectoryEntry {
-  number: number;
+  number: string;
   ref: string;
 }
 
@@ -371,7 +371,7 @@ interface DirectoryPage {
 }
 
 interface IssueCore {
-  number: number;
+  number: string;
   title: string;
   body: string;
   state: IssueState;
@@ -406,7 +406,7 @@ interface IssueCore {
 interface IssueSnapshot {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;
-  number: number;
+  number: string;
   issue: IssueCore;
   closedAt: string | null;
   messageCount: number;
@@ -430,13 +430,13 @@ interface IssueSnapshot {
 interface CommentPage {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;
-  number: number;
+  number: string;
   page: number;
   messages: BoardMessage[];
 }
 
 export interface IssueListSummary {
-  number: number;
+  number: string;
   title: string;
   state: IssueState;
   createdAt: string;
@@ -521,7 +521,7 @@ export function compareIssueActivity(
   left: Pick<IssueListSummary, 'number' | 'createdAt' | 'updatedAt' | 'lastActivityAt'>,
   right: Pick<IssueListSummary, 'number' | 'createdAt' | 'updatedAt' | 'lastActivityAt'>,
 ): number {
-  return issueLastActivityOf(right).localeCompare(issueLastActivityOf(left)) || right.number - left.number;
+  return issueLastActivityOf(right).localeCompare(issueLastActivityOf(left)) || right.number.localeCompare(left.number);
 }
 
 /**
@@ -569,7 +569,7 @@ export interface BoardOverview {
   head: string;
   revision: number;
   deleted: boolean;
-  queue: number[];
+  queue: string[];
   issues: IssueListSummary[];
   resources: BoardResource[];
 }
@@ -577,7 +577,7 @@ export interface BoardOverview {
 interface QueueSnapshot {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;
-  numbers: number[];
+  numbers: string[];
 }
 
 interface CatalogSnapshot {
@@ -620,15 +620,15 @@ interface FeedPage {
 interface StateBundle {
   meta: ShardedBoardMeta;
   state: VerifiedBoardState;
-  issueRefs: Map<number, string>;
-  issueSnapshots: Map<number, IssueSnapshot>;
-  messageCounts: Map<number, number>;
+  issueRefs: Map<string, string>;
+  issueSnapshots: Map<string, IssueSnapshot>;
+  messageCounts: Map<string, number>;
   /**
    * Recorded activity times, with entries only for issues whose activity this
    * store actually knows. A missing entry is not `null`: it means the field was
    * absent where it was read, and it stays missing rather than being invented.
    */
-  lastActivity: Map<number, string | null>;
+  lastActivity: Map<string, string | null>;
   /**
    * Whether `state.board`'s issues carry their comment threads. False on the
    * mutation fast path, where only the touched issue is hydrated; a writer must
@@ -636,7 +636,7 @@ interface StateBundle {
    * there means "not read", not "no comments".
    */
   threadsHydrated: boolean;
-  closedAt: Map<number, string>;
+  closedAt: Map<string, string>;
   directoryPages: Map<number, DirectoryPage>;
 }
 
@@ -907,6 +907,11 @@ function parseStoredOutstandingBlocks(value: unknown): string[] {
   return [...(value as string[])];
 }
 
+function validStoredId(value: unknown): value is string | number {
+  return (typeof value === 'string' && value.length > 0)
+    || (typeof value === 'number' && Number.isSafeInteger(value) && value > 0);
+}
+
 function directoryPageNumber(issueNumber: number): number {
   return Math.floor((issueNumber - 1) / DIRECTORY_PAGE_SIZE) + 1;
 }
@@ -931,7 +936,7 @@ function jsonSame(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function closedAtFromBoard(board: Board): Map<number, string> {
+function closedAtFromBoard(board: Board): Map<string, string> {
   return new Map(
     board.issues
       .filter((issue) => issue.state === 'closed')
@@ -949,16 +954,16 @@ function latestBoardTimestamp(board: Board, fallback: string): string {
   return new Date(Math.max(...timestamps.map((value) => Date.parse(value)))).toISOString();
 }
 
-function closedAtFromLegacy(log: NonNullable<StoredSignedBoard['log']>, board: Board): Map<number, string> {
-  const result = new Map<number, string>();
+function closedAtFromLegacy(log: NonNullable<StoredSignedBoard['log']>, board: Board): Map<string, string> {
+  const result = new Map<string, string>();
   for (const issue of board.issues) {
     if (issue.state === 'closed') result.set(issue.number, issue.updatedAt);
   }
   for (const operation of log.operations) {
     if (operation.kind === 'issue.close') {
-      result.set((operation.payload as { number: number }).number, operation.timestamp);
+      result.set(String((operation.payload as { number: string | number }).number), operation.timestamp);
     } else if (operation.kind === 'issue.reopen' || operation.kind === 'issue.delete') {
-      result.delete((operation.payload as { number: number }).number);
+      result.delete(String((operation.payload as { number: string | number }).number));
     }
   }
   return result;
@@ -966,10 +971,10 @@ function closedAtFromLegacy(log: NonNullable<StoredSignedBoard['log']>, board: B
 
 function orderedSummaries(
   state: VerifiedBoardState,
-  closedAt: Map<number, string>,
+  closedAt: Map<string, string>,
   issueState: IssueState,
-  messageCounts?: Map<number, number>,
-  lastActivity?: Map<number, string | null>,
+  messageCounts?: Map<string, number>,
+  lastActivity?: Map<string, string | null>,
   threadsHydrated = true,
 ): IssueListSummary[] {
   const byNumber = new Map(state.board.issues.map((issue) => [issue.number, issue]));
@@ -983,7 +988,7 @@ function orderedSummaries(
         .sort((left, right) => {
           const time = (closedAt.get(right.number) ?? right.updatedAt)
             .localeCompare(closedAt.get(left.number) ?? left.updatedAt);
-          return time || right.number - left.number;
+          return time || right.number.localeCompare(left.number);
         });
   return ordered.map((issue) => {
     const lastActivityAt = knownLastActivity(lastActivity, issue, threadsHydrated);
@@ -1042,7 +1047,7 @@ function newestCommentOf(issue: Pick<BoardIssue, 'messages'>): string | null {
  * commented" over a real comment the store simply had not read.
  */
 function knownLastActivity(
-  lastActivity: Map<number, string | null> | undefined,
+  lastActivity: Map<string, string | null> | undefined,
   issue: BoardIssue,
   threadsHydrated = true,
 ): string | null | undefined {
@@ -1203,7 +1208,7 @@ interface ReclaimOutcome {
  */
 export interface LogicalBoard {
   board: Board;
-  queue: number[];
+  queue: string[];
   /** Every feed entry, in position order, with comment bodies already resolved. */
   feed: BoardFeedEntry[];
   /** The issue the board had deleted, if it was deleted. */
@@ -1212,7 +1217,7 @@ export interface LogicalBoard {
    * When each closed issue was closed, which the old store recorded per issue and
    * the new store needs to order the closed list.
    */
-  closedAt: Map<number, string>;
+  closedAt: Map<string, string>;
   /** The board id and root key the pointer names, checked against the credential. */
   boardId: string;
   rootKeyId: string;
@@ -1704,10 +1709,10 @@ export class ShardedBoardStore {
       throw new ShardedBoardStoreError('Antonina issue directory page is malformed');
     }
     const entries = value.entries.map((entry) => {
-      if (!isRecord(entry) || !Number.isSafeInteger(entry.number) || typeof entry.ref !== 'string') {
+      if (!isRecord(entry) || !validStoredId(entry.number) || typeof entry.ref !== 'string') {
         throw new ShardedBoardStoreError('Antonina issue directory entry is malformed');
       }
-      return { number: entry.number as number, ref: entry.ref };
+      return { number: String(entry.number), ref: entry.ref };
     });
     return {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
@@ -1740,7 +1745,7 @@ export class ShardedBoardStore {
     if (!isRecord(pageValue)
         || pageValue.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
         || pageValue.boardId !== meta.boardId
-        || pageValue.number !== snapshot.number
+        || String(pageValue.number) !== snapshot.number
         || pageValue.page !== index + 1
         || !Array.isArray(pageValue.messages)) {
       throw new ShardedBoardStoreError('Antonina comment page is malformed');
@@ -1759,7 +1764,7 @@ export class ShardedBoardStore {
     if (!isRecord(value)
         || value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
         || value.boardId !== meta.boardId
-        || !Number.isSafeInteger(value.number)
+        || !validStoredId(value.number)
         || !isRecord(value.issue)
         || (value.closedAt !== null && typeof value.closedAt !== 'string')
         || !Number.isSafeInteger(value.messageCount)
@@ -1767,7 +1772,7 @@ export class ShardedBoardStore {
       throw new ShardedBoardStoreError('Antonina issue snapshot is malformed');
     }
     const coreValue = value.issue;
-    if (!Number.isSafeInteger(coreValue.number)
+    if (!validStoredId(coreValue.number)
         || typeof coreValue.title !== 'string'
         || typeof coreValue.body !== 'string'
         || (coreValue.state !== 'open' && coreValue.state !== 'closed')
@@ -1776,7 +1781,7 @@ export class ShardedBoardStore {
       throw new ShardedBoardStoreError('Antonina issue core is malformed');
     }
     const core: IssueCore = {
-      number: coreValue.number as number,
+      number: String(coreValue.number),
       title: coreValue.title,
       body: coreValue.body,
       state: coreValue.state,
@@ -1798,13 +1803,13 @@ export class ShardedBoardStore {
         ? {}
         : { outstandingBlocks: parseStoredOutstandingBlocks(coreValue.outstandingBlocks) }),
     };
-    if (core.number !== (value.number as number)) {
+    if (core.number !== String(value.number)) {
       throw new ShardedBoardStoreError('Antonina issue snapshot number mismatch');
     }
     const snapshot: IssueSnapshot = {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId: meta.boardId,
-      number: value.number as number,
+      number: String(value.number),
       issue: core,
       closedAt: value.closedAt,
       messageCount: requireSafeCount(value.messageCount, 'message count'),
@@ -1825,7 +1830,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
   private async readCommentPage(
     credential: BoardCredential,
     meta: ShardedBoardMeta,
-    number: number,
+    number: string,
     commentRef: string,
     page: number,
   ): Promise<BoardMessage[]> {
@@ -1834,7 +1839,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     if (!isRecord(pageValue)
         || pageValue.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
         || pageValue.boardId !== meta.boardId
-        || pageValue.number !== number
+        || String(pageValue.number) !== number
         || pageValue.page !== page
         || !Array.isArray(pageValue.messages)) {
       throw new ShardedBoardStoreError('Antonina comment page is malformed');
@@ -1857,29 +1862,58 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
    * so the callers that do want the whole thread keep saying so implicitly; the
    * bounded per-page read below never goes through here at all.
    */
+  /**
+   * Issues are addressed by opaque string identity, never by a numeric bucket.
+   * A directory page is merely a bounded storage chunk. Historical pages are
+   * normalized at read time; they require no rewriting before use.
+   */
+  private async findDirectoryEntry(
+    credential: BoardCredential,
+    meta: ShardedBoardMeta,
+    id: string,
+  ): Promise<{ page: number; directory: DirectoryPage; entry: DirectoryEntry } | null> {
+    for (let page = 1; page <= meta.directoryRefs.length; page += 1) {
+      if (meta.directoryRefs[page - 1] === null) continue;
+      const directory = await this.readDirectoryPage(credential, meta, page);
+      const entry = directory?.entries.find((candidate) => candidate.number === id);
+      if (entry !== undefined && directory !== null) return { page, directory, entry };
+    }
+    return null;
+  }
+
+  /** Select a storage page for a new ID; never use its spelling as an offset. */
+  private async destinationDirectoryPage(
+    credential: BoardCredential,
+    meta: ShardedBoardMeta,
+  ): Promise<number> {
+    const count = meta.directoryRefs.length;
+    if (count === 0) return 1;
+    const last = await this.readDirectoryPage(credential, meta, count);
+    return last === null || last.entries.length < DIRECTORY_PAGE_SIZE ? count : count + 1;
+  }
+
   private async readIssueSnapshotByNumber(
     credential: BoardCredential,
     meta: ShardedBoardMeta,
-    number: number,
+    number: string,
     withMessages = true,
   ): Promise<{ snapshot: IssueSnapshot; issue: BoardIssue } | null> {
-    const directory = await this.readDirectoryPage(credential, meta, directoryPageNumber(number));
-    const entry = directory?.entries.find((candidate) => candidate.number === number);
-    if (entry === undefined) return null;
-    return this.readIssueSnapshot(credential, meta, entry.ref, withMessages);
+    const found = await this.findDirectoryEntry(credential, meta, number);
+    if (found === null) return null;
+    return this.readIssueSnapshot(credential, meta, found.entry.ref, withMessages);
   }
 
-  private async readQueue(credential: BoardCredential, meta: ShardedBoardMeta): Promise<number[]> {
+  private async readQueue(credential: BoardCredential, meta: ShardedBoardMeta): Promise<string[]> {
     const stored = await this.requireJson<unknown>(credential.storageCapability, meta.queueRef);
     const value = stored.value;
     if (!isRecord(value)
         || value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
         || value.boardId !== meta.boardId
         || !Array.isArray(value.numbers)
-        || !value.numbers.every((number) => Number.isSafeInteger(number))) {
+        || !value.numbers.every(validStoredId)) {
       throw new ShardedBoardStoreError('Antonina queue snapshot is malformed');
     }
-    return [...value.numbers as number[]];
+    return (value.numbers as Array<string | number>).map(String);
   }
 
   private async readCatalog(credential: BoardCredential, meta: ShardedBoardMeta): Promise<CatalogSnapshot> {
@@ -1894,7 +1928,13 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     return {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId: meta.boardId,
-      resources: clone(value.resources as BoardResource[]),
+      resources: (value.resources as Array<Record<string, unknown>>).map((resource) => {
+        if (!isRecord(resource) || !Array.isArray(resource.issueNumbers)
+            || !resource.issueNumbers.every(validStoredId)) {
+          throw new ShardedBoardStoreError('Antonina catalog resource dependencies are malformed');
+        }
+        return { ...clone(resource), issueNumbers: resource.issueNumbers.map(String) } as BoardResource;
+      }),
     };
   }
 
@@ -1904,17 +1944,17 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
   ): Promise<StateBundle> {
     const meta = await this.readMeta(pointer, credential);
     const directoryPages = new Map<number, DirectoryPage>();
-    const issueRefs = new Map<number, string>();
+    const issueRefs = new Map<string, string>();
     for (let page = 1; page <= meta.directoryRefs.length; page += 1) {
       const directory = await this.readDirectoryPage(credential, meta, page);
       if (directory === null) continue;
       directoryPages.set(page, directory);
       for (const entry of directory.entries) issueRefs.set(entry.number, entry.ref);
     }
-    const issueSnapshots = new Map<number, IssueSnapshot>();
-    const messageCounts = new Map<number, number>();
-    const lastActivity = new Map<number, string | null>();
-    const closedAt = new Map<number, string>();
+    const issueSnapshots = new Map<string, IssueSnapshot>();
+    const messageCounts = new Map<string, number>();
+    const lastActivity = new Map<string, string | null>();
+    const closedAt = new Map<string, string>();
     const issues = await Promise.all([...issueRefs.entries()].map(async ([number, ref]) => {
       const result = await this.readIssueSnapshot(credential, meta, ref, true);
       issueSnapshots.set(number, result.snapshot);
@@ -1929,7 +1969,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       if (result.snapshot.closedAt !== null) closedAt.set(number, result.snapshot.closedAt);
       return result.issue;
     }));
-    issues.sort((left, right) => left.number - right.number);
+    issues.sort((left, right) => left.number.localeCompare(right.number));
     const queue = await this.readQueue(credential, meta);
     const catalog = await this.readCatalog(credential, meta);
     const board: Board = {
@@ -1978,9 +2018,9 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       ...openPages.flatMap((page) => page.entries),
       ...closedPages.flatMap((page) => page.entries),
     ];
-    const closedAt = new Map<number, string>();
-    const messageCounts = new Map<number, number>();
-    const lastActivity = new Map<number, string | null>();
+    const closedAt = new Map<string, string>();
+    const messageCounts = new Map<string, number>();
+    const lastActivity = new Map<string, string | null>();
     for (const summary of summaries) {
       messageCounts.set(summary.number, summary.messageCount);
       // Same rule as the hydrating read above, and it matters more here: these
@@ -1993,7 +2033,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       }
       if (summary.closedAt !== null) closedAt.set(summary.number, summary.closedAt);
     }
-    const issues = summaries.map(issueFromSummary).sort((left, right) => left.number - right.number);
+    const issues = summaries.map(issueFromSummary).sort((left, right) => left.number.localeCompare(right.number));
     return {
       meta,
       state: {
@@ -2077,7 +2117,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId,
       page,
-      entries: [...entries].sort((left, right) => left.number - right.number),
+      entries: [...entries].sort((left, right) => left.number.localeCompare(right.number)),
     };
     const ref = await this.writeShard(credential.storageCapability, value);
     return { ref, superseded: superseded === null ? [] : [superseded] };
@@ -2098,15 +2138,15 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     credential: BoardCredential,
     boardId: string,
     state: VerifiedBoardState,
-    closedAt: Map<number, string>,
+    closedAt: Map<string, string>,
     issueState: IssueState,
     previousState: VerifiedBoardState | null,
-    previousClosedAt: Map<number, string> | null,
+    previousClosedAt: Map<string, string> | null,
     previousRefs: string[],
-    messageCounts?: Map<number, number>,
-    previousMessageCounts?: Map<number, number>,
-    lastActivity?: Map<number, string | null>,
-    previousLastActivity?: Map<number, string | null>,
+    messageCounts?: Map<string, number>,
+    previousMessageCounts?: Map<string, number>,
+    lastActivity?: Map<string, string | null>,
+    previousLastActivity?: Map<string, string | null>,
     threadsHydrated = true,
   ): Promise<{ refs: string[]; superseded: string[] }> {
     const nextPages = paginate(
@@ -2198,7 +2238,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
   private async writeQueueSnapshot(
     credential: BoardCredential,
     boardId: string,
-    numbers: number[],
+    numbers: string[],
   ): Promise<string> {
     const value: QueueSnapshot = {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
@@ -2380,11 +2420,11 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     const closedAt = stored.log === null
       ? closedAtFromBoard(stored.state.board)
       : closedAtFromLegacy(stored.log, stored.state.board);
-    const issueRefs = new Map<number, string>();
+    const issueRefs = new Map<string, string>();
     const directoryPages = new Map<number, DirectoryEntry[]>();
     const commentIndexes = new Map<string, number>();
 
-    for (const issue of stored.state.board.issues) {
+    for (const [issueIndex, issue] of stored.state.board.issues.entries()) {
       const commentRefs: string[] = [];
       const pages = paginate(issue.messages, V3_COMMENT_PAGE_SIZE);
       for (let index = 0; index < pages.length; index += 1) {
@@ -2414,15 +2454,13 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       };
       const issueRef = await this.writeShard(credential.storageCapability, snapshot);
       issueRefs.set(issue.number, issueRef);
-      const pageNumber = directoryPageNumber(issue.number);
+      const pageNumber = Math.floor(issueIndex / DIRECTORY_PAGE_SIZE) + 1;
       const entries = directoryPages.get(pageNumber) ?? [];
       entries.push({ number: issue.number, ref: issueRef });
       directoryPages.set(pageNumber, entries);
     }
 
-    const maxDirectoryPage = stored.state.board.nextIssueNumber <= 1
-      ? 0
-      : directoryPageNumber(stored.state.board.nextIssueNumber - 1);
+    const maxDirectoryPage = Math.ceil(stored.state.board.issues.length / DIRECTORY_PAGE_SIZE);
     const directoryRefs: Array<string | null> = [];
     for (let page = 1; page <= maxDirectoryPage; page += 1) {
       const entries = directoryPages.get(page);
@@ -2601,7 +2639,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       : (() => { throw new ShardedBoardStoreError(`Antonina pre-cutover metadata lacks ${name}`); })());
 
     const issues: BoardIssue[] = [];
-    const closedAt = new Map<number, string>();
+    const closedAt = new Map<string, string>();
     for (const pageRef of refs('directoryRefs')) {
       if (pageRef === null || pageRef === undefined) continue;
       const page = await get(pageRef);
@@ -2622,9 +2660,9 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
           }
           messages.push(...(commentPage.messages as BoardMessage[]));
         }
-        if (typeof snapshot.closedAt === 'string') closedAt.set(core.number as number, snapshot.closedAt);
+        if (typeof snapshot.closedAt === 'string') closedAt.set(String(core.number), snapshot.closedAt);
         issues.push({
-          number: core.number as number,
+          number: String(core.number),
           title: core.title as string,
           body: core.body as string,
           state: core.state as IssueState,
@@ -2634,7 +2672,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         });
       }
     }
-    issues.sort((left, right) => left.number - right.number);
+    // Preserve the physical directory order: IDs are opaque, not sequence numbers.
 
     const queueValue = await get(single('queueRef'));
     const catalogValue = await get(single('catalogRef'));
@@ -2666,9 +2704,15 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         schemaVersion: BOARD_SCHEMA_VERSION,
         nextIssueNumber,
         issues,
-        resources: catalogValue.resources as BoardResource[],
+        resources: catalogValue.resources.map((entry) => {
+          if (!isRecord(entry) || !Array.isArray(entry.issueNumbers)
+              || !entry.issueNumbers.every(validStoredId)) {
+            throw new ShardedBoardStoreError('Antonina pre-cutover resource dependencies are malformed');
+          }
+          return { ...clone(entry), issueNumbers: entry.issueNumbers.map(String) } as BoardResource;
+        }),
       },
-      queue: [...(queueValue.numbers as number[])],
+      queue: (queueValue.numbers as Array<string | number>).map(String),
       feed,
       deleted: metaValue.deleted === true,
       closedAt,
@@ -2695,7 +2739,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       kind: entry.kind as BoardFeedEntry['kind'],
       at: entry.at as string,
       position: entry.position as number,
-      issueNumber: entry.issueNumber as number,
+      issueNumber: String(entry.issueNumber),
       title: entry.title as string,
       state: entry.state as IssueState,
       messageId: (entry.messageId ?? null) as string | null,
@@ -2770,7 +2814,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     }));
 
     const directoryPages = new Map<number, DirectoryEntry[]>();
-    for (const issue of logical.board.issues) {
+    for (const [issueIndex, issue] of logical.board.issues.entries()) {
       const commentRefs: string[] = [];
       const pages = paginate(issue.messages, V3_COMMENT_PAGE_SIZE);
       for (let index = 0; index < pages.length; index += 1) {
@@ -2794,15 +2838,13 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         commentRefs,
       };
       const ref = await this.writeShard(credential.storageCapability, snapshot);
-      const page = directoryPageNumber(issue.number);
+      const page = Math.floor(issueIndex / DIRECTORY_PAGE_SIZE) + 1;
       const entries = directoryPages.get(page) ?? [];
       entries.push({ number: issue.number, ref });
       directoryPages.set(page, entries);
     }
 
-    const maxDirectoryPage = logical.board.nextIssueNumber <= 1
-      ? 0
-      : directoryPageNumber(logical.board.nextIssueNumber - 1);
+    const maxDirectoryPage = Math.ceil(logical.board.issues.length / DIRECTORY_PAGE_SIZE);
     const directoryRefs: Array<string | null> = [];
     for (let page = 1; page <= maxDirectoryPage; page += 1) {
       const entries = directoryPages.get(page);
@@ -3246,18 +3288,15 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       }));
 
       const payloadNumber = isRecord(payload) ? payload.number : undefined;
-      const beforeIssueNumber = typeof payloadNumber === 'number' && Number.isSafeInteger(payloadNumber)
-        ? payloadNumber
-        : null;
+      const beforeIssueNumber = validStoredId(payloadNumber) ? String(payloadNumber) : null;
 
       // The compact path starts from list summaries. Only issue mutations that
       // actually need the issue body/messages hydrate that one issue, and only
       // the directory page containing the touched issue is read.
       if (compact && beforeIssueNumber !== null && touchesIssue(request.kind)) {
-        const pageNumber = directoryPageNumber(beforeIssueNumber);
-        const directory = await this.readDirectoryPage(credential, bundle.meta, pageNumber);
-        if (directory !== null) bundle.directoryPages.set(pageNumber, directory);
-        const entry = directory?.entries.find((candidate) => candidate.number === beforeIssueNumber);
+        const located = await this.findDirectoryEntry(credential, bundle.meta, beforeIssueNumber);
+        if (located !== null) bundle.directoryPages.set(located.page, located.directory);
+        const entry = located?.entry;
         if (request.kind !== 'issue.create' && entry !== undefined) {
           const detail = await this.readIssueSnapshot(
             credential,
@@ -3346,12 +3385,9 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       const nextDirectoryRefs = [...bundle.meta.directoryRefs];
       const issueMutation = touchesIssue(request.kind);
       if (issueMutation && beforeIssueNumber !== null) {
-        const directoryPage = directoryPageNumber(beforeIssueNumber);
-        // Read the page the mutation is about to rewrite, so the entries below
-        // start from what is actually in storage rather than from a copy this
-        // bundle happened to have cached. One read, one page: the fast path
-        // still does not walk the board.
-        const directory = await this.readDirectoryPage(credential, bundle.meta, directoryPage);
+        const located = await this.findDirectoryEntry(credential, bundle.meta, beforeIssueNumber);
+        const directoryPage = located?.page ?? await this.destinationDirectoryPage(credential, bundle.meta);
+        const directory = located?.directory ?? await this.readDirectoryPage(credential, bundle.meta, directoryPage);
         if (directory !== null) bundle.directoryPages.set(directoryPage, directory);
         const entries = clone(bundle.directoryPages.get(directoryPage)?.entries ?? []);
         const entryIndex = entries.findIndex((entry) => entry.number === beforeIssueNumber);
@@ -3649,7 +3685,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
 
   async getIssue(
     credentialValue: BoardCredential,
-    number: number,
+    number: string,
   ): Promise<BoardIssue | null> {
     const { credential, meta } = await this.requirePointerForCredential(credentialValue);
     const resolved = await this.readIssueSnapshotByNumber(credential, meta, number);
@@ -3689,7 +3725,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
   private async readNewestFirstCommentPage(
     credential: BoardCredential,
     meta: ShardedBoardMeta,
-    number: number,
+    number: string,
     snapshot: IssueSnapshot,
     page: number,
   ): Promise<BoardMessage[]> {
@@ -3721,7 +3757,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
    */
   async getIssuePage(
     credentialValue: BoardCredential,
-    number: number,
+    number: string,
     page: number,
   ): Promise<BoardIssue | null> {
     const { credential, meta } = await this.requirePointerForCredential(credentialValue);
@@ -3768,7 +3804,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
    */
   async readIssueCommentPage(
     credentialValue: BoardCredential,
-    number: number,
+    number: string,
     page: number,
   ): Promise<IssueCommentPage | null> {
     if (!Number.isSafeInteger(page) || page < 1) {
@@ -3841,6 +3877,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       const { review: storedReview, outstandingBlocks: storedBlocks, ...rest } = entry;
       return {
         ...(clone(rest) as unknown as IssueListSummary),
+        number: String(entry.number),
         ...(storedReview === undefined ? {} : { review: parseStoredReview(storedReview) }),
         ...(storedBlocks === undefined ? {} : { outstandingBlocks: parseStoredOutstandingBlocks(storedBlocks) }),
       };
@@ -3889,7 +3926,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     };
   }
 
-  async getQueue(credentialValue: BoardCredential): Promise<number[]> {
+  async getQueue(credentialValue: BoardCredential): Promise<string[]> {
     const { credential, meta } = await this.requirePointerForCredential(credentialValue);
     return this.readQueue(credential, meta);
   }
@@ -3909,7 +3946,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         kind: entry.kind,
         at: entry.at,
         position: entry.position,
-        issueNumber: entry.issueNumber,
+        issueNumber: String(entry.issueNumber),
         title: entry.title,
         state: entry.state,
         messageId: entry.messageId,
@@ -3925,7 +3962,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       kind: entry.kind,
       at: entry.at,
       position: entry.position,
-      issueNumber: entry.issueNumber,
+      issueNumber: String(entry.issueNumber),
       title: entry.title,
       state: entry.state,
       messageId: entry.messageId,

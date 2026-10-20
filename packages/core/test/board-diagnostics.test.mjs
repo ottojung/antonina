@@ -15,13 +15,13 @@ import {
 import { migratePersistedBoard, everySupersededVersionHasAMigration } from '../dist/migrations.js';
 
 const at = '2026-09-24T00:00:00.000Z';
-const issue = (number = 1) => ({
+const issue = (number = '1') => ({
   number, title: 'An issue', body: '', state: 'open',
   createdAt: at, updatedAt: at, messages: [],
 });
 const resource = () => ({
   host: 'lubko://phoebe-dev', path: '/workspace/project',
-  issueNumbers: [1], createdAt: at, updatedAt: at,
+  issueNumbers: ['1'], createdAt: at, updatedAt: at,
 });
 
 function rejected(board) {
@@ -55,7 +55,7 @@ test('malformed nested issues and resources are rejected with useful indexed dia
   assert.deepEqual(parseBoard(value), value);
   const invalidIssue = rejected({ ...value, issues: [{ ...issue(), state: 'waiting' }] });
   assert.equal(invalidIssue.defect.subject, 'board issue at index 0');
-  const invalidResource = rejected({ ...value, resources: [{ ...resource(), issueNumbers: [2] }] });
+  const invalidResource = rejected({ ...value, resources: [{ ...resource(), issueNumbers: ['2'] }] });
   assert.match(invalidResource.message, /resource|issue/i);
 });
 

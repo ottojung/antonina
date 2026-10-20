@@ -55,7 +55,7 @@ async function readIssueAt(server, credential, meta, number) {
   for (const ref of meta.directoryRefs) {
     if (ref === null) continue;
     const directory = await resolve(server, credential, ref);
-    const entry = directory?.entries.find((candidate) => candidate.number === number);
+    const entry = directory?.entries.find((candidate) => candidate.number === String(number));
     if (entry === undefined) continue;
     const snapshot = await resolve(server, credential, entry.ref);
     const messages = [];
@@ -392,8 +392,8 @@ test('a shard re-established by content addressing is not reclaimed', async () =
     null,
     'a re-established shard was reclaimed out from under the live generation',
   );
-  assert.deepEqual(await board.getQueue(credential), [1, 2, 3]);
-  const issue = await board.getIssue(credential, 1);
+  assert.deepEqual(await board.getQueue(credential), ['1', '2', '3']);
+  const issue = await board.getIssue(credential, '1');
   assert.ok(issue, 'the board must still open after a reverted reorder');
   assert.equal(issue.messages[0].body, 'after the revert');
 });
@@ -423,7 +423,7 @@ test('comments on a deleted issue stay readable in the feed', async () => {
   const comment = page.entries.find((entry) => entry.kind === 'comment-added');
   assert.ok(comment);
   assert.equal(comment.body, 'before the delete');
-  assert.equal(await board.getIssue(credential, 1), null);
+  assert.equal(await board.getIssue(credential, '1'), null);
 });
 
 test('a resolved generation stays fully readable for the whole retention window', async () => {
@@ -557,7 +557,7 @@ test('a superseded shard survives the window and then goes, and the window is ti
     for (const page of meta.directoryRefs) {
       if (page === null) continue;
       const directory = await resolve(server, credential, page);
-      const entry = directory?.entries.find((candidate) => candidate.number === 1);
+      const entry = directory?.entries.find((candidate) => candidate.number === '1');
       if (entry !== undefined) return entry.ref;
     }
     return null;
@@ -687,7 +687,7 @@ test('repeated create/comment/delete cycles do not grow the store', async () => 
     const directory = await resolve(server, credential, ref);
     for (const entry of directory.entries) liveNumbers.push(entry.number);
   }
-  assert.deepEqual(liveNumbers, [1, 2, 3], 'only the live issues may be in the directory');
+  assert.deepEqual(liveNumbers, ['1', '2', '3'], 'only the live issues may be in the directory');
   // The format carries no tombstone bookkeeping: the meta names no such field,
   // which is asserted on the raw object so a reintroduction is caught even if a
   // parser starts tolerating it again.
@@ -894,7 +894,7 @@ test('a server that refuses DELETE is counted, reported, and never silent', asyn
   );
   // The board still works. A reclamation that cannot delete anything is a storage
   // problem, and must not become a correctness one.
-  const live = await board.getIssue(credential, 1);
+  const live = await board.getIssue(credential, '1');
   assert.equal(live?.body, 'revision five');
 });
 

@@ -39,7 +39,7 @@ function closedSummary(
   createdMinutesAgo = 5000,
 ): IssueListSummary {
   return {
-    number,
+    number: String(number),
     title: `Issue ${number}`,
     state: 'closed',
     createdAt: minutesAgo(createdMinutesAgo),
@@ -75,10 +75,10 @@ function nonMonotonicClosed(count: number): IssueListSummary[] {
  * test, so the expectation is a fact about these rows and not a restatement of
  * `visibleIssues`.
  */
-function expectedActivityOrder(summaries: readonly IssueListSummary[]): number[] {
+function expectedActivityOrder(summaries: readonly IssueListSummary[]): string[] {
   return [...summaries]
     .sort((left, right) =>
-      Date.parse(issueLastActivityOf(right)) - Date.parse(issueLastActivityOf(left)) || right.number - left.number)
+      Date.parse(issueLastActivityOf(right)) - Date.parse(issueLastActivityOf(left)) || right.number.localeCompare(left.number))
     .map((each) => each.number);
 }
 
@@ -124,8 +124,8 @@ function overview(): BoardOverview {
 const session = {
   api: {
     accessState: (): BoardAccessState => ({ boardId: 'board-1', keyId: null, rootKeyId: 'root-1', capabilities: [], credentialRejection: null, storageRejected: false, canEdit: true }),
-    getIssueCommentPage: async (number: number, page: number): Promise<IssueCommentPage> => {
-      const found = board.find((each) => each.number === number);
+    getIssueCommentPage: async (number: string, page: number): Promise<IssueCommentPage> => {
+      const found = board.find((each) => String(each.number) === String(number));
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
       return {
         schemaVersion: 2,
@@ -137,8 +137,8 @@ const session = {
         messages: found.messages,
       };
     },
-    getIssue: async (number: number): Promise<BoardIssue> => {
-      const found = board.find((each) => each.number === number);
+    getIssue: async (number: string): Promise<BoardIssue> => {
+      const found = board.find((each) => String(each.number) === String(number));
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
       return found;
     },
@@ -147,7 +147,7 @@ const session = {
     editIssueBody: async () => null,
     close: async () => null,
     reopen: async () => null,
-    reorderQueue: vi.fn(async (target: number[]) => target),
+    reorderQueue: vi.fn(async (target: string[]) => target),
   },
   readOverview: vi.fn(async () => overview()),
   hasCredential: vi.fn(() => true),
@@ -177,8 +177,8 @@ async function mountClosedView(): Promise<HTMLElement> {
   return container;
 }
 
-function drawnRows(container: HTMLElement): number[] {
-  return Array.from(container.querySelectorAll('.issue-row')).map((row) => Number(row.getAttribute('data-issue')));
+function drawnRows(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll('.issue-row')).map((row) => String(row.getAttribute('data-issue')));
 }
 
 async function goNext(): Promise<void> {
@@ -209,12 +209,12 @@ describe('closed issue ordering by last activity', () => {
       closedSummary(2, 30, 40),
       closedSummary(9, 5, 90),
     ];
-    const EXPECTED = [9, 4, 17, 2];
+    const EXPECTED = ['9', '4', '17', '2'];
 
     expect(visibleIssues(rows, [], 'closed').map((each) => each.number)).toEqual(EXPECTED);
     // Non-vacuity: the expected order is neither the ascending number order nor
     // the descending closing-time order these same rows carry.
-    expect(EXPECTED).not.toEqual([2, 4, 9, 17]);
+    expect(EXPECTED).not.toEqual(['2', '4', '9', '17']);
     expect(EXPECTED).not.toEqual([...rows].sort(compareClosedIssues).map((each) => each.number));
   });
 
@@ -228,15 +228,15 @@ describe('closed issue ordering by last activity', () => {
       closedSummary(8, 2, 900),
     ];
 
-    expect(visibleIssues(rows, [], 'closed').map((each) => each.number)).toEqual([8, 3]);
-    expect([...rows].sort(compareClosedIssues).map((each) => each.number)).toEqual([3, 8]);
+    expect(visibleIssues(rows, [], 'closed').map((each) => each.number)).toEqual(['8', '3']);
+    expect([...rows].sort(compareClosedIssues).map((each) => each.number)).toEqual(['3', '8']);
   });
 
   it('breaks an activity tie by issue number, most recent first', () => {
     const rows = [closedSummary(3, 15, 1), closedSummary(11, 15, 2), closedSummary(7, 15, 3)];
     for (const each of rows) expect(issueLastActivityOf(each)).toBe(minutesAgo(15));
 
-    expect(visibleIssues(rows, [], 'closed').map((each) => each.number)).toEqual([11, 7, 3]);
+    expect(visibleIssues(rows, [], 'closed').map((each) => each.number)).toEqual(['7', '3', '11']);
   });
 
   it('ranks a newly commented old closed issue above a more recently closed but quiet one', () => {
@@ -249,7 +249,7 @@ describe('closed issue ordering by last activity', () => {
       closedSummary(2, 3, 1),
     ];
 
-    expect(visibleIssues(rows, [], 'closed').map((each) => each.number)).toEqual([1, 2]);
+    expect(visibleIssues(rows, [], 'closed').map((each) => each.number)).toEqual(['1', '2']);
   });
 
   it('ranks an old closed issue edited just now by the edit', () => {
@@ -261,11 +261,11 @@ describe('closed issue ordering by last activity', () => {
       closedSummary(2, 1, 1),
     ];
 
-    expect(visibleIssues(rows, [], 'closed').map((each) => each.number)).toEqual([2, 1]);
+    expect(visibleIssues(rows, [], 'closed').map((each) => each.number)).toEqual(['2', '1']);
     // Flip only the edit time and the order follows it, which is what makes this
     // about the edit rather than about the closing time.
     const edited = [{ ...rows[0]!, updatedAt: minutesAgo(0.5) }, rows[1]!];
-    expect(visibleIssues(edited, [], 'closed').map((each) => each.number)).toEqual([1, 2]);
+    expect(visibleIssues(edited, [], 'closed').map((each) => each.number)).toEqual(['1', '2']);
   });
 
   it('shows a closed filter nothing but closed issues', () => {
@@ -274,12 +274,12 @@ describe('closed issue ordering by last activity', () => {
       { ...closedSummary(2, 0, 4000), state: 'open', closedAt: null },
     ];
     const closed = nonMonotonicClosed(6);
-    const drawn = visibleIssues([...open, ...closed], [1, 2], 'closed').map((each) => each.number);
+    const drawn = visibleIssues([...open, ...closed], ['1', '2'], 'closed').map((each) => each.number);
 
     expect(drawn).toEqual(expectedActivityOrder(closed));
     expect(drawn).toHaveLength(closed.length);
-    for (const number of drawn) expect(number).not.toBe(1);
-    for (const number of drawn) expect(number).not.toBe(2);
+    for (const number of drawn) expect(number).not.toBe('1');
+    for (const number of drawn) expect(number).not.toBe('2');
   });
 
   it('leaves open-issue ordering exactly as the shared queue has it', () => {
@@ -293,7 +293,7 @@ describe('closed issue ordering by last activity', () => {
 
     // The `open` filter is the shared queue, untouched, even though every one of
     // these issues carries an activity time that would order them differently.
-    expect(visibleIssues(all, [3, 1, 2], 'open').map((each) => each.number)).toEqual([3, 1, 2]);
+    expect(visibleIssues(all, ['3', '1', '2'], 'open').map((each) => each.number)).toEqual(['3', '1', '2']);
   });
 });
 
@@ -334,7 +334,7 @@ describe('closed issue ordering across page boundaries', () => {
 
     // Non-vacuity: the activity order is neither the number order nor the
     // closing-time order the same rows carry.
-    expect(expected).not.toEqual([...rows].sort((left, right) => left.number - right.number).map((each) => each.number));
+    expect(expected).not.toEqual([...rows].sort((left, right) => left.number.localeCompare(right.number)).map((each) => each.number));
     expect(expected).not.toEqual([...rows].sort(compareClosedIssues).map((each) => each.number));
   });
 });
@@ -363,7 +363,7 @@ describe('the Closed view draws that order', () => {
     const container = await mountClosedView();
     const drawn = drawnRows(container);
 
-    expect(drawn).not.toEqual([...drawn].sort((left, right) => left - right));
+    expect(drawn).not.toEqual([...drawn].sort((left, right) => left.localeCompare(right)));
     expect(drawn).not.toEqual([...summaries].sort(compareClosedIssues).map((each) => each.number).slice(0, ISSUE_PAGE_SIZE));
     expect(drawn[0]).toBe(expectedActivityOrder(summaries)[0]);
   });

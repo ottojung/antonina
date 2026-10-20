@@ -284,7 +284,7 @@ describe('browser board session', () => {
 
     expect(access.canEdit).toBe(true);
     expect(storedCredential(storage).keyId).toBe(initialized.credential.keyId);
-    await expect(other.api.createIssue('Edited here')).resolves.toMatchObject({ number: 1 });
+    await expect(other.api.createIssue('Edited here')).resolves.toMatchObject({ title: 'Edited here' });
 
     other.clearCredential();
     expect(other.hasCredential()).toBe(false);
@@ -410,68 +410,69 @@ describe('the shared priority queue through the session', () => {
     const storage = memoryStorage();
     const owner = session(server, storage);
     const initialized = await owner.initialize();
-    await owner.api.createIssue('First');
-    await owner.api.createIssue('Second');
-    await owner.api.createIssue('Third');
-    return { server, storage, owner, initialized };
+    const first = (await owner.api.createIssue('First')).number;
+    const second = (await owner.api.createIssue('Second')).number;
+    const third = (await owner.api.createIssue('Third')).number;
+    return { server, storage, owner, initialized, ids: [first, second, third] as const };
   }
 
   it('reads the board and its queue in one pass', async () => {
-    const { server, storage } = await boardWithThreeIssues();
+    const { server, storage, ids } = await boardWithThreeIssues();
     const reader = session(server, storage);
 
     const state = await reader.readState();
 
-    expect(state?.board.issues.map((issue) => issue.number)).toEqual([1, 2, 3]);
-    expect(state?.queue).toEqual([1, 2, 3]);
+    expect(new Set(state?.board.issues.map((issue) => issue.number))).toEqual(new Set(ids));
+    expect(state?.queue).toEqual(ids);
   });
 
   it('seeds the queue oldest-issue first at initialization', async () => {
-    const { server, storage } = await boardWithThreeIssues();
-    await session(server, storage).api.reorderQueue([3, 1, 2]);
-    await session(server, storage).api.createIssue('Fourth');
+    const { server, storage, ids } = await boardWithThreeIssues();
+    await session(server, storage).api.reorderQueue([ids[2], ids[0], ids[1]]);
+    const fourth = (await session(server, storage).api.createIssue('Fourth')).number;
 
-    expect((await session(server, storage).readState())?.queue).toEqual([3, 1, 2, 4]);
+    expect((await session(server, storage).readState())?.queue).toEqual([ids[2], ids[0], ids[1], fourth]);
   });
 
   it('commits a reorder and shows the same order to a second client that only reads', async () => {
-    const { server, storage, initialized } = await boardWithThreeIssues();
+    const { server, storage, initialized, ids } = await boardWithThreeIssues();
     const writer = session(server, storage);
 
-    const committed = await writer.api.reorderQueue([2, 3, 1]);
+    const committed = await writer.api.reorderQueue([ids[1], ids[2], ids[0]]);
 
-    expect(committed).toEqual([2, 3, 1]);
+    expect(committed).toEqual([ids[1], ids[2], ids[0]]);
     const reader = session(server);
     await reader.enableEditing(serializeBoardCredential(initialized.credential));
-    expect((await reader.readState())?.queue).toEqual([2, 3, 1]);
-    expect(await reader.api.getQueue()).toEqual([2, 3, 1]);
+    expect((await reader.readState())?.queue).toEqual([ids[1], ids[2], ids[0]]);
+    expect(await reader.api.getQueue()).toEqual([ids[1], ids[2], ids[0]]);
   });
 
   it('leaves the stored board untouched when a reorder is refused', async () => {
     const { server, storage } = await boardWithThreeIssues();
+    const ids = (await session(server, storage).api.getQueue());
     const before = server.signed;
 
-    await expect(session(server, storage).api.reorderQueue([1, 2])).rejects.toThrow('every open issue exactly once');
+    await expect(session(server, storage).api.reorderQueue(ids.slice(0, 2))).rejects.toThrow('every open issue exactly once');
     expect(server.signed).toBe(before);
-    expect((await session(server, storage).api.getQueue())).toEqual([1, 2, 3]);
+    expect((await session(server, storage).api.getQueue())).toEqual(ids);
   });
 
   it('never lets a client without the board credential reorder the shared queue', async () => {
-    const { server } = await boardWithThreeIssues();
+    const { server, ids } = await boardWithThreeIssues();
     const reader = session(server);
 
     expect(reader.api.hasWriteAccess()).toBe(false);
-    await expect(reader.api.reorderQueue([3, 2, 1])).rejects.toThrow('credential');
+    await expect(reader.api.reorderQueue([...ids].reverse())).rejects.toThrow('credential');
     expect((server.signed as { revision: number }).revision).toBe(4);
   });
 
   it('keeps a newly opened issue in the queue a client re-reads after a close', async () => {
-    const { server, storage } = await boardWithThreeIssues();
+    const { server, storage, ids } = await boardWithThreeIssues();
     const client = session(server, storage);
-    await client.api.close(2);
-    expect((await client.readState())?.queue).toEqual([1, 3]);
-    await client.api.reopen(2);
-    expect((await client.readState())?.queue).toEqual([1, 3, 2]);
+    await client.api.close(ids[1]);
+    expect((await client.readState())?.queue).toEqual([ids[0], ids[2]]);
+    await client.api.reopen(ids[1]);
+    expect((await client.readState())?.queue).toEqual([ids[0], ids[2], ids[1]]);
   });
 });
 
@@ -482,13 +483,13 @@ describe('the board feed through the session', () => {
     const storage = memoryStorage();
     const owner = session(server, storage);
     await owner.initialize();
-    await owner.api.createIssue('First', 'the first body');
-    await owner.api.comment(1, 'Lubko', 'on it');
-    await owner.api.createIssue('Second');
-    await owner.api.close(2);
-    await owner.api.reopen(2);
-    await owner.api.editIssueBody(1, 'an edited body');
-    return { server, storage, writer: session(server, storage) };
+    const first = (await owner.api.createIssue('First', 'the first body')).number;
+    await owner.api.comment(first, 'Lubko', 'on it');
+    const second = (await owner.api.createIssue('Second')).number;
+    await owner.api.close(second);
+    await owner.api.reopen(second);
+    await owner.api.editIssueBody(first, 'an edited body');
+    return { server, storage, writer: session(server, storage), first, second };
   }
 
   it('reads directly materialized feed entries newest first', async () => {
@@ -507,10 +508,10 @@ describe('the board feed through the session', () => {
   });
 
   it('keeps close, reopen, and edit as distinct materialized feed entries', async () => {
-    const { writer } = await boardWithActivity();
+    const { writer, second } = await boardWithActivity();
     const page = await writer.readFeed();
     const forIssueTwo = page.entries.filter(
-      (entry) => entry.issueNumber === 2
+      (entry) => entry.issueNumber === second
         && (entry.kind === 'issue-closed' || entry.kind === 'issue-reopened'),
     );
 
@@ -648,7 +649,7 @@ const SUPERSEDED_BOARD_SCHEMA_VERSION = Math.min(...PERSISTED_BOARD_VERSIONS);
 const board = (overrides: Record<string, unknown> = {}) => ({
   schemaVersion: BOARD_SCHEMA_VERSION,
   nextIssueNumber: 2,
-  issues: [{ number: 1, title: 'Issue 1', body: '', state: 'open', createdAt: timestamp, updatedAt: timestamp, messages: [] }],
+  issues: [{ number: '1', title: 'Issue 1', body: '', state: 'open', createdAt: timestamp, updatedAt: timestamp, messages: [] }],
   resources: [],
   ...overrides,
 });
@@ -688,7 +689,7 @@ describe('a failed board read is classified, not just stringified', () => {
     expect(failure.message).toContain('malformed field nextIssueNumber');
 
     const nested = boardReadFailure(refusalOf(board({
-      issues: [{ number: 1, title: 'x', body: '', state: 'nope', createdAt: timestamp, updatedAt: timestamp, messages: [] }],
+      issues: [{ number: '1', title: 'x', body: '', state: 'nope', createdAt: timestamp, updatedAt: timestamp, messages: [] }],
     })));
     expect(nested.kind).toBe('element');
     expect(nested.subject).toBe('board issue at index 0');
@@ -696,7 +697,7 @@ describe('a failed board read is classified, not just stringified', () => {
   });
 
   it('keeps corrupt data apart from a version mismatch', () => {
-    const corrupt = boardReadFailure(refusalOf(board({ nextIssueNumber: 1 })));
+    const corrupt = boardReadFailure(refusalOf(board({ issues: [board().issues[0], board().issues[0]] })));
     expect(corrupt.kind).toBe('corrupt');
     expect(corrupt.kind).not.toBe('schema-version-mismatch');
   });

@@ -1,4 +1,5 @@
 import { compareClosedIssues } from './board-v3-store.js';
+import { newEntityId } from './ids.js';
 import type { BoardOverview, IssueCommentPage, IssueListSummary } from './board-v3-store.js';
 import { newestCommentAt } from './board-v3-store.js';
 import {
@@ -88,7 +89,7 @@ export {
 export class AntoninaApiError extends Error {}
 
 export interface ReviewRecordInput {
-  number: number;
+  number: string;
   /** The exact commit reviewed, or empty when the review named none. */
   commit: string;
   verdict: ReviewVerdict;
@@ -369,7 +370,7 @@ export class BoardApi {
           // The board whose pages are not materialized yet still has one closed
           // order, and it is the same one the materialized pages are written in.
           if (issueState === 'closed') return summarized.sort(compareClosedIssues);
-          return summarized.sort((left, right) => left.number - right.number);
+          return summarized.sort((left, right) => left.number.localeCompare(right.number));
         }
         summaries.push(...listed.entries);
         listedCount += listed.entries.length;
@@ -382,7 +383,7 @@ export class BoardApi {
   async listIssues(state?: IssueState): Promise<BoardIssue[]> {
     const credential = await this.fastReadCredential();
     const states: IssueState[] = state === undefined ? ['open', 'closed'] : [state];
-    const numbers: number[] = [];
+    const numbers: string[] = [];
     for (const issueState of states) {
       let listedCount = 0;
       for (let page = 1; ; page += 1) {
@@ -391,7 +392,7 @@ export class BoardApi {
           const issues = (await this.loadBoard()).issues;
           return issues
             .filter((issue) => state === undefined || issue.state === state)
-            .sort((left, right) => left.number - right.number);
+            .sort((left, right) => left.number.localeCompare(right.number));
         }
         numbers.push(...listed.entries.map((entry) => entry.number));
         listedCount += listed.entries.length;
@@ -401,11 +402,11 @@ export class BoardApi {
     const issues = await Promise.all(numbers.map((number) => this.store.getIssue(credential, number, this.rememberedHead)));
     return issues
       .filter((issue): issue is BoardIssue => issue !== null)
-      .sort((left, right) => left.number - right.number)
+      .sort((left, right) => left.number.localeCompare(right.number))
       .map(clone);
   }
 
-  async getIssue(number: number): Promise<BoardIssue> {
+  async getIssue(number: string): Promise<BoardIssue> {
     const credential = await this.fastReadCredential();
     const issue = await this.store.getIssue(credential, number, this.rememberedHead);
     if (issue === null) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
@@ -433,7 +434,7 @@ export class BoardApi {
    * read removes: it fetches the issue's own shard and at most the two comment
    * shards the window straddles, and a page past the end fetches none at all.
    */
-  async getIssueCommentPage(number: number, page: number): Promise<IssueCommentPage> {
+  async getIssueCommentPage(number: string, page: number): Promise<IssueCommentPage> {
     const credential = await this.fastReadCredential();
     const read = await this.store.readIssueCommentPage(credential, number, page);
     if (read === null) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
@@ -452,7 +453,7 @@ export class BoardApi {
    * conversation pager is the caller of that one. `getIssue` still returns the
    * whole issue to its existing callers and is unchanged by either.
    */
-  async getIssuePage(number: number, page: number): Promise<BoardIssue> {
+  async getIssuePage(number: string, page: number): Promise<BoardIssue> {
     const credential = await this.fastReadCredential();
     const issue = await this.store.getIssuePage(credential, number, page, this.rememberedHead);
     if (issue === null) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
@@ -499,14 +500,14 @@ export class BoardApi {
   }
 
 
-  async getQueue(): Promise<number[]> {
+  async getQueue(): Promise<string[]> {
     const credential = await this.fastReadCredential();
     const queue = await this.store.getQueue(credential, this.rememberedHead);
     if (queue !== null) return [...queue];
     return [...(await this.readStored()).state.queue];
   }
 
-  async reorderQueue(numbers: number[]): Promise<number[]> {
+  async reorderQueue(numbers: string[]): Promise<string[]> {
     const committed = await this.append('queue.reorder', { numbers: [...numbers] });
     return [...committed.state.queue];
   }
@@ -516,19 +517,22 @@ export class BoardApi {
     const cleanBody = body.trim();
     if (!cleanTitle) throw new AntoninaApiError('Issue title is required');
     requireMaximumCharacters(cleanBody, MAX_ISSUE_BODY_CHARACTERS, 'Issue body');
-    let createdNumber = 0;
+    let createdId = newEntityId();
     const committed = await this.append(
       'issue.create',
       (state) => {
-        createdNumber = state.board.nextIssueNumber;
-        if (createdNumber >= MAX_SAFE_INTEGER) throw new AntoninaApiError('Antonina issue number space is exhausted');
-        return { number: createdNumber, title: cleanTitle, body: cleanBody };
+        // Only the full identifier needs to be distinct; English words may repeat.
+        for (let attempt = 0; state.board.issues.some((issue) => issue.number === createdId); attempt++) {
+          if (attempt >= 8) throw new AntoninaApiError('Could not allocate a unique issue ID');
+          createdId = newEntityId();
+        }
+        return { number: createdId, title: cleanTitle, body: cleanBody };
       },
     );
-    return clone(this.requireIssue(committed.state.board.issues, createdNumber));
+    return clone(this.requireIssue(committed.state.board.issues, createdId));
   }
 
-  async editIssueBody(number: number, body: string): Promise<BoardIssue> {
+  async editIssueBody(number: string, body: string): Promise<BoardIssue> {
     const committed = await this.append(
       'issue.edit',
       { number, title: null, body: body.trim() },
@@ -567,11 +571,11 @@ export class BoardApi {
     return clone(review);
   }
 
-  async listResources(host?: string, issueNumber?: number): Promise<ResourceView[]> {
+  async listResources(host?: string, issueNumber?: string): Promise<ResourceView[]> {
     return resourceViews(await this.loadBoard(), host, issueNumber);
   }
 
-  async addResourceDependency(host: string, path: string, issueNumber: number): Promise<BoardResource> {
+  async addResourceDependency(host: string, path: string, issueNumber: string): Promise<BoardResource> {
     let cleanHost: string;
     let cleanPath: string;
     try {
@@ -591,7 +595,7 @@ export class BoardApi {
     return clone(resource);
   }
 
-  async removeResourceDependency(host: string, path: string, issueNumber: number): Promise<BoardResource[]> {
+  async removeResourceDependency(host: string, path: string, issueNumber: string): Promise<BoardResource[]> {
     let cleanHost: string;
     let cleanPath: string;
     try {
@@ -614,7 +618,7 @@ export class BoardApi {
     return clone(daemonHostViews(reports, options));
   }
 
-  async comment(number: number, author: string, body: string): Promise<BoardIssue> {
+  async comment(number: string, author: string, body: string): Promise<BoardIssue> {
     const cleanAuthor = author.trim();
     const cleanBody = body.trim();
     if (!cleanAuthor) throw new AntoninaApiError('Message author is required');
@@ -627,17 +631,17 @@ export class BoardApi {
     return clone(this.requireIssue(committed.state.board.issues, number));
   }
 
-  async close(number: number): Promise<BoardIssue> {
+  async close(number: string): Promise<BoardIssue> {
     const committed = await this.append('issue.close', { number });
     return clone(this.requireIssue(committed.state.board.issues, number));
   }
 
-  async reopen(number: number): Promise<BoardIssue> {
+  async reopen(number: string): Promise<BoardIssue> {
     const committed = await this.append('issue.reopen', { number });
     return clone(this.requireIssue(committed.state.board.issues, number));
   }
 
-  async deleteIssue(number: number): Promise<Board> {
+  async deleteIssue(number: string): Promise<Board> {
     await this.append('issue.delete', { number });
     // This API promises a full Board, not the compact mutation working set.
     // Deletion is rare enough that hydrating the surviving threads here is the
@@ -684,7 +688,7 @@ export class BoardApi {
     return this.requireCredential();
   }
 
-  private requireIssue(issues: BoardIssue[], number: number): BoardIssue {
+  private requireIssue(issues: BoardIssue[], number: string): BoardIssue {
     const issue = issues.find((candidate) => candidate.number === number);
     if (!issue) throw new AntoninaApiError('Antonina issue ' + number + ' does not exist');
     return issue;

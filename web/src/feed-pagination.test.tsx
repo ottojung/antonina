@@ -52,7 +52,7 @@ const STAMP = '2026-09-27T12:00:00.000Z';
 
 const SECRET = 'antonina-board-credential-root-1-do-not-share';
 
-const allIssues = new Map<number, BoardIssue>();
+const allIssues = new Map<string, BoardIssue>();
 
 /** Every feed read the fake board has been asked for, in order. */
 let feedRequests: BoardFeedRequest[] = [];
@@ -63,8 +63,8 @@ let feedTotal = 0;
 const session = {
   api: {
     accessState: (): BoardAccessState => ({ boardId: 'board-1', keyId: null, rootKeyId: 'root-1', capabilities: [], credentialRejection: null, storageRejected: false, canEdit: false }),
-    getIssue: async (number: number): Promise<BoardIssue> => {
-      const found = allIssues.get(number);
+    getIssue: async (number: string): Promise<BoardIssue> => {
+      const found = allIssues.get(String(number));
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
       return found;
     },
@@ -88,13 +88,13 @@ vi.mock('./api', async (importOriginal) => {
   return { ...actual, createBrowserBoardApi: () => session as unknown as BrowserBoardSession };
 });
 
-function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue {
-  return { number, title: `Issue ${number}`, body: '', state, createdAt: STAMP, updatedAt: STAMP, messages: [] };
+function issue(number: number | string, state: 'open' | 'closed' = 'open'): BoardIssue {
+  return { number: String(number), title: `Issue ${number}`, body: '', state, createdAt: STAMP, updatedAt: STAMP, messages: [] };
 }
 
 function overview(issues: BoardIssue[]): BoardOverview {
   allIssues.clear();
-  for (const each of issues) allIssues.set(each.number, each);
+  for (const each of issues) allIssues.set(String(each.number), each);
   return {
     boardId: 'board-1',
     head: 'op-1',
@@ -115,7 +115,7 @@ function overview(issues: BoardIssue[]): BoardOverview {
  * what the real projection's cursor names, so the fake and the real thing agree.
  */
 function entry(kind: BoardFeedEntryKind, issueNumber: number, position: number): BoardFeedEntry {
-  return { id: `op-${position}`, kind, at: STAMP, position, issueNumber, title: `Issue ${issueNumber}`, state: 'open', messageId: null, author: null, body: null };
+  return { id: `op-${position}`, kind, at: STAMP, position, issueNumber: String(issueNumber), title: `Issue ${issueNumber}`, state: 'open', messageId: null, author: null, body: null };
 }
 
 /**

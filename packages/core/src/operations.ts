@@ -92,30 +92,35 @@ export interface RevokePayload {
   keyId: string;
 }
 
+export type WireIssueId = number | string;
+function isWireIssueId(value: unknown): value is WireIssueId {
+  return isText(value) || isPositiveSafeInteger(value);
+}
+
 export interface IssueCreatePayload {
-  number: number;
+  number: WireIssueId;
   title: string;
   body: string;
 }
 
 export interface IssueEditPayload {
-  number: number;
+  number: WireIssueId;
   title: string | null;
   body: string | null;
 }
 
 export interface IssueReferencePayload {
-  number: number;
+  number: WireIssueId;
 }
 
 export interface IssueCommentPayload {
-  number: number;
+  number: WireIssueId;
   author: string;
   body: string;
 }
 
 export interface ResourcePayload {
-  number: number;
+  number: WireIssueId;
   host: string;
   path: string;
 }
@@ -138,7 +143,7 @@ export interface ResourcePayload {
  * names no commit clears nothing and is refused while a block is outstanding.
  */
 export interface ReviewRecordPayload {
-  number: number;
+  number: WireIssueId;
   commit: string;
   verdict: ReviewVerdict;
   reviewer: string;
@@ -146,7 +151,7 @@ export interface ReviewRecordPayload {
 }
 
 export interface QueueReorderPayload {
-  numbers: number[];
+  numbers: WireIssueId[];
 }
 
 export type BoardOperationPayload =
@@ -264,7 +269,8 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
   switch (kind) {
     case 'board.initialize': {
       if (!hasExactKeys(value, ['board'])) throw new Error('Initialize payload is malformed');
-      return { board: parsePersistedBoard(value.board) };
+      parsePersistedBoard(value.board); // Validate, but never rewrite data whose bytes were signed.
+      return { board: structuredClone(value.board) as PersistedBoard };
     }
     case 'authority.delegate': {
       if (!hasExactKeys(value, ['childKeyId', 'childPublicKey', 'capabilities'])
@@ -284,7 +290,7 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
     }
     case 'issue.create': {
       if (!hasExactKeys(value, ['number', 'title', 'body'])
-          || !isPositiveSafeInteger(value.number)
+          || !isWireIssueId(value.number)
           || !isText(value.title)
           || typeof value.body !== 'string') {
         throw new Error('Issue-create payload is malformed');
@@ -293,7 +299,7 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
     }
     case 'issue.edit': {
       if (!hasExactKeys(value, ['number', 'title', 'body'])
-          || !isPositiveSafeInteger(value.number)
+          || !isWireIssueId(value.number)
           || (value.title !== null && !isText(value.title))
           || (value.body !== null && typeof value.body !== 'string')
           || (value.title === null && value.body === null)) {
@@ -303,7 +309,7 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
     }
     case 'issue.comment': {
       if (!hasExactKeys(value, ['number', 'author', 'body'])
-          || !isPositiveSafeInteger(value.number)
+          || !isWireIssueId(value.number)
           || !isText(value.author)
           || !isText(value.body)) {
         throw new Error('Issue-comment payload is malformed');
@@ -313,7 +319,7 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
     case 'issue.close':
     case 'issue.reopen':
     case 'issue.delete': {
-      if (!hasExactKeys(value, ['number']) || !isPositiveSafeInteger(value.number)) {
+      if (!hasExactKeys(value, ['number']) || !isWireIssueId(value.number)) {
         throw new Error(`${kind} payload is malformed`);
       }
       return { number: value.number };
@@ -321,7 +327,7 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
     case 'resource.add':
     case 'resource.remove': {
       if (!hasExactKeys(value, ['number', 'host', 'path'])
-          || !isPositiveSafeInteger(value.number)
+          || !isWireIssueId(value.number)
           || !isText(value.host)
           || !isText(value.path)) {
         throw new Error(`${kind} payload is malformed`);
@@ -335,7 +341,7 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
       return structuredClone(value) as BoardOperationPayload;
     case 'review.record': {
       if (!hasExactKeys(value, ['number', 'commit', 'verdict', 'reviewer', 'rationale'])
-          || !isPositiveSafeInteger(value.number)
+          || !isWireIssueId(value.number)
           || !isText(value.verdict)
           || !isText(value.reviewer)
           || !isText(value.rationale)) {
@@ -353,11 +359,11 @@ function parsePayload(kind: BoardOperationKind, value: unknown): BoardOperationP
     case 'queue.reorder': {
       if (!hasExactKeys(value, ['numbers'])
           || !Array.isArray(value.numbers)
-          || !value.numbers.every(isPositiveSafeInteger)
+          || !value.numbers.every(isWireIssueId)
           || new Set(value.numbers).size !== value.numbers.length) {
         throw new Error('Queue-reorder payload is malformed');
       }
-      return { numbers: [...value.numbers] as number[] };
+      return { numbers: [...value.numbers] as WireIssueId[] };
     }
     case 'board.delete': {
       if (!hasExactKeys(value, [])) throw new Error('Board-delete payload is malformed');
@@ -512,7 +518,7 @@ export function unMigratedBoardReport(): BoardMigrationReport {
 
 export interface VerifiedBoardState {
   board: Board;
-  queue: number[];
+  queue: string[];
   authorities: VerifiedAuthority[];
   deleted: boolean;
   head: string;
@@ -561,15 +567,15 @@ function requiredCapability(kind: BoardOperationKind): BoardCapability | null {
   }
 }
 
-function requireIssue(board: Board, number: number): BoardIssue {
+function requireIssue(board: Board, number: string): BoardIssue {
   const issue = board.issues.find((candidate) => candidate.number === number);
   if (!issue) throw new OperationLogVerificationError(`Operation references missing issue ${number}`);
   return issue;
 }
 
-function exactOpenIssueQueue(board: Board, numbers: number[]): void {
-  const expected = board.issues.filter((issue) => issue.state === 'open').map((issue) => issue.number).sort((a, b) => a - b);
-  const actual = [...numbers].sort((a, b) => a - b);
+function exactOpenIssueQueue(board: Board, numbers: string[]): void {
+  const expected = board.issues.filter((issue) => issue.state === 'open').map((issue) => issue.number).sort();
+  const actual = [...numbers].sort();
   if (expected.length !== actual.length || expected.some((number, index) => number !== actual[index])) {
     throw new OperationLogVerificationError('Queue reorder must contain every open issue exactly once');
   }
@@ -597,8 +603,8 @@ function cloneBoard(board: Board): Board {
 export function applyBoardMutation(
   operation: SignedBoardOperation,
   board: Board,
-  queue: number[],
-): { board: Board; queue: number[]; deleted: boolean } {
+  queue: string[],
+): { board: Board; queue: string[]; deleted: boolean } {
   const candidate = cloneBoard(board);
   let nextQueue = [...queue];
   switch (operation.kind) {
@@ -608,14 +614,22 @@ export function applyBoardMutation(
       return { board: candidate, queue: nextQueue, deleted: false };
     case 'issue.create': {
       const payload = operation.payload as IssueCreatePayload;
-      if (payload.number !== candidate.nextIssueNumber) {
-        throw new OperationLogVerificationError('Issue-create number must equal the next issue number');
+      const id = String(payload.number);
+      // Numeric ordinals survive only in the verified legacy operation stream.
+      if (typeof payload.number === 'number') {
+        if (payload.number !== candidate.nextIssueNumber) {
+          throw new OperationLogVerificationError('Legacy issue-create ordinal is out of sequence');
+        }
+        if (candidate.nextIssueNumber >= Number.MAX_SAFE_INTEGER) {
+          throw new OperationLogVerificationError('Legacy issue number space is exhausted');
+        }
+        candidate.nextIssueNumber += 1;
       }
-      if (candidate.nextIssueNumber >= Number.MAX_SAFE_INTEGER) {
-        throw new OperationLogVerificationError('Issue number space is exhausted');
+      if (candidate.issues.some((issue) => issue.number === id)) {
+        throw new OperationLogVerificationError('Issue identifier already exists');
       }
       candidate.issues.push({
-        number: payload.number,
+        number: id,
         title: payload.title,
         body: payload.body,
         state: 'open',
@@ -623,13 +637,12 @@ export function applyBoardMutation(
         updatedAt: operation.timestamp,
         messages: [],
       });
-      candidate.nextIssueNumber += 1;
-      nextQueue.push(payload.number);
+      nextQueue.push(id);
       break;
     }
     case 'issue.edit': {
       const payload = operation.payload as IssueEditPayload;
-      const issue = requireIssue(candidate, payload.number);
+      const issue = requireIssue(candidate, String(payload.number));
       if (issue.state === 'closed') throw new OperationLogVerificationError('Closed issue descriptions cannot be edited');
       if (payload.title !== null) issue.title = payload.title;
       if (payload.body !== null) issue.body = payload.body;
@@ -638,7 +651,7 @@ export function applyBoardMutation(
     }
     case 'issue.comment': {
       const payload = operation.payload as IssueCommentPayload;
-      const issue = requireIssue(candidate, payload.number);
+      const issue = requireIssue(candidate, String(payload.number));
       issue.messages.push({
         id: operation.opId,
         author: payload.author,
@@ -650,7 +663,7 @@ export function applyBoardMutation(
     }
     case 'issue.close': {
       const payload = operation.payload as IssueReferencePayload;
-      const issue = requireIssue(candidate, payload.number);
+      const issue = requireIssue(candidate, String(payload.number));
       // The completion predicate docs/skills/itinerary-antonina.md states in
       // prose, enforced here so it cannot be satisfied by an orchestrator that
       // reads the review and merges anyway. A blocker is a refusal to close,
@@ -661,46 +674,46 @@ export function applyBoardMutation(
       }
       issue.state = 'closed';
       issue.updatedAt = operation.timestamp;
-      nextQueue = nextQueue.filter((number) => number !== payload.number);
+      nextQueue = nextQueue.filter((number) => number !== String(payload.number));
       break;
     }
     case 'issue.reopen': {
       const payload = operation.payload as IssueReferencePayload;
-      const issue = requireIssue(candidate, payload.number);
+      const issue = requireIssue(candidate, String(payload.number));
       issue.state = 'open';
       issue.updatedAt = operation.timestamp;
-      if (!nextQueue.includes(payload.number)) nextQueue.push(payload.number);
+      if (!nextQueue.includes(String(payload.number))) nextQueue.push(String(payload.number));
       break;
     }
     case 'issue.delete': {
       const payload = operation.payload as IssueReferencePayload;
-      requireIssue(candidate, payload.number);
-      candidate.issues = candidate.issues.filter((issue) => issue.number !== payload.number);
+      requireIssue(candidate, String(payload.number));
+      candidate.issues = candidate.issues.filter((issue) => issue.number !== String(payload.number));
       candidate.resources = candidate.resources.flatMap((resource) => {
-        const issueNumbers = resource.issueNumbers.filter((number) => number !== payload.number);
+        const issueNumbers = resource.issueNumbers.filter((number) => number !== String(payload.number));
         return issueNumbers.length === 0 ? [] : [{ ...resource, issueNumbers, updatedAt: operation.timestamp }];
       });
-      nextQueue = nextQueue.filter((number) => number !== payload.number);
+      nextQueue = nextQueue.filter((number) => number !== String(payload.number));
       break;
     }
     case 'resource.add': {
       const payload = operation.payload as ResourcePayload;
-      const issue = requireIssue(candidate, payload.number);
+      const issue = requireIssue(candidate, String(payload.number));
       if (issue.state !== 'open') throw new OperationLogVerificationError('A resource dependency requires an open issue');
       const host = canonicalHost(payload.host);
       const path = canonicalPath(payload.path);
       const current = candidate.resources.find((resource) => resource.host === host && resource.path === path);
       if (current) {
-        if (!current.issueNumbers.includes(payload.number)) {
-          current.issueNumbers.push(payload.number);
-          current.issueNumbers.sort((a, b) => a - b);
+        if (!current.issueNumbers.includes(String(payload.number))) {
+          current.issueNumbers.push(String(payload.number));
+          current.issueNumbers.sort();
           current.updatedAt = operation.timestamp;
         }
       } else {
         candidate.resources.push({
           host,
           path,
-          issueNumbers: [payload.number],
+          issueNumbers: [String(payload.number)],
           createdAt: operation.timestamp,
           updatedAt: operation.timestamp,
         });
@@ -714,10 +727,10 @@ export function applyBoardMutation(
       const path = canonicalPath(payload.path);
       const index = candidate.resources.findIndex((resource) => resource.host === host && resource.path === path);
       const current = index < 0 ? undefined : candidate.resources[index];
-      if (!current || !current.issueNumbers.includes(payload.number)) {
+      if (!current || !current.issueNumbers.includes(String(payload.number))) {
         throw new OperationLogVerificationError('Resource dependency does not exist');
       }
-      current.issueNumbers = current.issueNumbers.filter((number) => number !== payload.number);
+      current.issueNumbers = current.issueNumbers.filter((number) => number !== String(payload.number));
       if (current.issueNumbers.length === 0) candidate.resources.splice(index, 1);
       else current.updatedAt = operation.timestamp;
       break;
@@ -729,7 +742,7 @@ export function applyBoardMutation(
       break;
     case 'review.record': {
       const payload = operation.payload as ReviewRecordPayload;
-      const issue = requireIssue(candidate, payload.number);
+      const issue = requireIssue(candidate, String(payload.number));
       if (issue.state !== 'open') throw new OperationLogVerificationError('Only an open issue can be reviewed');
       const review: BoardReview = {
         commit: canonicalReviewCommit(payload.commit),
@@ -751,8 +764,9 @@ export function applyBoardMutation(
     }
     case 'queue.reorder': {
       const payload = operation.payload as QueueReorderPayload;
-      exactOpenIssueQueue(candidate, payload.numbers);
-      nextQueue = [...payload.numbers];
+      const ordered = payload.numbers.map(String);
+      exactOpenIssueQueue(candidate, ordered);
+      nextQueue = [...ordered];
       break;
     }
     case 'board.delete':
@@ -804,7 +818,7 @@ export async function verifyAndReplayOperationLog(
   let previous: string | null = null;
   let previousTimestamp: string | null = null;
   let board: Board | undefined;
-  let queue: number[] = [];
+  let queue: string[] = [];
   let deleted = false;
   let migrated: ReturnType<typeof migratePersistedBoard> | undefined;
   const seen = new Set<string>();

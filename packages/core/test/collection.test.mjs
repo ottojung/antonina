@@ -121,22 +121,21 @@ test('closing the last open dependent issue makes a path collectible, reopening 
     host: HOST,
     path: WORKTREE,
     status: 'protected',
-    issues: [{ number: 1, state: 'open' }, { number: 2, state: 'open' }],
+    issues: open.slice(0, 2).map(issue => ({ number: issue.number, state: 'open' })).sort((a,b)=>a.number < b.number ? -1 : a.number > b.number ? 1 : 0),
     basis: 'snapshot-verified',
   });
 
   await writer.close(open[1].number);
   const partly = await readCollectionSnapshot(HOST, reader);
   assert.equal(protectionOf(partly, WORKTREE).status, 'protected');
-  assert.equal(protectionOf(partly, WORKTREE).issues.at(-1).state, 'closed');
+  assert.equal(protectionOf(partly, WORKTREE).issues.find(item => item.number === open[1].number)?.state, 'closed');
 
   await writer.close(open[0].number);
   const collectible = await readCollectionSnapshot(HOST, reader);
   assert.equal(protectionOf(collectible, WORKTREE).status, 'collectible');
   assert.deepEqual(collectiblePaths(collectible), [WORKTREE]);
   assert.deepEqual(collectible.decisions.find((entry) => entry.path === WORKTREE).issues, [
-    { number: 1, state: 'closed' },
-    { number: 2, state: 'closed' },
+    ...open.slice(0, 2).map(issue => ({ number: issue.number, state: 'closed' })).sort((a,b)=>a.number < b.number ? -1 : a.number > b.number ? 1 : 0),
   ]);
 
   await writer.reopen(open[0].number);
@@ -307,7 +306,7 @@ test('a host sees only its own resources, and a host absent from the registry de
     host: HOST,
     path: WORKTREE,
     status: 'protected',
-    issues: [{ number: open[0].number, state: 'closed' }, { number: open[1].number, state: 'closed' }],
+    issues: open.slice(0, 2).map(issue => ({ number: issue.number, state: 'closed' })).sort((a,b)=>a.number < b.number ? -1 : a.number > b.number ? 1 : 0),
     basis: 'other-host',
   });
   assert.throws(() => openCollectionClaim(theirs, WORKTREE), /protected/);
@@ -348,7 +347,7 @@ test('a path registered on two hosts is decided by this host, not by the neighbo
     host: HOST,
     path: WORKTREE,
     status: 'collectible',
-    issues: [{ number: open[0].number, state: 'closed' }, { number: open[1].number, state: 'closed' }],
+    issues: open.slice(0, 2).map(issue => ({ number: issue.number, state: 'closed' })).sort((a,b)=>a.number < b.number ? -1 : a.number > b.number ? 1 : 0),
     basis: 'snapshot-verified',
   });
   assert.equal(collectiblePaths(mine).includes(WORKTREE), true);

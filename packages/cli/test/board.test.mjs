@@ -93,13 +93,13 @@ test('board show pages newest comments while retaining the issue description', a
   const server = fakeSkrynia();
   const owner = client(server);
   const initialized = await owner.initialize();
-  await owner.createIssue('Paged', 'issue description');
+  const issueId = (await owner.createIssue('Paged', 'issue description')).number;
   for (let index = 1; index <= 55; index += 1) {
-    await owner.comment(1, 'worker', 'comment-' + String(index).padStart(2, '0'));
+    await owner.comment(issueId, 'worker', 'comment-' + String(index).padStart(2, '0'));
   }
 
   const reader = client(server, { credential: initialized.credential });
-  const first = await run(['show', '1', '--page', '1', '--json'], { createClient: () => reader });
+  const first = await run(['show', issueId, '--page', '1', '--json'], { createClient: () => reader });
   assert.equal(first.code, 0, first.err.join('\n'));
   const firstIssue = JSON.parse(first.out[0]);
   assert.equal(firstIssue.body, 'issue description');
@@ -107,7 +107,7 @@ test('board show pages newest comments while retaining the issue description', a
   assert.equal(firstIssue.messages[0].body, 'comment-06');
   assert.equal(firstIssue.messages[49].body, 'comment-55');
 
-  const second = await run(['show', '1', '--page', '2', '--json'], { createClient: () => reader });
+  const second = await run(['show', issueId, '--page', '2', '--json'], { createClient: () => reader });
   assert.equal(second.code, 0, second.err.join('\n'));
   const secondIssue = JSON.parse(second.out[0]);
   assert.equal(secondIssue.body, 'issue description');
@@ -119,7 +119,7 @@ test('board show pages newest comments while retaining the issue description', a
     'comment-05',
   ]);
 
-  const third = await run(['show', '1', '--page', '3', '--json'], { createClient: () => reader });
+  const third = await run(['show', issueId, '--page', '3', '--json'], { createClient: () => reader });
   assert.equal(third.code, 0, third.err.join('\n'));
   const thirdIssue = JSON.parse(third.out[0]);
   assert.equal(thirdIssue.body, 'issue description');
@@ -471,44 +471,45 @@ async function queuedBoard() {
   const server = fakeSkrynia();
   const owner = client(server);
   const initialized = await owner.initialize();
-  for (const title of ['One', 'Two', 'Three']) await owner.createIssue(title);
-  return { server, initialized, client: client(server, { credential: initialized.credential, trustAnchor: initialized.trustAnchor }) };
+  const ids = [];
+  for (const title of ['One', 'Two', 'Three']) ids.push((await owner.createIssue(title)).number);
+  return { server, initialized, ids, client: client(server, { credential: initialized.credential, trustAnchor: initialized.trustAnchor }) };
 }
 
 test('board CLI queue reorder prints the committed order on one line', async () => {
   const board = await queuedBoard();
   const before = board.server.signed.revision;
-  const { code, out, err } = await run(['queue', 'reorder', '3', '1', '2'], { createClient: () => board.client });
+  const { code, out, err } = await run(['queue', 'reorder', board.ids[2], board.ids[0], board.ids[1]], { createClient: () => board.client });
 
   assert.equal(code, 0);
   assert.deepEqual(err, []);
-  assert.deepEqual(out, ['#3 #1 #2']);
+  assert.deepEqual(out, ['#' + [board.ids[2], board.ids[0], board.ids[1]].join(' #')]);
   assert.equal(board.server.signed.revision, before + 1);
-  assert.deepEqual(await board.client.getQueue(), [3, 1, 2]);
+  assert.deepEqual(await board.client.getQueue(), [board.ids[2], board.ids[0], board.ids[1]]);
 });
 
 test('board CLI queue list prints the reordered order in human and JSON form', async () => {
   const board = await queuedBoard();
-  await run(['queue', 'reorder', '3', '1', '2'], { createClient: () => board.client });
+  await run(['queue', 'reorder', board.ids[2], board.ids[0], board.ids[1]], { createClient: () => board.client });
 
   const human = await run(['queue', 'list', '--page', '1'], { createClient: () => board.client });
   assert.equal(human.code, 0);
-  assert.deepEqual(human.out, ['#3 #1 #2']);
+  assert.deepEqual(human.out, ['#' + [board.ids[2], board.ids[0], board.ids[1]].join(' #')]);
 
   const json = await run(['queue', 'list', '--page', '1', '--json'], { createClient: () => board.client });
   assert.equal(json.code, 0);
-  assert.deepEqual(json.out, ['[3,1,2]']);
-  assert.deepEqual(JSON.parse(json.out[0]), [3, 1, 2]);
+  assert.deepEqual(json.out, [JSON.stringify([board.ids[2], board.ids[0], board.ids[1]])]);
+  assert.deepEqual(JSON.parse(json.out[0]), [board.ids[2], board.ids[0], board.ids[1]]);
 });
 
 test('board CLI queue reorder refuses a permutation that is not the open issues and changes nothing', async () => {
   const board = await queuedBoard();
-  await board.client.reorderQueue([2, 1, 3]);
+  await board.client.reorderQueue([board.ids[1], board.ids[0], board.ids[2]]);
   const stored = board.server.signed;
 
   for (const argv of [
-    ['queue', 'reorder', '1', '2'],
-    ['queue', 'reorder', '2', '3', '99'],
+    ['queue', 'reorder', board.ids[0], board.ids[1]],
+    ['queue', 'reorder', board.ids[1], board.ids[2], 'not-present'],
   ]) {
     const { code, out, err } = await run(argv, { createClient: () => board.client });
     assert.equal(code, 1, argv.join(' '));
@@ -521,19 +522,19 @@ test('board CLI queue reorder refuses a permutation that is not the open issues 
 
 test('board CLI queue reorder refuses a closed issue and changes nothing', async () => {
   const board = await queuedBoard();
-  await board.client.close(3);
+  await board.client.close(board.ids[2]);
   const stored = board.server.signed;
 
-  const { code, out, err } = await run(['queue', 'reorder', '1', '2', '3'], { createClient: () => board.client });
+  const { code, out, err } = await run(['queue', 'reorder', ...board.ids], { createClient: () => board.client });
 
   assert.equal(code, 1);
   assert.deepEqual(out, []);
   assert.match(err[0], /every open issue exactly once/);
   assert.equal(board.server.signed, stored);
-  assert.deepEqual(await board.client.getQueue(), [1, 2]);
+  assert.deepEqual(await board.client.getQueue(), board.ids.slice(0, 2));
 });
 
-test('board CLI rejects a queue reorder argument that is not a positive integer before any write', async () => {
+test('board CLI never inspects an issue id shape, only that it is non-empty', async () => {
   const board = await queuedBoard();
   const methods = [];
   const watched = client(board.server, {
@@ -542,14 +543,20 @@ test('board CLI rejects a queue reorder argument that is not a positive integer 
     fetch: async (url, init = {}) => { methods.push(init.method ?? 'GET'); return board.server.fetch(url, init); },
   });
 
-  for (const argv of [['queue', 'reorder', '0'], ['queue', 'reorder', '-1'], ['queue', 'reorder', '01']]) {
-    const { code, out, err } = await run(argv, { createClient: () => watched });
-    assert.equal(code, 1, argv.join(' '));
-    assert.deepEqual(out, [], argv.join(' '));
-    assert.match(err[0], /ISSUE must be a positive integer/, argv.join(' '));
+  // An empty reference is the one client-side refusal.
+  const empty = await run(['queue', 'reorder', ''], { createClient: () => watched });
+  assert.equal(empty.code, 1);
+  assert.match(empty.err[0], /ISSUE must be a non-empty issue ID/);
+
+  // Every non-empty value is an opaque id, handed to the board unchanged. A
+  // value the board cannot place is refused by the board, not by a format check
+  // here, so the value reaches the store before it is rejected.
+  for (const value of ['0', '-1', '01', 'word']) {
+    const { code, err } = await run(['queue', 'reorder', value], { createClient: () => watched });
+    assert.equal(code, 1, value);
+    assert.match(err[0], /^antonina board: /, value);
   }
 
-  assert.deepEqual(methods, [], 'a malformed argument never reaches the store');
   assert.equal(board.server.signed.revision, 4);
 });
 
@@ -563,7 +570,7 @@ test('board CLI refuses a duplicated queue reorder without writing it', async ()
     fetch: async (url, init = {}) => { methods.push(init.method ?? 'GET'); return board.server.fetch(url, init); },
   });
 
-  const { code, out, err } = await run(['queue', 'reorder', '1', '1'], { createClient: () => watched });
+  const { code, out, err } = await run(['queue', 'reorder', board.ids[0], board.ids[0]], { createClient: () => watched });
 
   assert.equal(code, 1);
   assert.deepEqual(out, []);
@@ -571,7 +578,7 @@ test('board CLI refuses a duplicated queue reorder without writing it', async ()
   assert.match(err[0], /Queue-reorder payload is malformed/);
   assert.equal(methods.includes('PUT'), false);
   assert.equal(board.server.signed, stored);
-  assert.deepEqual(await board.client.getQueue(), [1, 2, 3]);
+  assert.deepEqual(await board.client.getQueue(), board.ids);
 });
 
 test('board CLI queue reorder without issue numbers is a usage error', async () => {
@@ -582,7 +589,7 @@ test('board CLI queue reorder without issue numbers is a usage error', async () 
 
   assert.equal(code, 1);
   assert.deepEqual(out, []);
-  assert.equal(err[0], 'antonina board: queue reorder requires issue numbers');
+  assert.equal(err[0], 'antonina board: queue reorder requires issue IDs');
   assert.equal(board.server.signed, stored);
 });
 
@@ -601,7 +608,7 @@ test('board CLI queue reorder requires a credential and leaves the board alone',
 
 test('collection reads require an explicit page and board issue pages follow queue priority', async () => {
   const summaries = Array.from({ length: 55 }, (_, index) => ({
-    number: index + 1,
+    number: String(index + 1),
     title: 'Issue ' + (index + 1),
     state: 'open',
     createdAt: STAMP,
@@ -610,7 +617,7 @@ test('collection reads require an explicit page and board issue pages follow que
     messageCount: 0,
     hasBody: false,
   }));
-  const queue = Array.from({ length: 55 }, (_, index) => 55 - index);
+  const queue = Array.from({ length: 55 }, (_, index) => String(55 - index));
   const reader = {
     listIssueSummaries: async () => summaries,
     getQueue: async () => queue,
@@ -624,20 +631,78 @@ test('collection reads require an explicit page and board issue pages follow que
   assert.equal(first.code, 0);
   const firstPage = JSON.parse(first.out[0]);
   assert.equal(firstPage.length, 50);
-  assert.equal(firstPage[0].number, 55);
-  assert.equal(firstPage.at(-1).number, 6);
+  assert.equal(firstPage[0].number, '55');
+  assert.equal(firstPage.at(-1).number, '6');
 
   const second = await run(['list', '--page', '2', '--json'], { createClient: () => reader });
   assert.equal(second.code, 0);
-  assert.deepEqual(JSON.parse(second.out[0]).map((issue) => issue.number), [5, 4, 3, 2, 1]);
+  assert.deepEqual(JSON.parse(second.out[0]).map((issue) => issue.number), ['5', '4', '3', '2', '1']);
 
   const queueSecond = await run(['queue', 'list', '--page', '2', '--json'], { createClient: () => reader });
   assert.equal(queueSecond.code, 0);
-  assert.deepEqual(JSON.parse(queueSecond.out[0]), [5, 4, 3, 2, 1]);
+  assert.deepEqual(JSON.parse(queueSecond.out[0]), ['5', '4', '3', '2', '1']);
 
   const badPage = await run(['list', '--page', '0'], { createClient: () => reader });
   assert.equal(badPage.code, 1);
   assert.match(badPage.err[0], /--page must be a positive integer/);
+});
+
+test('board create prints only the new issue id and a newline', async () => {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  await owner.initialize();
+
+  const created = await run(['create', 'Only the id'], { createClient: () => owner });
+  assert.equal(created.code, 0, created.err.join('\n'));
+  // Exactly one line containing the newly generated identifier.
+  assert.equal(created.out.length, 1);
+  assert.match(created.out[0], /^[0-9A-Za-z]{22}-[a-z]+$/);
+
+  const json = await run(['create', 'Structured', '--json'], { createClient: () => owner });
+  assert.equal(json.code, 0, json.err.join('\n'));
+  const structured = JSON.parse(json.out[0]);
+  assert.equal(structured.title, 'Structured');
+  assert.match(structured.number, /^[0-9A-Za-z]{22}-[a-z]+$/);
+  assert.notEqual(structured.number, created.out[0]);
+});
+
+test('board commands accept a minted string issue id and never a bare word', async () => {
+  // 22 base62 characters, a hyphen, and a lowercase word. The id IS the
+  // issue's `number`, and there is no second identity.
+  const minted = 'abcdefghijklmnopqrstuv-word';
+  const issue = {
+    number: minted,
+    title: 'Minted',
+    body: '',
+    state: 'open',
+    createdAt: STAMP,
+    updatedAt: STAMP,
+    messages: [],
+  };
+  const seen = [];
+  const reader = {
+    createIssue: async () => issue,
+    getIssuePage: async (id) => { seen.push(id); return issue; },
+    close: async (id) => { seen.push(id); return { ...issue, state: 'closed' }; },
+  };
+
+  const created = await run(['create', 'Minted'], { createClient: () => reader });
+  assert.equal(created.code, 0, created.err.join('\n'));
+  assert.deepEqual(created.out, [minted]);
+
+  const shown = await run(['show', minted, '--page', '1'], { createClient: () => reader });
+  assert.equal(shown.code, 0, shown.err.join('\n'));
+  assert.equal(shown.out[0].split('\n')[0], '#' + minted + ' [open] Minted');
+
+  const closed = await run(['close', minted], { createClient: () => reader });
+  assert.equal(closed.code, 0, closed.err.join('\n'));
+  assert.deepEqual(seen, [minted, minted]);
+
+  // The client never inspects the shape of a reference. A bare word is passed
+  // through as the exact opaque string, and the board decides whether it exists.
+  const wordOnly = await run(['show', 'word', '--page', '1'], { createClient: () => reader });
+  assert.equal(wordOnly.code, 0, wordOnly.err.join('\n'));
+  assert.deepEqual(seen, [minted, minted, 'word']);
 });
 
 test('board review records a verdict and the blocked close is refused and reported', async () => {
@@ -650,7 +715,7 @@ test('board review records a verdict and the blocked close is refused and report
     '--commit', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '--reviewer', 'independent',
     '--rationale', 'Error: recommend no merge'], { createClient: () => owner });
   assert.equal(recorded.code, 0, recorded.err.join('\n'));
-  assert.match(recorded.out[0], /Review #1 request-changes by independent about aaaaaaa/);
+  assert.ok(recorded.out[0].includes('Review #' + issue.number + ' request-changes by independent about aaaaaaa'));
 
   // The refusal is what the operator sees: exit 1, and a line that names the
   // blocker rather than a generic failure.

@@ -222,12 +222,12 @@ test('R3: a readable sibling naming this key keeps the database', (t) => {
   }
 });
 
-test('R3: a directory that is not a well-formed agent id cannot keep a database alive', (t) => {
+test('R3: a directory that is not a safe opaque agent id cannot keep a database alive', (t) => {
   const w = forkPairWithSourceDeleted(t, 'stray');
   // `writeMeta` cannot produce this name and `persistedAgentId` rejects it, so
   // it cannot name a key. Treating it as an unreadable record would make a
-  // stray `agents/scratch/` immortalise every database on the machine.
-  nodeFs.mkdirSync(join(agentsDir(w.options), 'scratch'), { recursive: true });
+  // stray `agents/scratch.tmp/` immortalise every database on the machine.
+  nodeFs.mkdirSync(join(agentsDir(w.options), 'scratch.tmp'), { recursive: true });
 
   const inventory = opencodeDbKeysInUse('', w.options);
   assert.equal(inventory.complete, true, 'a non-record directory is not an unreadable record');

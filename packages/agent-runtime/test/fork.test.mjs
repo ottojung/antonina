@@ -540,22 +540,22 @@ test('a failed metadata write leaves no half-created agent', (t) => {
 // create a directory for but the metadata guard rejects reaches the snapshot
 // step with a directory already on disk. That is exactly the state defect 1 is
 // about: a target directory exists, with no complete metadata, and nothing
-// removes it. 'B2' is such an id: `normalizeAgentId` lower-cases, so it is not
-// a persisted id, while the filesystem has no such opinion.
+// removes it. 'B.2' is such an id: it is a filesystem directory name, but the persisted
+// agent ID guard rejects the dot so the metadata snapshot refuses it.
 test('a failed meta snapshot leaves no half-created agent', (t) => {
   withIsolatedXdg(t);
   seed('a1', finishedMeta('a1'));
   const before = bytes('a1');
 
   assert.throws(
-    () => forkAgent('a1', 'B2', { env: process.env }, 2_000),
+    () => forkAgent('a1', 'B.2', { env: process.env }, 2_000),
     /managed-agent id is malformed/,
   );
 
   // No partial target survives: not the directory this call created, not a
   // record inside it, and not temp residue.
-  assert.equal(existsSync(agentDir('B2', { env: process.env })), false);
-  assert.equal(existsSync(metaPath('B2', { env: process.env })), false);
+  assert.equal(existsSync(agentDir('B.2', { env: process.env })), false);
+  assert.equal(existsSync(metaPath('B.2', { env: process.env })), false);
   assert.deepEqual(
     readdirSync(agentsDir({ env: process.env })).filter((name) => name.includes('.tmp')),
     [],
@@ -574,5 +574,5 @@ test('a fork keeps the record canonical even at a field boundary', (t) => {
   assert.equal(Object.keys(source.backend_error).length, BACKEND_ERROR_FIELDS);
   const clone = forkMetaSnapshot(source, 'b2', 2_000);
   assert.equal(Object.keys(clone.backend_error).length, BACKEND_ERROR_FIELDS);
-  assert.throws(() => validateAgentMetadata({ ...clone, id: 'B2' }), /id is malformed/);
+  assert.throws(() => validateAgentMetadata({ ...clone, id: 'B.2' }), /id is malformed/);
 });

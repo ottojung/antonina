@@ -92,7 +92,7 @@ async function boardWithComments(count) {
     schemaVersion: 4,
     nextIssueNumber: 2,
     issues: [{
-      number: 1,
+      number: '1',
       title: 'Supersession',
       body: 'the description',
       state: 'open',
@@ -108,7 +108,7 @@ async function boardWithComments(count) {
 /** Comment shards for issue 1 as `[storageKey, value]`, ordered by page. */
 function commentShards(server) {
   return [...server.objects.entries()]
-    .filter(([, entry]) => entry.value?.number === 1 && Array.isArray(entry.value?.messages))
+    .filter(([, entry]) => entry.value?.number === '1' && Array.isArray(entry.value?.messages))
     .sort((left, right) => left[1].value.page - right[1].value.page);
 }
 
@@ -158,7 +158,7 @@ function liveSnapshot(server, credential) {
   const meta = liveMeta(server);
   const directory = meta.directoryRefs.find((ref) => ref !== null);
   const page = server.objects.get(storageKeyOf(credential, directory)).value;
-  const entry = page.entries.find((candidate) => candidate.number === 1);
+  const entry = page.entries.find((candidate) => candidate.number === '1');
   assert.ok(entry, 'the directory names issue 1');
   const snapshot = server.objects.get(storageKeyOf(credential, entry.ref));
   assert.ok(snapshot, 'the directory names an issue snapshot that exists');
@@ -170,10 +170,10 @@ function liveIssueRef(server, credential) {
   const meta = liveMeta(server);
   const directory = meta.directoryRefs.find((ref) => ref !== null);
   const page = server.objects.get(storageKeyOf(credential, directory)).value;
-  return page.entries.find((candidate) => candidate.number === 1).ref;
+  return page.entries.find((candidate) => candidate.number === '1').ref;
 }
 
-const comment = (body) => ({ kind: 'issue.comment', payload: { number: 1, author: 'tester', body } });
+const comment = (body) => ({ kind: 'issue.comment', payload: { number: '1', author: 'tester', body } });
 
 test('superseding a comment shard writes a new ref and leaves the old shard in place', async () => {
   const { server, store, initialized } = await boardWithComments(60);
@@ -205,7 +205,7 @@ test('superseding a comment shard writes a new ref and leaves the old shard in p
   // page 1 is drawn from. Under oldest-first numbering this same assertion read
   // `page2`, and naming the physical shard's old page number here would pin the
   // bug rather than the behaviour.
-  const page1 = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  const page1 = await store.readIssueCommentPage(initialized.credential, '1', 1);
   assert.equal(page1.total, 61);
   assert.equal(page1.pageCount, 2);
   assert.equal(page1.messages.length, 50);
@@ -216,7 +216,7 @@ test('superseding a comment shard writes a new ref and leaves the old shard in p
 
   // The older shard was never rewritten, so its ref is carried forward untouched
   // and the remainder of the thread is still readable through it.
-  const page2 = await store.readIssueCommentPage(initialized.credential, 1, 2);
+  const page2 = await store.readIssueCommentPage(initialized.credential, '1', 2);
   assert.equal(page2.messages.length, 11);
   assert.equal(page2.messages[0].body, 'message 1');
   assert.equal(page2.messages.at(-1).body, 'message 11');
@@ -257,7 +257,7 @@ test('commentRefs is rewritten in the same commit that supersedes the shard', as
 
   // And every page resolves, one shard at a time.
   for (const page of [1, 2]) {
-    const read = await store.readIssueCommentPage(initialized.credential, 1, page);
+    const read = await store.readIssueCommentPage(initialized.credential, '1', page);
     assert.ok(read.messages.length > 0, `page ${page} resolves`);
   }
 });
@@ -307,12 +307,12 @@ test('after the window closes, the sweep reclaims the superseded shard and the r
   // the newest comment and page 2 holds the older remainder. Both still resolve,
   // which is the point of this assertion -- the sweep reclaimed superseded
   // objects and neither page depends on one.
-  const page1 = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  const page1 = await store.readIssueCommentPage(initialized.credential, '1', 1);
   assert.equal(page1.total, 63);
   assert.equal(page1.pageCount, 2);
   assert.equal(page1.messages.length, 50);
   assert.equal(page1.messages.at(-1).body, 'newest 3', 'page 1 ends at the newest comment');
-  const page2 = await store.readIssueCommentPage(initialized.credential, 1, 2);
+  const page2 = await store.readIssueCommentPage(initialized.credential, '1', 2);
   assert.equal(page2.total, 63);
   assert.equal(page2.pageCount, 2);
   assert.equal(page2.messages.length, 13);
@@ -320,7 +320,7 @@ test('after the window closes, the sweep reclaims the superseded shard and the r
   assert.equal(page2.messages.at(-1).body, 'message 13');
 
   // The whole thread still reassembles in order: no page lost, none served twice.
-  const thread = await store.getIssue(initialized.credential, 1);
+  const thread = await store.getIssue(initialized.credential, '1');
   assert.equal(thread.messages.length, 63);
   const expected = [
     ...Array.from({ length: 60 }, (_, index) => `message ${index + 1}`),
@@ -331,7 +331,7 @@ test('after the window closes, the sweep reclaims the superseded shard and the r
   assert.equal(thread.messages.map((entry) => entry.body).join('|'), expected.join('|'));
 
   // A page past the end touches no comment shard at all.
-  const past = await store.readIssueCommentPage(initialized.credential, 1, 99);
+  const past = await store.readIssueCommentPage(initialized.credential, '1', 99);
   assert.equal(past.total, 63);
   assert.equal(past.messages.length, 0);
   assert.equal(store.sweepReport().retained, 0, 'nothing failed or was refused');
@@ -349,7 +349,7 @@ test('an interrupted commit leaves commentRefs naming only resolvable shards', a
     schemaVersion: 4,
     nextIssueNumber: 2,
     issues: [{
-      number: 1,
+      number: '1',
       title: 'Interrupted',
       body: 'the description',
       state: 'open',
@@ -384,10 +384,10 @@ test('an interrupted commit leaves commentRefs naming only resolvable shards', a
   // Board issue 206: newest-first numbering, so page 1 ends at the newest
   // comment and page 2 holds the older remainder. The interrupted write changed
   // neither, so the thread still ends at 'message 60'.
-  const page1 = await h.store.readIssueCommentPage(initialized.credential, 1, 1);
+  const page1 = await h.store.readIssueCommentPage(initialized.credential, '1', 1);
   assert.equal(page1.messages.length, 50);
   assert.equal(page1.messages.at(-1).body, 'message 60', 'page 1 ends at the newest comment');
-  const page2 = await h.store.readIssueCommentPage(initialized.credential, 1, 2);
+  const page2 = await h.store.readIssueCommentPage(initialized.credential, '1', 2);
   assert.equal(page2.total, 60);
   assert.equal(page2.messages.length, 10);
   assert.equal(page2.messages[0].body, 'message 1');
@@ -437,7 +437,7 @@ test('an A->B->A edit does not re-establish a ref, and the sweep still leaves th
 
   const edit = (body) => store.appendFast(initialized.credential, {
     kind: 'issue.edit',
-    payload: { number: 1, title: null, body },
+    payload: { number: '1', title: null, body },
   });
   const bodyOf = (ref) => server.objects.get(storageKeyOf(initialized.credential, ref)).value.issue.body;
 
@@ -472,7 +472,7 @@ test('an A->B->A edit does not re-establish a ref, and the sweep still leaves th
 
   assert.ok(store.sweepReport().reclaimed > 0, 'the sweep ran and reclaimed');
   const live = liveSnapshot(server, initialized.credential);
-  const page = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  const page = await store.readIssueCommentPage(initialized.credential, '1', 1);
   assert.equal(page.issue.body, 'AAA', 'the live snapshot survived the sweep');
   assert.equal(page.messages.length, 2);
   assert.equal(page.total, 2);
@@ -502,7 +502,7 @@ test('a ref re-established by a later generation survives the sweep that recorde
     schemaVersion: 4,
     nextIssueNumber: 2,
     issues: [{
-      number: 1,
+      number: '1',
       title: 'Re-establishment',
       body: 'AAA',
       state: 'open',
@@ -513,8 +513,8 @@ test('a ref re-established by a later generation survives the sweep that recorde
     resources: [],
   });
 
-  await h.store.appendFast(initialized.credential, { kind: 'issue.close', payload: { number: 1 } });
-  await h.store.appendFast(initialized.credential, { kind: 'issue.reopen', payload: { number: 1 } });
+  await h.store.appendFast(initialized.credential, { kind: 'issue.close', payload: { number: '1' } });
+  await h.store.appendFast(initialized.credential, { kind: 'issue.reopen', payload: { number: '1' } });
 
   h.advance(ONE_WINDOW_MS);
   await h.store.appendFast(initialized.credential, comment('trigger the sweep'));
@@ -539,7 +539,7 @@ test('a ref re-established by a later generation survives the sweep that recorde
   // And the reads that consume those refs both work.
   const overview = await h.store.readOverview(initialized.credential);
   assert.equal(overview.issues.length, 1);
-  const page = await h.store.readIssueCommentPage(initialized.credential, 1, 1);
+  const page = await h.store.readIssueCommentPage(initialized.credential, '1', 1);
   assert.equal(page.issue.state, 'open');
   assert.equal(page.messages.length, 2);
 });

@@ -37,7 +37,7 @@ const STAMP = '2026-09-27T12:00:00.000Z';
  * the error and first-run paths, the feed tab — is the production component
  * tree, mounted.
  */
-const allIssues = new Map<number, BoardIssue>();
+const allIssues = new Map<string, BoardIssue>();
 
 const session = {
   api: {
@@ -48,8 +48,8 @@ const session = {
     // The conversation is read one bounded page at a time (board issue 174), so
     // the stub answers the same way for page 1 of a one-page thread: the issue's
     // own fields plus that page's messages.
-    getIssueCommentPage: async (number: number, page: number): Promise<IssueCommentPage> => {
-      const found = allIssues.get(number);
+    getIssueCommentPage: async (number: string, page: number): Promise<IssueCommentPage> => {
+      const found = allIssues.get(String(number));
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
       return {
         schemaVersion: 2,
@@ -61,8 +61,8 @@ const session = {
         messages: found.messages,
       };
     },
-    getIssue: async (number: number): Promise<BoardIssue> => {
-      const found = allIssues.get(number);
+    getIssue: async (number: string): Promise<BoardIssue> => {
+      const found = allIssues.get(String(number));
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
       return found;
     },
@@ -89,8 +89,8 @@ vi.mock('./api', async (importOriginal) => {
   };
 });
 
-function issue(number: number, overrides: Partial<BoardIssue> = {}): BoardIssue {
-  return { number, title: `Issue ${number}`, body: `Body of issue ${number}`, state: 'open', createdAt: STAMP, updatedAt: STAMP, messages: [], ...overrides };
+function issue(number: number | string, overrides: Partial<BoardIssue> = {}): BoardIssue {
+  return { number: String(number), title: `Issue ${number}`, body: `Body of issue ${number}`, state: 'open', createdAt: STAMP, updatedAt: STAMP, messages: [], ...overrides };
 }
 
 // The UI reads the materialized overview rather than a whole verified state:
@@ -99,7 +99,7 @@ function issue(number: number, overrides: Partial<BoardIssue> = {}): BoardIssue 
 // an overview reads materialized snapshots and reconstructs no history.
 function overview(issues: BoardIssue[]): BoardOverview {
   allIssues.clear();
-  for (const each of issues) allIssues.set(each.number, each);
+  for (const each of issues) allIssues.set(String(each.number), each);
   return {
     boardId: 'board-1',
     head: 'op-1',
@@ -124,7 +124,7 @@ function overview(issues: BoardIssue[]): BoardOverview {
 let sequence = 0;
 function feedEntry(kind: BoardFeedEntryKind, issueNumber: number, overrides: Partial<BoardFeedEntry> = {}): BoardFeedEntry {
   sequence += 1;
-  return { id: `op-${sequence}`, kind, at: STAMP, position: 100 - sequence, issueNumber, title: `Issue ${issueNumber}`, state: 'open', messageId: null, author: null, body: null, ...overrides };
+  return { id: `op-${sequence}`, kind, at: STAMP, position: 100 - sequence, issueNumber: String(issueNumber), title: `Issue ${issueNumber}`, state: 'open', messageId: null, author: null, body: null, ...overrides };
 }
 
 function feedPage(entries: BoardFeedEntry[], nextCursor: string | null = null): BoardFeedPage {

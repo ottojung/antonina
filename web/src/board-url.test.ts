@@ -28,7 +28,7 @@ import {
   type BoardUrlState,
 } from './board-url';
 
-const READY: BoardUrlState = { view: 'issues', selectedNumber: 7, filter: 'all', settingsOpen: false, page: 2, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE };
+const READY: BoardUrlState = { view: 'issues', selectedId: '7', filter: 'all', settingsOpen: false, page: 2, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE };
 
 function fakeHistory() {
   const calls: { mode: 'push' | 'replace'; url: string }[] = [];
@@ -48,7 +48,7 @@ describe('parsing the board URL', () => {
 
   it('reads every addressable field', () => {
     expect(parseBoardUrl('?view=feed')).toEqual({ ...DEFAULT_BOARD_URL_STATE, view: 'feed' });
-    expect(parseBoardUrl('?issue=139')).toEqual({ ...DEFAULT_BOARD_URL_STATE, selectedNumber: 139 });
+    expect(parseBoardUrl('?issue=139')).toEqual({ ...DEFAULT_BOARD_URL_STATE, selectedId: '139' });
     expect(parseBoardUrl('?filter=closed')).toEqual({ ...DEFAULT_BOARD_URL_STATE, filter: 'closed' });
     expect(parseBoardUrl('?page=4')).toEqual({ ...DEFAULT_BOARD_URL_STATE, page: 4 });
     expect(parseBoardUrl('?thread=4')).toEqual({ ...DEFAULT_BOARD_URL_STATE, commentPage: 4 });
@@ -63,7 +63,18 @@ describe('parsing the board URL', () => {
   });
 
   it('accepts a search string with or without its leading question mark', () => {
-    expect(parseBoardUrl('issue=5')).toEqual({ ...DEFAULT_BOARD_URL_STATE, selectedNumber: 5 });
+    expect(parseBoardUrl('issue=5')).toEqual({ ...DEFAULT_BOARD_URL_STATE, selectedId: '5' });
+  });
+
+  it('addresses an issue by its opaque id, whatever the id looks like', () => {
+    const minted = 'abcdefghijklmnopqrstuv-word';
+    expect(parseBoardUrl(`?issue=${minted}`).selectedId).toBe(minted);
+    expect(boardSearch({ ...DEFAULT_BOARD_URL_STATE, selectedId: minted })).toBe(`?issue=${minted}`);
+    expect(issueHref(minted, DEFAULT_BOARD_URL_STATE)).toBe(`?issue=${minted}&filter=all`);
+    // The client never inspects the shape: a bare word and a decimal are both
+    // opaque ids, carried through exactly as written.
+    expect(parseBoardUrl('?issue=word').selectedId).toBe('word');
+    expect(parseBoardUrl('?issue=320').selectedId).toBe('320');
   });
 
   it('degrades an unknown view to the Issues tab rather than to nothing', () => {
@@ -84,9 +95,12 @@ describe('parsing the board URL', () => {
     }
   });
 
-  it('selects nothing for an issue that is not a positive integer', () => {
-    for (const value of ['0', '-4', 'abc', '1.2', '']) {
-      expect(parseBoardUrl(`?issue=${encodeURIComponent(value)}`).selectedNumber).toBeUndefined();
+  it('selects nothing only for an empty issue parameter, never for its shape', () => {
+    expect(parseBoardUrl('?issue=').selectedId).toBeUndefined();
+    // Every non-empty string is a valid opaque id, including values a format
+    // check would have rejected.
+    for (const value of ['0', '-4', 'abc', '1.2', '320']) {
+      expect(parseBoardUrl(`?issue=${encodeURIComponent(value)}`).selectedId).toBe(value);
     }
   });
 
@@ -101,8 +115,9 @@ describe('parsing the board URL', () => {
     }
   });
 
-  it('drops a parameter that is too large to be an issue number', () => {
-    expect(parseBoardUrl(`?issue=${'9'.repeat(30)}`).selectedNumber).toBeUndefined();
+  it('carries a long id verbatim rather than judging its size', () => {
+    const long = '9'.repeat(30);
+    expect(parseBoardUrl(`?issue=${long}`).selectedId).toBe(long);
   });
 });
 
@@ -126,8 +141,8 @@ describe('writing the board URL', () => {
       { ...DEFAULT_BOARD_URL_STATE, view: 'resources' },
       { ...DEFAULT_BOARD_URL_STATE, view: 'feed', settingsOpen: true },
       { ...DEFAULT_BOARD_URL_STATE, filter: 'closed', page: 7 },
-      { ...DEFAULT_BOARD_URL_STATE, selectedNumber: 139 },
-      { ...DEFAULT_BOARD_URL_STATE, selectedNumber: 139, commentPage: 5 },
+      { ...DEFAULT_BOARD_URL_STATE, selectedId: '139' },
+      { ...DEFAULT_BOARD_URL_STATE, selectedId: '139', commentPage: 5 },
     ];
     for (const state of states) expect(parseBoardUrl(boardSearch(state))).toEqual(state);
   });
@@ -136,12 +151,12 @@ describe('writing the board URL', () => {
     // The board is a static bundle that may be mounted under any base path, so
     // an href names the query string alone and the browser resolves it against
     // the current path. A path-based route would 404 on reload instead.
-    expect(issueHref(7, DEFAULT_BOARD_URL_STATE)).toBe('?issue=7&filter=all');
+    expect(issueHref('7', DEFAULT_BOARD_URL_STATE)).toBe('?issue=7&filter=all');
     expect(tabHref('feed', DEFAULT_BOARD_URL_STATE)).toBe('?view=feed');
   });
 
   it('puts the path in front of the query string when one is given', () => {
-    expect(issueHref(7, DEFAULT_BOARD_URL_STATE, '/board')).toBe('/board?issue=7&filter=all');
+    expect(issueHref('7', DEFAULT_BOARD_URL_STATE, '/board')).toBe('/board?issue=7&filter=all');
     expect(tabHref('feed', DEFAULT_BOARD_URL_STATE, '/board/')).toBe('/board/?view=feed');
   });
 });
@@ -153,12 +168,12 @@ describe('navigating between states', () => {
   });
 
   it('removes a field set to undefined', () => {
-    expect(boardUrlFor({ selectedNumber: undefined }, READY).selectedNumber).toBeUndefined();
+    expect(boardUrlFor({ selectedId: undefined }, READY).selectedId).toBeUndefined();
   });
 
   it('leaves a tab without an open issue, and back on the first page', () => {
     const moved = tabUrlState('feed', READY);
-    expect(moved).toEqual({ ...READY, view: 'feed', selectedNumber: undefined, page: DEFAULT_ISSUE_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE });
+    expect(moved).toEqual({ ...READY, view: 'feed', selectedId: undefined, page: DEFAULT_ISSUE_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE });
   });
 
   it('writes and reads the Resources page, and keeps it off the Issues page', () => {
@@ -172,9 +187,9 @@ describe('navigating between states', () => {
   });
 
   it('opens an issue from any tab on the Issues tab with the issue selected', () => {
-    expect(issueUrlState(139, tabUrlState('feed', READY))).toEqual({
+    expect(issueUrlState('139', tabUrlState('feed', READY))).toEqual({
       view: 'issues',
-      selectedNumber: 139,
+      selectedId: '139',
       filter: 'all',
       settingsOpen: false,
       page: DEFAULT_ISSUE_PAGE,
@@ -189,13 +204,13 @@ describe('navigating between states', () => {
     // opening an issue resets the conversation page and leaves the list page
     // alone: the two paginate different screens.
     const deep = { ...READY, page: 4, commentPage: 3 };
-    const opened = issueUrlState(8, deep);
+    const opened = issueUrlState('8', deep);
     expect(opened.commentPage).toBe(DEFAULT_COMMENT_PAGE);
     expect(opened.page).toBe(4);
   });
 
   it('goes home to the Issues tab with nothing selected', () => {
-    expect(boardHomeState(READY)).toEqual({ view: 'issues', selectedNumber: undefined, filter: 'open', settingsOpen: false, page: DEFAULT_ISSUE_PAGE, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE });
+    expect(boardHomeState(READY)).toEqual({ view: 'issues', selectedId: undefined, filter: 'open', settingsOpen: false, page: DEFAULT_ISSUE_PAGE, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE });
   });
 
   it('tells two states apart only by what they show', () => {
@@ -244,7 +259,7 @@ describe('credential safety', () => {
       DEFAULT_BOARD_URL_STATE,
       READY,
       { ...DEFAULT_BOARD_URL_STATE, view: 'resources', settingsOpen: true, page: 3 },
-      { ...DEFAULT_BOARD_URL_STATE, selectedNumber: 4242, filter: 'closed' },
+      { ...DEFAULT_BOARD_URL_STATE, selectedId: '4242', filter: 'closed' },
       // A non-default Resources page, so the subset check actually exercises the
       // `resources` key rather than skipping it as a default.
       { ...DEFAULT_BOARD_URL_STATE, view: 'resources', resourcePage: 3, commentPage: 2, page: 2 },
@@ -279,7 +294,7 @@ describe('credential safety', () => {
     // assigns every issue. Nothing here is a capability, and a browser without
     // the credential opens the same URL as a read-only board rather than a
     // board it was given access to.
-    expect(issueHref(139, DEFAULT_BOARD_URL_STATE)).not.toMatch(/credential|token|key|secret/i);
+    expect(issueHref('139', DEFAULT_BOARD_URL_STATE)).not.toMatch(/credential|token|key|secret/i);
   });
 });
 

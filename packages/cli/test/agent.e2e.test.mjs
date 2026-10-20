@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   rmdirSync,
   writeFileSync,
@@ -122,7 +123,9 @@ case "$1" in
       echo '[]'
       exit 0
     fi
-    echo '[{"id":"ses_fake","title":"antonina-a11d","created":100},{"id":"ses_beef","title":"antonina-beef","created":100}]'
+    session_agent="$ANTONINA_FIXTURE_SESSION_AGENT"
+    if [ -z "$session_agent" ]; then session_agent="$ANTONINA_AGENT_ID"; fi
+    printf '[{"id":"ses_fake","title":"antonina-%s","created":100}]\n' "$session_agent"
     exit 0
     ;;
   run)
@@ -251,8 +254,26 @@ function run(args, env) {
   return spawnSync(process.execPath, [CLI, ...args], { env, encoding: 'utf8', timeout: 15_000 });
 }
 
+// Board issue 320: `agent new` mints its own id and prints exactly it and a
+// newline on stdout. This helper runs the command, asserts it succeeded, and
+// returns the generated id, so a test can name the agent it just created
+// without hardcoding one. The caller supplies only the non-id options.
+function newAgent(env, args = []) {
+  const created = run(['agent', 'new', ...args], env);
+  assert.equal(created.status, 0, created.stderr);
+  return created.stdout.trim();
+}
+
 function metaPath(root, id) {
   return join(root, 'state', 'antonina', 'agents', id, 'meta.json');
+}
+
+// The ids of every agent directory present under the test's state root. Used
+// where a test must prove that a refused `new`/fork created *nothing*, which
+// cannot be phrased against a generated id it never received.
+function agentDirs(root) {
+  const dir = join(root, 'state', 'antonina', 'agents');
+  return existsSync(dir) ? readdirSync(dir).sort() : [];
 }
 
 function readMetaPath(root, id) {
@@ -275,21 +296,22 @@ async function waitFor(root, id, predicate, timeoutMs = 8_000) {
 test('built CLI runs a fresh prompt then continues the discovered OpenCode session', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
-  const created = run(['agent', 'new', '--id', 'a11d', '--cwd', work, '--json'], env);
+  const created = run(['agent', 'new', '--cwd', work, '--json'], env);
   assert.equal(created.status, 0, created.stderr);
+  const agent_a11d = JSON.parse(created.stdout).id;
   assert.equal(JSON.parse(created.stdout).state, 'idle');
 
-  const first = run(['agent', 'run', '--id', 'a11d', '--detach', '--prompt', 'hello'], env);
+  const first = run(['agent', 'run', '--id', agent_a11d, '--detach', '--prompt', 'hello'], env);
   assert.equal(first.status, 0, first.stderr);
-  const firstDone = await waitFor(root, 'a11d', (meta) => meta.state === 'succeeded' && meta.active_runner === false);
+  const firstDone = await waitFor(root, agent_a11d, (meta) => meta.state === 'succeeded' && meta.active_runner === false);
   assert.equal(firstDone.native_session_id, 'ses_fake');
   assert.equal(firstDone.prompt_count, 1);
 
-  const second = run(['agent', 'run', '--id', 'a11d', '--detach', '--prompt', 'again'], env);
+  const second = run(['agent', 'run', '--id', agent_a11d, '--detach', '--prompt', 'again'], env);
   assert.equal(second.status, 0, second.stderr);
-  const secondDone = await waitFor(root, 'a11d', (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false);
+  const secondDone = await waitFor(root, agent_a11d, (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false);
   assert.equal(secondDone.native_session_id, 'ses_fake');
-  const log = readFileSync(join(root, 'state', 'antonina', 'agents', 'a11d', 'output.log'), 'utf8');
+  const log = readFileSync(join(root, 'state', 'antonina', 'agents', agent_a11d, 'output.log'), 'utf8');
   assert.match(log, /FAKE:hello/);
   assert.match(log, /FAKE:again/);
   assertFixtureInvoked(handle, 'hello');
@@ -299,15 +321,15 @@ test('built CLI runs a fresh prompt then continues the discovered OpenCode sessi
 test('hard steer interrupts the running process group and drains redirect FIFO', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'beef', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'run', '--id', 'beef', '--detach', '--prompt', 'slow'], env).status, 0);
-  await waitFor(root, 'beef', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
+  const agent_beef = newAgent(env, ['--cwd', work]);
+  assert.equal(run(['agent', 'run', '--id', agent_beef, '--detach', '--prompt', 'slow'], env).status, 0);
+  await waitFor(root, agent_beef, (meta) => meta.state === 'running' && typeof meta.pid === 'number');
 
-  const steer = run(['agent', 'run', '--id', 'beef', '--steer', '--detach', '--prompt', 'redirect'], env);
+  const steer = run(['agent', 'run', '--id', agent_beef, '--steer', '--detach', '--prompt', 'redirect'], env);
   assert.equal(steer.status, 0, steer.stderr);
-  const done = await waitFor(root, 'beef', (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false, 12_000);
-  assert.equal(done.native_session_id, 'ses_beef');
-  const log = readFileSync(join(root, 'state', 'antonina', 'agents', 'beef', 'output.log'), 'utf8');
+  const done = await waitFor(root, agent_beef, (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false, 12_000);
+  assert.equal(done.native_session_id, 'ses_fake');
+  const log = readFileSync(join(root, 'state', 'antonina', 'agents', agent_beef, 'output.log'), 'utf8');
   assert.match(log, /slow-start/);
   assert.match(log, /FAKE:redirect/);
   assertFixtureInvoked(handle, 'slow');
@@ -317,13 +339,13 @@ test('hard steer interrupts the running process group and drains redirect FIFO',
 test('ordinary prompt remains busy while an invocation is running', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'cafe', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'run', '--id', 'cafe', '--detach', '--prompt', 'slow'], env).status, 0);
-  await waitFor(root, 'cafe', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
-  const busy = run(['agent', 'run', '--id', 'cafe', '--detach', '--prompt', 'second'], env);
+  const agent_cafe = newAgent(env, ['--cwd', work]);
+  assert.equal(run(['agent', 'run', '--id', agent_cafe, '--detach', '--prompt', 'slow'], env).status, 0);
+  await waitFor(root, agent_cafe, (meta) => meta.state === 'running' && typeof meta.pid === 'number');
+  const busy = run(['agent', 'run', '--id', agent_cafe, '--detach', '--prompt', 'second'], env);
   assert.equal(busy.status, 1);
   assert.match(busy.stderr, /still running/);
-  const killed = run(['agent', 'kill', '--id', 'cafe'], env);
+  const killed = run(['agent', 'kill', '--id', agent_cafe], env);
   assert.equal(killed.status, 0, killed.stderr);
   assertFixtureInvoked(handle, 'slow');
 });
@@ -332,8 +354,8 @@ test('ordinary prompt remains busy while an invocation is running', async (t) =>
 test('stale reserved work is recovered without overwriting the accepted prompt', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'd00d', '--cwd', work], env).status, 0);
-  const path = metaPath(root, 'd00d');
+  const agent_d00d = newAgent(env, ['--cwd', work]);
+  const path = metaPath(root, agent_d00d);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   Object.assign(meta, {
     state: 'running',
@@ -353,12 +375,12 @@ test('stale reserved work is recovered without overwriting the accepted prompt',
   });
   writeFileSync(path, JSON.stringify(meta));
 
-  const recovery = run(['agent', 'run', '--id', 'd00d', '--detach', '--prompt', 'replacement'], env);
+  const recovery = run(['agent', 'run', '--id', agent_d00d, '--detach', '--prompt', 'replacement'], env);
   assert.equal(recovery.status, 1);
   assert.match(recovery.stderr, /recovering an already accepted prompt/);
-  const done = await waitFor(root, 'd00d', (value) => value.state === 'succeeded' && value.active_runner === false);
+  const done = await waitFor(root, agent_d00d, (value) => value.state === 'succeeded' && value.active_runner === false);
   assert.equal(done.prompt_count, 1);
-  const log = readFileSync(join(root, 'state', 'antonina', 'agents', 'd00d', 'output.log'), 'utf8');
+  const log = readFileSync(join(root, 'state', 'antonina', 'agents', agent_d00d, 'output.log'), 'utf8');
   assert.match(log, /FAKE:accepted/);
   assert.doesNotMatch(log, /FAKE:replacement/);
   assertFixtureInvoked(handle, 'accepted');
@@ -367,40 +389,52 @@ test('stale reserved work is recovered without overwriting the accepted prompt',
 test('detach acknowledges the runner claim and names the failure when it never lands', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'e207', '--cwd', work], env).status, 0);
+  const agent_e207 = newAgent(env, ['--cwd', work]);
 
   // External tree teardown: kill the detached runner as soon as it appears,
   // before it can claim ownership -- the Lubko short-lived-job cleanup shape
-  // from board issue 207. The killer lives in a file so its own command line
-  // never matches the pattern it searches for.
+  // from board issue 207. The killer lives in a file, and it identifies the
+  // runner by reading each process's own argv from /proc (argv[2] is the
+  // `_runner` handoff and argv[3] is this agent's generated id) rather than by
+  // a process name, so it cannot match itself and needs no `pgrep`.
   const killerScript = join(root, 'killer.sh');
   writeFileSync(killerScript, `#!/bin/bash
+target="$1"
 while true; do
-  P=$(pgrep -f "_runner e207 " | head -1)
-  if [ -n "$P" ]; then kill -9 "$P" 2>/dev/null; exit 0; fi
+  for entry in /proc/[0-9]*/cmdline; do
+    [ -r "$entry" ] || continue
+    args=()
+    while IFS= read -r -d '' arg; do args+=("$arg"); done < "$entry"
+    if [ "\${args[2]}" = "_runner" ] && [ "\${args[3]}" = "$target" ]; then
+      pid="\${entry#/proc/}"
+      pid="\${pid%/cmdline}"
+      kill -9 "$pid" 2>/dev/null
+      exit 0
+    fi
+  done
   sleep 0.005
 done
 `, { mode: 0o755 });
-  const killer = spawn('bash', [killerScript], { stdio: 'ignore' });
+  const killer = spawn('bash', [killerScript, agent_e207], { stdio: 'ignore' });
   t.after(() => {
     killer.kill('SIGKILL');
     rmSync(killerScript, { force: true });
   });
 
   // The 10s bounded claim acknowledgement dominates this test's runtime.
-  const started = run(['agent', 'run', '--id', 'e207', '--detach', '--prompt', 'hello', '--json'], env, { timeout: 30_000 });
+  const started = run(['agent', 'run', '--id', agent_e207, '--detach', '--prompt', 'hello', '--json'], env, { timeout: 30_000 });
   assert.equal(started.status, 1, started.stderr);
   assert.match(started.stderr, /never claimed ownership/);
 
   // The record is failed immediately and specifically -- not a reserved
   // record left to be reconciled into a generic disappearance ~60s later.
-  const meta = JSON.parse(readFileSync(metaPath(root, 'e207'), 'utf8'));
+  const meta = JSON.parse(readFileSync(metaPath(root, agent_e207), 'utf8'));
   assert.equal(meta.state, 'failed');
   assert.equal(meta.runner_pid, null);
   assert.equal(meta.pid, null);
   assert.equal(meta.error, 'detached runner never claimed ownership within 10s');
 
-  const status = run(['agent', 'status', '--id', 'e207', '--json'], env);
+  const status = run(['agent', 'status', '--id', agent_e207, '--json'], env);
   assert.equal(status.status, 0, status.stderr);
   const statusBody = JSON.parse(status.stdout);
   assert.equal(statusBody.state, 'failed');
@@ -414,21 +448,21 @@ done
 test('detach ack carries the claiming runner pid', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'e208', '--cwd', work], env).status, 0);
-  const started = run(['agent', 'run', '--id', 'e208', '--detach', '--prompt', 'hello', '--json'], env);
+  const agent_e208 = newAgent(env, ['--cwd', work]);
+  const started = run(['agent', 'run', '--id', agent_e208, '--detach', '--prompt', 'hello', '--json'], env);
   assert.equal(started.status, 0, started.stderr);
   const ack = JSON.parse(started.stdout);
   assert.equal(ack.detached, true);
   assert.equal(typeof ack.runner_pid, 'number', 'the ack must name the runner that claimed ownership');
-  const meta = JSON.parse(readFileSync(metaPath(root, 'e208'), 'utf8'));
+  const meta = JSON.parse(readFileSync(metaPath(root, agent_e208), 'utf8'));
   assert.equal(meta.runner_pid, ack.runner_pid);
-  await waitFor(root, 'e208', (value) => value.state === 'succeeded' && value.active_runner === false);
+  await waitFor(root, agent_e208, (value) => value.state === 'succeeded' && value.active_runner === false);
 });
 
 test('status reconciles abandoned running metadata to an explicit failure', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', 'dead', '--cwd', work], env).status, 0);
-  const path = metaPath(root, 'dead');
+  const agent_dead = newAgent(env, ['--cwd', work]);
+  const path = metaPath(root, agent_dead);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   Object.assign(meta, {
     state: 'running',
@@ -443,7 +477,7 @@ test('status reconciles abandoned running metadata to an explicit failure', (t) 
   });
   writeFileSync(path, JSON.stringify(meta));
 
-  const status = run(['agent', 'status', '--id', 'dead', '--json'], env);
+  const status = run(['agent', 'status', '--id', agent_dead, '--json'], env);
   assert.equal(status.status, 0, status.stderr);
   assert.equal(JSON.parse(status.stdout).state, 'failed');
   assert.match(readFileSync(path, 'utf8'), /disappeared without a captured exit status/);
@@ -452,18 +486,18 @@ test('status reconciles abandoned running metadata to an explicit failure', (t) 
 
 test('stop on idle is a no-op and preserves idle state', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', 'fade', '--cwd', work], env).status, 0);
-  const stopped = run(['agent', 'stop', '--id', 'fade'], env);
+  const agent_fade = newAgent(env, ['--cwd', work]);
+  const stopped = run(['agent', 'stop', '--id', agent_fade], env);
   assert.equal(stopped.status, 0, stopped.stderr);
   assert.match(stopped.stdout, /already stopped/);
-  const meta = JSON.parse(readFileSync(metaPath(root, 'fade'), 'utf8'));
+  const meta = JSON.parse(readFileSync(metaPath(root, agent_fade), 'utf8'));
   assert.equal(meta.state, 'idle');
 });
 
 test('clean dry-run observes and clean removes old terminal agents', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', 'f00d', '--cwd', work], env).status, 0);
-  const path = metaPath(root, 'f00d');
+  const agent_f00d = newAgent(env, ['--cwd', work]);
+  const path = metaPath(root, agent_f00d);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   // created_at is aged alongside finished_at: since board issue 129 the retention
   // anchor is the LATER of the two, so an agent created seconds ago that claims
@@ -473,31 +507,31 @@ test('clean dry-run observes and clean removes old terminal agents', (t) => {
 
   const dry = run(['agent', 'clean', '--days', '1', '--dry-run'], env);
   assert.equal(dry.status, 0, dry.stderr);
-  assert.match(dry.stdout, /f00d/);
+  assert.ok(dry.stdout.includes(agent_f00d), dry.stdout);
   assert.equal(JSON.parse(readFileSync(path, 'utf8')).state, 'succeeded');
 
   const clean = run(['agent', 'clean', '--days', '1'], env);
   assert.equal(clean.status, 0, clean.stderr);
-  assert.match(clean.stdout, /deleted agent f00d/);
+  assert.ok(clean.stdout.includes(`deleted agent ${agent_f00d}`), clean.stdout);
   assert.throws(() => readFileSync(path, 'utf8'));
 });
 
 
 test('delete without force refuses live work and force converges before removal', async (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', 'feed', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'run', '--id', 'feed', '--detach', '--prompt', 'slow'], env).status, 0);
-  await waitFor(root, 'feed', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
+  const agent_feed = newAgent(env, ['--cwd', work]);
+  assert.equal(run(['agent', 'run', '--id', agent_feed, '--detach', '--prompt', 'slow'], env).status, 0);
+  await waitFor(root, agent_feed, (meta) => meta.state === 'running' && typeof meta.pid === 'number');
 
-  const refused = run(['agent', 'delete', '--id', 'feed'], env);
+  const refused = run(['agent', 'delete', '--id', agent_feed], env);
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /use --force/);
-  assert.equal(JSON.parse(readFileSync(metaPath(root, 'feed'), 'utf8')).state, 'running');
+  assert.equal(JSON.parse(readFileSync(metaPath(root, agent_feed), 'utf8')).state, 'running');
 
-  const forced = run(['agent', 'delete', '--id', 'feed', '--force'], env);
+  const forced = run(['agent', 'delete', '--id', agent_feed, '--force'], env);
   assert.equal(forced.status, 0, forced.stderr);
-  assert.match(forced.stdout, /deleted agent feed/);
-  assert.throws(() => readFileSync(metaPath(root, 'feed'), 'utf8'));
+  assert.ok(forced.stdout.includes(`deleted agent ${agent_feed}`), forced.stdout);
+  assert.throws(() => readFileSync(metaPath(root, agent_feed), 'utf8'));
 });
 
 // The --force runner-reaping block in cmdDelete (packages/cli/src/agent.ts).
@@ -512,11 +546,11 @@ test('delete without force refuses live work and force converges before removal'
 test('delete --force reaps the live runner process before removing the agent', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'feed1', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'run', '--id', 'feed1', '--detach', '--prompt', 'slow'], env).status, 0);
+  const agent_feed1 = newAgent(env, ['--cwd', work]);
+  assert.equal(run(['agent', 'run', '--id', agent_feed1, '--detach', '--prompt', 'slow'], env).status, 0);
   const live = await waitFor(
     root,
-    'feed1',
+    agent_feed1,
     (meta) => meta.state === 'running'
       && typeof meta.pid === 'number'
       && meta.active_runner === true
@@ -545,10 +579,10 @@ test('delete --force reaps the live runner process before removing the agent', a
     }
   });
 
-  const forced = run(['agent', 'delete', '--id', 'feed1', '--force'], env);
+  const forced = run(['agent', 'delete', '--id', agent_feed1, '--force'], env);
   assert.equal(forced.status, 0, forced.stderr);
-  assert.match(forced.stdout, /deleted agent feed1/);
-  assert.throws(() => readFileSync(metaPath(root, 'feed1'), 'utf8'), 'the agent directory must be removed');
+  assert.ok(forced.stdout.includes(`deleted agent ${agent_feed1}`), forced.stdout);
+  assert.throws(() => readFileSync(metaPath(root, agent_feed1), 'utf8'), 'the agent directory must be removed');
 
   assert.equal(
     procStartTicks(runnerPid),
@@ -569,8 +603,8 @@ test('delete --force reaps the live runner process before removing the agent', a
 // reservation on the floor: a reserved runner is work that was accepted.
 test('delete --force cancels an in-flight runner reservation and reports it', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', 'feed2', '--cwd', work], env).status, 0);
-  const path = metaPath(root, 'feed2');
+  const agent_feed2 = newAgent(env, ['--cwd', work]);
+  const path = metaPath(root, agent_feed2);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   Object.assign(meta, {
     state: 'running',
@@ -598,19 +632,19 @@ test('delete --force cancels an in-flight runner reservation and reports it', (t
   });
   writeFileSync(path, JSON.stringify(meta));
 
-  const refused = run(['agent', 'delete', '--id', 'feed2'], env);
+  const refused = run(['agent', 'delete', '--id', agent_feed2], env);
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /use --force/);
   assert.equal(JSON.parse(readFileSync(path, 'utf8')).runner_reservation.state, 'reserved');
 
-  const forced = run(['agent', 'delete', '--id', 'feed2', '--force'], env);
+  const forced = run(['agent', 'delete', '--id', agent_feed2, '--force'], env);
   assert.equal(forced.status, 0, forced.stderr);
   assert.match(
     forced.stdout,
     /cancelled reserved runner work/,
     'delete --force must reap the reservation, not just tombstone it',
   );
-  assert.match(forced.stdout, /deleted agent feed2/);
+  assert.ok(forced.stdout.includes(`deleted agent ${agent_feed2}`), forced.stdout);
   assert.throws(() => readFileSync(path, 'utf8'));
 });
 
@@ -655,8 +689,8 @@ test('delete --force cancels an in-flight runner reservation and reports it', (t
 // start ticks deliberately disagree) are indistinguishable.
 test('delete refuses a non-running agent whose expired reservation owner has mismatched start ticks', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', 'feed3', '--cwd', work], env).status, 0);
-  const path = metaPath(root, 'feed3');
+  const agent_feed3 = newAgent(env, ['--cwd', work]);
+  const path = metaPath(root, agent_feed3);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   const realTicks = procStartTicks(process.pid);
   assert.ok(realTicks !== null, 'this test process must expose real start ticks for the sibling case to mean anything');
@@ -686,7 +720,7 @@ test('delete refuses a non-running agent whose expired reservation owner has mis
   writeFileSync(path, JSON.stringify(meta));
   const before = readFileSync(path, 'utf8');
 
-  const refused = run(['agent', 'delete', '--id', 'feed3'], env);
+  const refused = run(['agent', 'delete', '--id', agent_feed3], env);
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /use --force/);
   // Whole-file compare, not field-by-field: the refusal is thrown before
@@ -696,8 +730,8 @@ test('delete refuses a non-running agent whose expired reservation owner has mis
   // Sibling negative case: same shape, but the live pid's start ticks DO match.
   // Both are refused, and identically -- the delete path cannot tell them apart,
   // which is exactly the short-circuit this pins.
-  assert.equal(run(['agent', 'new', '--id', 'feed4', '--cwd', work], env).status, 0);
-  const path4 = metaPath(root, 'feed4');
+  const agent_feed4 = newAgent(env, ['--cwd', work]);
+  const path4 = metaPath(root, agent_feed4);
   const meta4 = JSON.parse(readFileSync(path4, 'utf8'));
   Object.assign(meta4, {
     state: 'stopped',
@@ -718,7 +752,7 @@ test('delete refuses a non-running agent whose expired reservation owner has mis
   });
   writeFileSync(path4, JSON.stringify(meta4));
 
-  const refused4 = run(['agent', 'delete', '--id', 'feed4'], env);
+  const refused4 = run(['agent', 'delete', '--id', agent_feed4], env);
   assert.equal(refused4.status, 1);
   assert.match(refused4.stderr, /use --force/);
   assert.equal(JSON.parse(readFileSync(path4, 'utf8')).runner_reservation.state, 'reserved');
@@ -759,13 +793,13 @@ function sameProcess(pid, ticks) {
 
 test('delete tombstone blocks later prompt reservation', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', 'face', '--cwd', work], env).status, 0);
-  const path = metaPath(root, 'face');
+  const agent_face = newAgent(env, ['--cwd', work]);
+  const path = metaPath(root, agent_face);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   meta.delete_pending = true;
   writeFileSync(path, JSON.stringify(meta));
 
-  const prompt = run(['agent', 'run', '--id', 'face', '--detach', '--prompt', 'must-not-run'], env);
+  const prompt = run(['agent', 'run', '--id', agent_face, '--detach', '--prompt', 'must-not-run'], env);
   assert.equal(prompt.status, 1);
   assert.match(prompt.stderr, /still running|redirect/);
   const after = JSON.parse(readFileSync(path, 'utf8'));
@@ -778,11 +812,11 @@ test('delete tombstone blocks later prompt reservation', (t) => {
 test('backend server failure is persisted and sanitized through status', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'bad1', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'run', '--id', 'bad1', '--detach', '--prompt', 'server-error'], env).status, 0);
-  await waitFor(root, 'bad1', (meta) => meta.state === 'failed' && meta.active_runner === false);
+  const agent_bad1 = newAgent(env, ['--cwd', work]);
+  assert.equal(run(['agent', 'run', '--id', agent_bad1, '--detach', '--prompt', 'server-error'], env).status, 0);
+  await waitFor(root, agent_bad1, (meta) => meta.state === 'failed' && meta.active_runner === false);
 
-  const status = run(['agent', 'status', '--id', 'bad1', '--json'], env);
+  const status = run(['agent', 'status', '--id', agent_bad1, '--json'], env);
   assert.equal(status.status, 0, status.stderr);
   const body = JSON.parse(status.stdout);
   assert.equal(body.state, 'failed');
@@ -800,19 +834,23 @@ test('prompt recovers an existing OpenCode session when durable session id was l
   // Reproduce real OpenCode: session list returns only sessions for its cwd.
   // The caller runs in the repository; the agent runs in its own worktree.
   env.ANTONINA_FIXTURE_SESSION_CWD = work;
-  assert.equal(run(['agent', 'new', '--id', 'a11d', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'run', '--id', 'a11d', '--detach', '--prompt', 'first'], env).status, 0);
-  await waitFor(root, 'a11d', (meta) => meta.state === 'succeeded' && meta.active_runner === false);
+  const agent_a11d = newAgent(env, ['--cwd', work]);
+  // The fixture titles its session after the agent id. The runner-side probe
+  // carries ANTONINA_AGENT_ID, but the CLI-side recovery probe below does not,
+  // so the test names the title the fixture should advertise.
+  env.ANTONINA_FIXTURE_SESSION_AGENT = agent_a11d;
+  assert.equal(run(['agent', 'run', '--id', agent_a11d, '--detach', '--prompt', 'first'], env).status, 0);
+  await waitFor(root, agent_a11d, (meta) => meta.state === 'succeeded' && meta.active_runner === false);
 
-  const path = metaPath(root, 'a11d');
+  const path = metaPath(root, agent_a11d);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   meta.native_session_id = null;
   writeFileSync(path, JSON.stringify(meta));
 
-  assert.equal(run(['agent', 'run', '--id', 'a11d', '--detach', '--prompt', 'recovered'], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', agent_a11d, '--detach', '--prompt', 'recovered'], env).status, 0);
   const done = await waitFor(
     root,
-    'a11d',
+    agent_a11d,
     (value) => value.state === 'succeeded' && value.prompt_count === 2 && value.active_runner === false,
   );
   assert.equal(done.native_session_id, 'ses_fake');
@@ -823,32 +861,42 @@ test('prompt recovers an existing OpenCode session when durable session id was l
 });
 
 
-test('agent ids canonicalize at every CLI boundary and preserve exit-code distinctions', (t) => {
+// Board issue 320: `agent new` mints a case-sensitive opaque id. The legacy
+// IDs are opaque and case-sensitive, as pinned by the runtime tests; this case keeps the
+// CLI-boundary exit-code distinction between an id that is not an id at all
+// (usage, 2) and a well-formed id that is not found (3).
+test('a generated id round-trips through status, and unknown ids keep their exit codes', (t) => {
   const { root, work, env } = fixture(t);
-  const created = run(['agent', 'new', '--id', 'A11CE', '--cwd', work], env);
-  assert.equal(created.status, 0, created.stderr);
-  assert.doesNotThrow(() => readFileSync(metaPath(root, 'a11ce'), 'utf8'));
+  const agentId = newAgent(env, ['--cwd', work]);
+  assert.doesNotThrow(() => readFileSync(metaPath(root, agentId), 'utf8'));
 
-  for (const id of ['a11ce', 'A11CE', 'a11Ce']) {
-    const status = run(['agent', 'status', '--id', id, '--json'], env);
-    assert.equal(status.status, 0, status.stderr);
-    assert.equal(JSON.parse(status.stdout).id, 'a11ce');
+  const status = run(['agent', 'status', '--id', agentId, '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(JSON.parse(status.stdout).id, agentId);
+
+  // A generated id is case-sensitive: where lowercasing changes it, the
+  // lowercased spelling is a different id and is not found. (When the random
+  // suffix happens to be lowercase already the spellings coincide, so the
+  // assertion is only meaningful -- and only made -- when they differ.)
+  const lowered = agentId.toLowerCase();
+  if (lowered !== agentId) {
+    assert.equal(run(['agent', 'status', '--id', lowered, '--json'], env).status, 3);
   }
 
-  assert.equal(run(['agent', 'status', '--id', 'not-hex', '--json'], env).status, 2);
+  assert.equal(run(['agent', 'status', '--id', 'not.hex', '--json'], env).status, 2);
   assert.equal(run(['agent', 'status', '--id', 'deadbeef', '--json'], env).status, 3);
 });
 
 test('status fails closed on malformed or old metadata, and list names the unreadable record', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', 'cab1e', '--cwd', work], env).status, 0);
-  const path = metaPath(root, 'cab1e');
+  const agent_cab1e = newAgent(env, ['--cwd', work]);
+  const path = metaPath(root, agent_cab1e);
 
   let meta = JSON.parse(readFileSync(path, 'utf8'));
   meta.created_at = {};
   writeFileSync(path, JSON.stringify(meta));
 
-  const status = run(['agent', 'status', '--id', 'cab1e', '--json'], env);
+  const status = run(['agent', 'status', '--id', agent_cab1e, '--json'], env);
   assert.equal(status.status, 1);
   assert.match(status.stderr, /created_at is malformed/);
 
@@ -862,14 +910,14 @@ test('status fails closed on malformed or old metadata, and list names the unrea
   assert.equal(listed.status, 0, listed.stderr);
   const payload = JSON.parse(listed.stdout);
   assert.equal(payload.agents.length, 0);
-  assert.deepEqual(payload.unreadable.map((entry) => entry.id), ['cab1e']);
+  assert.deepEqual(payload.unreadable.map((entry) => entry.id), [agent_cab1e]);
   assert.match(payload.unreadable[0].reason, /created_at is malformed/);
 
   meta = JSON.parse(readFileSync(path, 'utf8'));
   meta.created_at = 1;
   meta.agent_version = 3;
   writeFileSync(path, JSON.stringify(meta));
-  const oldVersion = run(['agent', 'status', '--id', 'cab1e', '--json'], env);
+  const oldVersion = run(['agent', 'status', '--id', agent_cab1e, '--json'], env);
   assert.equal(oldVersion.status, 1);
   assert.match(oldVersion.stderr, /unsupported managed-agent metadata version: 3/);
 
@@ -877,20 +925,20 @@ test('status fails closed on malformed or old metadata, and list names the unrea
   meta.agent_version = 4;
   delete meta.active_runner;
   writeFileSync(path, JSON.stringify(meta));
-  const missing = run(['agent', 'status', '--id', 'cab1e', '--json'], env);
+  const missing = run(['agent', 'status', '--id', agent_cab1e, '--json'], env);
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /metadata fields are not canonical/);
 });
 
 test('prompt rejects malformed durable cwd before reservation', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', 'c0de', '--cwd', work], env).status, 0);
-  const path = metaPath(root, 'c0de');
+  const agent_c0de = newAgent(env, ['--cwd', work]);
+  const path = metaPath(root, agent_c0de);
 
   const malformedCwd = JSON.parse(readFileSync(path, 'utf8'));
   malformedCwd.cwd = 'relative';
   writeFileSync(path, JSON.stringify(malformedCwd));
-  const cwdPrompt = run(['agent', 'run', '--id', 'c0de', '--detach', '--prompt', 'must-not-run'], env);
+  const cwdPrompt = run(['agent', 'run', '--id', agent_c0de, '--detach', '--prompt', 'must-not-run'], env);
   assert.equal(cwdPrompt.status, 1);
   assert.match(cwdPrompt.stderr, /cwd is malformed/);
   let after = JSON.parse(readFileSync(path, 'utf8'));
@@ -939,8 +987,8 @@ test('public CLI rejects positional data arguments', (t) => {
 test('attached prompt streams output and returns invocation status', (t) => {
   const handle = fixture(t);
   const { work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'ac1d', '--cwd', work], env).status, 0);
-  const prompt = run(['agent', 'run', '--id', 'ac1d', '--prompt', 'attached'], env);
+  const agent_ac1d = newAgent(env, ['--cwd', work]);
+  const prompt = run(['agent', 'run', '--id', agent_ac1d, '--prompt', 'attached'], env);
   assert.equal(prompt.status, 0, prompt.stderr);
   assert.match(prompt.stdout, /FAKE:attached/);
   assertFixtureInvoked(handle, 'attached');
@@ -955,13 +1003,13 @@ test('attached prompt streams output and returns invocation status', (t) => {
 // command still reads.
 test('a second run reports only its own output while agent log keeps the whole history', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', '177a', '--cwd', work], env).status, 0);
+  const agent_177a = newAgent(env, ['--cwd', work]);
 
-  const first = run(['agent', 'run', '--id', '177a', '--prompt', 'first'], env);
+  const first = run(['agent', 'run', '--id', agent_177a, '--prompt', 'first'], env);
   assert.equal(first.status, 0, first.stderr);
   assert.match(first.stdout, /FAKE:first/);
 
-  const second = run(['agent', 'run', '--id', '177a', '--prompt', 'second'], env);
+  const second = run(['agent', 'run', '--id', agent_177a, '--prompt', 'second'], env);
   assert.equal(second.status, 0, second.stderr);
   // Its own progress is still surfaced...
   assert.match(second.stdout, /FAKE:second/);
@@ -974,14 +1022,14 @@ test('a second run reports only its own output while agent log keeps the whole h
 
   // Non-vacuity: both runs really did produce output, both really are in the
   // durable log, and both really did reach the backend.
-  const durable = readFileSync(join(root, 'state', 'antonina', 'agents', '177a', 'output.log'), 'utf8');
+  const durable = readFileSync(join(root, 'state', 'antonina', 'agents', agent_177a, 'output.log'), 'utf8');
   assert.match(durable, /FAKE:first/);
   assert.match(durable, /FAKE:second/);
-  const meta = JSON.parse(readFileSync(metaPath(root, '177a'), 'utf8'));
+  const meta = JSON.parse(readFileSync(metaPath(root, agent_177a), 'utf8'));
   assert.equal(meta.prompt_count, 2);
 
   // The accumulated history is still `agent log`'s, unchanged.
-  const log = run(['agent', 'log', '--id', '177a', '--lines', '500'], env);
+  const log = run(['agent', 'log', '--id', agent_177a, '--lines', '500'], env);
   assert.equal(log.status, 0, log.stderr);
   assert.match(log.stdout, /FAKE:first/, 'agent log no longer reports the first run');
   assert.match(log.stdout, /FAKE:second/, 'agent log no longer reports the second run');
@@ -994,31 +1042,31 @@ test('a second run reports only its own output while agent log keeps the whole h
 test('run scope survives a steer: neither the steer nor the next run replays earlier output', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'a11d', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'run', '--id', 'a11d', '--detach', '--prompt', 'slow'], env).status, 0);
-  await waitFor(root, 'a11d', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
+  const agent_a11d = newAgent(env, ['--cwd', work]);
+  assert.equal(run(['agent', 'run', '--id', agent_a11d, '--detach', '--prompt', 'slow'], env).status, 0);
+  await waitFor(root, agent_a11d, (meta) => meta.state === 'running' && typeof meta.pid === 'number');
 
-  const steer = run(['agent', 'run', '--id', 'a11d', '--steer', '--prompt', 'redirect'], env);
+  const steer = run(['agent', 'run', '--id', agent_a11d, '--steer', '--prompt', 'redirect'], env);
   assert.ok(
     steer.status === 0 || steer.status === 1,
     `a steer run did not reach a lifecycle outcome: ${steer.status} ${steer.stderr}`,
   );
   assert.doesNotMatch(steer.stdout, /slow-start/, 'a steer run replayed the interrupted invocation');
-  await waitFor(root, 'a11d', (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false, 12_000);
+  await waitFor(root, agent_a11d, (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false, 12_000);
 
   // Non-vacuity: the interrupted invocation and the drained continuation both
   // really did write, so the markers excluded below really do exist.
-  const durable = readFileSync(join(root, 'state', 'antonina', 'agents', 'a11d', 'output.log'), 'utf8');
+  const durable = readFileSync(join(root, 'state', 'antonina', 'agents', agent_a11d, 'output.log'), 'utf8');
   assert.match(durable, /slow-start/);
   assert.match(durable, /FAKE:redirect/);
 
-  const third = run(['agent', 'run', '--id', 'a11d', '--prompt', 'third'], env);
+  const third = run(['agent', 'run', '--id', agent_a11d, '--prompt', 'third'], env);
   assert.equal(third.status, 0, third.stderr);
   assert.match(third.stdout, /FAKE:third/);
   assert.doesNotMatch(third.stdout, /slow-start/, 'a run replayed the interrupted invocation');
   assert.doesNotMatch(third.stdout, /FAKE:redirect/, 'a run replayed the drained steer continuation');
 
-  const log = run(['agent', 'log', '--id', 'a11d', '--lines', '500'], env);
+  const log = run(['agent', 'log', '--id', agent_a11d, '--lines', '500'], env);
   assert.equal(log.status, 0, log.stderr);
   assert.match(log.stdout, /slow-start/, 'agent log no longer reports the interrupted invocation');
   assert.match(log.stdout, /FAKE:redirect/, 'agent log no longer reports the drained continuation');
@@ -1029,34 +1077,34 @@ test('run scope survives a steer: neither the steer nor the next run replays ear
 
 test('graceful stop and wait timeout expose stable lifecycle results', async (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', '5a0f', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'run', '--id', '5a0f', '--detach', '--prompt', 'slow'], env).status, 0);
-  await waitFor(root, '5a0f', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
+  const agent_5a0f = newAgent(env, ['--cwd', work]);
+  assert.equal(run(['agent', 'run', '--id', agent_5a0f, '--detach', '--prompt', 'slow'], env).status, 0);
+  await waitFor(root, agent_5a0f, (meta) => meta.state === 'running' && typeof meta.pid === 'number');
 
-  const timed = run(['agent', 'wait', '--id', '5a0f', '--timeout', '1'], env);
+  const timed = run(['agent', 'wait', '--id', agent_5a0f, '--timeout', '1'], env);
   assert.equal(timed.status, 124);
   assert.match(timed.stderr, /still running after 1s/);
 
-  const stopped = run(['agent', 'stop', '--id', '5a0f'], env);
+  const stopped = run(['agent', 'stop', '--id', agent_5a0f], env);
   assert.equal(stopped.status, 0, stopped.stderr);
-  const meta = JSON.parse(readFileSync(metaPath(root, '5a0f'), 'utf8'));
+  const meta = JSON.parse(readFileSync(metaPath(root, agent_5a0f), 'utf8'));
   assert.equal(meta.state, 'stopped');
 
-  const waited = run(['agent', 'wait', '--id', '5a0f', '--timeout', '1'], env);
+  const waited = run(['agent', 'wait', '--id', agent_5a0f, '--timeout', '1'], env);
   assert.equal(waited.status, 1);
 });
 
 test('status exposes canonical and malformed steer metadata', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', '57ee', '--cwd', work], env).status, 0);
-  const path = metaPath(root, '57ee');
+  const agent_57ee = newAgent(env, ['--cwd', work]);
+  const path = metaPath(root, agent_57ee);
   let meta = JSON.parse(readFileSync(path, 'utf8'));
   meta.steer_seq = 2;
   meta.steer_queue = [{ seq: 2, prompt: 'first line\nsecond line', queued_at: 1.5 }];
   meta.intent = 'steer';
   writeFileSync(path, JSON.stringify(meta));
 
-  let status = JSON.parse(run(['agent', 'status', '--id', '57ee', '--json'], env).stdout);
+  let status = JSON.parse(run(['agent', 'status', '--id', agent_57ee, '--json'], env).stdout);
   assert.equal(status.steers_pending, 1);
   assert.equal(status.next_steer, 'first line');
   assert.equal(status.steer_preempting, true);
@@ -1067,7 +1115,7 @@ test('status exposes canonical and malformed steer metadata', (t) => {
   meta.steer_seq = false;
   meta.steer_queue = [];
   writeFileSync(path, JSON.stringify(meta));
-  const malformed = run(['agent', 'status', '--id', '57ee', '--json'], env);
+  const malformed = run(['agent', 'status', '--id', agent_57ee, '--json'], env);
   assert.equal(malformed.status, 1);
   assert.match(malformed.stderr, /steer_seq is malformed/);
 });
@@ -1140,9 +1188,9 @@ test('fixture guard: an unpinned backend falls into the PATH trap instead of a r
   // the only option and must hit the recorded trap rather than a real backend.
   const unpinned = { ...env };
   delete unpinned[OPENCODE_BIN_ENV];
-  assert.equal(run(['agent', 'new', '--id', 'b00b', '--cwd', work], unpinned).status, 0);
-  assert.equal(run(['agent', 'run', '--id', 'b00b', '--detach', '--prompt', 'unpinned'], unpinned).status, 0);
-  const done = await waitFor(root, 'b00b', (meta) => meta.state !== 'running' && meta.active_runner === false);
+  const agent_b00b = newAgent(unpinned, ['--cwd', work]);
+  assert.equal(run(['agent', 'run', '--id', agent_b00b, '--detach', '--prompt', 'unpinned'], unpinned).status, 0);
+  const done = await waitFor(root, agent_b00b, (meta) => meta.state !== 'running' && meta.active_runner === false);
   assert.equal(done.state, 'failed');
   assert.equal(done.exit_code, 70);
   const trapped = readFileSync(escapes, 'utf8');
@@ -1161,8 +1209,8 @@ test('fixture guard: an unpinned backend falls into the PATH trap instead of a r
 test('attached prompt reports the invocation outcome, not unconditional success', (t) => {
   const handle = fixture(t);
   const { work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'a7ac', '--cwd', work], env).status, 0);
-  const failing = run(['agent', 'run', '--id', 'a7ac', '--prompt', 'server-error'], env);
+  const agent_a7ac = newAgent(env, ['--cwd', work]);
+  const failing = run(['agent', 'run', '--id', agent_a7ac, '--prompt', 'server-error'], env);
   assert.equal(
     failing.status,
     1,
@@ -1171,8 +1219,8 @@ test('attached prompt reports the invocation outcome, not unconditional success'
   assertFixtureInvoked(handle, 'server-error');
   // The succeeding path stays pinned too: the same command, same exit-code
   // wiring, opposite outcome.
-  assert.equal(run(['agent', 'new', '--id', 'a7ad', '--cwd', work], env).status, 0);
-  const succeeding = run(['agent', 'run', '--id', 'a7ad', '--prompt', 'ok'], env);
+  const agent_a7ad = newAgent(env, ['--cwd', work]);
+  const succeeding = run(['agent', 'run', '--id', agent_a7ad, '--prompt', 'ok'], env);
   assert.equal(succeeding.status, 0, succeeding.stderr);
   assert.match(succeeding.stdout, /FAKE:ok/);
 });
@@ -1183,16 +1231,16 @@ test('attached prompt reports the invocation outcome, not unconditional success'
 // test (the invocation is not run) so the tail boundary is exact.
 test('log tails exactly the requested number of lines, defaulting to fifty', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', '1099', '--cwd', work], env).status, 0);
-  const logPath = join(root, 'state', 'antonina', 'agents', '1099', 'output.log');
+  const agent_1099 = newAgent(env, ['--cwd', work]);
+  const logPath = join(root, 'state', 'antonina', 'agents', agent_1099, 'output.log');
   const lines = Array.from({ length: 60 }, (_, index) => `line-${index + 1}`);
   writeFileSync(logPath, `${lines.join('\n')}\n`);
 
-  const three = run(['agent', 'log', '--id', '1099', '--lines', '3'], env);
+  const three = run(['agent', 'log', '--id', agent_1099, '--lines', '3'], env);
   assert.equal(three.status, 0, three.stderr);
   assert.deepEqual(three.stdout.split('\n').filter(Boolean), ['line-58', 'line-59', 'line-60']);
 
-  const fifty = run(['agent', 'log', '--id', '1099'], env);
+  const fifty = run(['agent', 'log', '--id', agent_1099], env);
   assert.equal(fifty.status, 0, fifty.stderr);
   const shown = fifty.stdout.split('\n').filter(Boolean);
   assert.equal(shown.length, 50, 'the default tail window is 50 lines');
@@ -1202,9 +1250,9 @@ test('log tails exactly the requested number of lines, defaulting to fifty', (t)
 
 test('log on an agent with no output yet says so and succeeds', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', '109a', '--cwd', work], env).status, 0);
-  assert.equal(existsSync(join(root, 'state', 'antonina', 'agents', '109a', 'output.log')), false);
-  const result = run(['agent', 'log', '--id', '109a'], env);
+  const agent_109a = newAgent(env, ['--cwd', work]);
+  assert.equal(existsSync(join(root, 'state', 'antonina', 'agents', agent_109a, 'output.log')), false);
+  const result = run(['agent', 'log', '--id', agent_109a], env);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stderr, /\(no output yet\)/);
 });
@@ -1245,15 +1293,15 @@ function outputLogPath(root, id) {
 test('log --follow streams a live invocation and returns when it reaches a terminal state', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', '109b', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'run', '--id', '109b', '--detach', '--prompt', 'slow'], env).status, 0);
-  const live = await waitFor(root, '109b', (meta) => meta.state === 'running' && typeof meta.pid === 'number');
+  const agent_109b = newAgent(env, ['--cwd', work]);
+  assert.equal(run(['agent', 'run', '--id', agent_109b, '--detach', '--prompt', 'slow'], env).status, 0);
+  const live = await waitFor(root, agent_109b, (meta) => meta.state === 'running' && typeof meta.pid === 'number');
   t.after(() => {
     try { process.kill(-live.pid, 'SIGKILL'); } catch {}
     try { process.kill(live.pid, 'SIGKILL'); } catch {}
   });
 
-  const followed = spawnCli(['agent', 'log', '--id', '109b', '--follow'], env);
+  const followed = spawnCli(['agent', 'log', '--id', agent_109b, '--follow'], env);
   // Wait until the follower has actually produced its up-front tail, so the
   // marker appended below provably arrives *after* --follow attached.
   await waitUntil(
@@ -1270,11 +1318,11 @@ test('log --follow streams a live invocation and returns when it reaches a termi
   // read can surface it, and the up-front tailLines window cannot.
   const marker = `follow-live-${Date.now()}-${process.pid}`;
   assert.doesNotMatch(
-    readFileSync(outputLogPath(root, '109b'), 'utf8'),
+    readFileSync(outputLogPath(root, agent_109b), 'utf8'),
     new RegExp(marker),
     'the marker must be unique to this run',
   );
-  appendFileSync(outputLogPath(root, '109b'), `${marker}\n`);
+  appendFileSync(outputLogPath(root, agent_109b), `${marker}\n`);
   await waitUntil(
     () => followed.stdout().includes(marker),
     `the post-attach marker ${marker} to be streamed to the follower's stdout`,
@@ -1285,7 +1333,7 @@ test('log --follow streams a live invocation and returns when it reaches a termi
     'log --follow must still be following after streaming live content',
   );
 
-  assert.equal(run(['agent', 'stop', '--id', '109b'], env).status, 0);
+  assert.equal(run(['agent', 'stop', '--id', agent_109b], env).status, 0);
   const result = await Promise.race([
     followed.exited,
     delay(20_000).then(() => null),
@@ -1295,7 +1343,7 @@ test('log --follow streams a live invocation and returns when it reaches a termi
   assert.match(result.stdout, new RegExp(marker), 'the streamed marker must be in the returned output');
   assert.match(followed.stdout(), /slow-start/);
   assertFixtureInvoked(handle, 'slow');
-  await waitFor(root, '109b', (meta) => meta.state === 'stopped');
+  await waitFor(root, agent_109b, (meta) => meta.state === 'stopped');
 });
 
 test('log --follow reports a vanished agent directory instead of following forever', async (t) => {
@@ -1305,11 +1353,11 @@ test('log --follow reports a vanished agent directory instead of following forev
   }
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', '109c', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'run', '--id', '109c', '--detach', '--prompt', 'slow'], env).status, 0);
+  const agent_109c = newAgent(env, ['--cwd', work]);
+  assert.equal(run(['agent', 'run', '--id', agent_109c, '--detach', '--prompt', 'slow'], env).status, 0);
   const live = await waitFor(
     root,
-    '109c',
+    agent_109c,
     (meta) => meta.state === 'running' && typeof meta.pid === 'number' && meta.pid > 1,
   );
   // The agent's state is removed from under a live --follow; the runner and its
@@ -1323,13 +1371,13 @@ test('log --follow reports a vanished agent directory instead of following forev
     }
   });
 
-  const followed = spawnCli(['agent', 'log', '--id', '109c', '--follow'], env);
+  const followed = spawnCli(['agent', 'log', '--id', agent_109c, '--follow'], env);
   await waitUntil(
     () => followed.stdout().length > 0,
     'log --follow to attach and print the invocation\'s own output',
   );
   assert.equal(followed.child.exitCode, null, 'log --follow must be following while the agent is live');
-  rmSync(join(root, 'state', 'antonina', 'agents', '109c'), { recursive: true, force: true });
+  rmSync(join(root, 'state', 'antonina', 'agents', agent_109c), { recursive: true, force: true });
 
   const result = await Promise.race([followed.exited, delay(20_000).then(() => null)]);
   assert.notEqual(result, null, 'log --follow must return when the agent directory vanishes');
@@ -1359,7 +1407,7 @@ test('stop escalates SIGTERM to SIGKILL for a backend that ignores SIGTERM', asy
   }
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', '7e40', '--cwd', work], env).status, 0);
+  const agent_7e40 = newAgent(env, ['--cwd', work]);
 
   const invocationId = 'e'.repeat(32);
   // A live backend that refuses to die politely: SIGTERM is observed and
@@ -1368,7 +1416,7 @@ test('stop escalates SIGTERM to SIGKILL for a backend that ignores SIGTERM', asy
     process.execPath,
     ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 60000);"],
     {
-      env: { ...env, ANTONINA_AGENT_ID: '7e40', ANTONINA_INVOCATION_ID: invocationId },
+      env: { ...env, ANTONINA_AGENT_ID: agent_7e40, ANTONINA_INVOCATION_ID: invocationId },
       stdio: 'ignore',
       detached: true,
     },
@@ -1387,7 +1435,7 @@ test('stop escalates SIGTERM to SIGKILL for a backend that ignores SIGTERM', asy
   const pgid = procPgrp(victim.pid);
   assert.equal(pgid, victim.pid, 'the invocation must lead its own process group');
 
-  const path = metaPath(root, '7e40');
+  const path = metaPath(root, agent_7e40);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   Object.assign(meta, {
     state: 'running',
@@ -1410,7 +1458,7 @@ test('stop escalates SIGTERM to SIGKILL for a backend that ignores SIGTERM', asy
   // stop waits 10s for a polite death, then escalates, then allows 5s more, so
   // it cannot use the 15s default timeout of run().
   const startedAt = Date.now();
-  const stopped = spawnCli(['agent', 'stop', '--id', '7e40'], env);
+  const stopped = spawnCli(['agent', 'stop', '--id', agent_7e40], env);
   // Watch the victim while stop runs, so the moment of the SIGKILL is observed
   // instead of being inferred from the command's own report.
   let diedAt = null;
@@ -1427,7 +1475,7 @@ test('stop escalates SIGTERM to SIGKILL for a backend that ignores SIGTERM', asy
 
   assert.notEqual(result, null, 'stop must return while the invocation is being escalated');
   assert.equal(result.status, 0, `stop must succeed via escalation; stderr: ${result.stderr}`);
-  assert.match(result.stdout, /stopped agent 7e40/);
+  assert.ok(result.stdout.includes(`stopped agent ${agent_7e40}`), result.stdout);
   assert.notEqual(diedAt, null, 'the invocation must actually be gone, not merely reported gone');
   // The SIGKILL landed inside stop's own post-escalation window, and it could
   // only have come from stop: the whole grace period elapsed first (SIGTERM was
@@ -1464,13 +1512,13 @@ test('stop refuses to report success when the invocation cannot be terminated', 
   }
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', '7e41', '--cwd', work], env).status, 0);
+  const agent_7e41 = newAgent(env, ['--cwd', work]);
 
   const invocationId = 'c'.repeat(32);
   // A live, harmless bystander that carries the markers the runtime uses to
   // confirm ownership, and that the test reaps itself.
   const victim = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
-    env: { ...env, ANTONINA_AGENT_ID: '7e41', ANTONINA_INVOCATION_ID: invocationId },
+    env: { ...env, ANTONINA_AGENT_ID: agent_7e41, ANTONINA_INVOCATION_ID: invocationId },
     stdio: 'ignore',
   });
   const reaped = new Promise((resolve) => victim.on('close', () => resolve()));
@@ -1482,7 +1530,7 @@ test('stop refuses to report success when the invocation cannot be terminated', 
   const ticks = procStartTicks(victim.pid);
   assert.equal(typeof ticks, 'number', 'the bystander must be alive with real start ticks');
 
-  const path = metaPath(root, '7e41');
+  const path = metaPath(root, agent_7e41);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   Object.assign(meta, {
     state: 'running',
@@ -1500,7 +1548,7 @@ test('stop refuses to report success when the invocation cannot be terminated', 
   writeFileSync(path, JSON.stringify(meta));
 
   // stop waits 10s for a polite death and 5s more after escalating.
-  const stopped = spawnSync(process.execPath, [CLI, 'agent', 'stop', '--id', '7e41'], {
+  const stopped = spawnSync(process.execPath, [CLI, 'agent', 'stop', '--id', agent_7e41], {
     env,
     encoding: 'utf8',
     timeout: 60_000,
@@ -1528,12 +1576,12 @@ test('stop refuses to report success when the invocation cannot be terminated', 
 test('new refuses a --cwd that is not an existing directory and creates no state', (t) => {
   const { root, work, env } = fixture(t);
   const missing = join(root, 'no-such-directory');
-  const result = run(['agent', 'new', '--id', '4ec1', '--cwd', missing], env);
+  const result = run(['agent', 'new', '--cwd', missing], env);
   assert.equal(result.status, 1, `expected a refusal, got: ${result.stdout}${result.stderr}`);
   assert.match(result.stderr, /working directory does not exist/);
   assert.equal(existsSync(missing), false, 'the refused working directory must not be created');
   assert.equal(
-    existsSync(join(root, 'state', 'antonina', 'agents', '4ec1')),
+    existsSync(join(root, 'state', 'antonina', 'agents')),
     false,
     'a refused new must not leave an agent directory behind',
   );
@@ -1542,27 +1590,28 @@ test('new refuses a --cwd that is not an existing directory and creates no state
   // guard: isDirectory must be consulted, not just existence.
   const file = join(work, 'not-a-directory');
   writeFileSync(file, 'regular file\n');
-  const asFile = run(['agent', 'new', '--id', '4ec2', '--cwd', file], env);
+  const asFile = run(['agent', 'new', '--cwd', file], env);
   assert.equal(asFile.status, 1, `expected a refusal, got: ${asFile.stdout}${asFile.stderr}`);
   assert.match(asFile.stderr, /working directory does not exist/);
   assert.equal(
-    existsSync(join(root, 'state', 'antonina', 'agents', '4ec2')),
+    existsSync(join(root, 'state', 'antonina', 'agents')),
     false,
     'a refused new must not leave an agent directory behind',
   );
 
   // The positive direction, so the guard cannot be satisfied by refusing every
   // --cwd: a real existing directory is still accepted.
-  const accepted = run(['agent', 'new', '--id', '4ec3', '--cwd', work, '--json'], env);
+  const accepted = run(['agent', 'new', '--cwd', work, '--json'], env);
   assert.equal(accepted.status, 0, accepted.stderr);
+  const acceptedId = JSON.parse(accepted.stdout).id;
   assert.equal(JSON.parse(accepted.stdout).cwd, work);
-  assert.equal(existsSync(join(root, 'state', 'antonina', 'agents', '4ec3', 'meta.json')), true);
+  assert.equal(existsSync(join(root, 'state', 'antonina', 'agents', acceptedId, 'meta.json')), true);
 });
 
 test('a/d. a full host still launches, because launch is not host-capacity policy', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'ca91', '--cwd', work], env).status, 0);
+  const agent_ca91 = newAgent(env, ['--cwd', work]);
 
   // A threshold no real host could satisfy was the previous branch's way of
   // making a refusal deterministic. The setting no longer exists and setting it
@@ -1571,10 +1620,10 @@ test('a/d. a full host still launches, because launch is not host-capacity polic
   // reported rather than enforced.
   const impossible = { ...env, [ANTONINA_MIN_HEADROOM_ENV]: '1099511627776' };
 
-  const launched = run(['agent', 'run', '--id', 'ca91', '--detach', '--prompt', 'work'], impossible);
+  const launched = run(['agent', 'run', '--id', agent_ca91, '--detach', '--prompt', 'work'], impossible);
   assert.equal(launched.status, 0, launched.stderr);
 
-  const done = await waitFor(root, 'ca91', (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
+  const done = await waitFor(root, agent_ca91, (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
   assert.equal(done.state, 'succeeded');
   // The prompt was really delivered, so this is a launch and not a no-op that
   // merely avoided refusing.
@@ -1585,9 +1634,9 @@ test('a/d. a full host still launches, because launch is not host-capacity polic
 test('5. agent status exposes host headroom without a separate command', async (t) => {
   const handle = fixture(t);
   const { work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'ca93', '--cwd', work], env).status, 0);
+  const agent_ca93 = newAgent(env, ['--cwd', work]);
 
-  const status = run(['agent', 'status', '--id', 'ca93', '--json'], env);
+  const status = run(['agent', 'status', '--id', agent_ca93, '--json'], env);
   assert.equal(status.status, 0, status.stderr);
   const capacity = JSON.parse(status.stdout).host_capacity;
   // The shape an operator reads after a death: what the kernel reported. There
@@ -1610,7 +1659,7 @@ test('5. agent status exposes host headroom without a separate command', async (
     assert.notEqual(capacity.headroom, 'unknown');
 
     // The human-readable form names the same reading.
-    const human = run(['agent', 'status', '--id', 'ca93'], env);
+    const human = run(['agent', 'status', '--id', agent_ca93], env);
     assert.equal(human.status, 0, human.stderr);
     assert.match(human.stdout, /headroom:.*of .*limit/);
     assert.doesNotMatch(human.stdout, /required/);
@@ -1620,12 +1669,12 @@ test('5. agent status exposes host headroom without a separate command', async (
 test('e. a signal-killed agent is reported as an external kill through status', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'ca94', '--cwd', work], env).status, 0);
-  const launched = run(['agent', 'run', '--id', 'ca94', '--detach', '--prompt', 'die-by-signal'], env);
+  const agent_ca94 = newAgent(env, ['--cwd', work]);
+  const launched = run(['agent', 'run', '--id', agent_ca94, '--detach', '--prompt', 'die-by-signal'], env);
   assert.equal(launched.status, 0, launched.stderr);
-  await waitFor(root, 'ca94', (meta) => meta.state === 'failed' && meta.active_runner === false, 30_000);
+  await waitFor(root, agent_ca94, (meta) => meta.state === 'failed' && meta.active_runner === false, 30_000);
 
-  const status = run(['agent', 'status', '--id', 'ca94', '--json'], env);
+  const status = run(['agent', 'status', '--id', agent_ca94, '--json'], env);
   assert.equal(status.status, 0, status.stderr);
   const body = JSON.parse(status.stdout);
   assert.equal(body.exit_signal, 9);
@@ -1656,7 +1705,7 @@ test('e. a signal-killed agent is reported as an external kill through status', 
   // comparison is against the durable record, not against a re-derivation of it:
   // this proves the display passed the runtime's own sentence through rather
   // than showing something plausible in its place.
-  const recorded = JSON.parse(readFileSync(metaPath(root, 'ca94'), 'utf8'));
+  const recorded = JSON.parse(readFileSync(metaPath(root, agent_ca94), 'utf8'));
   assert.equal(typeof recorded.error, 'string', 'this death recorded no note, so there is nothing to surface');
   assert.equal(body.last_error, recorded.error);
   // And it is the sentence `describeSignalDeath` writes for a signal death, in
@@ -1670,7 +1719,7 @@ test('e. a signal-killed agent is reported as an external kill through status', 
   // `last error:` and not `error:` because `finalizeTerminal` never clears
   // `meta.error` -- the staleness case is pinned by the test below -- and an
   // `error:` line under `exit code:` would read as this run's cause.
-  const human = run(['agent', 'status', '--id', 'ca94'], env);
+  const human = run(['agent', 'status', '--id', agent_ca94], env);
   assert.equal(human.status, 0, human.stderr);
   assert.match(human.stdout, /^last error: killed by SIGKILL \(signal 9\); /m);
 
@@ -1678,14 +1727,14 @@ test('e. a signal-killed agent is reported as an external kill through status', 
   // agent that ended cleanly has no note recorded, and the human surface must
   // then be silent about it rather than printing a placeholder. A status that
   // always printed a `last error:` line would satisfy every assertion above.
-  assert.equal(run(['agent', 'new', '--id', 'ca96', '--cwd', work], env).status, 0);
-  const clean = run(['agent', 'run', '--id', 'ca96', '--detach', '--prompt', 'ok'], env);
+  const agent_ca96 = newAgent(env, ['--cwd', work]);
+  const clean = run(['agent', 'run', '--id', agent_ca96, '--detach', '--prompt', 'ok'], env);
   assert.equal(clean.status, 0, clean.stderr);
-  await waitFor(root, 'ca96', (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
-  const cleanHuman = run(['agent', 'status', '--id', 'ca96'], env);
+  await waitFor(root, agent_ca96, (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
+  const cleanHuman = run(['agent', 'status', '--id', agent_ca96], env);
   assert.equal(cleanHuman.status, 0, cleanHuman.stderr);
   assert.doesNotMatch(cleanHuman.stdout, /^last error:/m);
-  const cleanJson = run(['agent', 'status', '--id', 'ca96', '--json'], env);
+  const cleanJson = run(['agent', 'status', '--id', agent_ca96, '--json'], env);
   assert.equal(cleanJson.status, 0, cleanJson.stderr);
   assert.equal(JSON.parse(cleanJson.stdout).last_error, null);
   // `cwd:` and the rest of the surface are untouched by this change: a clean
@@ -1712,38 +1761,38 @@ test('e. a signal-killed agent is reported as an external kill through status', 
 test('a note from an earlier failed run is never presented as this run\'s error', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
-  assert.equal(run(['agent', 'new', '--id', 'ca97', '--cwd', work], env).status, 0);
+  const agent_ca97 = newAgent(env, ['--cwd', work]);
 
   // Run one: killed from outside, so the runtime records a note.
-  const failed = run(['agent', 'run', '--id', 'ca97', '--detach', '--prompt', 'die-by-signal'], env);
+  const failed = run(['agent', 'run', '--id', agent_ca97, '--detach', '--prompt', 'die-by-signal'], env);
   assert.equal(failed.status, 0, failed.stderr);
   const firstFailure = await waitFor(
     root,
-    'ca97',
+    agent_ca97,
     (meta) => meta.state === 'failed' && meta.active_runner === false,
     30_000,
   );
   const staleNote = firstFailure.error;
   assert.equal(typeof staleNote, 'string', 'the first run recorded no note to go stale');
   assert.match(staleNote, /^killed by SIGKILL \(signal 9\); /);
-  const firstStatus = JSON.parse(run(['agent', 'status', '--id', 'ca97', '--json'], env).stdout);
+  const firstStatus = JSON.parse(run(['agent', 'status', '--id', agent_ca97, '--json'], env).stdout);
   assert.equal(firstStatus.last_error, staleNote, 'the first run\'s note must be displayed while it is the current one');
 
   // Run two, on the same agent, to success. A clean exit records no note, so
   // nothing on the runtime's side clears the first run's.
-  const succeeded = run(['agent', 'run', '--id', 'ca97', '--detach', '--prompt', 'ok'], env);
+  const succeeded = run(['agent', 'run', '--id', agent_ca97, '--detach', '--prompt', 'ok'], env);
   assert.equal(succeeded.status, 0, succeeded.stderr);
-  await waitFor(root, 'ca97', (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
+  await waitFor(root, agent_ca97, (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
 
   // The record itself is unchanged by the second run: the note is still there.
   // Asserted so the assertions below cannot be satisfied by something that
   // quietly dropped it -- the runtime did not clear it, and this change did not
   // make it clear it.
-  const afterSuccess = JSON.parse(readFileSync(metaPath(root, 'ca97'), 'utf8'));
+  const afterSuccess = JSON.parse(readFileSync(metaPath(root, agent_ca97), 'utf8'));
   assert.equal(afterSuccess.error, staleNote, 'the runtime cleared the earlier note');
 
   // What the second status shows. The run succeeded...
-  const second = run(['agent', 'status', '--id', 'ca97', '--json'], env);
+  const second = run(['agent', 'status', '--id', agent_ca97, '--json'], env);
   assert.equal(second.status, 0, second.stderr);
   const body = JSON.parse(second.stdout);
   assert.equal(body.state, 'succeeded');
@@ -1765,7 +1814,7 @@ test('a note from an earlier failed run is never presented as this run\'s error'
 
   // The human surface makes the same distinction in words, and the outcome
   // fields it prints are the successful ones.
-  const human = run(['agent', 'status', '--id', 'ca97'], env);
+  const human = run(['agent', 'status', '--id', agent_ca97], env);
   assert.equal(human.status, 0, human.stderr);
   assert.match(human.stdout, /^state: {6}succeeded$/m);
   assert.match(human.stdout, /^exit code: {2}0$/m);
@@ -1793,16 +1842,16 @@ test('a front runs in, and reports, the directory declared by --cwd on run', asy
   const declared = join(root, 'declared-worktree');
   mkdirSync(declared);
   // The record starts out naming one directory...
-  assert.equal(run(['agent', 'new', '--id', 'c0de', '--cwd', work], env).status, 0);
+  const agent_c0de = newAgent(env, ['--cwd', work]);
   // ...and the launch declares a different one.
   const launched = run(
-    ['agent', 'run', '--id', 'c0de', '--cwd', declared, '--detach', '--prompt', 'declared'],
+    ['agent', 'run', '--id', agent_c0de, '--cwd', declared, '--detach', '--prompt', 'declared'],
     env,
   );
   assert.equal(launched.status, 0, launched.stderr);
   const done = await waitFor(
     root,
-    'c0de',
+    agent_c0de,
     (meta) => meta.state === 'succeeded' && meta.active_runner === false,
     20_000,
   );
@@ -1811,17 +1860,17 @@ test('a front runs in, and reports, the directory declared by --cwd on run', asy
 
   // What the front says about itself, read from its own log. This is the
   // assertion that would fail if status merely reported a plausible path.
-  const log = readFileSync(outputLogPath(root, 'c0de'), 'utf8');
+  const log = readFileSync(outputLogPath(root, agent_c0de), 'utf8');
   assert.match(log, new RegExp(`FAKE_CWD:${declared}\\n`));
   assert.doesNotMatch(log, new RegExp(`FAKE_CWD:${work}\\n`));
 
   // And every report names the same directory the front named.
-  const status = run(['agent', 'status', '--id', 'c0de', '--json'], env);
+  const status = run(['agent', 'status', '--id', agent_c0de, '--json'], env);
   assert.equal(status.status, 0, status.stderr);
   assert.equal(JSON.parse(status.stdout).cwd, declared);
   const listed = run(['agent', 'list', '--page', '1', '--json'], env);
   assert.equal(listed.status, 0, listed.stderr);
-  const entry = JSON.parse(listed.stdout).agents.find((agent) => agent.id === 'c0de');
+  const entry = JSON.parse(listed.stdout).agents.find((agent) => agent.id === agent_c0de);
   assert.equal(entry.cwd, declared);
   // The backend was told the same directory, so the record and the invocation
   // cannot disagree about where the front is.
@@ -1834,23 +1883,22 @@ test('a front runs in, and reports, the directory declared by --cwd on run', asy
 // shell's directory is what made the field wrong in the first place.
 test('an agent with no declared working directory is never launched, and says so', (t) => {
   const { root, work, env } = fixture(t);
-  const created = run(['agent', 'new', '--id', 'd1e0'], env);
-  assert.equal(created.status, 0, created.stderr);
+  const agentId = newAgent(env);
 
   // No --cwd anywhere in this agent's life, so there is no such directory to
   // report. Reporting the directory this test process happens to run in would be
   // the defect this pins.
-  const status = run(['agent', 'status', '--id', 'd1e0', '--json'], env);
+  const status = run(['agent', 'status', '--id', agentId, '--json'], env);
   assert.equal(status.status, 0, status.stderr);
   assert.equal(JSON.parse(status.stdout).cwd, null);
-  const human = run(['agent', 'status', '--id', 'd1e0'], env);
+  const human = run(['agent', 'status', '--id', agentId], env);
   assert.equal(human.status, 0, human.stderr);
   assert.match(human.stdout, /^cwd:\s+undeclared$/m);
 
-  const launched = run(['agent', 'run', '--id', 'd1e0', '--detach', '--prompt', 'must-not-run'], env);
+  const launched = run(['agent', 'run', '--id', agentId, '--detach', '--prompt', 'must-not-run'], env);
   assert.equal(launched.status, 1, `expected a refusal, got: ${launched.stdout}${launched.stderr}`);
   assert.match(launched.stderr, /no declared working directory/);
-  const meta = JSON.parse(readFileSync(metaPath(root, 'd1e0'), 'utf8'));
+  const meta = JSON.parse(readFileSync(metaPath(root, agentId), 'utf8'));
   assert.equal(meta.prompt_count, 0, 'a refused launch must not accept the prompt');
   assert.equal(meta.pending_prompt, null);
   assert.equal(meta.active_runner, false);
@@ -1868,11 +1916,11 @@ test('--cwd is refused while a front exists, and changes nothing', async (t) => 
   const { root, work, env } = fixture(t);
   const elsewhere = join(root, 'not-yours');
   mkdirSync(elsewhere);
-  assert.equal(run(['agent', 'new', '--id', 'f0e5', '--cwd', work], env).status, 0);
-  assert.equal(run(['agent', 'run', '--id', 'f0e5', '--detach', '--prompt', 'slow'], env).status, 0);
+  const agent_f0e5 = newAgent(env, ['--cwd', work]);
+  assert.equal(run(['agent', 'run', '--id', agent_f0e5, '--detach', '--prompt', 'slow'], env).status, 0);
   const live = await waitFor(
     root,
-    'f0e5',
+    agent_f0e5,
     (meta) => meta.state === 'running'
       && typeof meta.pid === 'number'
       && typeof meta.runner_pid === 'number',
@@ -1881,18 +1929,18 @@ test('--cwd is refused while a front exists, and changes nothing', async (t) => 
     try { process.kill(-live.pid, 'SIGKILL'); } catch {}
     try { process.kill(live.pid, 'SIGKILL'); } catch {}
   });
-  const before = readFileSync(metaPath(root, 'f0e5'), 'utf8');
+  const before = readFileSync(metaPath(root, agent_f0e5), 'utf8');
 
   const refused = run(
-    ['agent', 'run', '--id', 'f0e5', '--steer', '--cwd', elsewhere, '--detach', '--prompt', 'moved'],
+    ['agent', 'run', '--id', agent_f0e5, '--steer', '--cwd', elsewhere, '--detach', '--prompt', 'moved'],
     env,
   );
   assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
   assert.match(refused.stderr, /--cwd/);
-  assert.equal(readFileSync(metaPath(root, 'f0e5'), 'utf8'), before, 'a refused --cwd must write nothing');
+  assert.equal(readFileSync(metaPath(root, agent_f0e5), 'utf8'), before, 'a refused --cwd must write nothing');
 
-  assert.equal(run(['agent', 'stop', '--id', 'f0e5'], env).status, 0);
-  await waitFor(root, 'f0e5', (meta) => meta.state === 'stopped');
+  assert.equal(run(['agent', 'stop', '--id', agent_f0e5], env).status, 0);
+  await waitFor(root, agent_f0e5, (meta) => meta.state === 'stopped');
   assert.equal(
     procStartTicks(live.runner_pid),
     null,
@@ -1908,9 +1956,9 @@ test('--cwd is refused while a front exists, and changes nothing', async (t) => 
 // names a directory means anything.
 test('a declared directory no front has run in is reported as never ran', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', '0b5e', '--cwd', work], env).status, 0);
+  const agent_0b5e = newAgent(env, ['--cwd', work]);
 
-  const status = run(['agent', 'status', '--id', '0b5e', '--json'], env);
+  const status = run(['agent', 'status', '--id', agent_0b5e, '--json'], env);
   assert.equal(status.status, 0, status.stderr);
   const parsed = JSON.parse(status.stdout);
   assert.equal(parsed.cwd, work, 'the declaration is the directory that was declared');
@@ -1919,11 +1967,11 @@ test('a declared directory no front has run in is reported as never ran', (t) =>
     null,
     'nothing has been launched, so nothing may be observed',
   );
-  assert.match(run(['agent', 'status', '--id', '0b5e'], env).stdout, /^ran in:\s+never ran$/m);
+  assert.match(run(['agent', 'status', '--id', agent_0b5e], env).stdout, /^ran in:\s+never ran$/m);
 
   const listed = run(['agent', 'list', '--page', '1', '--json'], env);
   assert.equal(listed.status, 0, listed.stderr);
-  const entry = JSON.parse(listed.stdout).agents.find((agent) => agent.id === '0b5e');
+  const entry = JSON.parse(listed.stdout).agents.find((agent) => agent.id === agent_0b5e);
   assert.equal(entry.invocation_cwd, null);
 
   // And the backend has not run at all, so there is nothing it could have been
@@ -1943,15 +1991,15 @@ test('the observation names the directory the backend actually ran in', async (t
   const second = join(root, 'second-worktree');
   mkdirSync(first);
   mkdirSync(second);
-  assert.equal(run(['agent', 'new', '--id', '0b5f', '--cwd', first], env).status, 0);
+  const agent_0b5f = newAgent(env, ['--cwd', first]);
 
   assert.equal(
-    run(['agent', 'run', '--id', '0b5f', '--detach', '--prompt', 'one'], env).status,
+    run(['agent', 'run', '--id', agent_0b5f, '--detach', '--prompt', 'one'], env).status,
     0,
   );
   const ran = await waitFor(
     root,
-    '0b5f',
+    agent_0b5f,
     (meta) => meta.state === 'succeeded' && meta.active_runner === false,
     20_000,
   );
@@ -1960,29 +2008,29 @@ test('the observation names the directory the backend actually ran in', async (t
   // The backend's own account of where it was, from its log, is the control the
   // record is checked against.
   assert.match(
-    readFileSync(outputLogPath(root, '0b5f'), 'utf8'),
+    readFileSync(outputLogPath(root, agent_0b5f), 'utf8'),
     new RegExp(`FAKE_CWD:${first}\\n`),
   );
 
   // A second run in a different directory rewrites the declaration, and the
   // observation follows the real launch rather than being written at acceptance.
   assert.equal(
-    run(['agent', 'run', '--id', '0b5f', '--cwd', second, '--detach', '--prompt', 'two'], env).status,
+    run(['agent', 'run', '--id', agent_0b5f, '--cwd', second, '--detach', '--prompt', 'two'], env).status,
     0,
   );
   const moved = await waitFor(
     root,
-    '0b5f',
+    agent_0b5f,
     (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false,
     20_000,
   );
   assert.equal(moved.cwd, second);
   assert.equal(moved.invocation_cwd, second);
 
-  const parsed = JSON.parse(run(['agent', 'status', '--id', '0b5f', '--json'], env).stdout);
+  const parsed = JSON.parse(run(['agent', 'status', '--id', agent_0b5f, '--json'], env).stdout);
   assert.equal(parsed.invocation_cwd, second);
   assert.match(
-    run(['agent', 'status', '--id', '0b5f'], env).stdout,
+    run(['agent', 'status', '--id', agent_0b5f], env).stdout,
     new RegExp(`^ran in:\\s+${second}$`, 'm'),
   );
   // Every launch of this front was handed the same directory the backend ran in.
@@ -2011,39 +2059,39 @@ function withoutInvocationCwd(env) {
 
 test('run refuses a launch into a directory the backend cannot honour', async (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', '8a7e', '--cwd', work], env).status, 0);
-  const before = readFileSync(metaPath(root, '8a7e'), 'utf8');
+  const agent_8a7e = newAgent(env, ['--cwd', work]);
+  const before = readFileSync(metaPath(root, agent_8a7e), 'utf8');
 
   // A directory named on this very invocation.
   const named = join(root, 'named-here');
   mkdirSync(named);
   const refused = run(
-    ['agent', 'run', '--id', '8a7e', '--cwd', named, '--detach', '--prompt', 'no'],
+    ['agent', 'run', '--id', agent_8a7e, '--cwd', named, '--detach', '--prompt', 'no'],
     withoutInvocationCwd(env),
   );
   assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
   assert.match(refused.stderr, /backend cannot run an invocation in a different working directory/);
-  assert.equal(readFileSync(metaPath(root, '8a7e'), 'utf8'), before, 'a refused launch must write nothing');
+  assert.equal(readFileSync(metaPath(root, agent_8a7e), 'utf8'), before, 'a refused launch must write nothing');
 
   // And the same launch of a directory declared *earlier*, in durable state,
 // with no `--cwd` on this command at all. This is the case a flag-shaped gate
   // misses: the backend is handed `--dir <declared>` by a CLI that has just been
   // told it cannot run an invocation in a named directory.
   const inherited = run(
-    ['agent', 'run', '--id', '8a7e', '--detach', '--prompt', 'no'],
+    ['agent', 'run', '--id', agent_8a7e, '--detach', '--prompt', 'no'],
     withoutInvocationCwd(env),
   );
   assert.equal(inherited.status, 1, `expected a refusal, got: ${inherited.stdout}${inherited.stderr}`);
   assert.match(inherited.stderr, /backend cannot run an invocation in a different working directory/);
-  assert.equal(readFileSync(metaPath(root, '8a7e'), 'utf8'), before, 'a refused launch must write nothing');
+  assert.equal(readFileSync(metaPath(root, agent_8a7e), 'utf8'), before, 'a refused launch must write nothing');
   assert.deepEqual(fixtureInvocations(env), [], 'the backend must never be invoked for a refused launch');
 
   // The positive control: the same commands, with the capability present, run.
   // Without it the cases above would also pass if the gate refused everything.
-  assert.equal(run(['agent', 'run', '--id', '8a7e', '--detach', '--prompt', 'go'], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', agent_8a7e, '--detach', '--prompt', 'go'], env).status, 0);
   const launched = await waitFor(
     root,
-    '8a7e',
+    agent_8a7e,
     (meta) => meta.state === 'succeeded' && meta.active_runner === false,
     20_000,
   );
@@ -2056,18 +2104,19 @@ test('run refuses a launch into a directory the backend cannot honour', async (t
 // launches from. Without this clause `new` accepted a directory `run` refuses.
 test('new refuses a declared directory the backend cannot honour, and writes nothing', (t) => {
   const { root, work, env } = fixture(t);
-  const refused = run(['agent', 'new', '--id', '8a7f', '--cwd', work], withoutInvocationCwd(env));
+  const refused = run(['agent', 'new', '--cwd', work], withoutInvocationCwd(env));
   assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
   assert.match(refused.stderr, /backend cannot run an invocation in a different working directory/);
   assert.equal(
-    existsSync(metaPath(root, '8a7f')),
+    existsSync(join(root, 'state', 'antonina', 'agents')),
     false,
     'a refused `new` must create no agent directory at all',
   );
 
   // An agent with no directory is still creatable: the gate is about a named
   // directory, not about the backend's presence.
-  assert.equal(run(['agent', 'new', '--id', '8a80'], withoutInvocationCwd(env)).status, 0);
+  const created = run(['agent', 'new'], withoutInvocationCwd(env));
+  assert.equal(created.status, 0, created.stderr);
 });
 
 // And at `new --fork`, which refuses `--cwd` outright but *inherits* the
@@ -2076,22 +2125,22 @@ test('new refuses a declared directory the backend cannot honour, and writes not
 // record, and above `forkAgent`, so a refusal writes nothing.
 test('new --fork refuses to inherit a directory the backend cannot honour', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', '8a81', '--cwd', work], env).status, 0);
+  const agent_8a81 = newAgent(env, ['--cwd', work]);
 
-  const refused = run(['agent', 'new', '--id', '8a82', '--fork', '8a81'], withoutInvocationCwd(env));
+  const refused = run(['agent', 'new', '--fork', agent_8a81], withoutInvocationCwd(env));
   assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
   assert.match(refused.stderr, /backend cannot run an invocation in a different working directory/);
-  assert.equal(
-    existsSync(metaPath(root, '8a82')),
-    false,
+  assert.deepEqual(
+    agentDirs(root),
+    [agent_8a81],
     'a refused fork must create no clone',
   );
 
   // A source that declared nothing is still forkable under the same backend: the
   // clone would record no directory, so there is nothing to honour.
-  assert.equal(run(['agent', 'new', '--id', '8a83'], env).status, 0);
-  assert.equal(run(['agent', 'new', '--id', '8a84', '--fork', '8a83'], withoutInvocationCwd(env)).status, 0);
-  assert.equal(readMetaPath(root, '8a84').cwd, null);
+  const agent_8a83 = newAgent(env);
+  const agent_8a84 = newAgent(withoutInvocationCwd(env), ['--fork', agent_8a83]);
+  assert.equal(readMetaPath(root, agent_8a84).cwd, null);
 });
 
 // `--cwd ''` resolves to the invoking shell's directory, because
@@ -2109,7 +2158,7 @@ test('a launch that never reached a backend observes nothing', async (t) => {
   const { root, env } = handle;
   const vanishing = join(root, 'vanishing-worktree');
   mkdirSync(vanishing);
-  assert.equal(run(['agent', 'new', '--id', '8a90', '--cwd', vanishing], env).status, 0);
+  const agent_8a90 = newAgent(env, ['--cwd', vanishing]);
 
   // Gone before the run command observes it. `run` re-validates only a
   // directory named on this command, so a declaration that has since been
@@ -2118,13 +2167,13 @@ test('a launch that never reached a backend observes nothing', async (t) => {
   rmSync(vanishing, { recursive: true, force: true });
 
   assert.equal(
-    run(['agent', 'run', '--id', '8a90', '--detach', '--prompt', 'never-launched'], env).status,
+    run(['agent', 'run', '--id', agent_8a90, '--detach', '--prompt', 'never-launched'], env).status,
     0,
     'the prompt is accepted; it is the launch that cannot happen',
   );
   const done = await waitFor(
     root,
-    '8a90',
+    agent_8a90,
     (meta) => meta.state === 'failed' && meta.active_runner === false,
     20_000,
   );
@@ -2146,20 +2195,20 @@ test('a launch that never reached a backend observes nothing', async (t) => {
     [],
     'the backend must not have been executed for a launch that could not happen',
   );
-  const parsed = JSON.parse(run(['agent', 'status', '--id', '8a90', '--json'], env).stdout);
+  const parsed = JSON.parse(run(['agent', 'status', '--id', agent_8a90, '--json'], env).stdout);
   assert.equal(parsed.invocation_cwd, null);
-  assert.match(run(['agent', 'status', '--id', '8a90'], env).stdout, /^ran in:\s+never ran$/m);
+  assert.match(run(['agent', 'status', '--id', agent_8a90], env).stdout, /^ran in:\s+never ran$/m);
   assertFixtureInvoked(handle, undefined);
 });
 
 test('an empty or whitespace-only --cwd is refused at every entry point', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', '8a85'], env).status, 0);
+  const agent_8a85 = newAgent(env);
 
   for (const value of ['', ' ', '\t', '\n', '   ']) {
     for (const args of [
-      ['agent', 'new', '--id', '8a86', '--cwd', value],
-      ['agent', 'run', '--id', '8a85', '--cwd', value, '--detach', '--prompt', 'no'],
+      ['agent', 'new', '--cwd', value],
+      ['agent', 'run', '--id', agent_8a85, '--cwd', value, '--detach', '--prompt', 'no'],
     ]) {
       const refused = run(args, env);
       assert.equal(
@@ -2172,8 +2221,8 @@ test('an empty or whitespace-only --cwd is refused at every entry point', (t) =>
   }
   // Neither command created or launched anything, and the record never acquired
   // the shell's directory.
-  assert.equal(existsSync(metaPath(root, '8a86')), false);
-  const after = readMetaPath(root, '8a85');
+  assert.deepEqual(agentDirs(root), [agent_8a85]);
+  const after = readMetaPath(root, agent_8a85);
   assert.equal(after.cwd, null);
   assert.equal(after.prompt_count, 0);
   assert.deepEqual(fixtureInvocations(env), []);
@@ -2184,23 +2233,20 @@ test('an empty or whitespace-only --cwd is refused at every entry point', (t) =>
 // is not an existing directory is refused before any state is written.
 test('run refuses a --cwd that is not an existing directory', (t) => {
   const { root, work, env } = fixture(t);
-  assert.equal(run(['agent', 'new', '--id', '9a17', '--cwd', work], env).status, 0);
+  const agent_9a17 = newAgent(env, ['--cwd', work]);
   const missing = join(root, 'no-such-worktree');
-  const before = readFileSync(metaPath(root, '9a17'), 'utf8');
-  const refused = run(['agent', 'run', '--id', '9a17', '--cwd', missing, '--detach', '--prompt', 'no'], env);
+  const before = readFileSync(metaPath(root, agent_9a17), 'utf8');
+  const refused = run(['agent', 'run', '--id', agent_9a17, '--cwd', missing, '--detach', '--prompt', 'no'], env);
   assert.equal(refused.status, 1, `expected a refusal, got: ${refused.stdout}${refused.stderr}`);
   assert.match(refused.stderr, /working directory does not exist/);
-  assert.equal(readFileSync(metaPath(root, '9a17'), 'utf8'), before, 'a refused --cwd must write nothing');
+  assert.equal(readFileSync(metaPath(root, agent_9a17), 'utf8'), before, 'a refused --cwd must write nothing');
 });
 
 
 
 test('agent list requires --page and uses --limit as the page size', (t) => {
   const { work, env } = fixture(t);
-  for (const id of ['a001', 'a002', 'a003']) {
-    const created = run(['agent', 'new', '--id', id, '--cwd', work], env);
-    assert.equal(created.status, 0, created.stderr);
-  }
+  for (let index = 0; index < 3; index += 1) newAgent(env, ['--cwd', work]);
 
   const missing = run(['agent', 'list', '--json'], env);
   assert.equal(missing.status, 2);

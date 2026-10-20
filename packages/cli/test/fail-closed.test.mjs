@@ -144,7 +144,7 @@ test('delete does not remove state when its deletion tombstone cannot be persist
 });
 
 test('new reports persistence failure and removes its uncommitted state directory', async (t) => {
-  const { work, state } = fixture(t);
+  const { root, work, state } = fixture(t);
   const output = capture();
   const failingFs = storeFs({
     renameSync() {
@@ -152,12 +152,19 @@ test('new reports persistence failure and removes its uncommitted state director
     },
   });
 
+  // Board issue 320: the id is generated, so it is not named here; the claim is
+  // that no agent directory survives the failed publish, whichever id was drawn.
   const code = await runAgentCommand(
-    ['new', '--id', 'cafe', '--cwd', work],
+    ['new', '--cwd', work],
     context(work, state, output.io, failingFs),
   );
 
   assert.equal(code, 1);
   assert.match(output.err.join('\n'), /failed to persist metadata/);
-  assert.equal(nodeFs.existsSync(agentDir('cafe', state)), false);
+  const agentsRoot = join(root, 'state', 'antonina', 'agents');
+  assert.equal(
+    nodeFs.existsSync(agentsRoot) ? nodeFs.readdirSync(agentsRoot).length : 0,
+    0,
+    'a failed new must leave no agent directory behind',
+  );
 });

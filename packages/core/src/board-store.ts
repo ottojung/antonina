@@ -388,7 +388,7 @@ export class SignedBoardStore {
 
   async getIssue(
     credentialValue: BoardCredential,
-    number: number,
+    number: string,
     previouslyAcceptedHead?: string | null,
   ): Promise<BoardIssue | null> {
     const credential = await verifyBoardCredential(credentialValue);
@@ -417,7 +417,7 @@ export class SignedBoardStore {
    */
   async readIssueCommentPage(
     credentialValue: BoardCredential,
-    number: number,
+    number: string,
     page: number,
   ): Promise<IssueCommentPage | null> {
     const credential = await verifyBoardCredential(credentialValue);
@@ -444,7 +444,7 @@ export class SignedBoardStore {
    */
   async getIssuePage(
     credentialValue: BoardCredential,
-    number: number,
+    number: string,
     page: number,
     previouslyAcceptedHead?: string | null,
   ): Promise<BoardIssue | null> {
@@ -476,7 +476,7 @@ export class SignedBoardStore {
   async getQueue(
     credentialValue: BoardCredential,
     previouslyAcceptedHead?: string | null,
-  ): Promise<number[] | null> {
+  ): Promise<string[] | null> {
     const credential = await verifyBoardCredential(credentialValue);
     await this.ensureMaterialized(credential, previouslyAcceptedHead);
     try {

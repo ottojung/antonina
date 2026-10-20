@@ -1,5 +1,6 @@
 // Board issue 129: `antonina agent clean` cannot classify an idle forked clone
-// that inherited a terminal `finished_at`.
+// that inherited a terminal `finished_at`. Board issue 320: `agent new` (and so
+// the fork) mints its own id, captured here from stdout.
 //
 // The state this file is about, measured rather than assumed (see
 // /workspace/BOARD129-CLEANFIX.md): `forkMetaSnapshot` sets `clone.state =
@@ -71,15 +72,20 @@ function readMeta(root, id) {
   return JSON.parse(readFileSync(metaPath(root, id), 'utf8'));
 }
 
+function createAgent(env, args) {
+  const created = run(['agent', 'new', ...args], env);
+  assert.equal(created.status, EXIT_OK, created.stderr);
+  return created.stdout.trim();
+}
+
 // Create a source agent and then make it look like one that ran and finished,
 // at `finishedAt`. The record is edited in place because this file launches no
 // backend: `agent new` cannot produce a finished agent without one, and the
 // state under test is the fork's output, not the run's.
-function finishedSource(t, id, finishedAt) {
+function finishedSource(t, finishedAt) {
   const handle = world(t);
-  const created = run(['agent', 'new', '--id', id, '--cwd', handle.work], handle.env);
-  assert.equal(created.status, EXIT_OK, created.stderr);
-  const path = metaPath(handle.root, id);
+  const sourceId = createAgent(handle.env, ['--cwd', handle.work]);
+  const path = metaPath(handle.root, sourceId);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   Object.assign(meta, {
     state: 'succeeded',
@@ -91,12 +97,13 @@ function finishedSource(t, id, finishedAt) {
     last_prompt: 'second prompt',
   });
   writeFileSync(path, JSON.stringify(meta, null, 2));
-  return handle;
+  return { ...handle, sourceId };
 }
 
-function forkSource(env, sourceId, cloneId) {
-  const forked = run(['agent', 'new', '--id', cloneId, '--fork', sourceId], env);
+function forkSource(env, sourceId) {
+  const forked = run(['agent', 'new', '--fork', sourceId], env);
   assert.equal(forked.status, EXIT_OK, forked.stderr);
+  return forked.stdout.trim();
 }
 
 function listed(args, env) {
@@ -106,57 +113,59 @@ function listed(args, env) {
 }
 
 test('an idle fork of a finished agent is a retention candidate and is swept', (t) => {
-  const { root, env } = finishedSource(t, 'a1', 1);
+  const { root, env, sourceId } = finishedSource(t, 1);
 
-  forkSource(env, 'a1', 'b2');
+  const cloneId = forkSource(env, sourceId);
 
   // The state the issue is about, asserted rather than assumed: a fork of a
   // finished source is idle AND carries the source's terminal finished_at.
-  const clone = readMeta(root, 'b2');
+  const clone = readMeta(root, cloneId);
   assert.equal(clone.state, 'idle');
   assert.equal(clone.finished_at, 1);
 
   // The classification: with a zero-day window the clone's work is unambiguously
   // past the cutoff, so `clean` must now select it. Before board 129 this
   // printed nothing, because 'idle' is not a terminal state.
-  assert.deepEqual(listed(['agent', 'clean', '--days', '0', '--dry-run'], env).sort(), ['a1', 'b2']);
+  assert.deepEqual(
+    listed(['agent', 'clean', '--days', '0', '--dry-run'], env).sort(),
+    [sourceId, cloneId].sort(),
+  );
 
   // And the selection is honoured, including by the second-phase re-check under
   // the atomic update -- a fix that changed only the outer filter would list the
   // clone here and then refuse to delete it.
   const cleaned = run(['agent', 'clean', '--days', '0'], env);
   assert.equal(cleaned.status, EXIT_OK, cleaned.stderr);
-  assert.match(cleaned.stdout, /deleted agent a1/);
-  assert.match(cleaned.stdout, /deleted agent b2/);
-  assert.equal(existsSync(agentDir(root, 'a1')), false);
-  assert.equal(existsSync(agentDir(root, 'b2')), false);
+  assert.ok(cleaned.stdout.includes(`deleted agent ${sourceId}`), cleaned.stdout);
+  assert.ok(cleaned.stdout.includes(`deleted agent ${cloneId}`), cleaned.stdout);
+  assert.equal(existsSync(agentDir(root, sourceId)), false);
+  assert.equal(existsSync(agentDir(root, cloneId)), false);
 });
 
 test('a fresh fork of an ancient finished agent is not swept on the source clock', (t) => {
   // finished_at far outside any default retention window; the clone is seconds old.
-  const { root, env } = finishedSource(t, 'a1', 1);
-  forkSource(env, 'a1', 'b2');
+  const { root, env, sourceId } = finishedSource(t, 1);
+  const cloneId = forkSource(env, sourceId);
 
-  assert.equal(readMeta(root, 'b2').created_at > 1, true);
+  assert.equal(readMeta(root, cloneId).created_at > 1, true);
 
   // The recorded decision, pinned: the clone's retention clock runs from its own
   // creation, so a default 30-day window does not delete an artifact the operator
   // just made. This is the case that keying the clock on the inherited
-  // finished_at alone would get wrong. (The old source `a1` is swept, correctly:
-  // its own finished_at is ancient and it has nothing to inherit.)
+  // finished_at alone would get wrong. (The old source is swept, correctly: its
+  // own finished_at is ancient and it has nothing to inherit.)
   const selected = listed(['agent', 'clean', '--dry-run'], env);
-  assert.equal(selected.includes('b2'), false, `clean selected the fresh clone: ${selected.join(',')}`);
-  assert.equal(existsSync(agentDir(root, 'b2')), true);
+  assert.equal(selected.includes(cloneId), false, `clean selected the fresh clone: ${selected.join(',')}`);
+  assert.equal(existsSync(agentDir(root, cloneId)), true);
 });
 
 test('an ordinary idle agent is still not a retention candidate', (t) => {
   const { root, env, work } = world(t);
-  const created = run(['agent', 'new', '--id', 'a1', '--cwd', work], env);
-  assert.equal(created.status, EXIT_OK, created.stderr);
+  const agentId = createAgent(env, ['--cwd', work]);
 
   // Never run, so no finished_at at all. Widening the classification to idle must
   // not turn "has not started" into "finished long ago".
-  assert.equal(readMeta(root, 'a1').finished_at, null);
+  assert.equal(readMeta(root, agentId).finished_at, null);
   assert.deepEqual(listed(['agent', 'clean', '--days', '0', '--dry-run'], env), []);
-  assert.equal(existsSync(agentDir(root, 'a1')), true);
+  assert.equal(existsSync(agentDir(root, agentId)), true);
 });

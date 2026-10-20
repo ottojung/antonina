@@ -124,7 +124,7 @@ async function seededWorkTree(context) {
 
 test('collect list prints every collectible path with the board and the revision it came from', async () => {
   await withWorkTree(async (context) => {
-    const { build } = await seededWorkTree(context);
+    const { build, open } = await seededWorkTree(context);
     const { code, out, err } = await run(['collect', 'list', '--page', '1', '--host', HOST], {
       createClient: () => context.reader,
     });
@@ -135,7 +135,7 @@ test('collect list prints every collectible path with the board and the revision
     assert.equal(
       out[0],
       `collectible ${context.worktree} on ${HOST}; board ${context.reader.accessState().boardId} `
-        + `rev ${context.writer.getRememberedHead()}; closed dependents #1, #2`,
+        + `rev ${context.writer.getRememberedHead()}; closed dependents ${open.slice(0, 2).map((issue) => issue.number).sort().map((id) => `#${id}`).join(', ')}`,
     );
     assert.equal(out[0].includes(build), false);
   });
@@ -143,11 +143,11 @@ test('collect list prints every collectible path with the board and the revision
 
 test('collect list reports one identical revision across all entries', async () => {
   await withWorkTree(async (context) => {
-    await context.writer.createIssue('Issue 1');
+    const firstId = (await context.writer.createIssue('Issue 1')).number;
     const second = join(context.managed, 'second');
-    await context.writer.addResourceDependency(HOST, context.worktree, 1);
-    await context.writer.addResourceDependency(HOST, second, 1);
-    await context.writer.close(1);
+    await context.writer.addResourceDependency(HOST, context.worktree, firstId);
+    await context.writer.addResourceDependency(HOST, second, firstId);
+    await context.writer.close(firstId);
     const revision = context.writer.getRememberedHead();
 
     const { code, out } = await run(['collect', 'list', '--page', '1', '--host', HOST, '--json'], {
@@ -792,9 +792,9 @@ test('the removal follows the authorized shape even when the final component cha
     assert.equal(existsSync(join(outside, 'keep')), true, 'the link target was not collected');
 
     // Half two: a symlink at re-check time, a directory at removal time.
-    await context.writer.createIssue('Issue 4');
-    await context.writer.addResourceDependency(HOST, context.worktree, 4);
-    await context.writer.close(4);
+    const fourthId = (await context.writer.createIssue('Issue 4')).number;
+    await context.writer.addResourceDependency(HOST, context.worktree, fourthId);
+    await context.writer.close(fourthId);
     await symlink(outside, context.worktree);
     const asSymlink = await recheckCollectionClaim(
       openCollectionClaim(await readCollectionSnapshot(HOST, reader), context.worktree),

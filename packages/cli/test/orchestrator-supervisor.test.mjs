@@ -107,8 +107,8 @@ test('scheduler is topology-only and never owns repositories or workspaces', () 
 test('scheduler uses human priority and dispatches full ready frontier', () => {
   assert.match(scheduler, /full priority-ordered open-issue list/);
   assert.match(scheduler, /CURRENT_SNAPSHOT/);
-  assert.match(scheduler, /antonina-scheduler-issue --issue N/);
-  assert.match(scheduler, /antonina-scheduler-launch --issue N/);
+  assert.match(scheduler, /antonina-scheduler-issue --issue ISSUE_ID/);
+  assert.match(scheduler, /antonina-scheduler-launch --issue ISSUE_ID/);
   assert.match(scheduler, /Delegate the WHOLE useful independent frontier/);
   assert.match(scheduler, /Continue dispatching in this same pass/);
   assert.match(scheduler, /Do not pass a cwd/);

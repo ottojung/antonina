@@ -165,11 +165,11 @@ test('an import reproduces the board exactly, and the runtime serves the new sto
     assert.equal(board.nextIssueNumber, 6);
     assert.deepEqual(
       board.issues.map((issue) => issue.number),
-      LEGACY_FIXTURE.issues.map((issue) => issue.number),
+      LEGACY_FIXTURE.issues.map((issue) => String(issue.number)),
     );
     // Bodies, states, timestamps and every comment with its author survive.
     for (const summary of LEGACY_FIXTURE.issues) {
-      const issue = board.issues.find((candidate) => candidate.number === summary.number);
+      const issue = board.issues.find((candidate) => candidate.number === String(summary.number));
       assert.equal(issue.body, summary.body, `body of issue ${summary.number}`);
       assert.equal(issue.state, summary.state, `state of issue ${summary.number}`);
       assert.equal(issue.messages.length, summary.messages, `comments on issue ${summary.number}`);
@@ -178,9 +178,9 @@ test('an import reproduces the board exactly, and the runtime serves the new sto
       assert.ok(issue.messages.every((message) => message.body.includes(`on issue ${summary.number}`)));
     }
     // The queue order, and the closed list a reader pages through.
-    assert.deepEqual(await store.getQueue(credential), [1, 2, 5]);
+    assert.deepEqual(await store.getQueue(credential), ['1', '2', '5']);
     const closed = await store.readIssuePage(credential, 'closed', 1);
-    assert.equal(closed.entries[0].number, 3);
+    assert.equal(closed.entries[0].number, '3');
     assert.equal(closed.total, 1);
     // The catalog.
     assert.equal(board.resources[0].path, '/srv/legacy');
@@ -195,7 +195,7 @@ test('an import reproduces the board exactly, and the runtime serves the new sto
       assert.equal(entries[index].position, entries[index - 1].position - 1, 'served newest-first');
     }
     const deletedComments = entries.filter(
-      (entry) => entry.issueNumber === LEGACY_FIXTURE.deletedIssue.number,
+      (entry) => entry.issueNumber === String(LEGACY_FIXTURE.deletedIssue.number),
     );
     assert.equal(deletedComments.length, LEGACY_FIXTURE.deletedIssue.messages);
     for (const id of fixture.deletedIssueMessageIds) {
@@ -205,7 +205,7 @@ test('an import reproduces the board exactly, and the runtime serves the new sto
       assert.ok(entry.author.startsWith('author-'));
     }
     // And the deleted issue is genuinely not a live issue any more.
-    assert.equal(await store.getIssue(credential, LEGACY_FIXTURE.deletedIssue.number), null);
+    assert.equal(await store.getIssue(credential, String(LEGACY_FIXTURE.deletedIssue.number)), null);
   });
 });
 

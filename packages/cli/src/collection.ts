@@ -196,7 +196,7 @@ export interface CollectListEntry {
   boardId: string;
   revision: string;
   /** The closed issues that used to owe this path protection, for the human line. */
-  closedDependents: number[];
+  closedDependents: string[];
 }
 
 export interface CollectListResult {

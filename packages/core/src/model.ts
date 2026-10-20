@@ -112,7 +112,7 @@ export interface BoardReview {
 }
 
 export interface BoardIssue {
-  number: number;
+  number: string;
   title: string;
   body: string;
   state: IssueState;
@@ -268,7 +268,7 @@ export function outstandingBlocksAfter(
 export interface BoardResource {
   host: string;
   path: string;
-  issueNumbers: number[];
+  issueNumbers: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -300,7 +300,7 @@ export interface LegacyBoardV3 {
 export type PersistedBoard = Board | LegacyBoardV2 | LegacyBoardV3;
 
 export interface ResourceDependencyView {
-  number: number;
+  number: string;
   state: IssueState;
 }
 
@@ -355,6 +355,29 @@ function isPositiveSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) > 0;
 }
 
+/**
+ * Boundary adapter for records written before issue identifiers were strings.
+ * The signed representation is never mutated; callers receive cloned domain state.
+ */
+function normalizePersistedIdentifiers(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  const board = structuredClone(value);
+  if (!Array.isArray(board.issues) || !Array.isArray(board.resources)) return board;
+  const asId = (id: unknown): unknown => isPositiveSafeInteger(id) ? String(id) : id;
+  board.issues = board.issues.map((issue: unknown) =>
+    isRecord(issue) ? { ...issue, number: asId(issue.number) } : issue);
+  board.resources = board.resources.map((resource: unknown) =>
+    isRecord(resource) && Array.isArray(resource.issueNumbers)
+      ? { ...resource, issueNumbers: resource.issueNumbers.map(asId).sort() }
+      : resource);
+  return board;
+}
+function oldNumericMaximum(value: unknown): number {
+  if (!isRecord(value) || !Array.isArray(value.issues)) return 0;
+  return Math.max(0, ...value.issues.map((issue: unknown) =>
+    isRecord(issue) && isPositiveSafeInteger(issue.number) ? issue.number : 0));
+}
+
 function isMessage(value: unknown): value is BoardMessage {
   return isRecord(value)
     && hasExactKeys(value, ['id', 'author', 'body', 'createdAt'])
@@ -387,7 +410,7 @@ function isIssue(value: unknown): value is BoardIssue {
       ['number', 'title', 'body', 'state', 'createdAt', 'updatedAt', 'messages'],
       ['review', 'outstandingBlocks'],
     )
-    && isPositiveSafeInteger(value.number)
+    && isText(value.number)
     && isText(value.title)
     && typeof value.body === 'string'
     && (value.state === 'open' || value.state === 'closed')
@@ -442,7 +465,7 @@ export function canonicalPath(value: string): string {
   return path;
 }
 
-function isResource(value: unknown, issueNumbers: Set<number>): value is BoardResource {
+function isResource(value: unknown, issueNumbers: Set<string>): value is BoardResource {
   return isRecord(value)
     && hasExactKeys(value, ['host', 'path', 'issueNumbers', 'createdAt', 'updatedAt'])
     && isText(value.host)
@@ -451,7 +474,7 @@ function isResource(value: unknown, issueNumbers: Set<number>): value is BoardRe
     && isValidPath(value.path)
     && Array.isArray(value.issueNumbers)
     && value.issueNumbers.length > 0
-    && value.issueNumbers.every((number) => isPositiveSafeInteger(number) && issueNumbers.has(number))
+    && value.issueNumbers.every((number) => isText(number) && issueNumbers.has(number))
     && value.issueNumbers.every((number, index, all) => index === 0 || number > all[index - 1])
     && isTimestamp(value.createdAt)
     && isTimestamp(value.updatedAt);
@@ -539,8 +562,8 @@ function issueDefect(value: unknown, index: number): BoardDefect {
   const field = firstDefect(where, [
     {
       field: 'number',
-      expected: 'a positive safe integer',
-      ok: isPositiveSafeInteger(value.number),
+      expected: 'a non-empty opaque identifier string',
+      ok: isText(value.number),
       value: value.number,
     },
     { field: 'title', expected: 'a non-empty string', ok: isText(value.title), value: value.title },
@@ -595,7 +618,7 @@ function issueDefect(value: unknown, index: number): BoardDefect {
 }
 
 /** {@link isResource}, explained. Consulted only after {@link isResource} has refused. */
-function resourceDefect(value: unknown, issueNumbers: Set<number>, index: number): BoardDefect {
+function resourceDefect(value: unknown, issueNumbers: Set<string>, index: number): BoardDefect {
   const where = `board resource at index ${index}`;
   const at = { kind: 'element' } as const;
   if (!isRecord(value)) return { ...notARecordDefect(where, value), ...at };
@@ -638,17 +661,17 @@ function resourceDefect(value: unknown, issueNumbers: Set<number>, index: number
   if (!Array.isArray(issueList)) return unclassifiedElementDefect(where, index);
   for (let position = 0; position < issueList.length; position += 1) {
     const entry = issueList[position];
-    if (!isPositiveSafeInteger(entry)) {
+    if (!isText(entry)) {
       return {
         ...fieldDefect(where, `issueNumbers index ${position}`,
-          entry, 'a positive safe integer'),
+          entry, 'a non-empty opaque issue identifier'),
         kind: 'element',
       };
     }
     if (!issueNumbers.has(entry)) {
       return {
         ...fieldDefect(where, `issueNumbers index ${position}`,
-          entry, 'an issue number that exists on this board'),
+          entry, 'an issue identifier that exists on this board'),
         kind: 'element',
       };
     }
@@ -736,6 +759,10 @@ function legacyBoardV2Defect(value: unknown): BoardDefect {
 }
 
 export function parseLegacyBoardV2(value: unknown): LegacyBoardV2 {
+  // Keep the exact persisted wire values (including JSON numbers) for signature validation.
+  const persistedWire = structuredClone(value);
+  const counterFloor = oldNumericMaximum(value);
+  value = normalizePersistedIdentifiers(value);
   if (!isRecord(value)
       || !hasExactKeys(value, LEGACY_BOARD_V2_KEYS)
       || value.schemaVersion !== LEGACY_BOARD_SCHEMA_VERSION
@@ -746,7 +773,7 @@ export function parseLegacyBoardV2(value: unknown): LegacyBoardV2 {
     throw new BoardIncompatibilityError(legacyBoardV2Defect(value));
   }
   const board = value as unknown as LegacyBoardV2;
-  const numbers = new Set<number>();
+  const numbers = new Set<string>();
   for (const issue of board.issues) {
     if (numbers.has(issue.number)) {
       throw new BoardIncompatibilityError(corruptDefect(
@@ -756,7 +783,7 @@ export function parseLegacyBoardV2(value: unknown): LegacyBoardV2 {
     }
     numbers.add(issue.number);
   }
-  if (board.nextIssueNumber <= Math.max(0, ...numbers)) {
+  if (board.nextIssueNumber <= counterFloor) {
     throw new BoardIncompatibilityError(corruptDefect(
       'board', 'nextIssueNumber',
       'does not exceed every issue number already on the board',
@@ -768,7 +795,7 @@ export function parseLegacyBoardV2(value: unknown): LegacyBoardV2 {
       throw new BoardIncompatibilityError(resourceDefect(resource, numbers, index));
     }
   }
-  return structuredClone(board);
+  return persistedWire as LegacyBoardV2;
 }
 
 export function parseLegacyBoardV3(value: unknown): LegacyBoardV3 {
@@ -901,6 +928,8 @@ export function parsePersistedBoard(value: unknown): PersistedBoard {
 }
 
 export function parseCanonicalBoard(value: unknown): Board {
+  const counterFloor = oldNumericMaximum(value);
+  value = normalizePersistedIdentifiers(value);
   // The guard is unchanged from the one this parser always ran: it is the sole
   // authority on what a canonical board is, and it runs first and alone. The
   // defect functions below are only reached when it has already refused, so
@@ -919,7 +948,7 @@ export function parseCanonicalBoard(value: unknown): Board {
   }
 
   const board = value as unknown as Board;
-  const numbers = new Set<number>();
+  const numbers = new Set<string>();
   for (const issue of board.issues) {
     if (numbers.has(issue.number)) {
       throw new BoardIncompatibilityError(corruptDefect(
@@ -945,7 +974,7 @@ export function parseCanonicalBoard(value: unknown): Board {
       }
     }
   }
-  if (board.nextIssueNumber <= Math.max(0, ...numbers)) {
+  if (board.nextIssueNumber <= counterFloor) {
     throw new BoardIncompatibilityError(corruptDefect(
       'board', 'nextIssueNumber',
       'does not exceed every issue number already on the board',
@@ -990,7 +1019,7 @@ export function resourceState(
     : 'collectible';
 }
 
-export function resourceViews(board: Board, host?: string, issueNumber?: number): ResourceView[] {
+export function resourceViews(board: Board, host?: string, issueNumber?: string): ResourceView[] {
   const issues = new Map(board.issues.map((issue) => [issue.number, issue] as const));
   return board.resources
     .filter((resource) => host === undefined || resource.host === host)

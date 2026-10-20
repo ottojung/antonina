@@ -12,10 +12,10 @@ const UNREADABLE_BOARD_SCHEMA_VERSION = PERSISTED_BOARD_VERSIONS[0] - 1;
 
 const timestamp = '2026-09-24T00:00:00.000Z';
 function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue {
-  return { number, title: `Issue ${number}`, body: '', state, createdAt: timestamp, updatedAt: timestamp, messages: [] };
+  return { number: String(number), title: `Issue ${number}`, body: '', state, createdAt: timestamp, updatedAt: timestamp, messages: [] };
 }
 function resource(overrides: Partial<BoardResource> = {}): BoardResource {
-  return { host: 'lubko://server', path: '/protected/path', issueNumbers: [1], createdAt: timestamp, updatedAt: timestamp, ...overrides };
+  return { host: 'lubko://server', path: '/protected/path', issueNumbers: ['1'], createdAt: timestamp, updatedAt: timestamp, ...overrides };
 }
 
 describe('board schema', () => {
@@ -24,9 +24,9 @@ describe('board schema', () => {
   });
 
   it('enforces exact keys, canonical resources, and referenced issues', () => {
-    const valid: Board = { schemaVersion: BOARD_SCHEMA_VERSION, nextIssueNumber: 3, issues: [issue(1), issue(2, 'closed')], resources: [resource({ issueNumbers: [1, 2] })] };
+    const valid: Board = { schemaVersion: BOARD_SCHEMA_VERSION, nextIssueNumber: 3, issues: [issue(1), issue(2, 'closed')], resources: [resource({ issueNumbers: ['1', '2'] })] };
     expect(parseBoard(valid)).toEqual(valid);
-    expect(() => parseBoard({ ...valid, resources: [resource({ issueNumbers: [3] })] })).toThrow('issueNumbers index 0: found a number, expected an issue number that exists on this board');
+    expect(() => parseBoard({ ...valid, resources: [resource({ issueNumbers: ['3'] })] })).toThrow('issueNumbers index 0: found a string, expected an issue identifier that exists on this board');
     expect(() => parseBoard({ ...valid, resources: [resource(), resource()] })).toThrow('duplicate resource');
     expect(() => parseBoard({ ...valid, extra: true })).toThrow("wrong keys (unexpected 'extra')");
   });
@@ -41,7 +41,7 @@ describe('board schema', () => {
   });
 
   it('derives protection from open dependent issues and preserves closed dependencies', () => {
-    const dependencies = resource({ issueNumbers: [1, 2] });
+    const dependencies = resource({ issueNumbers: ['1', '2'] });
     expect(resourceState(dependencies, [issue(1), issue(2, 'closed')])).toBe('protected');
     expect(resourceState(dependencies, [issue(1, 'closed'), issue(2, 'closed')])).toBe('collectible');
   });

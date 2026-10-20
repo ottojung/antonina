@@ -84,7 +84,7 @@ async function boardWithComments(count) {
     schemaVersion: 4,
     nextIssueNumber: 2,
     issues: [{
-      number: 1,
+      number: '1',
       title: 'Long conversation',
       body: 'the description',
       state: 'open',
@@ -100,7 +100,7 @@ async function boardWithComments(count) {
 test('page 1 of a conversation holds the MOST RECENT comments, not the oldest', async () => {
   const { store, initialized } = await boardWithComments(120);
 
-  const first = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  const first = await store.readIssueCommentPage(initialized.credential, '1', 1);
 
   assert.equal(first.page, 1);
   assert.equal(first.total, 120);
@@ -119,9 +119,9 @@ test('page 1 of a conversation holds the MOST RECENT comments, not the oldest', 
 test('higher page numbers walk BACKWARD into older history', async () => {
   const { store, initialized } = await boardWithComments(120);
 
-  const first = await store.readIssueCommentPage(initialized.credential, 1, 1);
-  const second = await store.readIssueCommentPage(initialized.credential, 1, 2);
-  const third = await store.readIssueCommentPage(initialized.credential, 1, 3);
+  const first = await store.readIssueCommentPage(initialized.credential, '1', 1);
+  const second = await store.readIssueCommentPage(initialized.credential, '1', 2);
+  const third = await store.readIssueCommentPage(initialized.credential, '1', 3);
 
   // Each page reaches further back than the one before it. Read as three
   // consecutive assertions this says "newest, then older, then older still",
@@ -139,7 +139,7 @@ test('paging the whole thread newest-first loses nothing and repeats nothing', a
   const pages = [];
   const lengths = [];
   for (let page = 1; page <= 3; page += 1) {
-    const read = await store.readIssueCommentPage(initialized.credential, 1, page);
+    const read = await store.readIssueCommentPage(initialized.credential, '1', page);
     lengths.push(read.messages.length);
     pages.push(bodies(read));
   }
@@ -163,14 +163,14 @@ test('a comment page keeps its order when every comment shares one timestamp', a
   // is unique per comment and nondecreasing in time, and it is the same order on
   // every read rather than whatever a sort happened to produce.
   const reads = await Promise.all([1, 2, 3].map((page) =>
-    store.readIssueCommentPage(initialized.credential, 1, page)));
+    store.readIssueCommentPage(initialized.credential, '1', page)));
 
   const first = bodies(reads[0]);
   assert.deepEqual(first, messages(120).slice(70, 120).map((message) => message.body));
 
   // Reading the same page again, and reading it concurrently with the others,
   // gives byte-identical order. An unstable tie-break would not.
-  const again = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  const again = await store.readIssueCommentPage(initialized.credential, '1', 1);
   assert.deepEqual(bodies(again), first);
   assert.deepEqual(bodies(again), bodies(reads[0]));
 });
@@ -185,8 +185,8 @@ test('the web conversation read and the CLI board show agree on every page', asy
   // They have to return the same comments for the same page number, or the trap
   // is only half removed.
   for (const page of [1, 2, 3]) {
-    const viaConversation = await store.readIssueCommentPage(initialized.credential, 1, page);
-    const viaShow = await store.getIssuePage(initialized.credential, 1, page);
+    const viaConversation = await store.readIssueCommentPage(initialized.credential, '1', page);
+    const viaShow = await store.getIssuePage(initialized.credential, '1', page);
     assert.deepEqual(
       bodies(viaConversation),
       viaShow.messages.map((message) => message.body),
@@ -197,7 +197,7 @@ test('the web conversation read and the CLI board show agree on every page', asy
 
 test('a newest-first page still reads a bounded number of shards, not the whole thread', async () => {
   const { server, store, initialized } = await boardWithComments(120);
-  const shards = commentShardKeys(server, 1);
+  const shards = commentShardKeys(server, '1');
   assert.equal(shards.size, 3);
 
   // Newest-first pages are cut against the newest end of a shard sequence that
@@ -207,7 +207,7 @@ test('a newest-first page still reads a bounded number of shards, not the whole 
   // being reassembled to draw one page of it -- the cost this read exists to
   // avoid, and the regression a naive "sort the array" fix would walk into.
   server.clearRequests();
-  const page = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  const page = await store.readIssueCommentPage(initialized.credential, '1', 1);
   const reads = commentShardReads(server, shards);
 
   assert.equal(page.messages.length, 50);
@@ -218,7 +218,7 @@ test('a newest-first page still reads a bounded number of shards, not the whole 
   // And the same bound holds for the whole thread read, which is the contrast:
   // it does reassemble everything, and that is what the paged read is avoiding.
   server.clearRequests();
-  const whole = await store.getIssue(initialized.credential, 1);
+  const whole = await store.getIssue(initialized.credential, '1');
   assert.equal(whole.messages.length, 120);
   assert.equal(commentShardReads(server, shards).length, 3);
 });
@@ -226,7 +226,7 @@ test('a newest-first page still reads a bounded number of shards, not the whole 
 test('a thread that fits on one page is entirely on page 1, and stays newest-first as it grows past one', async () => {
   const { store, initialized } = await boardWithComments(7);
 
-  const page = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  const page = await store.readIssueCommentPage(initialized.credential, '1', 1);
 
   assert.equal(page.total, 7);
   assert.equal(page.pageCount, 1);
@@ -241,18 +241,18 @@ test('a thread that fits on one page is entirely on page 1, and stays newest-fir
   for (let index = 0; index < 44; index += 1) {
     await store.append(initialized.credential, {
       kind: 'issue.comment',
-      payload: { number: 1, author: 'poster', body: `appended ${index + 1}` },
+      payload: { number: '1', author: 'poster', body: `appended ${index + 1}` },
     });
   }
 
-  const grown = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  const grown = await store.readIssueCommentPage(initialized.credential, '1', 1);
   assert.equal(grown.total, 51);
   assert.equal(grown.pageCount, 2);
   assert.equal(grown.messages.length, 50);
   assert.equal(grown.messages.at(-1).body, 'appended 44', 'the newest comment is on page 1 once there are two pages');
   assert.ok(!bodies(grown).includes('message 1'), 'the oldest comment has fallen to page 2');
 
-  const second = await store.readIssueCommentPage(initialized.credential, 1, 2);
+  const second = await store.readIssueCommentPage(initialized.credential, '1', 2);
   assert.deepEqual(bodies(second), ['message 1'], 'page 2 holds only the comment page 1 could not');
 });
 
@@ -265,10 +265,10 @@ test('a new comment is visible on page 1 without the reader paging forward', asy
   // page forward three times to see their own post.
   await store.append(initialized.credential, {
     kind: 'issue.comment',
-    payload: { number: 1, author: 'poster', body: 'the newest comment' },
+    payload: { number: '1', author: 'poster', body: 'the newest comment' },
   });
 
-  const first = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  const first = await store.readIssueCommentPage(initialized.credential, '1', 1);
   assert.equal(first.total, 121);
   assert.equal(first.messages.length, 50);
   assert.equal(first.messages.at(-1).body, 'the newest comment', 'the newest comment is on page 1');
@@ -277,10 +277,10 @@ test('a new comment is visible on page 1 without the reader paging forward', asy
 
 test('a page past the end of the thread is empty and reads no shard', async () => {
   const { server, store, initialized } = await boardWithComments(120);
-  const shards = commentShardKeys(server, 1);
+  const shards = commentShardKeys(server, '1');
 
   server.clearRequests();
-  const page = await store.readIssueCommentPage(initialized.credential, 1, 4);
+  const page = await store.readIssueCommentPage(initialized.credential, '1', 4);
 
   assert.deepEqual(page.messages, []);
   assert.equal(page.total, 120);
@@ -290,6 +290,6 @@ test('a page past the end of the thread is empty and reads no shard', async () =
   // "Past the end" is only past the end relative to a direction. Page 4 is the
   // fourth page walking BACKWARD from the newest comment; the newest window is
   // page 1, which is what makes page 4 the empty one rather than page 1.
-  const first = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  const first = await store.readIssueCommentPage(initialized.credential, '1', 1);
   assert.equal(first.messages.at(-1).body, 'message 120', 'page 1 is the newest window, so page 4 is past the end');
 });

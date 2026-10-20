@@ -28,13 +28,13 @@ afterEach(cleanup);
 const STAMP = '2026-09-27T12:00:00.000Z';
 
 let sequence = 0;
-function entry(kind: BoardFeedEntryKind, issueNumber: number, overrides: Partial<BoardFeedEntry> = {}): BoardFeedEntry {
+function entry(kind: BoardFeedEntryKind, issueNumber: number | string, overrides: Partial<BoardFeedEntry> = {}): BoardFeedEntry {
   sequence += 1;
-  return { id: `op-${sequence}`, kind, at: STAMP, position: 100 - sequence, issueNumber, title: `Issue ${issueNumber}`, state: 'open', messageId: null, author: null, body: null, ...overrides };
+  return { id: `op-${sequence}`, kind, at: STAMP, position: 100 - sequence, issueNumber: String(issueNumber), title: `Issue ${issueNumber}`, state: 'open', messageId: null, author: null, body: null, ...overrides };
 }
 
-function issue(number: number): BoardIssue {
-  return { number, title: `Issue ${number}`, body: '', state: 'open', createdAt: STAMP, updatedAt: STAMP, messages: [] };
+function issue(number: number | string): BoardIssue {
+  return { number: String(number), title: `Issue ${number}`, body: '', state: 'open', createdAt: STAMP, updatedAt: STAMP, messages: [] };
 }
 
 function page(entries: BoardFeedEntry[], nextCursor: string | null, total = entries.length): BoardFeedPage {
@@ -74,7 +74,7 @@ function logFeed(total: number, kind: BoardFeedEntryKind = 'issue-created', from
     kind,
     at: STAMP,
     position: index + 1,
-    issueNumber: from + index,
+    issueNumber: String(from + index),
     title: `Issue ${from + index}`,
     state: 'open' as const,
     messageId: null,
@@ -264,15 +264,15 @@ describe('the feed container, mounted', () => {
     // A click has to travel the real event path: the button the container
     // rendered, through React own handler, to the caller's callback.
     const entries = [entry('comment-added', 7, { author: 'Lubko', body: 'hi' })];
-    const opened: number[] = [];
+    const opened: string[] = [];
     const { read } = reader([page(entries, null, 1)]);
 
-    render(<FeedView readFeed={read} issues={[issue(7)]} generation={0} page={1} onPage={() => {}} onOpenIssue={(number) => { opened.push(number); }} />);
+    render(<FeedView readFeed={read} issues={[issue(7)]} generation={0} page={1} onPage={() => {}} onOpenIssue={(id) => { opened.push(id); }} />);
     const list = await screen.findByRole('list', { name: 'Board activity, newest first' });
     const button = await within(list).findByRole('button', { name: '#7 Issue 7' });
     await act(async () => { fireEvent.click(button); });
 
-    expect(opened).toEqual([7]);
+    expect(opened).toEqual(['7']);
   });
 
   it('reads nothing at all when the component is unmounted before the read lands', async () => {

@@ -497,8 +497,8 @@ test('board CLI queue list prints the reordered order in human and JSON form', a
 
   const json = await run(['queue', 'list', '--page', '1', '--json'], { createClient: () => board.client });
   assert.equal(json.code, 0);
-  assert.deepEqual(json.out, ['[3,1,2]']);
-  assert.deepEqual(JSON.parse(json.out[0]), [3, 1, 2]);
+  assert.deepEqual(json.out, ['["3","1","2"]']);
+  assert.deepEqual(JSON.parse(json.out[0]), ['3', '1', '2']);
 });
 
 test('board CLI queue reorder refuses a permutation that is not the open issues and changes nothing', async () => {
@@ -533,7 +533,7 @@ test('board CLI queue reorder refuses a closed issue and changes nothing', async
   assert.deepEqual(await board.client.getQueue(), [1, 2]);
 });
 
-test('board CLI rejects a queue reorder argument that is not a positive integer before any write', async () => {
+test('board CLI never inspects an issue id shape, only that it is non-empty', async () => {
   const board = await queuedBoard();
   const methods = [];
   const watched = client(board.server, {
@@ -542,14 +542,20 @@ test('board CLI rejects a queue reorder argument that is not a positive integer 
     fetch: async (url, init = {}) => { methods.push(init.method ?? 'GET'); return board.server.fetch(url, init); },
   });
 
-  for (const argv of [['queue', 'reorder', '0'], ['queue', 'reorder', '-1'], ['queue', 'reorder', '01']]) {
-    const { code, out, err } = await run(argv, { createClient: () => watched });
-    assert.equal(code, 1, argv.join(' '));
-    assert.deepEqual(out, [], argv.join(' '));
-    assert.match(err[0], /ISSUE must be a positive integer/, argv.join(' '));
+  // An empty reference is the one client-side refusal.
+  const empty = await run(['queue', 'reorder', ''], { createClient: () => watched });
+  assert.equal(empty.code, 1);
+  assert.match(empty.err[0], /ISSUE must be a non-empty issue ID/);
+
+  // Every non-empty value is an opaque id, handed to the board unchanged. A
+  // value the board cannot place is refused by the board, not by a format check
+  // here, so the value reaches the store before it is rejected.
+  for (const value of ['0', '-1', '01', 'word']) {
+    const { code, err } = await run(['queue', 'reorder', value], { createClient: () => watched });
+    assert.equal(code, 1, value);
+    assert.match(err[0], /^antonina board: /, value);
   }
 
-  assert.deepEqual(methods, [], 'a malformed argument never reaches the store');
   assert.equal(board.server.signed.revision, 4);
 });
 
@@ -582,7 +588,7 @@ test('board CLI queue reorder without issue numbers is a usage error', async () 
 
   assert.equal(code, 1);
   assert.deepEqual(out, []);
-  assert.equal(err[0], 'antonina board: queue reorder requires issue numbers');
+  assert.equal(err[0], 'antonina board: queue reorder requires issue IDs');
   assert.equal(board.server.signed, stored);
 });
 
@@ -633,11 +639,68 @@ test('collection reads require an explicit page and board issue pages follow que
 
   const queueSecond = await run(['queue', 'list', '--page', '2', '--json'], { createClient: () => reader });
   assert.equal(queueSecond.code, 0);
-  assert.deepEqual(JSON.parse(queueSecond.out[0]), [5, 4, 3, 2, 1]);
+  assert.deepEqual(JSON.parse(queueSecond.out[0]), ['5', '4', '3', '2', '1']);
 
   const badPage = await run(['list', '--page', '0'], { createClient: () => reader });
   assert.equal(badPage.code, 1);
   assert.match(badPage.err[0], /--page must be a positive integer/);
+});
+
+test('board create prints only the new issue id and a newline', async () => {
+  const server = fakeSkrynia();
+  const owner = client(server);
+  await owner.initialize();
+
+  const created = await run(['create', 'Only the id'], { createClient: () => owner });
+  assert.equal(created.code, 0, created.err.join('\n'));
+  // Exactly one line, and it is the id alone: a legacy issue's id is its
+  // decimal number as a string.
+  assert.deepEqual(created.out, ['1']);
+
+  const json = await run(['create', 'Structured', '--json'], { createClient: () => owner });
+  assert.equal(json.code, 0, json.err.join('\n'));
+  const structured = JSON.parse(json.out[0]);
+  assert.equal(structured.title, 'Structured');
+  assert.equal(structured.number, '2');
+});
+
+test('board commands accept a minted string issue id and never a bare word', async () => {
+  // 22 base62 characters, a hyphen, and a lowercase word. The id IS the
+  // issue's `number`, and there is no second identity.
+  const minted = 'abcdefghijklmnopqrstuv-word';
+  const issue = {
+    number: minted,
+    title: 'Minted',
+    body: '',
+    state: 'open',
+    createdAt: STAMP,
+    updatedAt: STAMP,
+    messages: [],
+  };
+  const seen = [];
+  const reader = {
+    createIssue: async () => issue,
+    getIssuePage: async (id) => { seen.push(id); return issue; },
+    close: async (id) => { seen.push(id); return { ...issue, state: 'closed' }; },
+  };
+
+  const created = await run(['create', 'Minted'], { createClient: () => reader });
+  assert.equal(created.code, 0, created.err.join('\n'));
+  assert.deepEqual(created.out, [minted]);
+
+  const shown = await run(['show', minted, '--page', '1'], { createClient: () => reader });
+  assert.equal(shown.code, 0, shown.err.join('\n'));
+  assert.equal(shown.out[0].split('\n')[0], '#' + minted + ' [open] Minted');
+
+  const closed = await run(['close', minted], { createClient: () => reader });
+  assert.equal(closed.code, 0, closed.err.join('\n'));
+  assert.deepEqual(seen, [minted, minted]);
+
+  // The client never inspects the shape of a reference. A bare word is passed
+  // through as the exact opaque string, and the board decides whether it exists.
+  const wordOnly = await run(['show', 'word', '--page', '1'], { createClient: () => reader });
+  assert.equal(wordOnly.code, 0, wordOnly.err.join('\n'));
+  assert.deepEqual(seen, [minted, minted, 'word']);
 });
 
 test('board review records a verdict and the blocked close is refused and reported', async () => {

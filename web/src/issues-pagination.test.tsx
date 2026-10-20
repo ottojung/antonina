@@ -33,8 +33,8 @@ const STAMP = '2026-09-27T12:00:00.000Z';
 // Issues keys on last activity. These fixtures carry `lastActivityAt` alongside
 // the `BoardIssue` fields so they satisfy it; `null` is "never commented", which
 // is what every fixture here is.
-function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue & { closedAt: string | null; lastActivityAt: string | null } {
-  return { number, title: `Issue ${number}`, body: `Body of issue ${number}`, state, createdAt: STAMP, updatedAt: STAMP, closedAt: state === 'closed' ? STAMP : null, messages: [], lastActivityAt: null };
+function issue(number: number | string, state: 'open' | 'closed' = 'open'): BoardIssue & { closedAt: string | null; lastActivityAt: string | null } {
+  return { number: String(number), title: `Issue ${number}`, body: `Body of issue ${number}`, state, createdAt: STAMP, updatedAt: STAMP, closedAt: state === 'closed' ? STAMP : null, messages: [], lastActivityAt: null };
 }
 
 /** A board of `open` open issues numbered 1..open, plus `closed` closed ones after them. */
@@ -52,7 +52,7 @@ function queueOf(issues: readonly BoardIssue[]): number[] {
 
 let board: BoardIssue[] = [];
 let reads = 0;
-const sentQueues: number[][] = [];
+const sentQueues: string[][] = [];
 
 function overview(): BoardOverview {
   reads += 1;
@@ -82,11 +82,11 @@ function overview(): BoardOverview {
   };
 }
 
-function withState(number: number, state: 'open' | 'closed'): void {
-  board = board.map((each) => (each.number === number ? { ...each, state } : each));
+function withState(id: string, state: 'open' | 'closed'): void {
+  board = board.map((each) => (String(each.number) === String(id) ? { ...each, state } : each));
 }
 
-function withQueue(queue: number[]): void {
+function withQueue(queue: string[]): void {
   const byNumber = new Map(board.map((each) => [each.number, each]));
   board = queue.map((number) => byNumber.get(number)!).concat(board.filter((each) => !queue.includes(each.number)));
 }
@@ -98,8 +98,8 @@ const session = {
     // the stub answers that too. It is page 1 of a one-page thread for every
     // fixture here; this file is about the Issues list, not about paging a
     // conversation, which `issue-conversation-pagination.test.tsx` covers.
-    getIssueCommentPage: async (number: number, page: number): Promise<IssueCommentPage> => {
-      const found = board.find((each) => each.number === number);
+    getIssueCommentPage: async (number: string, page: number): Promise<IssueCommentPage> => {
+      const found = board.find((each) => String(each.number) === String(number));
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
       return {
         schemaVersion: 2,
@@ -111,8 +111,8 @@ const session = {
         messages: found.messages,
       };
     },
-    getIssue: async (number: number): Promise<BoardIssue> => {
-      const found = board.find((each) => each.number === number);
+    getIssue: async (number: string): Promise<BoardIssue> => {
+      const found = board.find((each) => String(each.number) === String(number));
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
       return found;
     },
@@ -124,9 +124,9 @@ const session = {
     },
     comment: async () => null,
     editIssueBody: async () => null,
-    close: async (number: number) => { withState(number, 'closed'); },
-    reopen: async (number: number) => { withState(number, 'open'); },
-    reorderQueue: vi.fn(async (target: number[]) => { sentQueues.push(target); withQueue(target); return target; }),
+    close: async (id: string) => { withState(id, 'closed'); },
+    reopen: async (id: string) => { withState(id, 'open'); },
+    reorderQueue: vi.fn(async (target: string[]) => { sentQueues.push(target); withQueue(target); return target; }),
   },
   readOverview: vi.fn(async () => overview()),
   hasCredential: vi.fn(() => true),
@@ -234,13 +234,13 @@ describe('issue list pagination state', () => {
       ...Array.from({ length: 20 }, (_, index) => issue(100 + index, 'closed'))];
     // A complete queue: every open issue exactly once, which is what the board
     // commits, with the head deliberately not in ascending number order.
-    const queue = [60, 40, 10, ...Array.from({ length: 60 }, (_, index) => index + 1).filter((number) => number !== 10 && number !== 40 && number !== 60)];
+    const queue = ['60', '40', '10', ...Array.from({ length: 60 }, (_, index) => index + 1).filter((number) => number !== 10 && number !== 40 && number !== 60).map(String)];
 
     const open = visibleIssues(all, queue, 'open');
     const closed = visibleIssues(all, queue, 'closed');
     const every = visibleIssues(all, queue, 'all');
 
-    expect(open.slice(0, 3)).toEqual([60, 40, 10].map((number) => all.find((each) => each.number === number)));
+    expect(open.slice(0, 3)).toEqual(['60', '40', '10'].map((number) => all.find((each) => each.number === number)));
     expect(issuePage(open, 1).map((each) => each.number)).toEqual(open.slice(0, ISSUE_PAGE_SIZE).map((each) => each.number));
     expect(issuePage(open, 2).map((each) => each.number)).toEqual(open.slice(50).map((each) => each.number));
     // Closed issues keep their stable order across pages.
@@ -515,8 +515,8 @@ describe('the issues list, paginated', () => {
     // Every open issue exactly once: the full queue, not a page of it and not
     // the dragged pair. Pagination changed what is drawn, not what a move means.
     expect(committed).toHaveLength(120);
-    expect([...committed].sort((left, right) => left - right)).toEqual(Array.from({ length: 120 }, (_, index) => index + 1));
-    expect(committed[0]).toBe(101);
+    expect([...committed].sort((left, right) => Number(left) - Number(right))).toEqual(Array.from({ length: 120 }, (_, index) => String(index + 1)));
+    expect(committed[0]).toBe('101');
     // The page the reader was on is still a page of the reordered queue.
     expect(rangeText(container)).toBe('101–120 of 120');
   });

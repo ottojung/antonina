@@ -40,14 +40,14 @@ import {
 const STAMP = '2026-09-25T12:00:00.000Z';
 
 let sequence = 0;
-function entry(kind: BoardFeedEntryKind, issueNumber: number, overrides: Partial<BoardFeedEntry> = {}): BoardFeedEntry {
+function entry(kind: BoardFeedEntryKind, issueNumber: number | string, overrides: Partial<BoardFeedEntry> = {}): BoardFeedEntry {
   sequence += 1;
   return {
     id: `op-${sequence}`,
     kind,
     at: STAMP,
     position: 100 - sequence,
-    issueNumber,
+    issueNumber: String(issueNumber),
     title: `Issue ${issueNumber}`,
     state: 'open',
     messageId: null,
@@ -57,8 +57,8 @@ function entry(kind: BoardFeedEntryKind, issueNumber: number, overrides: Partial
   };
 }
 
-function issue(number: number): BoardIssue {
-  return { number, title: `Issue ${number}`, body: '', state: 'open', createdAt: STAMP, updatedAt: STAMP, messages: [] };
+function issue(number: number | string): BoardIssue {
+  return { number: String(number), title: `Issue ${number}`, body: '', state: 'open', createdAt: STAMP, updatedAt: STAMP, messages: [] };
 }
 
 function page(entries: BoardFeedEntry[], nextCursor: string | null, total = entries.length): BoardFeedPage {
@@ -159,15 +159,15 @@ describe('the feed tab', () => {
   });
 
   it('opens the issue an entry belongs to, and offers no target for a deleted one', () => {
-    const opened: number[] = [];
-    const onOpenIssue = (number: number) => { opened.push(number); };
+    const opened: string[] = [];
+    const onOpenIssue = (id: string) => { opened.push(id); };
     const entries = [entry('comment-added', 7, { author: 'Lubko', body: 'hi' }), entry('issue-deleted', 8)];
     const markup = renderToStaticMarkup(<FeedThread {...props({ entries, total: 2, onOpenIssue })} />);
     const rows = byClass({ entries, total: 2, onOpenIssue }, 'feed-issue');
 
     expect(rows).toHaveLength(2);
     rows.forEach((row) => (row as Button).props.onClick?.());
-    expect(opened).toEqual([7]);
+    expect(opened).toEqual(['7']);
     // The deleted issue is gone from the board, so its row is text and not a
     // link into an issue that no longer exists.
     expect(rows[1].type).toBe('span');

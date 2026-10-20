@@ -106,7 +106,7 @@ test('board feed --json is the whole page, machine readable, and requires the bo
   assert.equal(comment.messageId, comment.id);
   assert.equal(comment.author, 'ada');
   assert.equal(comment.body, 'first');
-  assert.equal(comment.issueNumber, 1);
+  assert.equal(comment.issueNumber, '1');
   // The state each entry reports is the state its own operation left, not the
   // board's final state: the comment was written while the issue was open.
   assert.equal(comment.state, 'open');

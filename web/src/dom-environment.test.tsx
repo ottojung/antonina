@@ -52,7 +52,7 @@ describe('the web suite test environment', () => {
     // is used here because it needs no session and no provider — the guard tests
     // the environment, not the app.
     const issue: BoardIssue = { number: 1, title: 'Probe issue', body: '', state: 'open', createdAt: '2026-09-27T09:00:00.000Z', updatedAt: '2026-09-27T09:00:00.000Z', messages: [] };
-    const { container } = render(<IssueQueue issues={[issue]} queue={[]} hasWriteAccess={false} selectedNumber={undefined} onSelect={() => {}} onReorder={async () => null} empty={{ title: 'none', body: 'none' }} />);
+    const { container } = render(<IssueQueue issues={[issue]} queue={[]} hasWriteAccess={false} selectedId={undefined} onSelect={() => {}} onReorder={async () => null} empty={{ title: 'none', body: 'none' }} />);
 
     expect(container.isConnected).toBe(true);
     expect(document.body.contains(container)).toBe(true);

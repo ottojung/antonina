@@ -50,7 +50,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--fork': 'Create the new agent as a snapshot of this existing agent id. If the source has a backend session, the clone continues it: running both drives one conversation. There is no per-fork opt-out.',
   '--host': 'Host identifier/address.',
   '--id': 'Identifier for the selected command.',
-  '--issue': 'Board issue number.',
+  '--issue': 'Board issue ID.',
   '--json': 'Emit JSON.',
   '--killed': 'Show killed agents only.',
   '--limit': 'Page size for commands that support it.',
@@ -152,7 +152,7 @@ const BOARD_SPECS: readonly CommandSpec[] = [
   }),
   withJson({
     path: ['create'],
-    summary: 'Create a board issue. Antonina assigns and returns the issue number.',
+    summary: 'Create a board issue. Antonina assigns and returns the issue ID.',
     values: ['--title', '--body'],
     required: ['--title'],
     normalize: (p) => ['create', p.values.get('--title')!, ...valueArgs(p, ['--body']), ...jsonArg(p)],

@@ -43,9 +43,9 @@ function messages(count: number) {
   return Array.from({ length: count }, (_, index) => message(index + 1));
 }
 
-function issue(number: number, count = 0): BoardIssue {
+function issue(number: number | string, count = 0): BoardIssue {
   return {
-    number,
+    number: String(number),
     title: `Issue ${number}`,
     body: `Body of issue ${number}`,
     state: 'open',
@@ -58,7 +58,7 @@ function issue(number: number, count = 0): BoardIssue {
 let board: BoardIssue[] = [];
 let reads = 0;
 /** Every `(issue, page)` the shell asked the core for, in order. */
-const askedPages: Array<[number, number]> = [];
+const askedPages: Array<[string, number]> = [];
 
 function overview(): BoardOverview {
   reads += 1;
@@ -97,9 +97,9 @@ function overview(): BoardOverview {
  * ordering assertion below pass for the wrong reason. Board issue 206: the
  * browser and the CLI have to answer "what is on page 1" identically.
  */
-function readPage(number: number, page: number): IssueCommentPage {
+function readPage(number: string, page: number): IssueCommentPage {
   askedPages.push([number, page]);
-  const found = board.find((each) => each.number === number);
+  const found = board.find((each) => String(each.number) === String(number));
   if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
   const total = found.messages.length;
   const end = Math.max(0, total - (page - 1) * COMMENT_PAGE_SIZE);
@@ -118,11 +118,11 @@ function readPage(number: number, page: number): IssueCommentPage {
 const session = {
   api: {
     accessState: (): BoardAccessState => ({ boardId: 'board-1', keyId: null, rootKeyId: 'root-1', capabilities: [], credentialRejection: null, storageRejected: false, canEdit: true }),
-    getIssueCommentPage: vi.fn(async (number: number, page: number): Promise<IssueCommentPage> => readPage(number, page)),
+    getIssueCommentPage: vi.fn(async (number: string, page: number): Promise<IssueCommentPage> => readPage(number, page)),
     // The whole-thread read stays on the API for its own callers. The shell is
     // not one of them, and this counts any call so the tests can prove it.
-    getIssue: vi.fn(async (number: number): Promise<BoardIssue> => {
-      const found = board.find((each) => each.number === number);
+    getIssue: vi.fn(async (number: string): Promise<BoardIssue> => {
+      const found = board.find((each) => String(each.number) === String(number));
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
       return found;
     }),
@@ -133,11 +133,11 @@ const session = {
     },
     // The real `BoardApi.comment` answers with the committed issue, which is how
     // the shell learns the write succeeded.
-    comment: vi.fn(async (number: number, _author: string, _body: string): Promise<BoardIssue> => {
-      board = board.map((each) => each.number === number
+    comment: vi.fn(async (number: string, _author: string, _body: string): Promise<BoardIssue> => {
+      board = board.map((each) => String(each.number) === String(number)
         ? { ...each, messages: [...each.messages, message(each.messages.length + 1)] }
         : each);
-      return board.find((each) => each.number === number)!;
+      return board.find((each) => String(each.number) === String(number))!;
     }),
     editIssueBody: async () => null,
     close: async () => undefined,
@@ -298,8 +298,8 @@ describe('the conversation renders one page at a time', () => {
     await act(async () => { fireEvent.click(previousButton()); });
     await waitFor(() => expect(positionText(container)).toContain('Page 2 of 3'));
     // Each page change was one request for that page, not a re-read of the thread.
-    expect(askedPages).toContainEqual([2, 2]);
-    expect(askedPages).toContainEqual([2, 3]);
+    expect(askedPages).toContainEqual(['2', 2]);
+    expect(askedPages).toContainEqual(['2', 3]);
   });
 
   it('keeps the message order stable across pages, newest window first', async () => {
@@ -328,7 +328,7 @@ describe('the conversation renders one page at a time', () => {
     const container = await mountAtIssue(2, '&thread=3');
     await waitFor(() => expect(positionText(container)).toContain('Page 3 of 3'));
     expect(drawnMessages(container)[0]).toBe('message 1');
-    expect(askedPages).toContainEqual([2, 3]);
+    expect(askedPages).toContainEqual(['2', 3]);
   });
 
   it('gives a stale page the one that exists, and corrects the address', async () => {
@@ -339,7 +339,7 @@ describe('the conversation renders one page at a time', () => {
     await waitFor(() => expect(positionText(container)).toContain('Page 3 of 3'));
     expect(drawnMessages(container)[0]).toBe('message 1');
     expect(parseBoardUrl(window.location.search).commentPage).toBe(3);
-    expect(askedPages).toContainEqual([2, 3]);
+    expect(askedPages).toContainEqual(['2', 3]);
   });
 
   it('offers no controls for a thread that fits on one page', async () => {

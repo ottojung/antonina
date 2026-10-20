@@ -27,13 +27,13 @@ import {
 
 const STAMP = '2026-09-27T12:00:00.000Z';
 
-function issue(number: number, state: 'open' | 'closed' = 'open'): BoardIssue {
-  return { number, title: `Issue ${number}`, body: `Body of issue ${number}`, state, createdAt: STAMP, updatedAt: STAMP, messages: [] };
+function issue(number: number | string, state: 'open' | 'closed' = 'open'): BoardIssue {
+  return { number: String(number), title: `Issue ${number}`, body: `Body of issue ${number}`, state, createdAt: STAMP, updatedAt: STAMP, messages: [] };
 }
 
 /** One registered path protected by `dependents`, on the given host. */
 function resource(host: string, path: string, dependents: number[] = [1]): BoardResource {
-  return { host, path, issueNumbers: dependents, createdAt: STAMP, updatedAt: STAMP };
+  return { host, path, issueNumbers: dependents.map(String), createdAt: STAMP, updatedAt: STAMP };
 }
 
 /**
@@ -75,19 +75,19 @@ function overview(): BoardOverview {
   };
 }
 
-const addedDependencies: Array<{ host: string; path: string; number: number }> = [];
-const removedDependencies: Array<{ host: string; path: string; number: number }> = [];
+const addedDependencies: Array<{ host: string; path: string; id: string }> = [];
+const removedDependencies: Array<{ host: string; path: string; id: string }> = [];
 
 const session = {
   api: {
     accessState: (): BoardAccessState => ({ boardId: 'board-1', keyId: null, rootKeyId: 'root-1', capabilities: [], credentialRejection: null, storageRejected: false, canEdit: true }),
-    getIssueCommentPage: async (number: number, page: number): Promise<IssueCommentPage> => {
-      const found = board.find((each) => each.number === number);
+    getIssueCommentPage: async (number: string, page: number): Promise<IssueCommentPage> => {
+      const found = board.find((each) => String(each.number) === String(number));
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
       return { schemaVersion: 2, boardId: 'board-1', issue: { ...found, messages: [] }, page, pageCount: 1, total: found.messages.length, messages: found.messages };
     },
-    getIssue: async (number: number): Promise<BoardIssue> => {
-      const found = board.find((each) => each.number === number);
+    getIssue: async (number: string): Promise<BoardIssue> => {
+      const found = board.find((each) => String(each.number) === String(number));
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
       return found;
     },
@@ -97,22 +97,22 @@ const session = {
     close: async () => undefined,
     reopen: async () => undefined,
     reorderQueue: async (target: number[]) => target,
-    addResourceDependency: vi.fn(async (host: string, path: string, number: number) => {
-      addedDependencies.push({ host, path, number });
+    addResourceDependency: vi.fn(async (host: string, path: string, id: string) => {
+      addedDependencies.push({ host, path, id });
       registered = registered.map((entry) => (entry.host === host && entry.path === path
-        ? { ...entry, issueNumbers: [...entry.issueNumbers, number] }
+        ? { ...entry, issueNumbers: [...entry.issueNumbers, id] }
         : entry));
       return resource(host, path);
     }),
-    removeResourceDependency: vi.fn(async (host: string, path: string, number: number) => {
-      removedDependencies.push({ host, path, number });
+    removeResourceDependency: vi.fn(async (host: string, path: string, id: string) => {
+      removedDependencies.push({ host, path, id });
       // Production-shaped, from `packages/core/src/operations.ts`: a resource
       // whose last dependency goes is DELETED, not left behind with an empty
       // list. That is the only mutation that can shorten the collection under a
       // reader, which is exactly what the clamp exists for.
       registered = registered.flatMap((entry) => {
         if (entry.host !== host || entry.path !== path) return [entry];
-        const issueNumbers = entry.issueNumbers.filter((each) => each !== number);
+        const issueNumbers = entry.issueNumbers.filter((each) => each !== id);
         return issueNumbers.length === 0 ? [] : [{ ...entry, issueNumbers }];
       });
       return undefined;
@@ -406,7 +406,7 @@ describe('grouping and dependency controls while paged', () => {
     expect(card.querySelector('.state-label.open')).not.toBeNull();
     await act(async () => { fireEvent.click(within(card).getByRole('button', { name: 'Remove issue 1' })); });
 
-    expect(removedDependencies).toEqual([{ host: 'lubko://one', path, number: 1 }]);
+    expect(removedDependencies).toEqual([{ host: 'lubko://one', path, id: '1' }]);
     // The write went through the same commit path as any other, so the board is
     // re-read and the page it lands on is a page of the board as it now is. The
     // card's issue 1 was the resource's only dependency, so production deletes
@@ -457,7 +457,7 @@ describe('grouping and dependency controls while paged', () => {
       fireEvent.click(within(addForm).getByRole('button', { name: 'Add' }));
     });
     const path = card.querySelector('code')?.textContent ?? '';
-    expect(addedDependencies).toEqual([{ host: 'lubko://one', path, number: 2 }]);
+    expect(addedDependencies).toEqual([{ host: 'lubko://one', path, id: '2' }]);
 
     // The register form at the top of the tab is untouched by paging.
     await act(async () => {
@@ -466,7 +466,7 @@ describe('grouping and dependency controls while paged', () => {
       fireEvent.change(screen.getByLabelText('Open issue'), { target: { value: '3' } });
       fireEvent.click(screen.getByRole('button', { name: 'Add dependency' }));
     });
-    expect(addedDependencies[1]).toEqual({ host: 'lubko://one', path: '/registered/fresh', number: 3 });
+    expect(addedDependencies[1]).toEqual({ host: 'lubko://one', path: '/registered/fresh', id: '3' });
   });
 
   it('follows a dependency chip to its issue and keeps the Resources page', async () => {

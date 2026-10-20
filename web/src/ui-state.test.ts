@@ -47,8 +47,8 @@ import {
   queueSlots,
   REJECTED_CREDENTIAL_COPY,
   trustRequired,
-  unplacedIssueNumbers,
-  untrackedIssueNumbers,
+  unplacedIssueIds,
+  untrackedIssueIds,
   visibleIssues,
   BOARD_KEY_COPY,
   READ_ONLY_CALLOUT,
@@ -63,8 +63,8 @@ const timestamp = '2026-09-24T12:00:00.000Z';
  * the list helpers, so a fixture shaped like one would pin a contract the board
  * never offers.
  */
-function issue(number: number, state: 'open' | 'closed', updatedAt = timestamp): BoardIssue & { closedAt: string | null } {
-  return { number, title: `Issue ${number}`, body: '', state, createdAt: updatedAt, updatedAt, closedAt: state === 'closed' ? updatedAt : null, messages: [] };
+function issue(number: number | string, state: 'open' | 'closed', updatedAt = timestamp): BoardIssue & { closedAt: string | null } {
+  return { number: String(number), title: `Issue ${number}`, body: '', state, createdAt: updatedAt, updatedAt, closedAt: state === 'closed' ? updatedAt : null, messages: [] };
 }
 function state(overrides: Partial<VerifiedBoardState> = {}): VerifiedBoardState {
   return {
@@ -88,28 +88,28 @@ describe('issue UI state', () => {
   // queue decides the order even when a timestamp says otherwise.
   it('shows open issues in the shared queue order, not by recency', () => {
     const issues = [issue(1, 'open', '2026-09-24T23:00:00.000Z'), issue(2, 'open', '2026-09-24T01:00:00.000Z'), issue(3, 'open')];
-    expect(visibleIssues(issues, [2, 3, 1], 'open').map((entry) => entry.number)).toEqual([2, 3, 1]);
-    expect(visibleIssues(issues, [1, 2, 3], 'open').map((entry) => entry.number)).toEqual([1, 2, 3]);
+    expect(visibleIssues(issues, ['2', '3', '1'], 'open').map((entry) => entry.number)).toEqual(['2', '3', '1']);
+    expect(visibleIssues(issues, ['1', '2', '3'], 'open').map((entry) => entry.number)).toEqual(['1', '2', '3']);
   });
 
   it('takes the open order straight from the shared queue, for every queue the board could commit', () => {
     const issues = [issue(1, 'open'), issue(2, 'open'), issue(3, 'open')];
-    for (const queue of [[1, 2, 3], [3, 2, 1], [2, 1, 3], [3, 1, 2]]) {
+    for (const queue of [['1', '2', '3'], ['3', '2', '1'], ['2', '1', '3'], ['3', '1', '2']]) {
       expect(openQueueOrder(issues, queue)).toEqual(queue);
     }
   });
 
   it('leaves a closed issue out of the order, because the queue holds open issues only', () => {
     const issues = [issue(1, 'open'), issue(2, 'open'), issue(3, 'closed'), issue(4, 'closed')];
-    expect(openQueueOrder(issues, [2, 1])).toEqual([2, 1]);
-    expect(queuePosition([2, 1], 3)).toBe(0);
-    expect(priorityLabel(queuePosition([2, 1], 3))).toBe('Not in the queue');
+    expect(openQueueOrder(issues, ['2', '1'])).toEqual(['2', '1']);
+    expect(queuePosition(['2', '1'], '3')).toBe(0);
+    expect(priorityLabel(queuePosition(['2', '1'], '3'))).toBe('Not in the queue');
   });
 
   it('lists closed issues outside the queue, most recently active first', () => {
     const issues = [issue(1, 'open'), issue(4, 'closed', '2026-09-24T23:00:00.000Z'), issue(2, 'open'), issue(3, 'closed')];
-    expect(visibleIssues(issues, [2, 1], 'closed').map((entry) => entry.number)).toEqual([4, 3]);
-    expect(visibleIssues(issues, [2, 1], 'open').map((entry) => entry.number)).toEqual([2, 1]);
+    expect(visibleIssues(issues, ['2', '1'], 'closed').map((entry) => entry.number)).toEqual(['4', '3']);
+    expect(visibleIssues(issues, ['2', '1'], 'open').map((entry) => entry.number)).toEqual(['2', '1']);
   });
 
   // Board issue 180 ordered All Issues by last activity; board issue 306 extended
@@ -118,7 +118,7 @@ describe('issue UI state', () => {
   // shared queue).
   it('orders All Issues by last activity, newest first', () => {
     const issues = [issue(1, 'open'), issue(4, 'closed', '2026-09-24T23:00:00.000Z'), issue(2, 'open'), issue(3, 'closed')];
-    expect(visibleIssues(issues, [2, 1], 'all').map((entry) => entry.number)).toEqual([4, 3, 2, 1]);
+    expect(visibleIssues(issues, ['2', '1'], 'all').map((entry) => entry.number)).toEqual(['4', '3', '2', '1']);
   });
 
   it('counts every issue view', () => {
@@ -147,66 +147,66 @@ describe('issue UI state', () => {
 });
 
 describe('priority queue moves', () => {
-  const order = [4, 2, 9, 1];
+  const order = ['4', '2', '9', '1'];
 
   it('sends a whole-list permutation for a single move, not the pair it swapped', () => {
-    expect(moveQueueEarlier(order, 9)).toEqual([4, 9, 2, 1]);
-    expect(moveQueueLater(order, 4)).toEqual([2, 4, 9, 1]);
-    expect(moveQueueIssue(order, 1, 0)).toEqual([1, 4, 2, 9]);
-    for (const next of [moveQueueEarlier(order, 9), moveQueueLater(order, 4), moveQueueIssue(order, 1, 0)]) {
+    expect(moveQueueEarlier(order, '9')).toEqual(['4', '9', '2', '1']);
+    expect(moveQueueLater(order, '4')).toEqual(['2', '4', '9', '1']);
+    expect(moveQueueIssue(order, '1', 0)).toEqual(['1', '4', '2', '9']);
+    for (const next of [moveQueueEarlier(order, '9'), moveQueueLater(order, '4'), moveQueueIssue(order, '1', 0)]) {
       expect(next).not.toBeNull();
-      expect([...(next as number[])].sort((left, right) => left - right)).toEqual([...order].sort((left, right) => left - right));
+      expect([...(next as number[])].sort((left, right) => left.localeCompare(right))).toEqual([...order].sort((left, right) => left.localeCompare(right)));
       expect(next).toHaveLength(order.length);
     }
   });
 
   it('refuses a boundary move instead of sending a queue the board would reject', () => {
-    expect(moveQueueEarlier(order, 4)).toBeNull();
-    expect(moveQueueLater(order, 1)).toBeNull();
-    expect(canMoveInQueue(order, 4, 'earlier')).toBe(false);
-    expect(canMoveInQueue(order, 4, 'later')).toBe(true);
-    expect(canMoveInQueue(order, 1, 'earlier')).toBe(true);
-    expect(canMoveInQueue(order, 1, 'later')).toBe(false);
+    expect(moveQueueEarlier(order, '4')).toBeNull();
+    expect(moveQueueLater(order, '1')).toBeNull();
+    expect(canMoveInQueue(order, '4', 'earlier')).toBe(false);
+    expect(canMoveInQueue(order, '4', 'later')).toBe(true);
+    expect(canMoveInQueue(order, '1', 'earlier')).toBe(true);
+    expect(canMoveInQueue(order, '1', 'later')).toBe(false);
   });
 
-  it('refuses an unqueued issue, an out-of-range slot, and a move onto itself', () => {    expect(moveQueueEarlier(order, 77)).toBeNull();
-    expect(moveQueueLater(order, 77)).toBeNull();
-    expect(moveQueueIssue(order, 2, 0)).toEqual([2, 4, 9, 1]);
-    expect(moveQueueIssue(order, 2, 1)).toBeNull();
-    expect(moveQueueIssue(order, 2, order.length)).toBeNull();
-    expect(moveQueueIssue(order, 2, -1)).toBeNull();
-    expect(canMoveInQueue(order, 77, 'earlier')).toBe(false);
+  it('refuses an unqueued issue, an out-of-range slot, and a move onto itself', () => {    expect(moveQueueEarlier(order, '77')).toBeNull();
+    expect(moveQueueLater(order, '77')).toBeNull();
+    expect(moveQueueIssue(order, '2', 0)).toEqual(['2', '4', '9', '1']);
+    expect(moveQueueIssue(order, '2', 1)).toBeNull();
+    expect(moveQueueIssue(order, '2', order.length)).toBeNull();
+    expect(moveQueueIssue(order, '2', -1)).toBeNull();
+    expect(canMoveInQueue(order, '77', 'earlier')).toBe(false);
   });
 
   it('moves a middle issue in both directions and leaves the order untouched', () => {
-    expect(moveQueueEarlier(order, 2)).toEqual([2, 4, 9, 1]);
-    expect(moveQueueLater(order, 2)).toEqual([4, 9, 2, 1]);
-    expect(order).toEqual([4, 2, 9, 1]);
+    expect(moveQueueEarlier(order, '2')).toEqual(['2', '4', '9', '1']);
+    expect(moveQueueLater(order, '2')).toEqual(['4', '9', '2', '1']);
+    expect(order).toEqual(['4', '2', '9', '1']);
   });
 
   it('reports the one-based position of a queued issue and none for an unqueued one', () => {
-    expect(queuePosition(order, 4)).toBe(1);
-    expect(queuePosition(order, 1)).toBe(4);
-    expect(queuePosition(order, 77)).toBe(0);
-    expect(priorityLabel(queuePosition(order, 9))).toBe('Priority 3');
+    expect(queuePosition(order, '4')).toBe(1);
+    expect(queuePosition(order, '1')).toBe(4);
+    expect(queuePosition(order, '77')).toBe(0);
+    expect(priorityLabel(queuePosition(order, '9'))).toBe('Priority 3');
   });
 
   it('offers every position as a move-to slot and moves there in one whole-queue commit', () => {
     expect(queueSlots(order)).toEqual([1, 2, 3, 4]);
-    expect(moveQueueTo(order, 1, 1)).toEqual([1, 4, 2, 9]);
-    expect(moveQueueTo(order, 4, 4)).toEqual([2, 9, 1, 4]);
-    expect(moveQueueTo(order, 2, 2)).toBeNull();
-    expect(moveQueueTo(order, 77, 1)).toBeNull();
-    expect(moveQueueTo(order, 1, 5)).toBeNull();
+    expect(moveQueueTo(order, '1', 1)).toEqual(['1', '4', '2', '9']);
+    expect(moveQueueTo(order, '4', 4)).toEqual(['2', '9', '1', '4']);
+    expect(moveQueueTo(order, '2', 2)).toBeNull();
+    expect(moveQueueTo(order, '77', 1)).toBeNull();
+    expect(moveQueueTo(order, '1', 5)).toBeNull();
     // The same permutation the step controls and a drop commit, never a pair.
-    expect(moveQueueTo(order, 1, 1)).toEqual(moveQueueIssue(order, 1, 0));
-    for (const next of [moveQueueTo(order, 1, 1), moveQueueTo(order, 4, 4)]) {
-      expect([...(next as number[])].sort((left, right) => left - right)).toEqual([...order].sort((left, right) => left - right));
+    expect(moveQueueTo(order, '1', 1)).toEqual(moveQueueIssue(order, '1', 0));
+    for (const next of [moveQueueTo(order, '1', 1), moveQueueTo(order, '4', 4)]) {
+      expect([...(next as number[])].sort((left, right) => left.localeCompare(right))).toEqual([...order].sort((left, right) => left.localeCompare(right)));
     }
   });
 
   it('names the issue and the slot range a move-to control places, so the numbers can be read aloud', () => {
-    expect(queueMoveToLabel(1, 4)).toBe('Move to a chosen position in the priority queue: #1 (positions run from 1 to 4)');
+    expect(queueMoveToLabel('1', 4)).toBe('Move to a chosen position in the priority queue: #1 (positions run from 1 to 4)');
   });
 });
 
@@ -272,10 +272,10 @@ describe('board copy', () => {
 
 describe('board load state', () => {
   const board: Board = { ...emptyBoard(), nextIssueNumber: 2, issues: [issue(1, 'open')] };
-  const verified = state({ board, queue: [1] });
+  const verified = state({ board, queue: ['1'] });
   const summaryBoard = {
     issues: [{
-      number: 1,
+      number: '1',
       title: 'Issue 1',
       state: 'open' as const,
       createdAt: timestamp,
@@ -286,7 +286,7 @@ describe('board load state', () => {
     }],
     resources: [],
   };
-  const ready: BoardLoad = { status: 'ready', board: summaryBoard, queue: [1], head: 'head' };
+  const ready: BoardLoad = { status: 'ready', board: summaryBoard, queue: ['1'], head: 'head' };
 
   it('resolves a read to the first-run state while the board is missing', () => {
     expect(boardLoaded(null)).toEqual({ status: 'uninitialized' });
@@ -403,11 +403,11 @@ describe('board load state', () => {
 describe('the feed, as the browser presents it', () => {
   const STAMP = '2026-09-25T12:00:00.000Z';
   const feedEntry = (overrides: Partial<BoardFeedEntry> = {}): BoardFeedEntry => ({
-    id: 'op-1', kind: 'issue-created', at: STAMP, position: 3, issueNumber: 4, title: 'Issue 4',
+    id: 'op-1', kind: 'issue-created', at: STAMP, position: 3, issueNumber: '4', title: 'Issue 4',
     state: 'open', messageId: null, author: null, body: null, ...overrides,
   });
-  const issue = (number: number): BoardIssue => ({
-    number, title: 'Issue ' + number, body: '', state: 'open', createdAt: STAMP, updatedAt: STAMP, messages: [],
+  const issue = (number: number | string): BoardIssue => ({
+    number: String(number), title: 'Issue ' + number, body: '', state: 'open', createdAt: STAMP, updatedAt: STAMP, messages: [],
   });
 
   it('names every kind the projection can produce, and no other', () => {
@@ -446,38 +446,39 @@ describe('the feed, as the browser presents it', () => {
   });
 
   it('reports the issues the log never named, and only those', () => {
-    expect(untrackedIssueNumbers([issue(1), issue(2)], [feedEntry({ issueNumber: 2 })])).toEqual([1]);
-    expect(untrackedIssueNumbers([issue(1)], [feedEntry({ issueNumber: 1 })])).toEqual([]);
+    expect(untrackedIssueIds([issue(1), issue(2)], [feedEntry({ issueNumber: '2' })])).toEqual(['1']);
+    expect(untrackedIssueIds([issue(1)], [feedEntry({ issueNumber: '1' })])).toEqual([]);
     // A deleted issue is one the log did record, at its deletion.
-    expect(untrackedIssueNumbers([], [feedEntry({ kind: 'issue-deleted', issueNumber: 9 })])).toEqual([]);
-    expect(untrackedIssueNumbers([issue(2), issue(1)], [])).toEqual([1, 2]);
+    expect(untrackedIssueIds([], [feedEntry({ kind: 'issue-deleted', issueNumber: '9' })])).toEqual([]);
+    // The board's own order is kept: ids are opaque strings and are never sorted.
+    expect(untrackedIssueIds([issue(2), issue(1)], [])).toEqual(['2', '1']);
   });
 
   it('says the predates-the-log caveat in terms of the issues it cannot place', () => {
-    expect(FEED_TRUNCATED_COPY([1])).toContain('#1');
-    expect(FEED_TRUNCATED_COPY([1, 2])).toContain('#1, #2');
-    expect(FEED_TRUNCATED_COPY([1])).toContain('already on the board when the materialized feed began');
+    expect(FEED_TRUNCATED_COPY(['1'])).toContain('#1');
+    expect(FEED_TRUNCATED_COPY(['1', '2'])).toContain('#1, #2');
+    expect(FEED_TRUNCATED_COPY(['1'])).toContain('already on the board when the materialized feed began');
     // The sentence names the exhaustion it depends on, so it cannot be quoted
     // as a claim made from a partial walk.
-    expect(FEED_TRUNCATED_COPY([1])).toContain('read the whole feed');
+    expect(FEED_TRUNCATED_COPY(['1'])).toContain('read the whole feed');
   });
 
   it('makes the claim only once the whole log is in hand', () => {
     const sixty = Array.from({ length: 60 }, (_, index) => issue(index + 1));
-    const firstFifty = Array.from({ length: 50 }, (_, index) => feedEntry({ issueNumber: 50 - index }));
+    const firstFifty = Array.from({ length: 50 }, (_, index) => feedEntry({ issueNumber: String(50 - index) }));
 
     // The set difference itself still holds: the first page mentions 50 issues.
-    expect(untrackedIssueNumbers(sixty, firstFifty)).toHaveLength(10);
+    expect(untrackedIssueIds(sixty, firstFifty)).toHaveLength(10);
     // A token outstanding means the walk is unfinished, so the claim is withheld
     // even though the difference is ten issues long.
-    expect(unplacedIssueNumbers(sixty, firstFifty, 'v1.more', 55)).toEqual([]);
+    expect(unplacedIssueIds(sixty, firstFifty, 'v1.more', 55)).toEqual([]);
     // And a walk that came up short against the total the page reported is no
     // more complete than one with a token left.
-    expect(unplacedIssueNumbers(sixty, firstFifty, null, 55)).toEqual([]);
+    expect(unplacedIssueIds(sixty, firstFifty, null, 55)).toEqual([]);
     // Only with no token and every counted entry held does the difference
     // become a fact about the log.
-    expect(unplacedIssueNumbers(sixty, firstFifty, null, 50)).toEqual([51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
-    expect(unplacedIssueNumbers([issue(1)], [feedEntry({ issueNumber: 1 })], null, 1)).toEqual([]);
+    expect(unplacedIssueIds(sixty, firstFifty, null, 50)).toEqual(['51', '52', '53', '54', '55', '56', '57', '58', '59', '60']);
+    expect(unplacedIssueIds([issue(1)], [feedEntry({ issueNumber: '1' })], null, 1)).toEqual([]);
   });
 
   it('names the two kinds the board does not record, without implying a row for them', () => {

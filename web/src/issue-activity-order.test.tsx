@@ -368,13 +368,13 @@ function overview(): BoardOverview {
 const session = {
   api: {
     accessState: (): BoardAccessState => ({ boardId: 'board-1', keyId: null, rootKeyId: 'root-1', capabilities: [], credentialRejection: null, storageRejected: false, canEdit: false }),
-    getIssueCommentPage: async (number: number, page: number): Promise<IssueCommentPage> => {
-      const found = board.find((each) => each.number === number);
+    getIssueCommentPage: async (number: string, page: number): Promise<IssueCommentPage> => {
+      const found = board.find((each) => String(each.number) === String(number));
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
       return { schemaVersion: 2, boardId: 'board-1', issue: { ...found, messages: [] }, page, pageCount: 1, total: found.messages.length, messages: found.messages };
     },
-    getIssue: async (number: number): Promise<BoardIssue> => {
-      const found = board.find((each) => each.number === number);
+    getIssue: async (number: string): Promise<BoardIssue> => {
+      const found = board.find((each) => String(each.number) === String(number));
       if (found === undefined) throw new Error('Antonina issue ' + number + ' does not exist');
       return found;
     },

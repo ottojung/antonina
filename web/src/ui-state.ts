@@ -24,7 +24,7 @@ export type BoardLoad =
   | { status: 'uninitialized' }
   | { status: 'untrusted' }
   | { status: 'deleted' }
-  | { status: 'ready'; board: BoardSummary; queue: number[]; head: string }
+  | { status: 'ready'; board: BoardSummary; queue: string[]; head: string }
   | { status: 'failed'; message: string };
 
 export const FIRST_RUN_COPY = {
@@ -255,7 +255,7 @@ export function firstRunOutcome(created: BoardRead, afterRefusal?: BoardRead): F
  * result is the board's order, never one the browser invented. There is no
  * other order to fall back to, so nothing is sorted or appended here.
  */
-export function openQueueOrder<T extends Pick<BoardIssue, 'number' | 'state'>>(issues: readonly T[], queue: readonly number[]): number[] {
+export function openQueueOrder<T extends Pick<BoardIssue, 'number' | 'state'>>(issues: readonly T[], queue: readonly string[]): string[] {
   const open = new Set(issues.filter((issue) => issue.state === 'open').map((issue) => issue.number));
   return queue.filter((number) => open.has(number));
 }
@@ -283,7 +283,7 @@ type ActivitySortable = Pick<BoardIssue, 'number' | 'state'> & Pick<IssueListSum
  * list, before `issuePage` slices it, so the order is global and pages are
  * windows onto it rather than independently sorted pages.
  */
-export function closedIssueOrder<T extends ActivitySortable>(issues: readonly T[]): number[] {
+export function closedIssueOrder<T extends ActivitySortable>(issues: readonly T[]): string[] {
   return activityIssueOrder(issues.filter((issue) => issue.state === 'closed')).map((issue) => issue.number);
 }
 
@@ -303,7 +303,7 @@ export function activityIssueOrder<T extends ActivitySortable>(issues: readonly 
  * The issues a filter shows. `open` is the shared queue; `closed` and `all` are
  * ordered by last activity, with `closed` restricted to closed issues.
  */
-export function visibleIssues<T extends ActivitySortable>(issues: readonly T[], queue: readonly number[], filter: IssueFilter): T[] {
+export function visibleIssues<T extends ActivitySortable>(issues: readonly T[], queue: readonly string[], filter: IssueFilter): T[] {
   if (filter === 'all') return activityIssueOrder(issues);
   const byNumber = new Map(issues.map((issue) => [issue.number, issue]));
   if (filter === 'closed') return closedIssueOrder(issues).map((number) => byNumber.get(number)!);
@@ -578,7 +578,7 @@ export const COMMENT_PAGE_OLDER = 'Older comments';
  * move to the position the issue already holds — which is how "earlier" at the
  * head and "later" at the tail become no-ops instead of rejected writes.
  */
-export function moveQueueIssue(order: number[], number: number, to: number): number[] | null {
+export function moveQueueIssue(order: string[], number: string, to: number): string[] | null {
   const from = order.indexOf(number);
   if (from === -1 || !Number.isInteger(to) || to < 0 || to >= order.length || to === from) return null;
   const next = [...order];
@@ -589,23 +589,23 @@ export function moveQueueIssue(order: number[], number: number, to: number): num
 
 export type QueueDirection = 'earlier' | 'later';
 
-export function moveQueueEarlier(order: number[], number: number): number[] | null {
+export function moveQueueEarlier(order: string[], number: string): string[] | null {
   const from = order.indexOf(number);
   return from > 0 ? moveQueueIssue(order, number, from - 1) : null;
 }
 
-export function moveQueueLater(order: number[], number: number): number[] | null {
+export function moveQueueLater(order: string[], number: string): string[] | null {
   const from = order.indexOf(number);
   return from !== -1 ? moveQueueIssue(order, number, from + 1) : null;
 }
 
 /** Whether a move control has anywhere to move to, so a boundary press is offered as a no-op. */
-export function canMoveInQueue(order: number[], number: number, direction: QueueDirection): boolean {
+export function canMoveInQueue(order: string[], number: string, direction: QueueDirection): boolean {
   return (direction === 'earlier' ? moveQueueEarlier(order, number) : moveQueueLater(order, number)) !== null;
 }
 
 /** The one-based slots a move-to control offers: every position the queue has. */
-export function queueSlots(order: number[]): number[] {
+export function queueSlots(order: string[]): number[] {
   return order.map((_, index) => index + 1);
 }
 
@@ -615,7 +615,7 @@ export function queueSlots(order: number[]): number[] {
  * permutation the step controls and a drop commit, so a keyboard user places an
  * issue exactly as a drag would.
  */
-export function moveQueueTo(order: number[], number: number, to: number): number[] | null {
+export function moveQueueTo(order: string[], number: string, to: number): string[] | null {
   return moveQueueIssue(order, number, to - 1);
 }
 
@@ -625,12 +625,12 @@ export function moveQueueTo(order: number[], number: number, to: number): number
  * The control is offered on the selected row alone — a select per row would be
  * one option per slot per row — so its name has to carry the whole instruction.
  */
-export function queueMoveToLabel(number: number, slots: number): string {
-  return `${QUEUE_MOVE_TO_LABEL}: #${number} (positions run from 1 to ${slots})`;
+export function queueMoveToLabel(id: string, slots: number): string {
+  return `${QUEUE_MOVE_TO_LABEL}: #${id} (positions run from 1 to ${slots})`;
 }
 
 /** The one-based position an issue holds in the shared queue, or 0 when unqueued. */
-export function queuePosition(order: number[], number: number): number {
+export function queuePosition(order: string[], number: string): number {
   const index = order.indexOf(number);
   return index === -1 ? 0 : index + 1;
 }
@@ -845,11 +845,11 @@ export const FEED_UNTRACKED_COPY =
  * What this cannot say on its own is that the issue predates the log. It can
  * only say the entries it was handed do not mention it, and on a paged feed
  * that is exactly as true of an issue created ten operations ago and left off
- * the first page. `unplacedIssueNumbers` is the gated form.
+ * the first page. `unplacedIssueIds` is the gated form.
  */
-export function untrackedIssueNumbers<T extends Pick<BoardIssue, 'number'>>(issues: readonly T[], entries: BoardFeedEntry[]): number[] {
+export function untrackedIssueIds<T extends { number: string }>(issues: readonly T[], entries: BoardFeedEntry[]): string[] {
   const tracked = new Set(entries.map((entry) => entry.issueNumber));
-  return issues.filter((issue) => !tracked.has(issue.number)).map((issue) => issue.number).sort((left, right) => left - right);
+  return issues.filter((issue) => !tracked.has(issue.number)).map((issue) => issue.number);
 }
 
 /**
@@ -886,9 +886,9 @@ export function untrackedIssueNumbers<T extends Pick<BoardIssue, 'number'>>(issu
  * the log, which is a `packages/core` projection question rather than something to
  * re-accumulate in the browser.
  */
-export function unplacedIssueNumbers<T extends Pick<BoardIssue, 'number'>>(issues: readonly T[], entries: BoardFeedEntry[], nextCursor: string | null, total: number): number[] {
+export function unplacedIssueIds<T extends { number: string }>(issues: readonly T[], entries: BoardFeedEntry[], nextCursor: string | null, total: number): string[] {
   if (nextCursor !== null || entries.length < total) return [];
-  return untrackedIssueNumbers(issues, entries);
+  return untrackedIssueIds(issues, entries);
 }
 
 /**
@@ -896,8 +896,8 @@ export function unplacedIssueNumbers<T extends Pick<BoardIssue, 'number'>>(issue
  * exhaustion it depends on, so the sentence cannot be read as a claim made from
  * a partial walk.
  */
-export const FEED_TRUNCATED_COPY = (numbers: number[]) =>
-  `You have read the whole feed, and it records no activity for these issues. They were already on the board when the materialized feed began, so the feed cannot show when they were created or changed: ${numbers.map((number) => `#${number}`).join(', ')}.`;
+export const FEED_TRUNCATED_COPY = (ids: string[]) =>
+  `You have read the whole feed, and it records no activity for these issues. They were already on the board when the materialized feed began, so the feed cannot show when they were created or changed: ${ids.map((id) => `#${id}`).join(', ')}.`;
 
 export function formatUpdatedAt(timestamp: string, now = new Date()): string {
   const date = new Date(timestamp);

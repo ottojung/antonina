@@ -63,8 +63,15 @@ export const DEFAULT_RESOURCE_PAGE = 1;
 
 export interface BoardUrlState {
   view: BoardView;
-  /** The open issue whose thread is shown, or `undefined` for the list alone. */
-  selectedNumber: number | undefined;
+  /**
+   * The open issue whose thread is shown, or `undefined` for the list alone.
+   *
+   * An issue id is an opaque public string: a minted id (22 base62 characters,
+   * a hyphen, a lowercase word) or a legacy issue's decimal number as a string.
+   * The URL carries that id verbatim, so a minted issue is addressable and a
+   * legacy link still opens.
+   */
+  selectedId: string | undefined;
   filter: IssueFilter;
   settingsOpen: boolean;
   /** The Issues-list page number, one-based. */
@@ -93,7 +100,7 @@ export interface BoardUrlState {
 /** The board as it opens with no URL parameters at all. */
 export const DEFAULT_BOARD_URL_STATE: BoardUrlState = {
   view: DEFAULT_BOARD_VIEW,
-  selectedNumber: undefined,
+  selectedId: undefined,
   filter: DEFAULT_ISSUE_FILTER,
   settingsOpen: false,
   page: DEFAULT_ISSUE_PAGE,
@@ -125,7 +132,7 @@ function isIssueFilter(value: string): value is IssueFilter {
  *
  * Only an all-digits string is a number: a decimal, a sign, an exponent, a
  * whitespace-padded value and a non-numeric value are all stale input rather
- * than an issue number, and none of them becomes one here.
+ * than a page number, and none of them becomes one here.
  */
 function positiveInteger(value: string | null): number | undefined {
   if (value === null || !/^[0-9]+$/.test(value)) return undefined;
@@ -133,13 +140,23 @@ function positiveInteger(value: string | null): number | undefined {
   return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : undefined;
 }
 
+// An issue id is opaque: a minted identity and a legacy decimal are the same
+// kind of thing to this client, which never inspects or validates the shape.
+// The only check is that the address named a non-empty string; the core owns
+// the generator and the resolution.
+
+/** An issue id from a URL parameter, or `undefined` for an empty/absent value. */
+function issueId(value: string | null): string | undefined {
+  return value !== null && value !== '' ? value : undefined;
+}
+
 /**
  * Reads the board's UI state out of a query string.
  *
  * Every field degrades rather than fails. An unknown or missing `view` is the
  * Issues tab; an unknown `filter` is `open`; a `page`, a `thread`, an `entries`
- * or a `resources` that is not a positive integer is page 1; an `issue` that is not a
- * positive integer selects nothing.
+ * or a `resources` that is not a positive integer is page 1; an `issue` that is
+ * not an issue id selects nothing.
  * So a stale link, a truncated paste and a hand-edited URL all land on a usable
  * board view instead of a blank screen, and unknown parameters are ignored
  * rather than echoed back into the address bar.
@@ -151,7 +168,7 @@ export function parseBoardUrl(search: string): BoardUrlState {
   const settings = params.get('settings');
   return {
     view: view !== null && isBoardView(view) ? view : DEFAULT_BOARD_VIEW,
-    selectedNumber: positiveInteger(params.get('issue')),
+    selectedId: issueId(params.get('issue')),
     filter: filter !== null && isIssueFilter(filter) ? filter : DEFAULT_ISSUE_FILTER,
     settingsOpen: settings === '1',
     page: positiveInteger(params.get('page')) ?? DEFAULT_ISSUE_PAGE,
@@ -172,7 +189,7 @@ export function parseBoardUrl(search: string): BoardUrlState {
 export function boardSearch(state: BoardUrlState): string {
   const params = new URLSearchParams();
   if (state.view !== DEFAULT_BOARD_VIEW) params.set('view', state.view);
-  if (state.selectedNumber !== undefined) params.set('issue', String(state.selectedNumber));
+  if (state.selectedId !== undefined) params.set('issue', state.selectedId);
   if (state.filter !== DEFAULT_ISSUE_FILTER) params.set('filter', state.filter);
   if (state.page !== DEFAULT_ISSUE_PAGE) params.set('page', String(state.page));
   if (state.commentPage !== DEFAULT_COMMENT_PAGE) params.set('thread', String(state.commentPage));
@@ -206,7 +223,7 @@ export function boardUrlFor(changes: Partial<BoardUrlState>, from: BoardUrlState
   }
   return {
     view: next.view,
-    selectedNumber: next.selectedNumber,
+    selectedId: next.selectedId,
     filter: next.filter,
     settingsOpen: next.settingsOpen,
     page: next.page,
@@ -224,7 +241,7 @@ export function boardUrlFor(changes: Partial<BoardUrlState>, from: BoardUrlState
  */
 export function sameBoardUrl(left: BoardUrlState, right: BoardUrlState): boolean {
   return left.view === right.view
-    && left.selectedNumber === right.selectedNumber
+    && left.selectedId === right.selectedId
     && left.filter === right.filter
     && left.settingsOpen === right.settingsOpen
     && left.page === right.page
@@ -235,15 +252,15 @@ export function sameBoardUrl(left: BoardUrlState, right: BoardUrlState): boolean
 
 /** The Issues tab: a tab link clears the selected issue, because the list is the screen. */
 export function tabUrlState(view: BoardView, from: BoardUrlState): BoardUrlState {
-  return boardUrlFor({ view, selectedNumber: undefined, page: DEFAULT_ISSUE_PAGE, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE }, from);
+  return boardUrlFor({ view, selectedId: undefined, page: DEFAULT_ISSUE_PAGE, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE }, from);
 }
 
 /** An issue thread: opening one from any tab lands on the Issues tab with the issue selected. */
-export function issueUrlState(number: number, from: BoardUrlState): BoardUrlState {
+export function issueUrlState(id: string, from: BoardUrlState): BoardUrlState {
   // A conversation opened from anywhere starts at its first page: the page a
   // reader was last reading is about the previous issue's thread, and carrying it
   // over would open an issue in the middle of itself.
-  return boardUrlFor({ view: 'issues', selectedNumber: number, filter: 'all', commentPage: DEFAULT_COMMENT_PAGE }, from);
+  return boardUrlFor({ view: 'issues', selectedId: id, filter: 'all', commentPage: DEFAULT_COMMENT_PAGE }, from);
 }
 
 /**
@@ -255,7 +272,7 @@ export function issueUrlState(number: number, from: BoardUrlState): BoardUrlStat
 export function boardHomeState(from: BoardUrlState): BoardUrlState {
   return boardUrlFor({
     view: DEFAULT_BOARD_VIEW,
-    selectedNumber: undefined,
+    selectedId: undefined,
     filter: DEFAULT_ISSUE_FILTER,
     settingsOpen: false,
     page: DEFAULT_ISSUE_PAGE,
@@ -270,9 +287,9 @@ export function tabHref(view: BoardView, from: BoardUrlState, pathname?: string)
   return boardHref(tabUrlState(view, from), pathname);
 }
 
-/** One issue's href. It carries no credential: the number is a selector, nothing more. */
-export function issueHref(number: number, from: BoardUrlState, pathname?: string): string {
-  return boardHref(issueUrlState(number, from), pathname);
+/** One issue's href. It carries no credential: the id is a selector, nothing more. */
+export function issueHref(id: string, from: BoardUrlState, pathname?: string): string {
+  return boardHref(issueUrlState(id, from), pathname);
 }
 
 export interface BoardLocation {

@@ -87,3 +87,13 @@ test('the legacy hex id space is a different shape and is not produced here', ()
     assert.equal(/^[0-9a-f]+$/.test(id), false, `${id} must not look like a legacy hex id`);
   }
 });
+
+test('large word vocabulary is reachable and selection terminates', () => {
+  const observed = new Set();
+  for (let i = 0; i < 30000; i += 1) {
+    const word = SHAPE.exec(newEntityId())?.[2];
+    assert.ok(word);
+    observed.add(word);
+  }
+  assert.ok(observed.size > 9000, 'the generator must draw from the expanded wordlist');
+});

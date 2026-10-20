@@ -253,7 +253,7 @@ test('fork flags are validated at the surface', (t) => {
   const missingValue = run(['agent', 'new', '--fork'], env);
   assert.equal(missingValue.status, EXIT_USAGE);
 
-  const notAnId = run(['agent', 'new', '--fork', 'not-an-id'], env);
+  const notAnId = run(['agent', 'new', '--fork', 'not.an.id'], env);
   assert.equal(notAnId.status, EXIT_USAGE);
   assert.match(notAnId.stderr, /--fork/);
 

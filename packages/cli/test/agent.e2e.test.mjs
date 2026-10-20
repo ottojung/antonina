@@ -862,8 +862,7 @@ test('prompt recovers an existing OpenCode session when durable session id was l
 
 
 // Board issue 320: `agent new` mints a case-sensitive opaque id. The legacy
-// case-insensitive canonicalization is a runtime property and is pinned in
-// packages/agent-runtime/test/process.test.mjs; what this case keeps is the
+// IDs are opaque and case-sensitive, as pinned by the runtime tests; this case keeps the
 // CLI-boundary exit-code distinction between an id that is not an id at all
 // (usage, 2) and a well-formed id that is not found (3).
 test('a generated id round-trips through status, and unknown ids keep their exit codes', (t) => {
@@ -884,7 +883,7 @@ test('a generated id round-trips through status, and unknown ids keep their exit
     assert.equal(run(['agent', 'status', '--id', lowered, '--json'], env).status, 3);
   }
 
-  assert.equal(run(['agent', 'status', '--id', 'not-hex', '--json'], env).status, 2);
+  assert.equal(run(['agent', 'status', '--id', 'not.hex', '--json'], env).status, 2);
   assert.equal(run(['agent', 'status', '--id', 'deadbeef', '--json'], env).status, 3);
 });
 

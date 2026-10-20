@@ -119,3 +119,12 @@ Removing a dedicated OpenCode database file is a two-step act: the inventory of 
 What bounds the interval is the surrounding lifecycle rather than any claim about the key. A fork that reads its source after the delete tombstone is refused, because a source marked `delete_pending` blocks a fork. The reachable case is therefore the narrower one: a fork that read its source and passed that check before the tombstone was written, and that publishes its clone after the unlink has already happened. That case is not closed here, and this statement is the reason: a reader must not come away believing the re-read guarantees no record names the key, because it guarantees only that no record named it at the instant it was read. The alternative considered and rejected is to hold a lock across the read and the unlink. It is worse rather than better, for the reason recorded for the stale-lock reclaim in `hosts.md`: naming the lock would not make the judgment and the removal atomic either, it would add a second unwitnessed step to a destructive path, and the residual interval would then be larger and no longer stated. Trading this interval for a longer unstated one is not an improvement.
 
 This is a statement about the interval alone. It does not weaken what the read must establish before the unlink: an inventory that could not be enumerated, or a record whose metadata could not be read or did not validate, is not an inventory that licenses an unlink, and a key the read names is not collected.
+
+
+$id-20261019-opaque-agent-identity
+title: Generated agent identifiers are case-sensitive opaque strings
+date: 2026/10/19
+source: issue-320
+kind: requirement
+
+Antonina generates fresh managed-agent IDs as a random 22-character base62 prefix, a hyphen, and an independently chosen English word. The complete generated ID is case-sensitive. All CLI and runtime consumers treat identities as opaque strings, preserve exact case, and never parse the word. Existing legacy lowercase hex agent IDs remain valid and may continue be normalized for compatibility at the persistence/input boundary. The above historical case-insensitive-ID guidance is superseded for new IDs. The agent new creation command does not accept caller-provided --id; it prints the generated ID alone on stdout, or returns structured --json.

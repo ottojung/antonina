@@ -2,7 +2,7 @@
 
 Use this skill when scheduled or agentic work creates, uses, or hands off a durable host filesystem location. A resource is a host and canonical absolute POSIX path, such as `lubko://example-host` plus `/workspace/project-worktree`; the path may be a file or directory.
 
-Resource registration is dependency and liveness metadata, not exclusive ownership or a lock. Multiple open Antonina issues may depend on one resource. Every number in these commands is an **Antonina BOARD issue number**, never a GitHub issue number.
+Resource registration is dependency and liveness metadata, not exclusive ownership or a lock. Multiple open Antonina issues may depend on one resource. Every issue identifier in these commands is an **Antonina BOARD issue ID** (an opaque string, including legacy digit-only IDs), never a GitHub issue number.
 
 ## Paging contract
 
@@ -21,7 +21,7 @@ A path is collectible only when it is registered on that host and no open Antoni
 ## Commands
 
 ```sh
-antonina board resource list --page PAGE [--host HOST] [--issue NUMBER]
+antonina board resource list --page PAGE [--host HOST] [--issue ISSUE_ID]
 antonina board resource add --issue ISSUE --host HOST --path PATH
 antonina board resource remove --issue ISSUE --host HOST --path PATH
 ```

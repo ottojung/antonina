@@ -60,7 +60,7 @@ The scheduler's complete output is its delegations and issue-level coordination 
 
 An agent's succeeded process state means only that the runner exited successfully.
 The snapshot deliberately marks terminal delivery as unverified and supplies
-unverified_terminal_issues. **Never use matching terminal issue numbers as a
+unverified_terminal_issues. **Never use matching terminal issue IDs as a
 completed-work set.** For each open issue without a live owner, consult
 antonina-scheduler-issue --issue ISSUE_ID: its newest_messages contain the newest
 substantive comments across paginated history (routine scheduler launch chatter

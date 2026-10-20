@@ -39,14 +39,14 @@ No global cap or fixed target agent count. No fairness quota or project-specific
 Use `CURRENT_SNAPSHOT` for the open issue list and live-agent identities; refresh through Antonina if stale. Consult each issue through:
 
 ```sh
-antonina-scheduler-issue --issue NUMBER
+antonina-scheduler-issue --issue ISSUE_ID
 antonina board show --id ISSUE_ID --page 1 --json
 ```
 
 For a distinct topologically ready packet, invoke:
 
 ```sh
-antonina-scheduler-launch --issue NUMBER --title 'Project #NUMBER: task' --summary SUMMARY --prompt PROMPT --json
+antonina-scheduler-launch --issue ISSUE_ID --title 'Project #ISSUE_ID: task' --summary SUMMARY --prompt PROMPT --json
 ```
 
 The scheduler **never passes `--cwd`**, calls `antonina-scheduler-provision` or `antonina-scheduler-worktrees`, or even asks whether there is a checkout. The launch helper establishes the runtime's fixed generic starting context and revalidates board openness and live ownership. The agent receives the issue, chooses its own isolated files, clones Git repositories if needed, follows repository instructions, and performs all substantive work.
@@ -91,9 +91,9 @@ Use exclusively `opencode-go/longcat-2.5-preview-free`, variant `low`, unless th
 
 An agent's succeeded process state means only that the runner exited successfully.
 The snapshot deliberately marks terminal delivery as unverified and supplies
-unverified_terminal_issues. **Never use matching terminal issue numbers as a
+unverified_terminal_issues. **Never use matching terminal issue IDs as a
 completed-work set.** For each open issue without a live owner, consult
-antonina-scheduler-issue --issue N: its newest_messages contain the newest
+antonina-scheduler-issue --issue ISSUE_ID: its newest_messages contain the newest
 substantive comments across paginated history (routine scheduler launch chatter
 is separated), including human decisions and worker handoffs.
 

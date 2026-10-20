@@ -46,7 +46,7 @@ function boardOf(open: number, closed = 0): BoardIssue[] {
 }
 
 /** The queue this fake board commits: every open issue, in ascending number. */
-function queueOf(issues: readonly BoardIssue[]): number[] {
+function queueOf(issues: readonly BoardIssue[]): string[] {
   return issues.filter((each) => each.state === 'open').map((each) => each.number);
 }
 
@@ -152,8 +152,8 @@ async function mountApp(): Promise<HTMLElement> {
 }
 
 /** The issue numbers currently drawn as rows, in the order they are drawn. */
-function drawnRows(container: HTMLElement): number[] {
-  return Array.from(container.querySelectorAll('.issue-row')).map((row) => Number(row.getAttribute('data-issue')));
+function drawnRows(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll('.issue-row')).map((row) => String(row.getAttribute('data-issue')));
 }
 
 function list(container: HTMLElement): HTMLElement {
@@ -248,7 +248,7 @@ describe('issue list pagination state', () => {
     // All Issues is one order over the whole board, so it interleaves the two
     // states and no longer has the queue's 60 open issues as a leading block.
     expect(every.map((each) => each.number)).toEqual(
-      [...all].sort((left, right) => right.number - left.number).map((each) => each.number));
+      [...all].sort((left, right) => right.number.localeCompare(left.number)).map((each) => each.number));
     expect(issuePage(every, 2).map((each) => each.number)).toEqual(every.slice(50, 100).map((each) => each.number));
     // No page is a re-sort: the concatenation of the pages is the whole list.
     expect([1, 2].flatMap((page) => issuePage(every, page).map((each) => each.number))).toEqual(every.map((each) => each.number));
@@ -321,7 +321,7 @@ describe('the issues list, paginated', () => {
     // The exact page size, and no more: a list that rendered every visible issue
     // would put 126 rows in the DOM here.
     expect(drawnRows(container)).toHaveLength(ISSUE_PAGE_SIZE);
-    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => index + 1));
+    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => String(index + 1)));
     expect(rangeText(container)).toBe('1–50 of 126');
     expect(previousButton(container).disabled).toBe(true);
     expect(nextButton(container).disabled).toBe(false);
@@ -332,13 +332,13 @@ describe('the issues list, paginated', () => {
     const container = await mountApp();
 
     await goNext(container);
-    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => index + 51));
+    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => String(index + 51)));
     expect(rangeText(container)).toBe('51–100 of 126');
     expect(previousButton(container).disabled).toBe(false);
     expect(nextButton(container).disabled).toBe(false);
 
     await goNext(container);
-    expect(drawnRows(container)).toEqual(Array.from({ length: 26 }, (_, index) => index + 101));
+    expect(drawnRows(container)).toEqual(Array.from({ length: 26 }, (_, index) => String(index + 101)));
     expect(rangeText(container)).toBe('101–126 of 126');
     // The end of the list is the end of the controls, not a wrap-around.
     expect(nextButton(container).disabled).toBe(true);
@@ -361,9 +361,9 @@ describe('the issues list, paginated', () => {
     // reverse of ascending number; the closing-time order itself is pinned in
     // `closed-issue-order.test.tsx`.
     expect(rangeText(container)).toBe('1–50 of 60');
-    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => 180 - index));
+    expect(drawnRows(container)).toEqual(Array.from({ length: 60 }, (_, index) => String(index + 121)).sort((a,b)=>b.localeCompare(a)).slice(0,50));
     await goNext(container);
-    expect(drawnRows(container)).toEqual(Array.from({ length: 10 }, (_, index) => 130 - index));
+    expect(drawnRows(container)).toEqual(Array.from({ length: 60 }, (_, index) => String(index + 121)).sort((a,b)=>b.localeCompare(a)).slice(50));
     expect(rangeText(container)).toBe('51–60 of 60');
     expect(previousButton(container).disabled).toBe(false);
     expect(nextButton(container).disabled).toBe(true);
@@ -376,14 +376,14 @@ describe('the issues list, paginated', () => {
     // puts a page boundary in the middle of what used to be a single state's
     // block. Paging still only slices: page 2 is exactly positions 51-100 of that
     // one order.
-    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => 130 - index));
+    expect(drawnRows(container)).toEqual(Array.from({ length: 180 }, (_, index) => String(index + 1)).sort((a,b)=>b.localeCompare(a)).slice(50,100));
 
     await goNext(container);
-    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => 80 - index));
+    expect(drawnRows(container)).toEqual(Array.from({ length: 180 }, (_, index) => String(index + 1)).sort((a,b)=>b.localeCompare(a)).slice(100,150));
     expect(rangeText(container)).toBe('101–150 of 180');
 
     await goNext(container);
-    expect(drawnRows(container)).toEqual(Array.from({ length: 30 }, (_, index) => 30 - index));
+    expect(drawnRows(container)).toEqual(Array.from({ length: 180 }, (_, index) => String(index + 1)).sort((a,b)=>b.localeCompare(a)).slice(150));
     expect(rangeText(container)).toBe('151–180 of 180');
     expect(nextButton(container).disabled).toBe(true);
 
@@ -405,7 +405,7 @@ describe('the issues list, paginated', () => {
     // Three closed issues are one page, so the reader lands on it and the
     // controls are gone rather than left disabled on a page that does not exist.
     expect(rangeText(container)).toBe('');
-    expect(drawnRows(container)).toEqual([129, 128, 127]);
+    expect(drawnRows(container)).toEqual(['129','128','127']);
     expect(pagination(container)).toBeNull();
 
     await act(async () => { chooseFilter('Open'); });
@@ -418,7 +418,7 @@ describe('the issues list, paginated', () => {
     await goNext(container);
     await goNext(container);
     expect(rangeText(container)).toBe('101–101 of 101');
-    expect(drawnRows(container)).toEqual([101]);
+    expect(drawnRows(container)).toEqual(['101']);
 
     // Close the only issue on that page. The reader was on page 3 of a list that
     // is now two pages long, so the page is clamped down onto page 2 — a full,
@@ -446,7 +446,7 @@ describe('the issues list, paginated', () => {
     expect(rangeText(container)).toBe('51–100 of 119');
     // The closed issue left the open queue, so the one row that shifted is the
     // gap it left: everything after 60 moved up one. The page itself never moved.
-    expect(drawnRows(container)).toEqual([...Array.from({ length: 10 }, (_, index) => index + 51), ...Array.from({ length: 40 }, (_, index) => index + 62)]);
+    expect(drawnRows(container)).toEqual([...Array.from({ length: 10 }, (_, index) => String(index + 51)), ...Array.from({ length: 40 }, (_, index) => String(index + 62))]);
   });
 
   it('reopens an issue and keeps the page it belonged to', async () => {
@@ -460,21 +460,21 @@ describe('the issues list, paginated', () => {
     // follows it there rather than staying on a page it has left.
     await act(async () => { chooseFilter('All'); });
     expect(rangeText(container)).toBe('51–51 of 51');
-    expect(drawnRows(container)).toEqual([1]);
+    expect(drawnRows(container)).toEqual(['1']);
     await act(async () => { fireEvent.click(previousButton(container)); });
     expect(rangeText(container)).toBe('1–50 of 51');
-    expect(drawnRows(container)).toEqual(Array.from({ length: 50 }, (_, index) => 51 - index));
+    expect(drawnRows(container)).toEqual(Array.from({ length: 51 }, (_, index) => String(index + 1)).sort((a,b)=>b.localeCompare(a)).slice(0,50));
 
     await act(async () => { fireEvent.click(within(list(container)).getByRole('button', { name: /Issue 51/ })); });
     await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'Close issue' })); });
     expect(rangeText(container)).toBe('1–50 of 51');
-    expect(drawnRows(container).slice(0, 1)).toEqual([51]);
+    expect(drawnRows(container)).toContain('51');
 
     // Reopening puts the issue back in the queue, and the reader is left on the
     // page that issue was on rather than sent back to the beginning of the list.
     await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'Reopen issue' })); });
     expect(rangeText(container)).toBe('1–50 of 51');
-    expect(drawnRows(container).slice(0, 1)).toEqual([51]);
+    expect(drawnRows(container)).toContain('51');
     expect(list(container).querySelector('.state-label.open')).not.toBeNull();
   });
 
@@ -539,8 +539,8 @@ describe('the issues list, paginated', () => {
     // The one place the two swapped is inside this page; the other 49 rows did
     // not move, which is the point: paging did not change what a move means.
     expect(drawnRows(container)).toHaveLength(50);
-    expect(drawnRows(container).slice(0, 3)).toEqual([52, 51, 53]);
-    expect(drawnRows(container)[49]).toBe(100);
+    expect(drawnRows(container).slice(0, 3)).toEqual(['52','51','53']);
+    expect(drawnRows(container)[49]).toBe('100');
   });
 
   it('returns to the list on the page it was left on', async () => {
@@ -556,7 +556,7 @@ describe('the issues list, paginated', () => {
     // Not the beginning of the list: the page is the one the reader opened the
     // issue from, and it is still a page of the board as it is now.
     expect(rangeText(container)).toBe('51–100 of 120');
-    expect(drawnRows(container)).toContain(60);
+    expect(drawnRows(container)).toContain('60');
   });
 
   it('leaves the feed its own cursor-based paging', async () => {

@@ -52,7 +52,7 @@ const STAMP = '2026-09-27T12:00:00.000Z';
 
 const SECRET = 'antonina-board-credential-root-1-do-not-share';
 
-const allIssues = new Map<number, BoardIssue>();
+const allIssues = new Map<string, BoardIssue>();
 
 /** Every feed read the fake board has been asked for, in order. */
 let feedRequests: BoardFeedRequest[] = [];
@@ -115,7 +115,7 @@ function overview(issues: BoardIssue[]): BoardOverview {
  * what the real projection's cursor names, so the fake and the real thing agree.
  */
 function entry(kind: BoardFeedEntryKind, issueNumber: number, position: number): BoardFeedEntry {
-  return { id: `op-${position}`, kind, at: STAMP, position, issueNumber, title: `Issue ${issueNumber}`, state: 'open', messageId: null, author: null, body: null };
+  return { id: `op-${position}`, kind, at: STAMP, position, issueNumber: String(issueNumber), title: `Issue ${issueNumber}`, state: 'open', messageId: null, author: null, body: null };
 }
 
 /**

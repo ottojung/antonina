@@ -150,7 +150,7 @@ function fakeClick(number: string, direction: 'earlier' | 'later'): QueueTarget 
 }
 
 interface FakeTransfer { getData(type: string): string; setData(type: string, value: string): void }
-function fakeDrop(row: Row, dragged: number): { target: QueueTarget; prevented: number } {
+function fakeDrop(row: Row, dragged: number | string): { target: QueueTarget; prevented: number } {
   const state = { prevented: 0 };
   const event: IssueDrop = {
     dataTransfer: { getData: (type: string) => (type === QUEUE_DRAG_TYPE ? String(dragged) : '') },
@@ -504,7 +504,7 @@ describe('committing a priority reorder', () => {
   });
 
   it('sends nothing at all for a deliberate no-op', async () => {
-    const { deps, record } = commit(async () => [1, 2, 3]);
+    const { deps, record } = commit(async () => ['1', '2', '3']);
 
     await expect(commitQueueOrder(null, deps)).resolves.toBeNull();
     expect(record.reload).toBe(0);

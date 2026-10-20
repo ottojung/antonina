@@ -128,9 +128,9 @@ describe('issue UI state', () => {
 
   it('groups resources by host for a separate hierarchical view', () => {
     const resources = [
-      { host: 'lubko://z', path: '/b', issueNumbers: [1], createdAt: timestamp, updatedAt: timestamp },
-      { host: 'lubko://a', path: '/one', issueNumbers: [1], createdAt: timestamp, updatedAt: timestamp },
-      { host: 'lubko://a', path: '/two', issueNumbers: [2], createdAt: timestamp, updatedAt: timestamp },
+      { host: 'lubko://z', path: '/b', issueNumbers: ['1'], createdAt: timestamp, updatedAt: timestamp },
+      { host: 'lubko://a', path: '/one', issueNumbers: ['1'], createdAt: timestamp, updatedAt: timestamp },
+      { host: 'lubko://a', path: '/two', issueNumbers: ['2'], createdAt: timestamp, updatedAt: timestamp },
     ];
     expect(groupResources(resources).map(([host, entries]) => [host, entries.map((entry) => entry.path)])).toEqual([
       ['lubko://a', ['/one', '/two']],
@@ -155,7 +155,7 @@ describe('priority queue moves', () => {
     expect(moveQueueIssue(order, '1', 0)).toEqual(['1', '4', '2', '9']);
     for (const next of [moveQueueEarlier(order, '9'), moveQueueLater(order, '4'), moveQueueIssue(order, '1', 0)]) {
       expect(next).not.toBeNull();
-      expect([...(next as number[])].sort((left, right) => left.localeCompare(right))).toEqual([...order].sort((left, right) => left.localeCompare(right)));
+      expect([...(next as string[])].sort((left, right) => left.localeCompare(right))).toEqual([...order].sort((left, right) => left.localeCompare(right)));
       expect(next).toHaveLength(order.length);
     }
   });
@@ -201,7 +201,7 @@ describe('priority queue moves', () => {
     // The same permutation the step controls and a drop commit, never a pair.
     expect(moveQueueTo(order, '1', 1)).toEqual(moveQueueIssue(order, '1', 0));
     for (const next of [moveQueueTo(order, '1', 1), moveQueueTo(order, '4', 4)]) {
-      expect([...(next as number[])].sort((left, right) => left.localeCompare(right))).toEqual([...order].sort((left, right) => left.localeCompare(right)));
+      expect([...(next as string[])].sort((left, right) => left.localeCompare(right))).toEqual([...order].sort((left, right) => left.localeCompare(right)));
     }
   });
 

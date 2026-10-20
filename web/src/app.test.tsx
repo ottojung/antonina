@@ -37,7 +37,7 @@ const STAMP = '2026-09-27T12:00:00.000Z';
  * the error and first-run paths, the feed tab — is the production component
  * tree, mounted.
  */
-const allIssues = new Map<number, BoardIssue>();
+const allIssues = new Map<string, BoardIssue>();
 
 const session = {
   api: {
@@ -124,7 +124,7 @@ function overview(issues: BoardIssue[]): BoardOverview {
 let sequence = 0;
 function feedEntry(kind: BoardFeedEntryKind, issueNumber: number, overrides: Partial<BoardFeedEntry> = {}): BoardFeedEntry {
   sequence += 1;
-  return { id: `op-${sequence}`, kind, at: STAMP, position: 100 - sequence, issueNumber, title: `Issue ${issueNumber}`, state: 'open', messageId: null, author: null, body: null, ...overrides };
+  return { id: `op-${sequence}`, kind, at: STAMP, position: 100 - sequence, issueNumber: String(issueNumber), title: `Issue ${issueNumber}`, state: 'open', messageId: null, author: null, body: null, ...overrides };
 }
 
 function feedPage(entries: BoardFeedEntry[], nextCursor: string | null = null): BoardFeedPage {

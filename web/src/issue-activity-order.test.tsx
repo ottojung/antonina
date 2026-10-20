@@ -59,7 +59,7 @@ function summary(number: number, options: {
   const hasComment = options.commentAt !== undefined && options.commentAt !== null;
   const state = options.state ?? 'open';
   return {
-    number,
+    number: String(number),
     title: `Issue ${number}`,
     state,
     createdAt,
@@ -127,7 +127,7 @@ function nonMonotonicByActivity(n: number, state: 'open' | 'closed' = 'open'): I
   }));
 }
 
-function numbers(issues: readonly { number: number }[]): number[] {
+function numbers(issues: readonly { number: string }[]): string[] {
   return issues.map((entry) => entry.number);
 }
 
@@ -189,7 +189,7 @@ describe('last activity is the newest comment, or creation time when there is no
     // creation time rather than throwing or sorting on undefined. The cast also
     // omits `updatedAt`, which a real summary always carries; the reader must
     // tolerate that too rather than dereference it.
-    const legacy = { number: 1, createdAt: CREATED } as IssueListSummary;
+    const legacy = { number: '1', createdAt: CREATED } as IssueListSummary;
     expect(issueLastActivityOf(legacy)).toBe(CREATED);
   });
 
@@ -210,7 +210,7 @@ describe('the All Issues order', () => {
     const ordered = activityIssueOrder(issues);
     const expected = [...issues]
       .sort((left, right) =>
-        issueLastActivityOf(right).localeCompare(issueLastActivityOf(left)) || right.number - left.number)
+        issueLastActivityOf(right).localeCompare(issueLastActivityOf(left)) || right.number.localeCompare(left.number))
       .map((entry) => entry.number);
     expect(numbers(ordered)).toEqual(expected);
     // Guard against the fixture having degenerated into something issue number
@@ -229,10 +229,10 @@ describe('the All Issues order', () => {
       summary(2, { createdAt: '2026-09-27T12:00:00.000Z', commentAt: '2026-09-27T13:00:00.000Z' }),
       summary(3, { createdAt: '2026-09-27T10:00:00.000Z', commentAt: '2026-09-27T11:00:00.000Z' }),
     ];
-    expect(numbers(activityIssueOrder(issues))).toEqual([1, 2, 3]);
+    expect(numbers(activityIssueOrder(issues))).toEqual(['1', '2', '3']);
     // Non-vacuity: by creation order and by comment order alone, issue 1 is last.
-    expect(numbers([...issues].sort((left, right) => right.createdAt.localeCompare(left.createdAt)))).toEqual([2, 3, 1]);
-    expect(numbers([...issues].sort((left, right) => (right.lastActivityAt ?? '').localeCompare(left.lastActivityAt ?? '')))).toEqual([2, 3, 1]);
+    expect(numbers([...issues].sort((left, right) => right.createdAt.localeCompare(left.createdAt)))).toEqual(['2', '3', '1']);
+    expect(numbers([...issues].sort((left, right) => (right.lastActivityAt ?? '').localeCompare(left.lastActivityAt ?? '')))).toEqual(['2', '3', '1']);
   });
 
   it('moves an old issue to the top when it is commented on', () => {
@@ -244,8 +244,8 @@ describe('the All Issues order', () => {
       summary(2, { createdAt: '2026-09-27T12:00:00.000Z', commentAt: '2026-09-27T13:00:00.000Z' }),
       summary(3, { createdAt: '2026-09-27T10:00:00.000Z', commentAt: '2026-09-27T11:00:00.000Z' }),
     ];
-    expect(numbers(activityIssueOrder(issues))).toEqual([1, 2, 3]);
-    expect(numbers([...issues].sort((left, right) => right.createdAt.localeCompare(left.createdAt)))).toEqual([2, 3, 1]);
+    expect(numbers(activityIssueOrder(issues))).toEqual(['1', '2', '3']);
+    expect(numbers([...issues].sort((left, right) => right.createdAt.localeCompare(left.createdAt)))).toEqual(['2', '3', '1']);
   });
 
   it('is the core comparator applied to the whole list', () => {
@@ -262,11 +262,11 @@ describe('the All Issues order', () => {
       summary(2, { createdAt: '2026-09-27T11:00:00.000Z' }),
       summary(3, { createdAt: '2026-09-27T09:00:00.000Z', commentAt: '2026-09-27T12:00:00.000Z' }),
     ];
-    expect(numbers(activityIssueOrder(issues))).toEqual([3, 2, 1]);
+    expect(numbers(activityIssueOrder(issues))).toEqual(['3', '2', '1']);
     // A pure `updatedAt` sort would answer 2, 1, 3 instead: it would ignore issue
     // 3's later comment and rank issue 2 (created 11:00) above issue 1 (updated
     // 10:00). The activity key keeps issue 3 first on its comment.
-    expect(numbers([...issues].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)))).toEqual([2, 1, 3]);
+    expect(numbers([...issues].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)))).toEqual(['2', '1', '3']);
   });
 
   it('ranks an issue whose last comment predates another issue\'s creation by that comment', () => {
@@ -277,7 +277,7 @@ describe('the All Issues order', () => {
     // Issue 2's creation is four hours earlier, so a creation-order sort puts it
     // last; its comment is three hours before issue 1's creation, so the
     // activity order still puts it last too -- by the comment, not by creation.
-    expect(numbers(activityIssueOrder(issues))).toEqual([1, 2]);
+    expect(numbers(activityIssueOrder(issues))).toEqual(['1', '2']);
   });
 
   it('interleaves open and closed issues by activity rather than listing one state first', () => {
@@ -286,7 +286,7 @@ describe('the All Issues order', () => {
       summary(2, { state: 'closed', createdAt: '2026-09-27T08:00:00.000Z', commentAt: '2026-09-27T20:00:00.000Z' }),
       summary(3, { state: 'open', createdAt: '2026-09-27T08:00:00.000Z', commentAt: '2026-09-27T15:00:00.000Z' }),
     ];
-    expect(numbers(visibleIssues(issues, [1, 3], 'all'))).toEqual([2, 3, 1]);
+    expect(numbers(visibleIssues(issues, ['1', '3'], 'all'))).toEqual(['2', '3', '1']);
   });
 
   it('does not disturb the open queue order or the closed order', () => {
@@ -294,10 +294,10 @@ describe('the All Issues order', () => {
     // timestamp sort is browser-local priority the shared queue forbids. Board
     // 180's order is All Issues only, and both of these are untouched by it.
     const issues = [summary(1, { commentAt: '2026-09-27T01:00:00.000Z' }), summary(2), summary(3, { state: 'closed' })];
-    expect(openQueueOrder(issues, [2, 3, 1])).toEqual([2, 1]);
-    expect(numbers(visibleIssues(issues, [2, 1], 'open'))).toEqual([2, 1]);
-    expect(numbers(visibleIssues(issues, [2, 1], 'closed'))).toEqual([3]);
-    expect(closedIssueOrder(issues)).toEqual([3]);
+    expect(openQueueOrder(issues, ['2', '3', '1'])).toEqual(['2', '1']);
+    expect(numbers(visibleIssues(issues, ['2', '1'], 'open'))).toEqual(['2', '1']);
+    expect(numbers(visibleIssues(issues, ['2', '1'], 'closed'))).toEqual(['3']);
+    expect(closedIssueOrder(issues)).toEqual(['3']);
   });
 });
 
@@ -339,7 +339,7 @@ describe('the order is global across pages', () => {
     // Ascending activity, so the global order is the reverse of the input.
     expect(numbers(ordered)).toEqual(numbers([...issues].reverse()));
     expect(numbers(issuePage(ordered, 1))).toEqual(numbers(ordered).slice(0, ISSUE_PAGE_SIZE));
-    expect(numbers(issuePage(ordered, 2))).toEqual([10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    expect(numbers(issuePage(ordered, 2))).toEqual(['10', '9', '8', '7', '6', '5', '4', '3', '2', '1']);
   });
 
   function issueLastActivityOfOf(entry: IssueListSummary): string {
@@ -412,8 +412,8 @@ async function mountAllIssues(): Promise<HTMLElement> {
   return container;
 }
 
-function drawnRows(container: HTMLElement): number[] {
-  return Array.from(container.querySelectorAll('.issue-row')).map((row) => Number(row.getAttribute('data-issue')));
+function drawnRows(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll('.issue-row')).map((row) => String(row.getAttribute('data-issue')));
 }
 
 beforeEach(() => {
@@ -460,7 +460,7 @@ describe('the drawn All Issues view', () => {
     // Issue 2 has no comments at all and is drawn between the two that do, by its
     // creation time: issue 3 (comment 09:00) then issue 2 (created 08:00) then
     // issue 1 (comment 07:00).
-    expect(drawnRows(container)).toEqual([3, 2, 1]);
+    expect(drawnRows(container)).toEqual(['3', '2', '1']);
   });
 });
 
@@ -577,7 +577,7 @@ describe('the store mints the field the web order consumes', () => {
     const issues = [5, 4, 3].map((minutesAgo, index) => {
       const createdAt = new Date(base - minutesAgo * 60_000).toISOString();
       return {
-        number: index + 1,
+        number: String(index + 1),
         title: `Issue ${index + 1}`,
         body: '',
         state: 'open' as const,
@@ -610,8 +610,8 @@ describe('the store mints the field the web order consumes', () => {
 
     // 1. The store put the key on the wire. No fixture, no hand-built field.
     expect(overview.issues.filter((entry) => Object.hasOwn(entry, 'lastActivityAt'))).toHaveLength(3);
-    const oldest = overview.issues.find((entry) => entry.number === 1)!;
-    const newest = overview.issues.find((entry) => entry.number === 3)!;
+    const oldest = overview.issues.find((entry) => entry.number === '1')!;
+    const newest = overview.issues.find((entry) => entry.number === '3')!;
     expect(oldest.lastActivityAt).toBe(COMMENTED);
     expect(newest.lastActivityAt).toBeNull();
 
@@ -621,7 +621,7 @@ describe('the store mints the field the web order consumes', () => {
     // 3. THE CONSUMPTION PROOF. readOverview's output goes straight into the
     //    All Issues path, and issue 1 -- the lowest number -- comes first.
     const order = numbers(visibleIssues(overview.issues, overview.queue, 'all'));
-    expect(order).toEqual([1, 3, 2]);
+    expect(order).toEqual(['1', '3', '2']);
 
     // 4. Negative control on identical data. If deleting the field did not change
     //    the order, step 3 would have passed for reasons unrelated to it.

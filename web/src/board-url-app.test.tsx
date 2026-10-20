@@ -38,7 +38,7 @@ const STAMP = '2026-09-27T12:00:00.000Z';
 /** The board credential as the browser holds it. Nothing below may put this in a URL. */
 const SECRET = 'antonina-board-credential-root-1-do-not-share';
 
-const allIssues = new Map<number, BoardIssue>();
+const allIssues = new Map<string, BoardIssue>();
 
 const session = {
   api: {
@@ -572,14 +572,14 @@ describe('the board addressed by URL, mounted', () => {
     // rows inside the Issues list are `<button>`s, not anchors, so they are not
     // part of this contract.
     let prevented = false;
-    const opened: number[] = [];
-    issueLinkClick((number) => { opened.push(number); }, 42)({ preventDefault: () => { prevented = true; } });
+    const opened: string[] = [];
+    issueLinkClick((number) => { opened.push(number); }, '42')({ preventDefault: () => { prevented = true; } });
     expect(prevented).toBe(true);
-    expect(opened).toEqual([42]);
+    expect(opened).toEqual(['42']);
     // The event is optional so a static render can drive the handler; with no
     // event it must still open the issue rather than throw.
-    expect(issueLinkClick((number) => { opened.push(number); }, 43)()).toBeUndefined();
-    expect(opened).toEqual([42, 43]);
+    expect(issueLinkClick((number) => { opened.push(number); }, '43')()).toBeUndefined();
+    expect(opened).toEqual(['42', '43']);
   });
 
   it('replaces the first write and pushes every one after it', async () => {

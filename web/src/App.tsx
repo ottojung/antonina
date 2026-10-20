@@ -553,11 +553,11 @@ export function IssueQueue({ issues, page = issues, queue, hasWriteAccess, selec
    * shared queue, and a page of it is not a queue the board would accept.
    */
   page?: IssueListRow[];
-  queue: number[];
+  queue: string[];
   hasWriteAccess: boolean;
   selectedId: string | undefined;
   onSelect: (id: string) => void;
-  onReorder: (target: QueueTarget) => Promise<number[] | null>;
+  onReorder: (target: QueueTarget) => Promise<string[] | null>;
   empty: { title: string; body: string };
 }) {
   // One order for the whole list, straight from the board's committed queue. The
@@ -585,12 +585,12 @@ export function issueLinkClick(open: (id: string) => void, id: string): (event?:
 
 function IssueQueueRow({ issue, order, position, hasWriteAccess, selected, onSelect, onReorder }: {
   issue: IssueListRow;
-  order: number[];
+  order: string[];
   position: number;
   hasWriteAccess: boolean;
   selected: boolean;
   onSelect: (id: string) => void;
-  onReorder: (target: QueueTarget) => Promise<number[] | null>;
+  onReorder: (target: QueueTarget) => Promise<string[] | null>;
 }) {
   // Only a queued row offers a move at all: the board's queue holds open issues
   // only, so a move on a closed row is one the board cannot commit, and a

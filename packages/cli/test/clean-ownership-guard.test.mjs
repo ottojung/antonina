@@ -15,7 +15,8 @@ import test from 'node:test';
 // This file is deliberately disjoint from agent.e2e.test.mjs and needs no fake
 // backend: `new`, `clean --dry-run` and `clean` never invoke OpenCode, so this seam
 // is exercised on a plain temp XDG_STATE_HOME and stays green even on a noexec
-// checkout (where the exec-probing fixture cannot be built).
+// checkout (where the exec-probing fixture cannot be built). Board issue 320:
+// `agent new` mints its own id, captured from stdout rather than named.
 const CLI = resolve('packages/cli/dist/packages/cli/src/main.js');
 
 function stateDir(t) {
@@ -36,21 +37,26 @@ function metaPath(root, id) {
   return join(agentDir(root, id), 'meta.json');
 }
 
-function newAgent(t, id) {
+function createAgent(env, args) {
+  const created = run(['agent', 'new', ...args], env);
+  assert.equal(created.status, 0, created.stderr);
+  return created.stdout.trim();
+}
+
+function newAgent(t) {
   const { root, env } = stateDir(t);
   const work = join(root, 'work');
   mkdirSync(work, { recursive: true });
-  const created = run(['agent', 'new', '--id', id, '--cwd', work], env);
-  assert.equal(created.status, 0, created.stderr);
-  return { root, env, work };
+  const id = createAgent(env, ['--cwd', work]);
+  return { root, env, work, id };
 }
 
 // A terminal, long-finished agent that nonetheless still holds an accepted prompt
 // and a freshly reserved runner. It is a retention candidate for the outer filter
 // (terminal state, finished_at far in the past) and must be refused by the guard.
-function ageAndArmOwnership(t, id) {
-  const handle = newAgent(t, id);
-  const path = metaPath(handle.root, id);
+function ageAndArmOwnership(t) {
+  const handle = newAgent(t);
+  const path = metaPath(handle.root, handle.id);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   Object.assign(meta, {
     state: 'succeeded',
@@ -96,19 +102,19 @@ function ageAndArmOwnership(t, id) {
 }
 
 test('clean selects an agent that owns an accepted prompt and reserved runner', (t) => {
-  const { env, path } = ageAndArmOwnership(t, '0a1b2c');
+  const { env, path, id } = ageAndArmOwnership(t);
   const dry = run(['agent', 'clean', '--days', '1', '--dry-run'], env);
   assert.equal(dry.status, 0, dry.stderr);
-  assert.match(dry.stdout, /0a1b2c/, 'the candidate filter must still select this agent');
+  assert.ok(dry.stdout.includes(id), 'the candidate filter must still select this agent');
   assert.equal(JSON.parse(readFileSync(path, 'utf8')).state, 'succeeded', 'dry-run must not mutate');
 });
 
 test('clean refuses to remove an agent holding an accepted prompt and reserved runner', (t) => {
-  const { env, root, path } = ageAndArmOwnership(t, '0ceef');
+  const { env, root, path, id } = ageAndArmOwnership(t);
   const clean = run(['agent', 'clean', '--days', '1'], env);
   assert.equal(clean.status, 0, clean.stderr);
-  assert.doesNotMatch(clean.stdout, /deleted agent 0ceef/, 'the ownership guard must refuse this removal');
-  assert.ok(existsSync(agentDir(root, '0ceef')), 'the guarded agent directory must survive clean');
+  assert.ok(!clean.stdout.includes(`deleted agent ${id}`), 'the ownership guard must refuse this removal');
+  assert.ok(existsSync(agentDir(root, id)), 'the guarded agent directory must survive clean');
   const after = JSON.parse(readFileSync(path, 'utf8'));
   assert.equal(after.pending_prompt, 'accepted', 'the accepted prompt must be preserved');
   assert.equal(after.active_runner, true, 'runner ownership must be preserved');
@@ -117,9 +123,9 @@ test('clean refuses to remove an agent holding an accepted prompt and reserved r
 });
 
 test('clean still removes an unowned terminal agent alongside a guarded one', (t) => {
-  const { env, root } = ageAndArmOwnership(t, '0beef1');
-  assert.equal(run(['agent', 'new', '--id', '0fee7', '--cwd', join(root, 'work')], env).status, 0);
-  const freeMeta = metaPath(root, '0fee7');
+  const { env, root, id: guardedId } = ageAndArmOwnership(t);
+  const freeId = createAgent(env, ['--cwd', join(root, 'work')]);
+  const freeMeta = metaPath(root, freeId);
   const free = JSON.parse(readFileSync(freeMeta, 'utf8'));
   Object.assign(free, {
     state: 'failed',
@@ -133,19 +139,19 @@ test('clean still removes an unowned terminal agent alongside a guarded one', (t
 
   const clean = run(['agent', 'clean', '--days', '1'], env);
   assert.equal(clean.status, 0, clean.stderr);
-  assert.match(clean.stdout, /deleted agent 0fee7/, 'an unowned old terminal agent is still collectable');
-  assert.ok(existsSync(agentDir(root, '0beef1')), 'the guarded agent must survive the same run');
-  assert.ok(!existsSync(agentDir(root, '0fee7')), 'the unowned agent must be removed');
+  assert.ok(clean.stdout.includes(`deleted agent ${freeId}`), 'an unowned old terminal agent is still collectable');
+  assert.ok(existsSync(agentDir(root, guardedId)), 'the guarded agent must survive the same run');
+  assert.ok(!existsSync(agentDir(root, freeId)), 'the unowned agent must be removed');
 });
 
 test('clean refuses an agent whose only ownership is a live marked invocation', async (t) => {
-  const { root, work, env } = newAgent(t, '0a17e');
+  const { root, work, env, id } = newAgent(t);
   const invocationId = 'c'.repeat(32);
   // A real child carrying the ownership markers the runtime checks, so
   // `invocationAlive` is true on its own merits (PID + start time + env markers)
   // rather than on a stubbed seam. Reaped before this test returns.
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
-    env: { ...process.env, ANTONINA_AGENT_ID: '0a17e', ANTONINA_INVOCATION_ID: invocationId },
+    env: { ...process.env, ANTONINA_AGENT_ID: id, ANTONINA_INVOCATION_ID: invocationId },
     detached: true,
     stdio: 'ignore',
   });
@@ -157,7 +163,7 @@ test('clean refuses an agent whose only ownership is a live marked invocation', 
   });
   await waitForIdentity(child.pid);
 
-  const path = metaPath(root, '0a17e');
+  const path = metaPath(root, id);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   Object.assign(meta, {
     state: 'succeeded',
@@ -175,8 +181,8 @@ test('clean refuses an agent whose only ownership is a live marked invocation', 
 
   const clean = run(['agent', 'clean', '--days', '1'], env);
   assert.equal(clean.status, 0, clean.stderr);
-  assert.doesNotMatch(clean.stdout, /deleted agent 0a17e/, 'a live invocation must block removal');
-  assert.ok(existsSync(agentDir(root, '0a17e')));
+  assert.ok(!clean.stdout.includes(`deleted agent ${id}`), 'a live invocation must block removal');
+  assert.ok(existsSync(agentDir(root, id)));
   assert.equal(JSON.parse(readFileSync(path, 'utf8')).pid, child.pid);
   assert.equal(child.exitCode, null, 'the child must still be alive after the refused clean');
 });

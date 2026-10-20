@@ -265,14 +265,13 @@ const BOARD_SPECS: readonly CommandSpec[] = [
 const AGENT_SPECS: readonly CommandSpec[] = [
   {
     path: ['new'],
-    summary: 'Create an idle managed agent, or a snapshot of an existing one with --fork.',
-    values: ['--id', '--cwd', '--title', '--fork'],
+    summary: 'Create an idle managed agent, or a snapshot of an existing one with --fork. Prints the generated id.',
+    values: ['--cwd', '--title', '--fork'],
     flags: ['--json'],
-    required: ['--id'],
     optionHelp: {
       '--cwd': 'Declared default directory for every invocation of this agent; refused with --fork',
     },
-    normalize: (p) => ['new', ...valueArgs(p, ['--id', '--cwd', '--title', '--fork']), ...flagArgs(p, ['--json'])],
+    normalize: (p) => ['new', ...valueArgs(p, ['--cwd', '--title', '--fork']), ...flagArgs(p, ['--json'])],
   },
   {
     path: ['list'],

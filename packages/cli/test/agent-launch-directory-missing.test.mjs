@@ -167,9 +167,11 @@ test('a directory that disappears between acceptance and spawn is named, and nev
   const { work, env, invoked } = fixture(t);
 
   // Created through the real CLI, so the declaration and everything else about
-  // the record is the ordinary shape rather than something assembled here.
-  const created = runCli(['agent', 'new', '--id', '0a11', '--cwd', work, '--json'], env);
+  // the record is the ordinary shape rather than something assembled here. The
+  // id is generated (board issue 320), so it is captured from stdout.
+  const created = runCli(['agent', 'new', '--cwd', work, '--json'], env);
   assert.equal(created.status, 0, `${created.stdout}${created.stderr}`);
+  const agentId = JSON.parse(created.stdout).id;
   assert.equal(JSON.parse(created.stdout).cwd, work);
 
   // The accepted-but-not-yet-launched state, built through the same lifecycle
@@ -178,12 +180,12 @@ test('a directory that disappears between acceptance and spawn is named, and nev
   // hand-built record could differ from the CLI's in exactly the field this
   // test is about.
   const now = Date.now() / 1000;
-  const meta = readMeta('0a11', { env });
+  const meta = readMeta(agentId, { env });
   beginInvocation(meta, 'work', now, 2);
   meta.active_runner = true;
   meta.runner_gen = 3;
   meta.runner_reservation = reservation({ gen: 3 });
-  writeMeta('0a11', meta, { env });
+  writeMeta(agentId, meta, { env });
 
   // The window: the directory is gone before the spawn. Nothing races here --
   // the runner is called directly, so the check is reached on the state above,
@@ -191,9 +193,9 @@ test('a directory that disappears between acceptance and spawn is named, and nev
   rmSync(work, { recursive: true, force: true });
   assert.equal(existsSync(work), false, 'the fixture must actually be gone for this case to mean anything');
 
-  await runManagedRunner('0a11', 'new', 3, { env });
+  await runManagedRunner(agentId, 'new', 3, { env });
 
-  const after = readMeta('0a11', { env });
+  const after = readMeta(agentId, { env });
   assert.equal(after.state, 'failed');
   assert.equal(
     after.error,
@@ -229,7 +231,7 @@ test('a directory that disappears between acceptance and spawn is named, and nev
   // only reason `DISPLAYABLE_AGENT_ERRORS` grew a `LAUNCH_DIRECTORY_MISSING: `
   // entry was so that `agent status` would quote it. Asserted through the real
   // CLI, in both output forms.
-  const human = runCli(['agent', 'status', '--id', '0a11'], env);
+  const human = runCli(['agent', 'status', '--id', agentId], env);
   assert.equal(human.status, 0, `${human.stdout}${human.stderr}`);
   assert.match(
     human.stdout,
@@ -237,7 +239,7 @@ test('a directory that disappears between acceptance and spawn is named, and nev
     human.stdout,
   );
   assert.doesNotMatch(human.stdout, /not displayable here/, human.stdout);
-  const json = runCli(['agent', 'status', '--id', '0a11', '--json'], env);
+  const json = runCli(['agent', 'status', '--id', agentId, '--json'], env);
   assert.equal(json.status, 0, `${json.stdout}${json.stderr}`);
   const parsed = JSON.parse(json.stdout);
   assert.equal(parsed.last_error, `${LAUNCH_DIRECTORY_MISSING}: ${work}`);
@@ -250,21 +252,23 @@ test('the same agent launches normally once the directory exists again', async (
   // rather than a poisoned agent: a restored directory must be usable, through
   // the same declared `cwd`, with no operator intervention on the record.
   const { work, env, invoked } = fixture(t);
-  assert.equal(runCli(['agent', 'new', '--id', '0a12', '--cwd', work, '--json'], env).status === 0, true);
+  const created = runCli(['agent', 'new', '--cwd', work, '--json'], env);
+  assert.equal(created.status, 0, `${created.stdout}${created.stderr}`);
+  const agentId = JSON.parse(created.stdout).id;
   const now = Date.now() / 1000;
-  const meta = readMeta('0a12', { env });
+  const meta = readMeta(agentId, { env });
   beginInvocation(meta, 'work', now, 2);
   meta.active_runner = true;
   meta.runner_gen = 3;
   meta.runner_reservation = reservation({ gen: 3 });
-  writeMeta('0a12', meta, { env });
+  writeMeta(agentId, meta, { env });
 
-  await runManagedRunner('0a12', 'new', 3, { env });
+  await runManagedRunner(agentId, 'new', 3, { env });
 
-  const after = readMeta('0a12', { env });
+  const after = readMeta(agentId, { env });
   assert.equal(after.state, 'succeeded', 'a directory that still exists launches as before');
   assert.equal(after.error, null);
   assert.equal(after.invocation_cwd, work, 'the observation is recorded only once a child existed');
   assert.ok(existsSync(invoked), 'the backend really was executed on this path');
-  assert.match(readFileSync(metaPath('0a12', { env }), 'utf8'), new RegExp(`"invocation_cwd": ${JSON.stringify(work).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(readFileSync(metaPath(agentId, { env }), 'utf8'), new RegExp(`"invocation_cwd": ${JSON.stringify(work).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
 });

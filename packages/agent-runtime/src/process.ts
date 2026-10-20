@@ -1,6 +1,8 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { isEntityId } from '../../core/src/ids.js';
+
 const STAT_MIN_FIELDS = 20;
 const STAT_STATE_FIELD_INDEX = 0;
 const STAT_PPID_FIELD_INDEX = 1;
@@ -163,9 +165,27 @@ export function signalMarkedInvocationProcesses(
   return signalled;
 }
 
+/**
+ * Canonicalize a managed-agent id from an input boundary, or `null` when it is
+ * not an id at all.
+ *
+ * Two id shapes are accepted, because two shapes exist on disk:
+ *
+ *   - the new entity ids minted by `packages/core/src/ids.ts`
+ *     (`newEntityId`), which are case-sensitive opaque tokens and are returned
+ *     unchanged; and
+ *   - the legacy lowercase-hex ids, which are matched case-insensitively and
+ *     lowercased, exactly as before, so every existing agent record and every
+ *     script that spells one in mixed case keeps resolving to the same agent.
+ *
+ * The two spaces cannot collide: a new id always contains a hyphen and a
+ * lowercase word suffix, and a legacy id is hex and so contains no hyphen.
+ */
 export function normalizeAgentId(raw: unknown): string | null {
   if (typeof raw !== 'string' || raw.length === 0) return null;
-  const value = raw.trim().toLowerCase();
+  const trimmed = raw.trim();
+  if (isEntityId(trimmed)) return trimmed;
+  const value = trimmed.toLowerCase();
   return value.length > 0 && HEX.test(value) ? value : null;
 }
 

@@ -98,12 +98,16 @@ npm run build
 The current local runtime is available through the `antonina agent` namespace:
 
 ```sh
-antonina agent new --id a13f09c2 --cwd /workspace/project
-antonina agent run --id a13f09c2 --cwd /workspace/project --prompt 'Investigate the issue and implement the fix.'
-antonina agent status --id a13f09c2
-antonina agent log --id a13f09c2
-antonina agent wait --id a13f09c2 --timeout 3600
+id=$(antonina agent new --cwd /workspace/project)   # prints the generated id
+antonina agent run --id "$id" --cwd /workspace/project --prompt 'Investigate the issue and implement the fix.'
+antonina agent status --id "$id"
+antonina agent log --id "$id"
+antonina agent wait --id "$id" --timeout 3600
 ```
+
+`agent new` assigns the agent's id itself and prints exactly that bare id and a newline on stdout, so a shell captures it directly; `--json` emits the same id in the structured object. There is no caller-supplied `--id` on `agent new` (passing one is a usage error), and `agent new --fork <source>` mints a fresh id for the clone the same way while the `--fork` value still names the source. Every other command (`run`, `status`, `log`, `wait`, `stop`, `kill`, `delete`, `list`, `new --fork`) takes the id with `--id`, and both the new ids and existing hexadecimal managed-agent ids remain valid there.
+
+> **Migration note.** Scripts that still call `agent new --id <id>` must be updated to capture the generated id from stdout (`id=$(antonina agent new ...)`) or to read it from `--json`. The repository's own deployment and host scripts are migrated at integration stage; this branch deliberately does not edit them.
 
 A managed front runs in a working directory an operator declares with `--cwd`; it never inherits the directory of the shell that created it. `agent new` without `--cwd` records no working directory, `agent run` without `--cwd` refuses to launch such an agent, and `agent status` and `agent list` report `cwd: null` for it rather than naming a directory nobody chose.
 

@@ -18,6 +18,7 @@ import {
   signalMarkedInvocationProcesses,
   splitProcStatFields,
 } from '../dist/packages/agent-runtime/src/process.js';
+import { newEntityId } from '../dist/packages/core/src/ids.js';
 
 function statLine({ state = 'S', ppid = 1, pgrp = 4242, start = 1234 } = {}) {
   const fields = [state, String(ppid), String(pgrp), '0', '0', '0', '0', '0', '0', '0', '0', '7', '11', '0', '0', '0', '0', '0', '0', String(start)];
@@ -105,6 +106,24 @@ test('persisted authority validators do not normalize durable values', () => {
   assert.equal(persistedInvocationId('g'.repeat(32)), null);
   assert.equal(persistedProcessInteger(123, 1), 123);
   for (const value of [0, -1, 1.5, '123', true]) assert.equal(persistedProcessInteger(value, 1), null);
+});
+
+test('agent ids accept both generated entity ids and legacy hex', () => {
+  // Board issue 320: the new id space is case-sensitive opaque tokens, while
+  // the legacy hex space stays case-insensitive and lowercases.
+  const generated = newEntityId();
+  assert.equal(normalizeAgentId(generated), generated, 'a generated id is returned unchanged');
+  assert.equal(persistedAgentId(generated), generated, 'a generated id is canonical as written');
+  assert.equal(normalizeAgentId(`  ${generated}  `), generated, 'surrounding whitespace is trimmed');
+  // A generated id is not lowercased into a different id.
+  assert.notEqual(normalizeAgentId(generated.toLowerCase()), generated);
+  // Legacy hex is unchanged: case-insensitive at the boundary, lowercase on disk.
+  assert.equal(normalizeAgentId(' A1B2 '), 'a1b2');
+  assert.equal(persistedAgentId('a1b2'), 'a1b2');
+  assert.equal(persistedAgentId('A1B2'), null);
+  for (const value of ['', 'not-an-id', 'a'.repeat(22) + '-Word', 123, true, null]) {
+    assert.equal(persistedAgentId(value), null);
+  }
 });
 
 test('liveness verifies persisted identity before ordinary Node signal probe', (t) => {

@@ -8,6 +8,7 @@ import {
 } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { newEntityId } from '../../core/src/ids.js';
 import {
   backendCapabilities,
   configuredModelAvailable,
@@ -38,6 +39,7 @@ import {
 } from '../../agent-runtime/src/lifecycle.js';
 import {
   AgentForkSourceMissingError,
+  AgentForkTargetExistsError,
   forkAgent,
 } from '../../agent-runtime/src/fork.js';
 import {
@@ -160,7 +162,7 @@ function nonnegativeInteger(raw: string | undefined, name: string): number {
 
 function requireAgentId(raw: string | undefined, command: string): string {
   const agentId = normalizeAgentId(raw);
-  if (agentId === null) throw new UsageError(`${command}: --id is required and must be a base-16 string`);
+  if (agentId === null) throw new UsageError(`${command}: --id is required and must be a managed-agent id`);
   return agentId;
 }
 
@@ -454,12 +456,44 @@ function declaredCwd(raw: string, command: string): string {
   return cwd;
 }
 
+// The id is generated, so a collision is not a failure mode an operator can
+// reach -- the random suffix has 63^22 values and the word is only a readability
+// aid. The bound exists so that a broken RNG (one that returns a constant, say)
+// fails loudly instead of spinning forever.
+const MAX_AGENT_ID_ATTEMPTS = 8;
+
+/**
+ * `new` mints the agent's id; the caller never supplies one. The directory is
+ * created exclusively, so an id that already exists is refused by the store
+ * rather than adopted, and a fresh id is drawn until one is free.
+ */
+function createFreshAgentDirectory(context: AgentCommandContext): string {
+  for (let attempt = 0; attempt < MAX_AGENT_ID_ATTEMPTS; attempt += 1) {
+    const agentId = newEntityId();
+    if (createAgentDirectory(agentId, paths(context))) return agentId;
+  }
+  throw new Error('new: could not allocate a unique agent id');
+}
+
+/**
+ * `antonina agent new [--cwd PATH] [--title T]`: create an idle agent.
+ *
+ * The id is generated here (board issue 320) and never accepted from the
+ * caller: `--id` is refused by name rather than ignored, so a caller migrating
+ * from the old `new --id <id>` form is told the flag is gone instead of
+ * believing the id it named was honoured. The generated id is printed on
+ * default stdout as exactly the bare id and a newline -- no prose -- so a shell
+ * can capture it directly (`id=$(antonina agent new --cwd ...)`); `--json`
+ * continues to emit the structured object, now carrying the generated id.
+ */
 async function cmdNew(args: string[], context: AgentCommandContext): Promise<number> {
   const parsed = parse(args, ['--json']);
   if (parsed.positionals.length !== 0) throw new UsageError('new: unexpected positional arguments');
-  const agentId = requireAgentId(parsed.values.get('--id'), 'new');
+  if (parsed.values.has('--id')) {
+    throw new UsageError('new: --id is not accepted; the agent id is generated and printed on stdout');
+  }
   if (parsed.values.has('--fork')) {
-    return await cmdFork(parsed.values.get('--fork')!, agentId, parsed, context);
+    return await cmdFork(parsed.values.get('--fork')!, parsed, context);
   }
   // A front is not created in whatever directory happened to invoke this
   // command. With no `--cwd` the agent records no working directory at all, and
@@ -472,7 +506,7 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
   // the declaration too, by name, before any state is written. Without this
   // `new` would accept a directory `run` refuses.
   if (cwd !== null) requireInvocationCwdCapability('new', context.env);
-  if (!createAgentDirectory(agentId, paths(context))) throw new Error(`new: agent ${agentId} already exists`);
+  const agentId = createFreshAgentDirectory(context);
   const meta = idleMeta(agentId, cwd, parsed.values.get('--title') ?? null);
   try {
     writeMeta(agentId, meta, paths(context));
@@ -483,24 +517,21 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
   if (parsed.flags.has('--json')) {
     context.io.stdout(stableJson({ id: agentId, state: 'idle', cwd, created_at: meta.created_at }));
   } else {
-    context.io.stdout(
-      cwd === null
-        ? `Created agent with id ${agentId} (idle, no declared working directory). Declare one with \`antonina agent run --id ${agentId} --cwd /absolute/path --prompt 'task'\`.`
-        : `Created agent with id ${agentId} (idle). Start work with \`antonina agent run --id ${agentId} --prompt 'task'\`.`,
-    );
+    context.io.stdout(agentId);
   }
   return EXIT_OK;
 }
 
 /**
- * `agent new --id <NEW> --fork <OLD>`: a snapshot of an existing agent.
+ * `agent new --fork <OLD>`: a snapshot of an existing agent.
  *
  * The clone gets the source's persisted work identity -- declared cwd, title,
  * variant, native session, prompt history and terminal outcome -- and its own
- * id, its own record and its own lifecycle state, with no process, runner,
- * reservation, accepted prompt or queued steer inherited. It is a snapshot, not
- * a link: nothing in the product reads the source in order to update the clone,
- * or the clone in order to update the source, and the two never share a file.
+ * generated id, its own record and its own lifecycle state, with no process,
+ * runner, reservation, accepted prompt or queued steer inherited. It is a
+ * snapshot, not a link: nothing in the product reads the source in order to
+ * update the clone, or the clone in order to update the source, and the two
+ * never share a file.
  *
  * A source that is currently running is forkable, and that is the case the
  * feature exists for: because the clone names no process, no control command
@@ -512,16 +543,20 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
  * describe a fresh front's own declaration, and letting them apply to a fork
  * would leave an operator believing they had named the clone's directory when
  * the record says the source's.
+ *
+ * The clone's id is generated, exactly as a non-forking `new` generates its
+ * own, and it is printed on default stdout as the bare id and a newline. The
+ * disclosure that the clone shares the source's backend session is written to
+ * stderr, so the machine-readable stdout stays a single id while the operator
+ * still learns that running both agents drives one conversation.
  */
 async function cmdFork(
   raw: string,
-  agentId: string,
   parsed: Parsed,
   context: AgentCommandContext,
 ): Promise<number> {
   const sourceId = normalizeAgentId(raw);
-  if (sourceId === null) throw new UsageError('new: --fork must be a base-16 managed-agent id');
-  if (sourceId === agentId) throw new UsageError('new: --fork source and --id must be different agents');
+  if (sourceId === null) throw new UsageError('new: --fork must be a managed-agent id');
   if (parsed.values.has('--cwd')) throw new UsageError('new: --cwd cannot be combined with --fork');
   if (parsed.values.has('--title')) throw new UsageError('new: --title cannot be combined with --fork');
   // `--fork` refuses `--cwd` above, but it does not thereby declare nothing -- it
@@ -541,15 +576,21 @@ async function cmdFork(
   if (source !== null && persistedAgentCwd(source) !== null) {
     requireInvocationCwdCapability('new --fork', context.env);
   }
-  let meta: AgentMetadata;
-  try {
-    meta = forkAgent(sourceId, agentId, paths(context));
-  } catch (error) {
-    // A source that does not exist is a lookup failure, not a crash, and gets
-    // the same exit code every other unknown-id path in this file returns.
-    if (error instanceof AgentForkSourceMissingError) throw new NotFoundError(error.message);
-    throw error;
+  let meta: AgentMetadata | null = null;
+  for (let attempt = 0; attempt < MAX_AGENT_ID_ATTEMPTS && meta === null; attempt += 1) {
+    try {
+      meta = forkAgent(sourceId, newEntityId(), paths(context));
+    } catch (error) {
+      // A source that does not exist is a lookup failure, not a crash, and gets
+      // the same exit code every other unknown-id path in this file returns.
+      if (error instanceof AgentForkSourceMissingError) throw new NotFoundError(error.message);
+      // The generated target id collided with an existing agent. Draw again.
+      if (error instanceof AgentForkTargetExistsError) continue;
+      throw error;
+    }
   }
+  if (meta === null) throw new Error('new --fork: could not allocate a unique agent id');
+  const agentId = requiredPersistedAgentId(meta);
   if (parsed.flags.has('--json')) {
     context.io.stdout(stableJson({
       id: agentId,
@@ -562,8 +603,9 @@ async function cmdFork(
       created_at: meta.created_at,
     }));
   } else {
+    context.io.stdout(agentId);
     const cwd = persistedAgentCwd(meta);
-    context.io.stdout(
+    context.io.stderr(
       `Forked agent ${sourceId} into ${agentId} (state ${String(persistedLifecycleState(meta))}, ${String(meta.prompt_count)} prompts, ${cwd === null ? 'no declared working directory' : cwd}). `
       + `The clone inherits the source's backend session, and apart from that session the two records are independent: neither is ever read in order to update the other. `
       + `They share one backend session, so running both will drive the same conversation. `

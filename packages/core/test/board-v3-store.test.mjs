@@ -301,7 +301,7 @@ test('issue reads use only the pointer and materialized snapshots', async () => 
   }, created.state.head);
 
   server.clearRequests();
-  const issue = await store.getIssue(initialized.credential, 1);
+  const issue = await store.getIssue(initialized.credential, '1');
 
   assert.equal(issue?.title, 'One key');
   assert.equal(issue?.messages.length, 1);
@@ -382,7 +382,7 @@ test('fast mutations read summaries plus only the touched issue thread', async (
   const unrelatedKeys = new Set(
     [...server.objects.entries()]
       .filter(([, entry]) =>
-        entry.value?.number === 51
+        entry.value?.number === '51'
         && (entry.value?.issue !== undefined || Array.isArray(entry.value?.messages)))
       .map(([key]) => key),
   );
@@ -400,7 +400,7 @@ test('fast mutations read summaries plus only the touched issue thread', async (
   );
 
   const secondPage = await store.readIssuePage(initialized.credential, 'open', 2);
-  assert.equal(secondPage?.entries[0].number, 51);
+  assert.equal(secondPage?.entries[0].number, '51');
   assert.equal(secondPage?.entries[0].messageCount, 1);
   assert.equal(secondPage?.entries[0].hasBody, true);
 });
@@ -472,7 +472,7 @@ test('the existing board storage key is the only live access key', async () => {
     /board key/i,
   );
 
-  const issue = await store.getIssue(initialized.credential, 1);
+  const issue = await store.getIssue(initialized.credential, '1');
   assert.equal(issue?.messages.length, 0);
 });
 
@@ -511,7 +511,7 @@ test('concurrent writers serialize through the one capability-protected pointer'
   assert.ok(final);
   assert.deepEqual(
     final.state.board.issues.map((issue) => issue.number),
-    [1, 2, 3],
+    ['1', '2', '3'],
   );
   assert.deepEqual(
     new Set(final.state.board.issues.map((issue) => issue.title)),
@@ -590,7 +590,7 @@ test('a shard carrying a verdict this build does not name is refused, not read a
     },
   }, created.state.head);
 
-  const before = await store.getIssue(initialized.credential, 1);
+  const before = await store.getIssue(initialized.credential, '1');
   assert.equal(before.review.verdict, 'request-changes');
   assert.equal(before.review.commit, 'a'.repeat(40));
 
@@ -609,7 +609,7 @@ test('a shard carrying a verdict this build does not name is refused, not read a
   // the read that would let a blocked handoff be declared complete.
   const reader = deterministicStore(server);
   await assert.rejects(
-    () => reader.getIssue(initialized.credential, 1),
+    () => reader.getIssue(initialized.credential, '1'),
     /stored review verdict is malformed/,
   );
   await assert.rejects(
@@ -644,7 +644,7 @@ test('a shard carrying a verdict this build does not name is refused, not read a
     }
     const rereader = deterministicStore(server);
     await assert.rejects(
-      () => rereader.getIssue(initialized.credential, 1),
+      () => rereader.getIssue(initialized.credential, '1'),
       /stored review verdict is malformed/,
       `getIssue must refuse a review whose commit is ${what}`,
     );
@@ -695,7 +695,7 @@ test('a stored null is refused by name in each materialized position, and never 
   // The shard is written by this build first, so the field under test exists in
   // both positions before anything is corrupted; otherwise a null would be
   // indistinguishable from the absent key that legitimately means "no review".
-  assert.deepEqual((await store.getIssue(initialized.credential, 1)).outstandingBlocks, ['a'.repeat(40)]);
+  assert.deepEqual((await store.getIssue(initialized.credential, '1')).outstandingBlocks, ['a'.repeat(40)]);
   const reviewShards = shardsCarryingReview(server);
   const blockShards = shardsCarryingBlocks(server);
   assert.ok(reviewShards.length >= 2, 'the verdict must be materialized in both the snapshot and the projection');
@@ -727,7 +727,7 @@ test('a stored null is refused by name in each materialized position, and never 
     await writeStoredField(server, targets, field, null);
     const reader = deterministicStore(server);
     const read = isSnapshot(where)
-      ? () => reader.getIssue(initialized.credential, 1)
+      ? () => reader.getIssue(initialized.credential, '1')
       : () => reader.readIssuePage(initialized.credential, 'open', 1);
     // The refusal must be this build's own, at the reader under test, and not a
     // throw from somewhere downstream of it: a `TypeError` on the way out of
@@ -749,7 +749,7 @@ test('a stored null is refused by name in each materialized position, and never 
     const other = deterministicStore(server);
     const served = isSnapshot(where)
       ? (await other.readIssuePage(initialized.credential, 'open', 1)).entries[0]
-      : await other.getIssue(initialized.credential, 1);
+      : await other.getIssue(initialized.credential, '1');
     const otherValue = served[field];
     assert.ok(
       otherPristine.some((value) => JSON.stringify(value) === JSON.stringify(otherValue)),
@@ -787,7 +787,7 @@ test('a shard carrying outstanding blocks this build cannot compare is refused, 
     },
   }, created.state.head);
 
-  const before = await store.getIssue(initialized.credential, 1);
+  const before = await store.getIssue(initialized.credential, '1');
   assert.deepEqual(before.outstandingBlocks, ['a'.repeat(40)]);
 
   const carrying = shardsCarryingBlocks(server);
@@ -805,7 +805,7 @@ test('a shard carrying outstanding blocks this build cannot compare is refused, 
     await overwriteStoredBlocks(server, carrying, blocks);
     const reader = deterministicStore(server);
     await assert.rejects(
-      () => reader.getIssue(initialized.credential, 1),
+      () => reader.getIssue(initialized.credential, '1'),
       /stored outstanding review blocks are malformed/,
       `getIssue must refuse ${what}`,
     );
@@ -851,10 +851,10 @@ test('a compact mutation of one issue keeps every other issue review verdict in 
   // A reader that has never seen the write must see the block in both places the
   // completion gate can read it, before any mutation at all.
   const reader = deterministicStore(server);
-  assert.deepEqual((await reader.getIssue(initialized.credential, 1)).outstandingBlocks, ['a'.repeat(40)]);
+  assert.deepEqual((await reader.getIssue(initialized.credential, '1')).outstandingBlocks, ['a'.repeat(40)]);
   const pageBefore = await reader.readIssuePage(initialized.credential, 'open', 1);
   assert.deepEqual(
-    pageBefore.entries.find((entry) => entry.number === 1).outstandingBlocks,
+    pageBefore.entries.find((entry) => entry.number === '1').outstandingBlocks,
     ['a'.repeat(40)],
     'precondition: the projection carries the block',
   );
@@ -867,13 +867,13 @@ test('a compact mutation of one issue keeps every other issue review verdict in 
 
   const after = deterministicStore(server);
   assert.deepEqual(
-    (await after.getIssue(initialized.credential, 1)).outstandingBlocks,
+    (await after.getIssue(initialized.credential, '1')).outstandingBlocks,
     ['a'.repeat(40)],
     "an untouched issue's outstanding blocks survive a mutation of another issue",
   );
-  assert.equal((await after.getIssue(initialized.credential, 1)).review.verdict, 'request-changes');
+  assert.equal((await after.getIssue(initialized.credential, '1')).review.verdict, 'request-changes');
   const pageAfter = await after.readIssuePage(initialized.credential, 'open', 1);
-  const entry = pageAfter.entries.find((candidate) => candidate.number === 1);
+  const entry = pageAfter.entries.find((candidate) => candidate.number === '1');
   assert.deepEqual(
     entry.outstandingBlocks,
     ['a'.repeat(40)],

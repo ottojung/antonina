@@ -52,11 +52,11 @@ async function boardWithActivity() {
   const server = fakeSkrynia();
   const owner = client(server);
   const initialized = await owner.initialize();
-  await owner.createIssue('Feed me', 'the body');
-  await owner.comment(1, 'ada', 'first');
-  await owner.editIssueBody(1, 'the body, edited');
-  await owner.close(1);
-  await owner.reopen(1);
+  const id = (await owner.createIssue('Feed me', 'the body')).number;
+  await owner.comment(id, 'ada', 'first');
+  await owner.editIssueBody(id, 'the body, edited');
+  await owner.close(id);
+  await owner.reopen(id);
   return client(server, { credential: initialized.credential });
 }
 
@@ -70,7 +70,7 @@ test('board feed prints every recorded operation, newest first, and names the co
   // can separate these lines is the order the log committed them, read newest
   // first. Creation, comment, edit, closure and reopen are five events, not one.
   assert.equal(out.length, 5);
-  assert.match(out[0], /^\d{4}-\d\d-\d\dT[\d:.]+Z {2}#1 \[open\] reopened {2}Feed me$/);
+  assert.match(out[0], /^\d{4}-\d\d-\d\dT[\d:.]+Z {2}#[0-9A-Za-z]{22}-[a-z]+ \[open\] reopened {2}Feed me$/);
   assert.match(out[1], /\[closed\] closed {2}Feed me$/);
   assert.match(out[2], /\[open\] edited {2}Feed me$/);
   assert.match(out[3], /\[open\] commented by ada: first$/);
@@ -106,7 +106,7 @@ test('board feed --json is the whole page, machine readable, and requires the bo
   assert.equal(comment.messageId, comment.id);
   assert.equal(comment.author, 'ada');
   assert.equal(comment.body, 'first');
-  assert.equal(comment.issueNumber, '1');
+  assert.match(comment.issueNumber, /^[0-9A-Za-z]{22}-[a-z]+$/);
   // The state each entry reports is the state its own operation left, not the
   // board's final state: the comment was written while the issue was open.
   assert.equal(comment.state, 'open');
@@ -120,8 +120,8 @@ test('board feed numbered pages walk the feed without loss or repeat', async () 
   const owner = client(server, { now: () => new Date('2026-09-25T00:00:00.000Z') });
   const initialized = await owner.initialize();
   for (let index = 0; index < 4; index += 1) {
-    await owner.createIssue('Issue ' + index, '');
-    await owner.comment(index + 1, 'ada', 'note ' + index);
+    const created = await owner.createIssue('Issue ' + index, '');
+    await owner.comment(created.number, 'ada', 'note ' + index);
   }
   const reader = client(server, { credential: initialized.credential });
 

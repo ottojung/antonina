@@ -1928,7 +1928,13 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     return {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId: meta.boardId,
-      resources: clone(value.resources as BoardResource[]),
+      resources: (value.resources as Array<Record<string, unknown>>).map((resource) => {
+        if (!isRecord(resource) || !Array.isArray(resource.issueNumbers)
+            || !resource.issueNumbers.every(validStoredId)) {
+          throw new ShardedBoardStoreError('Antonina catalog resource dependencies are malformed');
+        }
+        return { ...clone(resource), issueNumbers: resource.issueNumbers.map(String) } as BoardResource;
+      }),
     };
   }
 
@@ -2666,7 +2672,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         });
       }
     }
-    issues.sort((left, right) => left.number.localeCompare(right.number));
+    // Preserve the physical directory order: IDs are opaque, not sequence numbers.
 
     const queueValue = await get(single('queueRef'));
     const catalogValue = await get(single('catalogRef'));
@@ -2698,7 +2704,13 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         schemaVersion: BOARD_SCHEMA_VERSION,
         nextIssueNumber,
         issues,
-        resources: catalogValue.resources as BoardResource[],
+        resources: catalogValue.resources.map((entry) => {
+          if (!isRecord(entry) || !Array.isArray(entry.issueNumbers)
+              || !entry.issueNumbers.every(validStoredId)) {
+            throw new ShardedBoardStoreError('Antonina pre-cutover resource dependencies are malformed');
+          }
+          return { ...clone(entry), issueNumbers: entry.issueNumbers.map(String) } as BoardResource;
+        }),
       },
       queue: (queueValue.numbers as Array<string | number>).map(String),
       feed,
@@ -3865,6 +3877,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       const { review: storedReview, outstandingBlocks: storedBlocks, ...rest } = entry;
       return {
         ...(clone(rest) as unknown as IssueListSummary),
+        number: String(entry.number),
         ...(storedReview === undefined ? {} : { review: parseStoredReview(storedReview) }),
         ...(storedBlocks === undefined ? {} : { outstandingBlocks: parseStoredOutstandingBlocks(storedBlocks) }),
       };
@@ -3933,7 +3946,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         kind: entry.kind,
         at: entry.at,
         position: entry.position,
-        issueNumber: entry.issueNumber,
+        issueNumber: String(entry.issueNumber),
         title: entry.title,
         state: entry.state,
         messageId: entry.messageId,
@@ -3949,7 +3962,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       kind: entry.kind,
       at: entry.at,
       position: entry.position,
-      issueNumber: entry.issueNumber,
+      issueNumber: String(entry.issueNumber),
       title: entry.title,
       state: entry.state,
       messageId: entry.messageId,

@@ -78,8 +78,9 @@ test('a root-signed queue reorder verifies and replays in the submitted order', 
   const replayed = await verifyAndReplayOperationLog(log, anchor);
 
   // Neither ascending nor descending, so an implementation that sorted would fail here.
-  assert.deepEqual(replayed.queue, [3, 1, 4, 2]);
-  assert.deepEqual(replayed.board.issues.map((issue) => issue.number), [1, 2, 3, 4]);
+  // The wire payload carried numeric legacy ids; the model holds them as strings.
+  assert.deepEqual(replayed.queue, ['3', '1', '4', '2']);
+  assert.deepEqual(replayed.board.issues.map((issue) => issue.number), ['1', '2', '3', '4']);
 });
 
 test('replaying the same reordered log twice yields identical state including the queue', async () => {
@@ -90,7 +91,7 @@ test('replaying the same reordered log twice yields identical state including th
   const second = await verifyAndReplayOperationLog(clone(log), anchor);
 
   assert.deepEqual(second, first);
-  assert.deepEqual(first.queue, [2, 3, 1]);
+  assert.deepEqual(first.queue, ['2', '3', '1']);
 });
 
 test('the reordered queue survives a reload of the persisted log alone', async () => {
@@ -101,7 +102,7 @@ test('the reordered queue survives a reload of the persisted log alone', async (
   const persisted = JSON.parse(JSON.stringify(log));
   const reloaded = await verifyAndReplayOperationLog(persisted, anchor);
 
-  assert.deepEqual(reloaded.queue, [3, 2, 1]);
+  assert.deepEqual(reloaded.queue, ['3', '2', '1']);
   assert.equal(reloaded.head, log.head);
 });
 
@@ -111,7 +112,7 @@ test('a partial queue reorder is rejected and commits nothing', async () => {
 
   await assert.rejects(() => verifyAndReplayOperationLog(log, anchor), /every open issue exactly once/);
   const committed = await verifyAndReplayOperationLog(withoutLastOperation(log), anchor);
-  assert.deepEqual(committed.queue, [1, 2, 3, 4]);
+  assert.deepEqual(committed.queue, ['1', '2', '3', '4']);
 });
 
 test('a queue reorder with a duplicated issue cannot be signed at all', async () => {
@@ -125,7 +126,7 @@ test('a queue reorder with a duplicated issue cannot be signed at all', async ()
   );
   assert.equal(log.operations.length, 4);
   const committed = await verifyAndReplayOperationLog(log, anchor);
-  assert.deepEqual(committed.queue, [1, 2, 3]);
+  assert.deepEqual(committed.queue, ['1', '2', '3']);
 });
 
 test('a queue reorder naming a closed issue is rejected and commits nothing', async () => {
@@ -134,7 +135,7 @@ test('a queue reorder naming a closed issue is rejected and commits nothing', as
 
   await assert.rejects(() => verifyAndReplayOperationLog(log, anchor), /every open issue exactly once/);
   const committed = await verifyAndReplayOperationLog(withoutLastOperation(log), anchor);
-  assert.deepEqual(committed.queue, [1, 2, 3]);
+  assert.deepEqual(committed.queue, ['1', '2', '3']);
 });
 
 test('a queue reorder naming an issue the board never had is rejected and commits nothing', async () => {
@@ -143,7 +144,7 @@ test('a queue reorder naming an issue the board never had is rejected and commit
 
   await assert.rejects(() => verifyAndReplayOperationLog(log, anchor), /every open issue exactly once/);
   const committed = await verifyAndReplayOperationLog(withoutLastOperation(log), anchor);
-  assert.deepEqual(committed.queue, [1, 2, 3]);
+  assert.deepEqual(committed.queue, ['1', '2', '3']);
 });
 
 test('a queue reorder that drops an open issue while keeping the list length is rejected', async () => {
@@ -152,7 +153,7 @@ test('a queue reorder that drops an open issue while keeping the list length is 
 
   await assert.rejects(() => verifyAndReplayOperationLog(log, anchor), /every open issue exactly once/);
   const committed = await verifyAndReplayOperationLog(withoutLastOperation(log), anchor);
-  assert.deepEqual(committed.queue, [1, 2, 3, 4]);
+  assert.deepEqual(committed.queue, ['1', '2', '3', '4']);
 });
 
 test('an empty queue reorder is accepted for a board with no open issues', async () => {
@@ -174,7 +175,7 @@ test('any issued board key can reorder the queue', async () => {
   await append(log, editor, 'queue.reorder', { numbers: [2, 1] }, 4);
 
   const replayed = await verifyAndReplayOperationLog(log, anchor);
-  assert.deepEqual(replayed.queue, [2, 1]);
+  assert.deepEqual(replayed.queue, ['2', '1']);
 });
 
 test('a delegated credential holding queue.reorder can reorder the queue', async () => {
@@ -188,7 +189,7 @@ test('a delegated credential holding queue.reorder can reorder the queue', async
   await append(log, editor, 'queue.reorder', { numbers: [2, 1] }, 4);
 
   const replayed = await verifyAndReplayOperationLog(log, anchor);
-  assert.deepEqual(replayed.queue, [2, 1]);
+  assert.deepEqual(replayed.queue, ['2', '1']);
 });
 
 test('the queue follows the issue lifecycle, asserted after every step', async () => {
@@ -200,22 +201,22 @@ test('the queue follows the issue lifecycle, asserted after every step', async (
   await append(log, root, 'issue.create', { number: 1, title: 'One', body: '' }, 1);
   await append(log, root, 'issue.create', { number: 2, title: 'Two', body: '' }, 2);
   await append(log, root, 'issue.create', { number: 3, title: 'Three', body: '' }, 3);
-  assert.deepEqual(await at(), [1, 2, 3], 'create appends');
+  assert.deepEqual(await at(), ['1', '2', '3'], 'create appends');
 
   await append(log, root, 'queue.reorder', { numbers: [3, 1, 2] }, 4);
-  assert.deepEqual(await at(), [3, 1, 2], 'reorder replaces the whole queue');
+  assert.deepEqual(await at(), ['3', '1', '2'], 'reorder replaces the whole queue');
 
   await append(log, root, 'issue.close', { number: 1 }, 5);
-  assert.deepEqual(await at(), [3, 2], 'close removes the number');
+  assert.deepEqual(await at(), ['3', '2'], 'close removes the number');
 
   await append(log, root, 'issue.reopen', { number: 1 }, 6);
-  assert.deepEqual(await at(), [3, 2, 1], 'reopen re-adds the number');
+  assert.deepEqual(await at(), ['3', '2', '1'], 'reopen re-adds the number');
 
   await append(log, root, 'issue.delete', { number: 2 }, 7);
-  assert.deepEqual(await at(), [3, 1], 'delete removes the number');
+  assert.deepEqual(await at(), ['3', '1'], 'delete removes the number');
 
   await append(log, root, 'issue.create', { number: 4, title: 'Four', body: '' }, 8);
-  assert.deepEqual(await at(), [3, 1, 4], 'a later create appends to the reordered queue');
+  assert.deepEqual(await at(), ['3', '1', '4'], 'a later create appends to the reordered queue');
 });
 
 test('board initialization seeds the queue from the imported open issues in issue order', async () => {
@@ -239,7 +240,7 @@ test('board initialization seeds the queue from the imported open issues in issu
   }, 1);
 
   const replayed = await verifyAndReplayOperationLog(log, anchor);
-  assert.deepEqual(replayed.queue, [2, 3]);
+  assert.deepEqual(replayed.queue, ['2', '3']);
 });
 
 test('board deletion leaves the queue as it was and ends the history', async () => {
@@ -249,7 +250,7 @@ test('board deletion leaves the queue as it was and ends the history', async () 
 
   const deleted = await verifyAndReplayOperationLog(log, anchor);
   assert.equal(deleted.deleted, true);
-  assert.deepEqual(deleted.queue, [2, 1]);
+  assert.deepEqual(deleted.queue, ['2', '1']);
 });
 
 /** A well-formed signed `queue.reorder` operation, used only as a payload host. */
@@ -271,7 +272,7 @@ test('a queue reorder payload with a duplicated entry is refused by the parser',
 
   await assert.rejects(() => verifyAndReplayOperationLog(log, anchor), /Queue-reorder payload is malformed/);
   const committed = await verifyAndReplayOperationLog(withoutLastOperation(log), anchor);
-  assert.deepEqual(committed.queue, [1, 2]);
+  assert.deepEqual(committed.queue, ['1', '2']);
 });
 
 test('a queue reorder payload with a non-integer entry is refused by the parser', async () => {
@@ -279,7 +280,7 @@ test('a queue reorder payload with a non-integer entry is refused by the parser'
 
   await assert.rejects(() => verifyAndReplayOperationLog(log, anchor), /Queue-reorder payload is malformed/);
   const committed = await verifyAndReplayOperationLog(withoutLastOperation(log), anchor);
-  assert.deepEqual(committed.queue, [1, 2]);
+  assert.deepEqual(committed.queue, ['1', '2']);
 });
 
 test('a queue reorder payload with an unknown extra key is refused by the parser', async () => {
@@ -287,7 +288,7 @@ test('a queue reorder payload with an unknown extra key is refused by the parser
 
   await assert.rejects(() => verifyAndReplayOperationLog(log, anchor), /Queue-reorder payload is malformed/);
   const committed = await verifyAndReplayOperationLog(withoutLastOperation(log), anchor);
-  assert.deepEqual(committed.queue, [1, 2]);
+  assert.deepEqual(committed.queue, ['1', '2']);
 });
 
 test('a queue reorder payload that is missing its numbers key is refused by the parser', async () => {
@@ -295,7 +296,7 @@ test('a queue reorder payload that is missing its numbers key is refused by the 
 
   await assert.rejects(() => verifyAndReplayOperationLog(log, anchor), /Queue-reorder payload is malformed/);
   const committed = await verifyAndReplayOperationLog(withoutLastOperation(log), anchor);
-  assert.deepEqual(committed.queue, [1, 2]);
+  assert.deepEqual(committed.queue, ['1', '2']);
 });
 
 test('a queue reorder payload that is not an array is refused by the parser', async () => {
@@ -303,7 +304,7 @@ test('a queue reorder payload that is not an array is refused by the parser', as
 
   await assert.rejects(() => verifyAndReplayOperationLog(log, anchor), /Queue-reorder payload is malformed/);
   const committed = await verifyAndReplayOperationLog(withoutLastOperation(log), anchor);
-  assert.deepEqual(committed.queue, [1, 2]);
+  assert.deepEqual(committed.queue, ['1', '2']);
 });
 
 test('the queue reorder payload parser accepts a whole-list permutation of open issue numbers', async () => {
@@ -313,16 +314,18 @@ test('the queue reorder payload parser accepts a whole-list permutation of open 
   const parsed = parseSignedBoardOperation(JSON.parse(JSON.stringify(operation)));
   assert.deepEqual(parsed.payload, { numbers: [3, 2, 1] });
   const replayed = await verifyAndReplayOperationLog(log, anchor);
-  assert.deepEqual(replayed.queue, [3, 2, 1]);
+  assert.deepEqual(replayed.queue, ['3', '2', '1']);
 });
 
-test('the queue reorder payload parser refuses every number that is not a positive safe integer', async () => {
+test('the queue reorder payload parser refuses every entry that is neither a positive safe integer nor a non-empty string', async () => {
   const { root } = await initialized();
   const host = await signedReorder(root, 1);
   const wire = JSON.parse(JSON.stringify(host));
 
   // Hostile values that JSON can still carry, none of which may reach the queue.
-  const hostile = [0, -1, 1.5, 1e21, '1', Number.MAX_SAFE_INTEGER + 1, null, true];
+  // A string entry is a valid wire id now, so it is not hostile; an empty string
+  // still is, because an empty id names no issue.
+  const hostile = [0, -1, 1.5, 1e21, '', Number.MAX_SAFE_INTEGER + 1, null, true, {}, []];
 
   for (const value of hostile) {
     const carried = JSON.parse(JSON.stringify(value));
@@ -333,6 +336,10 @@ test('the queue reorder payload parser refuses every number that is not a positi
     );
   }
 
-  const accepted = parseSignedBoardOperation({ ...wire, payload: { numbers: [2, 1] } });
-  assert.deepEqual(accepted.payload, { numbers: [2, 1] });
+  // Both wire id shapes are accepted: the numeric historical form and the
+  // opaque string form. The wire keeps each exactly as signed.
+  const numeric = parseSignedBoardOperation({ ...wire, payload: { numbers: [2, 1] } });
+  assert.deepEqual(numeric.payload, { numbers: [2, 1] });
+  const opaque = parseSignedBoardOperation({ ...wire, payload: { numbers: ['2', '1'] } });
+  assert.deepEqual(opaque.payload, { numbers: ['2', '1'] });
 });

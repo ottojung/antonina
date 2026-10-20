@@ -61,7 +61,7 @@ async function boardWithComments(count) {
     schemaVersion: 4,
     nextIssueNumber: 2,
     issues: [{
-      number: 1,
+      number: '1',
       title: 'Long conversation',
       body: 'the description',
       state: 'open',
@@ -76,11 +76,11 @@ async function boardWithComments(count) {
 
 test('a bounded comment page reads a bounded number of comment shards, not the whole thread', async () => {
   const { server, store, initialized } = await boardWithComments(120);
-  const shards = commentShardKeys(server, 1);
+  const shards = commentShardKeys(server, '1');
   assert.equal(shards.size, 3, '120 comments are stored as three 50-message shards');
 
   server.clearRequests();
-  const page = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  const page = await store.readIssueCommentPage(initialized.credential, '1', 1);
   const read = commentShardReads(server, shards);
 
   assert.equal(page.total, 120);
@@ -105,7 +105,7 @@ test('a bounded comment page reads a bounded number of comment shards, not the w
 
   // The issue's own shard is read for the core fields, and no comment shard
   // other than the requested window is touched at all.
-  const issueKeys = issueShardKeys(server, 1);
+  const issueKeys = issueShardKeys(server, '1');
   assert.equal(issueKeys.size, 1);
   assert.equal(server.requests.filter((request) => request.method === 'GET' && issueKeys.has(request.key)).length, 1);
   assert.equal(page.issue.messages.length, 0, 'the issue core carries no messages with it');
@@ -115,14 +115,14 @@ test('a bounded comment page reads a bounded number of comment shards, not the w
 
 test('a comment page aligned with a shard boundary still fetches exactly one', async () => {
   const { server, store, initialized } = await boardWithComments(120);
-  const shards = commentShardKeys(server, 1);
+  const shards = commentShardKeys(server, '1');
 
   // Not every page straddles. Page 3 of a 120-comment thread is the oldest
   // window and falls entirely inside the first shard, so the boundedness claim
   // is not "always one" and not "always two" but a ceiling -- and the ceiling
   // has to be observed, not assumed.
   server.clearRequests();
-  const page = await store.readIssueCommentPage(initialized.credential, 1, 3);
+  const page = await store.readIssueCommentPage(initialized.credential, '1', 3);
   const read = commentShardReads(server, shards);
 
   assert.equal(page.messages.length, 20);
@@ -133,10 +133,10 @@ test('a comment page aligned with a shard boundary still fetches exactly one', a
 
 test('the whole-thread read is what the fan-out costs, for contrast', async () => {
   const { server, store, initialized } = await boardWithComments(120);
-  const shards = commentShardKeys(server, 1);
+  const shards = commentShardKeys(server, '1');
 
   server.clearRequests();
-  const issue = await store.getIssue(initialized.credential, 1);
+  const issue = await store.getIssue(initialized.credential, '1');
 
   assert.equal(issue.messages.length, 120);
   assert.equal(commentShardReads(server, shards).length, 3, 'getIssue still reassembles every shard');
@@ -144,10 +144,10 @@ test('the whole-thread read is what the fan-out costs, for contrast', async () =
 
 test('a page past the end of the thread fetches no comment shard at all', async () => {
   const { server, store, initialized } = await boardWithComments(120);
-  const shards = commentShardKeys(server, 1);
+  const shards = commentShardKeys(server, '1');
 
   server.clearRequests();
-  const page = await store.readIssueCommentPage(initialized.credential, 1, 4);
+  const page = await store.readIssueCommentPage(initialized.credential, '1', 4);
 
   assert.equal(page.messages.length, 0);
   assert.equal(page.total, 120);
@@ -161,11 +161,11 @@ test('a page past the end of the thread fetches no comment shard at all', async 
 
 test('an issue with no comments needs no shard read for its only page', async () => {
   const { server, store, initialized } = await boardWithComments(0);
-  const shards = commentShardKeys(server, 1);
+  const shards = commentShardKeys(server, '1');
   assert.equal(shards.size, 0);
 
   server.clearRequests();
-  const page = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  const page = await store.readIssueCommentPage(initialized.credential, '1', 1);
 
   assert.equal(page.messages.length, 0);
   assert.equal(page.total, 0);
@@ -183,7 +183,7 @@ test('paging the whole thread backward reproduces the stored message order exact
   // than flipping it.
   const pages = [];
   for (let page = 1; page <= 3; page += 1) {
-    const read = await store.readIssueCommentPage(initialized.credential, 1, page);
+    const read = await store.readIssueCommentPage(initialized.credential, '1', page);
     assert.equal(read.messages.length, page === 3 ? 20 : 50);
     pages.push(read.messages.map((message) => message.body));
   }
@@ -196,14 +196,14 @@ test('a new comment lands on page 1, and the page before it is unchanged by that
 
   await store.append(initialized.credential, {
     kind: 'issue.comment',
-    payload: { number: 1, author: 'poster', body: 'the newest comment' },
+    payload: { number: '1', author: 'poster', body: 'the newest comment' },
   });
 
   // Board issue 206: a comment is appended to the newest end, and page 1 is the
   // newest window, so a reader on page 1 sees their own post without paging.
   // Under oldest-first numbering this post landed on the last page and the
   // reader had to page forward twice to find it.
-  const first = await store.readIssueCommentPage(initialized.credential, 1, 1);
+  const first = await store.readIssueCommentPage(initialized.credential, '1', 1);
   assert.equal(first.total, 121);
   assert.equal(first.pageCount, 3);
   assert.equal(first.messages.length, 50);
@@ -212,7 +212,7 @@ test('a new comment lands on page 1, and the page before it is unchanged by that
 
   // The newest page before it is unchanged by that post, which is what makes the
   // ordering across pages stable rather than shifted.
-  const second = await store.readIssueCommentPage(initialized.credential, 1, 2);
+  const second = await store.readIssueCommentPage(initialized.credential, '1', 2);
   assert.equal(second.total, 121);
   assert.equal(second.messages.length, 50);
   assert.equal(second.messages[0].body, 'message 22');
@@ -222,13 +222,13 @@ test('a new comment lands on page 1, and the page before it is unchanged by that
 test('a bounded read of an issue the board does not hold is null, as getIssue is', async () => {
   const { store, initialized } = await boardWithComments(3);
 
-  assert.equal(await store.readIssueCommentPage(initialized.credential, 99, 1), null);
-  assert.equal(await store.getIssue(initialized.credential, 99), null);
+  assert.equal(await store.readIssueCommentPage(initialized.credential, '99', 1), null);
+  assert.equal(await store.getIssue(initialized.credential, '99'), null);
 });
 
 test('a comment page must be a positive integer', async () => {
   const { store, initialized } = await boardWithComments(3);
 
-  await assert.rejects(() => store.readIssueCommentPage(initialized.credential, 1, 0), /positive integer/);
-  await assert.rejects(() => store.readIssueCommentPage(initialized.credential, 1, 1.5), /positive integer/);
+  await assert.rejects(() => store.readIssueCommentPage(initialized.credential, '1', 0), /positive integer/);
+  await assert.rejects(() => store.readIssueCommentPage(initialized.credential, '1', 1.5), /positive integer/);
 });

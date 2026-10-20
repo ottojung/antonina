@@ -76,7 +76,7 @@ test('concurrent writers converge through the one pointer CAS without losing eit
   assert.ok(committed);
   assert.deepEqual(
     committed.state.board.issues.map((issue) => issue.number),
-    [1, 2],
+    ['1', '2'],
   );
   assert.deepEqual(
     new Set(committed.state.board.issues.map((issue) => issue.title)),

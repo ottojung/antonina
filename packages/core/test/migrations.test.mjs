@@ -658,7 +658,7 @@ function expectedMigratedBoard() {
     nextIssueNumber: 7,
     issues: [
       {
-        number: 1,
+        number: '1',
         title: 'Migrate the persisted board format',
         body: 'Signed by 0.1.0, edited by 0.1.0, and never rewritten since.',
         state: 'open',
@@ -680,7 +680,7 @@ function expectedMigratedBoard() {
         ],
       },
       {
-        number: 2,
+        number: '2',
         title: 'Collect the finished archive',
         body: 'Closed before the signing that carries it.',
         state: 'closed',
@@ -694,7 +694,7 @@ function expectedMigratedBoard() {
         }],
       },
       {
-        number: 3,
+        number: '3',
         title: 'Rehearse the reopen path',
         body: 'Closed and reopened by the operations below.',
         state: 'open',
@@ -703,7 +703,7 @@ function expectedMigratedBoard() {
         messages: [],
       },
       {
-        number: 4,
+        number: '4',
         title: 'Write the migration fixtures',
         body: 'This board is one of them.',
         state: 'open',
@@ -712,7 +712,7 @@ function expectedMigratedBoard() {
         messages: [],
       },
       {
-        number: 5,
+        number: '5',
         title: 'Collect from the closed issue',
         body: 'Created by a delegated key.',
         state: 'open',
@@ -721,7 +721,7 @@ function expectedMigratedBoard() {
         messages: [],
       },
       {
-        number: 6,
+        number: '6',
         title: 'After the revocation',
         body: 'Root-signed tail.',
         state: 'open',
@@ -734,7 +734,7 @@ function expectedMigratedBoard() {
       {
         host: 'lubko://gpu-01',
         path: '/srv/work',
-        issueNumbers: [1, 3, 5],
+        issueNumbers: ['1', '3', '5'],
         createdAt: '2026-09-20T09:06:00.000Z',
         updatedAt: '2026-09-20T09:08:00.000Z',
       },
@@ -750,7 +750,7 @@ test('the real 0.1.0 board opens through the gate and migrates to exactly the ex
     throughVersions: versionsSteppedThrough(legacy),
   });
   assert.deepEqual(state.board, expectedMigratedBoard());
-  assert.deepEqual(state.queue, [5, 1, 3, 4, 6]);
+  assert.deepEqual(state.queue, ['5', '1', '3', '4', '6']);
   assert.deepEqual(
     state.authorities.map((authority) => [authority.keyId, authority.revoked]),
     [[ROOT_KEY.keyId, false], ['ed25519:Vp2GP2F7SOLExy7wSO_56Z0FcZuyCyve-CgikP1aC44', true]],
@@ -769,7 +769,7 @@ test('the migrated board reads through the public model, and reads deterministic
   ]);
   assert.equal(Object.hasOwn(board, 'targets'), false);
   assert.equal(Object.hasOwn(board, 'dispatches'), false);
-  assert.deepEqual(board.issues.map((issue) => issue.number), [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(board.issues.map((issue) => issue.number), ['1', '2', '3', '4', '5', '6']);
 });
 
 test('the legacy signed representation is verified exactly as persisted, byte for byte', async () => {
@@ -927,15 +927,15 @@ test('a migrated board accepts writes, and those writes survive a reopen', async
   // alone, so the ordinary path for it is the credential read.
   const reread = await store.readWithCredential(credential);
   assert.notEqual(reread, null);
-  const issue = reread.state.board.issues.find((candidate) => candidate.number === 7);
+  const issue = reread.state.board.issues.find((candidate) => candidate.number === '7');
   assert.equal(issue.title, 'Written after migration');
   assert.equal(issue.state, 'open');
   assert.deepEqual(issue.messages.map((message) => message.body), ['comment on a migrated board']);
   assert.deepEqual(
     reread.state.board.resources.map((resource) => [resource.host, resource.path, resource.issueNumbers]),
     [
-      ['lubko://gpu-01', '/srv/work', [1, 3, 5]],
-      ['lubko://gpu-02', '/srv/after', [7]],
+      ['lubko://gpu-01', '/srv/work', ['1', '3', '5']],
+      ['lubko://gpu-02', '/srv/after', ['7']],
     ],
   );
 

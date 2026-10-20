@@ -203,7 +203,7 @@ test('a board written before lastActivityAt existed keeps its recorded activity 
   });
 
   const afterWrite = (await allOpenSummaries(store, initialized.credential)).flat();
-  const issue2 = afterWrite.find((summary) => summary.number === 2);
+  const issue2 = afterWrite.find((summary) => summary.number === '2');
   assert.ok(issue2);
   assert.equal(
     issue2.lastActivityAt,
@@ -227,7 +227,7 @@ test('a board written before lastActivityAt existed keeps its recorded activity 
     afterWrite.filter((summary) => Object.hasOwn(summary, 'lastActivityAt'))
       .map((summary) => summary.number)
       .sort((left, right) => left - right),
-    [1],
+    ['1'],
   );
 
   // Rewriting the issue's own thread is where the true time is known, so that is
@@ -237,7 +237,7 @@ test('a board written before lastActivityAt existed keeps its recorded activity 
     payload: { number: 2, author: 'tester', body: 'answering the comment' },
   });
   const recovered = (await allOpenSummaries(store, initialized.credential)).flat();
-  assert.equal(recovered.find((summary) => summary.number === 2).lastActivityAt, COMMENTED);
+  assert.equal(recovered.find((summary) => summary.number === '2').lastActivityAt, COMMENTED);
 });
 
 test('an issue with no recorded activity orders by the documented fallback, deterministically', async () => {
@@ -252,17 +252,17 @@ test('an issue with no recorded activity orders by the documented fallback, dete
 
   const expected = [...summaries]
     .sort((left, right) => issueLastActivityOf(right).localeCompare(issueLastActivityOf(left))
-      || right.number - left.number)
+      || right.number.localeCompare(left.number))
     .map((summary) => summary.number);
 
   assert.deepEqual(activityOrder(summaries), expected);
   // Not the number order, not the queue order: the fallback is what decides.
-  assert.notDeepEqual(expected, [...summaries].sort((left, right) => left.number - right.number).map((s) => s.number));
+  assert.notDeepEqual(expected, [...summaries].sort((left, right) => left.number.localeCompare(right.number)).map((s) => s.number));
   // Issues 4 and 5 share a creation time and have no activity, so only the
   // documented tie-break can separate them, and it must be the higher number
   // first rather than input order.
   const shared = activityOrder(summaries);
-  assert.ok(shared.indexOf(5) < shared.indexOf(4));
+  assert.ok(shared.indexOf('5') < shared.indexOf('4'));
 
   // Determinism across repeated reads of the same snapshot.
   const second = (await allOpenSummaries(store, initialized.credential)).flat();

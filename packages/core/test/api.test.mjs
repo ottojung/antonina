@@ -55,8 +55,8 @@ test('explicit initialization establishes trust, credential, and verified editin
   assert.equal(await client.signedBoardExists(), true);
 
   const created = await client.createIssue('First', 'signed board');
-  assert.equal(created.number, 1);
-  const commented = await client.comment(1, 'root', 'hello');
+  assert.match(created.number, /^[0-9A-Za-z]{22}-[a-z]+$/);
+  const commented = await client.comment(created.number, 'root', 'hello');
   assert.equal(commented.messages[0].body, 'hello');
   assert.ok(client.getRememberedHead());
 });
@@ -359,15 +359,15 @@ test('reorderQueue commits the requested order and getQueue reads it back', asyn
   const server = fakeSkrynia();
   const client = api(server);
   await client.initialize();
-  await client.createIssue('One');
-  await client.createIssue('Two');
-  await client.createIssue('Three');
+  const one = (await client.createIssue('One')).number;
+  const two = (await client.createIssue('Two')).number;
+  const three = (await client.createIssue('Three')).number;
   const before = server.signed.revision;
 
-  const committed = await client.reorderQueue([3, 1, 2]);
+  const committed = await client.reorderQueue([three, one, two]);
 
-  assert.deepEqual(committed, [3, 1, 2]);
-  assert.deepEqual(await client.getQueue(), [3, 1, 2]);
+  assert.deepEqual(committed, [three, one, two]);
+  assert.deepEqual(await client.getQueue(), [three, one, two]);
   assert.equal(server.signed.revision, before + 1);
 });
 
@@ -375,12 +375,12 @@ test('a reordered queue is durable for a fresh client holding the board key', as
   const server = fakeSkrynia();
   const writer = api(server);
   const initialized = await writer.initialize();
-  await writer.createIssue('One');
-  await writer.createIssue('Two');
-  await writer.reorderQueue([2, 1]);
+  const one = (await writer.createIssue('One')).number;
+  const two = (await writer.createIssue('Two')).number;
+  await writer.reorderQueue([two, one]);
 
   const fresh = api(server, { credential: initialized.credential });
-  assert.deepEqual(await fresh.getQueue(), [2, 1]);
+  assert.deepEqual(await fresh.getQueue(), [two, one]);
   assert.equal(fresh.hasWriteAccess(), true);
 });
 
@@ -391,21 +391,21 @@ test('a rejected queue permutation leaves the stored log and the queue unchanged
     fetch: async (url, init = {}) => { methods.push(init.method ?? 'GET'); return server.fetch(url, init); },
   });
   await client.initialize();
-  await client.createIssue('One');
-  await client.createIssue('Two');
-  await client.reorderQueue([2, 1]);
+  const one = (await client.createIssue('One')).number;
+  const two = (await client.createIssue('Two')).number;
+  await client.reorderQueue([two, one]);
   const stored = structuredClone(server.signed);
 
   // A partial list and an unknown number fail the open-issue invariant; a
   // duplicated one is refused earlier, by the payload parser.
   for (const [invalid, refusal] of [
-    [[1], /every open issue exactly once/],
-    [[2, 1, 1], /Queue-reorder payload is malformed/],
-    [[1, 99], /every open issue exactly once/],
+    [[one], /every open issue exactly once/],
+    [[two, one, one], /Queue-reorder payload is malformed/],
+    [[one, 'no-such-issue'], /every open issue exactly once/],
   ]) {
     await assert.rejects(() => client.reorderQueue(invalid), refusal);
     assert.deepEqual(server.signed, stored, 'a rejected permutation must not change board content');
-    assert.deepEqual(await client.getQueue(), [2, 1]);
+    assert.deepEqual(await client.getQueue(), [two, one]);
   }
   assert.equal(methods.includes('PUT'), true, 'the accepted reorder did commit the pointer');
   assert.deepEqual(server.signed, stored);
@@ -415,8 +415,8 @@ test('an existing issued key can reorder regardless of its old capability list',
   const server = fakeSkrynia();
   const root = api(server);
   const initialized = await root.initialize();
-  await root.createIssue('One');
-  await root.createIssue('Two');
+  const one = (await root.createIssue('One')).number;
+  const two = (await root.createIssue('Two')).number;
   const child = await anotherCredentialWithSameBoardKey(initialized);
 
   const delegated = api(server, {
@@ -424,17 +424,17 @@ test('an existing issued key can reorder regardless of its old capability list',
     trustAnchor: initialized.trustAnchor,
     rememberedHead: root.getRememberedHead(),
   });
-  assert.deepEqual(await delegated.reorderQueue([2, 1]), [2, 1]);
-  assert.deepEqual(await delegated.getQueue(), [2, 1]);
+  assert.deepEqual(await delegated.reorderQueue([two, one]), [two, one]);
+  assert.deepEqual(await delegated.getQueue(), [two, one]);
 });
 
 test('a queue reorder survives the ETag conflict of a concurrent valid writer', async () => {
   const server = fakeSkrynia();
   const root = api(server);
   const initialized = await root.initialize();
-  await root.createIssue('One');
-  await root.createIssue('Two');
-  await root.createIssue('Three');
+  const one = (await root.createIssue('One')).number;
+  const two = (await root.createIssue('Two')).number;
+  const three = (await root.createIssue('Three')).number;
   const revisionBefore = server.signed.revision;
 
   const rival = api(server, {
@@ -444,14 +444,14 @@ test('a queue reorder survives the ETag conflict of a concurrent valid writer', 
   });
   // The rival commits a comment between this client's read and its write, so the
   // first PUT is refused with 412 and the reorder has to converge on retry.
-  server.beforePut = async () => { await rival.comment(1, 'rival', 'racing'); };
+  server.beforePut = async () => { await rival.comment(one, 'rival', 'racing'); };
 
-  const committed = await root.reorderQueue([3, 1, 2]);
+  const committed = await root.reorderQueue([three, one, two]);
 
-  assert.deepEqual(committed, [3, 1, 2]);
-  assert.deepEqual(await root.getQueue(), [3, 1, 2]);
+  assert.deepEqual(committed, [three, one, two]);
+  assert.deepEqual(await root.getQueue(), [three, one, two]);
   assert.equal(server.signed.revision, revisionBefore + 2, 'the rival and the retry both committed');
-  const issue = await root.getIssue(1);
+  const issue = await root.getIssue(one);
   assert.equal(issue.messages.at(-1)?.body, 'racing');
 });
 

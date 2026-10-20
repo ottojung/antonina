@@ -173,8 +173,8 @@ test('a populated v3 board migrates to the current version through the gate, dro
   assert.equal(Object.hasOwn(migrated.board, 'targets'), false);
   assert.equal(Object.hasOwn(migrated.board, 'dispatches'), false);
   // Unrelated data is carried across byte for byte, including the raw catalog.
-  assert.deepEqual(migrated.board.issues, board.issues);
-  assert.deepEqual(migrated.board.resources, board.resources);
+  assert.deepEqual(migrated.board.issues, board.issues.map(issue => ({ ...issue, number: String(issue.number) })));
+  assert.deepEqual(migrated.board.resources, board.resources.map(resource => ({ ...resource, issueNumbers: resource.issueNumbers.map(String) })));
   assert.equal(migrated.board.nextIssueNumber, board.nextIssueNumber);
 });
 

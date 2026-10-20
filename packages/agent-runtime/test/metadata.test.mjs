@@ -217,7 +217,7 @@ test('a record may omit opencode_db, but a present one must be an agent-id-shape
   assert.equal(persistedOpencodeDbKey(absent), null);
   assert.equal(persistedOpencodeDbKey({ ...base, opencode_db: null }), null);
 
-  for (const malformed of [42, 'A11D', 'not an id', '', {}, []]) {
+  for (const malformed of [42, 'not an id', 'bad.path', '', {}, []]) {
     assert.equal(persistedOpencodeDbKey({ ...base, opencode_db: malformed }), null);
     assert.throws(
       () => validateAgentMetadata({ ...base, opencode_db: malformed }),

@@ -99,29 +99,28 @@ test('environment markers are exact NUL-delimited entries', (t) => {
 });
 
 test('persisted authority validators do not normalize durable values', () => {
-  assert.equal(normalizeAgentId(' A1B2 '), 'a1b2');
+  assert.equal(normalizeAgentId(' A1B2 '), 'A1B2');
   assert.equal(persistedAgentId('a1b2'), 'a1b2');
-  for (const value of ['A1B2', '', 'not-hex', 123, true]) assert.equal(persistedAgentId(value), null);
+  for (const value of ['', 'a/b', 'a.b', 'has space', 123, true]) assert.equal(persistedAgentId(value), null);
   assert.equal(persistedInvocationId('a'.repeat(32)), 'a'.repeat(32));
   assert.equal(persistedInvocationId('g'.repeat(32)), null);
   assert.equal(persistedProcessInteger(123, 1), 123);
   for (const value of [0, -1, 1.5, '123', true]) assert.equal(persistedProcessInteger(value, 1), null);
 });
 
-test('agent ids accept both generated entity ids and legacy hex', () => {
-  // Board issue 320: the new id space is case-sensitive opaque tokens, while
-  // the legacy hex space stays case-insensitive and lowercases.
+test('agent ID consumers preserve filesystem-safe opaque strings verbatim', () => {
   const generated = newEntityId();
-  assert.equal(normalizeAgentId(generated), generated, 'a generated id is returned unchanged');
-  assert.equal(persistedAgentId(generated), generated, 'a generated id is canonical as written');
-  assert.equal(normalizeAgentId(`  ${generated}  `), generated, 'surrounding whitespace is trimmed');
-  // A generated id is not lowercased into a different id.
-  assert.notEqual(normalizeAgentId(generated.toLowerCase()), generated);
-  // Legacy hex is unchanged: case-insensitive at the boundary, lowercase on disk.
-  assert.equal(normalizeAgentId(' A1B2 '), 'a1b2');
-  assert.equal(persistedAgentId('a1b2'), 'a1b2');
-  assert.equal(persistedAgentId('A1B2'), null);
-  for (const value of ['', 'not-an-id', 'a'.repeat(22) + '-Word', 123, true, null]) {
+  assert.equal(normalizeAgentId(generated), generated);
+  assert.equal(persistedAgentId(generated), generated);
+  assert.equal(normalizeAgentId('  ' + generated + '  '), generated);
+  assert.equal(normalizeAgentId(generated.toLowerCase()), generated.toLowerCase());
+  assert.equal(normalizeAgentId(' A1B2 '), 'A1B2');
+  assert.equal(persistedAgentId('A1B2'), 'A1B2');
+  for (const value of ['a1b2', 'not-an-id', 'arbitrary_word', 'A1B2']) {
+    assert.equal(normalizeAgentId(value), value);
+    assert.equal(persistedAgentId(value), value);
+  }
+  for (const value of ['', ' ', 'a.b', '..', '../escape', 'a/b', 'a\\b', 'has space', 123, true, null]) {
     assert.equal(persistedAgentId(value), null);
   }
 });

@@ -53,7 +53,7 @@ export interface BoardFeedEntry {
    * migration, so they remain a unique ordering key without a live log.
    */
   position: number;
-  issueNumber: number;
+  issueNumber: string;
   /**
    * The issue's title as of this operation: what a create or a title edit set,
    * otherwise the title in force when the operation was committed.
@@ -141,7 +141,7 @@ function entryOf(
   operation: SignedBoardOperation,
   position: number,
   kind: BoardFeedEntryKind,
-  issueNumber: number,
+  issueNumber: string,
   title: string,
   state: IssueState,
   comment: IssueCommentPayload | null = null,
@@ -181,43 +181,43 @@ interface IssueHistory {
  * would assert something no operation says.
  */
 export function feedEntries(log: BoardOperationLog): BoardFeedEntry[] {
-  const histories = new Map<number, IssueHistory>();
+  const histories = new Map<string, IssueHistory>();
   const entries: BoardFeedEntry[] = [];
   for (const [position, operation] of log.operations.entries()) {
     switch (operation.kind) {
       case 'issue.create': {
         const payload = operation.payload as IssueCreatePayload;
         const history = { title: payload.title, state: 'open' as IssueState };
-        histories.set(payload.number, history);
-        entries.push(entryOf(operation, position, 'issue-created', payload.number, history.title, history.state));
+        histories.set(String(payload.number), history);
+        entries.push(entryOf(operation, position, 'issue-created', String(payload.number), history.title, history.state));
         break;
       }
       case 'issue.edit': {
         const payload = operation.payload as IssueEditPayload;
-        const history = histories.get(payload.number);
+        const history = histories.get(String(payload.number));
         if (history === undefined) break;
         if (payload.title !== null) history.title = payload.title;
-        entries.push(entryOf(operation, position, 'issue-edited', payload.number, history.title, history.state));
+        entries.push(entryOf(operation, position, 'issue-edited', String(payload.number), history.title, history.state));
         break;
       }
       case 'issue.comment': {
         const payload = operation.payload as IssueCommentPayload;
-        const history = histories.get(payload.number);
+        const history = histories.get(String(payload.number));
         if (history === undefined) break;
-        entries.push(entryOf(operation, position, 'comment-added', payload.number, history.title, history.state, payload));
+        entries.push(entryOf(operation, position, 'comment-added', String(payload.number), history.title, history.state, payload));
         break;
       }
       case 'issue.close':
       case 'issue.reopen': {
         const payload = operation.payload as IssueReferencePayload;
-        const history = histories.get(payload.number);
+        const history = histories.get(String(payload.number));
         if (history === undefined) break;
         history.state = operation.kind === 'issue.close' ? 'closed' : 'open';
         entries.push(entryOf(
           operation,
           position,
           operation.kind === 'issue.close' ? 'issue-closed' : 'issue-reopened',
-          payload.number,
+          String(payload.number),
           history.title,
           history.state,
         ));
@@ -225,12 +225,12 @@ export function feedEntries(log: BoardOperationLog): BoardFeedEntry[] {
       }
       case 'issue.delete': {
         const payload = operation.payload as IssueReferencePayload;
-        const history = histories.get(payload.number);
+        const history = histories.get(String(payload.number));
         if (history === undefined) break;
         // The title and the state in force at the deletion are what the entry
         // reports; nothing can happen to the issue afterwards.
-        entries.push(entryOf(operation, position, 'issue-deleted', payload.number, history.title, history.state));
-        histories.delete(payload.number);
+        entries.push(entryOf(operation, position, 'issue-deleted', String(payload.number), history.title, history.state));
+        histories.delete(String(payload.number));
         break;
       }
       default:

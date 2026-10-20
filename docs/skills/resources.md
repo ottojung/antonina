@@ -2,7 +2,7 @@
 
 Use this skill when scheduled or agentic work creates, uses, or hands off a durable host filesystem location. A resource is a host and canonical absolute POSIX path, such as `lubko://example-host` plus `/workspace/project-worktree`; the path may be a file or directory.
 
-Resource registration is dependency and liveness metadata, not exclusive ownership or a lock. Multiple open Antonina issues may depend on one resource. Every issue identifier in these commands is an **Antonina BOARD issue ID** (an opaque string, including legacy digit-only IDs), never a GitHub issue number.
+Resource registration is dependency and liveness metadata, not exclusive ownership or a lock. Multiple open Antonina issues may depend on one resource. Every issue identifier in these commands is an **Antonina BOARD issue ID** (one exact, case-sensitive opaque string, including legacy digit-only IDs), never a GitHub issue number. Do not cast it to a number or parse any part of the ID. Resource dependencies reference exactly this issue identity, not an internal numeric surrogate.
 
 ## Paging contract
 

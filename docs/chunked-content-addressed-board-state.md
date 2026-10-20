@@ -1,6 +1,6 @@
 # Chunked content-addressed board state for bounded lazy loading
 
-- **Status:** Proposed (design only; nothing here is implemented)
+- **Status:** Historical proposal; not the currently deployed storage/identifier contract
 - **Date:** 2026-09-27
 - **Related issue:** #70
 - **Base commit:** `0c96127`, which was `origin/main` when this document was
@@ -10,6 +10,8 @@
 - **Related issue:** #73 (migration framework) — see §7 and §8, this document
   is written to be consistent with its stated security constraint and says so
   where it is not.
+
+**Further historical distinction (issue #320):** This proposal also predates opaque string issue identities. Any integer issue-number arithmetic in the sections below describes the 2026-09-27 design only. The live issue ID is one opaque string (old digit-only values included); no consumer should parse its shape or derive a storage page from its spelling. See `docs/intent-records/identifiers.md` and `README.md` for the current contract.
 
 **Superseded by a later schema change.** This design predates the removal of the
 execution-target abstraction (board issue #304). The persisted board schema no

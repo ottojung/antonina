@@ -66,10 +66,9 @@ export interface BoardUrlState {
   /**
    * The open issue whose thread is shown, or `undefined` for the list alone.
    *
-   * An issue id is an opaque public string: a minted id (22 base62 characters,
-   * a hyphen, a lowercase word) or a legacy issue's decimal number as a string.
-   * The URL carries that id verbatim, so a minted issue is addressable and a
-   * legacy link still opens.
+   * An issue ID is an opaque public string. The URL carries it verbatim,
+   * regardless of when it was issued; parsing the generator's shape or
+   * distinguishing legacy-looking IDs is not a consumer responsibility.
    */
   selectedId: string | undefined;
   filter: IssueFilter;

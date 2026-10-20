@@ -1,6 +1,6 @@
 # TypeScript migration completion record
 
-Issue #28 replaced Antonina's Python production stack with one TypeScript/Node.js implementation. The migration is complete when this document is read on the cutover branch: Python source, Python packaging, Python CI, and the duplicate Python test suite have been removed.
+Issue #28 replaced Antonina's Python production stack with one TypeScript/Node.js implementation. This is a historical cutover inventory, not a claim that every interface remains unchanged. **Current post-issue-320 contract:** board issue IDs and managed-agent IDs are single, case-sensitive, opaque strings. The shared generator chooses a random 22-character base62 prefix and an independently random word for new identities. Legacy digit-only issue IDs are converted to strings when old persisted data is read; old signed operation bytes are still verified unchanged. There is no caller-chosen agent ID or second internal numeric issue identity. See `docs/intent-records/identifiers.md`.
 
 ## Canonical runtime
 
@@ -11,13 +11,13 @@ The supported command namespaces are:
 - `antonina agent ...`: `new`, `list`, `status`, `run`, `log`, `wait`, `stop`, `kill`, `delete`, and `clean`;
 - `antonina board ...`: `list`, `show`, `create`, `edit`, `comment`, `close`, `reopen`, and resource operations.
 
-`_runner` is an implementation-private entry point. Public CLI syntax reserves positional words for command/subcommand selection only. Every data argument is a named `--option`, and every public command level supports both `-h` and `--help`. Board issue numbers are returned by `board create`; callers do not assign them.
+`_runner` is an implementation-private entry point. Public CLI syntax reserves positional words for command/subcommand selection only. Every data argument is a named `--option`, and every public command level supports both `-h` and `--help`. Board issue IDs are generated and returned by `board create` as strings; callers do not assign them. The issue model's `number` property is the *string ID* despite its historical name.
 
 ## Shared board contract
 
 `packages/core` is the authoritative board/domain implementation consumed by both the CLI and web application. Live board state is stored as materialized snapshots split across Skrynia keys: paged issue summaries, per-issue bodies and comment pages, queue, catalog, feed, directories, and metadata. The one shared board credential supplies the board-wide storage key, and mutations commit atomically by CAS-updating the small board pointer. Normal v3 reads and writes do not replay history; the old signed board-v2 log is retained only as a one-time migration input for existing boards.
 
-Important invariants include strict schema parsing, JavaScript-safe issue counters, chronological messages, canonical resource identities, existing-issue dependency checks, summary-only list reads, localized issue mutation reads, and ETag-based mutation retries after HTTP 412.
+Important current invariants include strict schema parsing, opaque string issue IDs and queue/resource references, exact verification of legacy signed numeric wire data before conversion to strings, chronological messages, canonical resource identities, existing-issue dependency checks, summary-only list reads, localized issue mutation reads, and ETag-based mutation retries after HTTP 412. Historical `nextIssueNumber` fields are compatibility metadata, never the identity allocator for new issues.
 
 ## Managed-agent runtime contract
 
@@ -27,7 +27,7 @@ Durable state lives under `$XDG_STATE_HOME/antonina`, falling back to `$HOME/.lo
 
 The runtime preserves the important high-level lifecycle invariants from the retired implementation:
 
-- caller-supplied hexadecimal IDs are canonicalized to lowercase at input boundaries;
+- Antonina generates IDs when creating agents; existing and generated IDs are preserved exactly as supplied in references, with no case normalization or format-dependent consumer logic;
 - accepted prompts, runner generations/reservations, FIFO steers, deletion tombstones, and terminal states are persisted;
 - the first prompt creates an OpenCode session and later prompts continue it;
 - a lost durable native-session ID is recovered from the Antonina OpenCode session title when possible;

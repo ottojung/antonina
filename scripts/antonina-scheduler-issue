@@ -94,8 +94,8 @@ def read_issue(issue):
 
 def main():
     args = [arg for arg in sys.argv[1:] if arg != "--json"]
-    if len(args) != 2 or args[0] != "--issue" or not (args[1].isdigit() or re.fullmatch(r"[0-9A-Za-z]{22}-[a-z]+", args[1])):
-        raise SystemExit("usage: antonina-scheduler-issue --issue ISSUE [--json]")
+    if len(args) != 2 or args[0] != "--issue" or not args[1] or args[1].strip() != args[1]:
+        raise SystemExit("usage: antonina-scheduler-issue --issue ISSUE_ID [--json]")
     print(json.dumps(read_issue(args[1]), separators=(",", ":")))
 
 

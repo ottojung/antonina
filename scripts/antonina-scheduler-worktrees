@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import json
 import os
-import re
 import subprocess
 import sys
 
@@ -41,8 +40,8 @@ def resources(issue):
 
 def main():
     args = [arg for arg in sys.argv[1:] if arg != "--json"]
-    if len(args) != 2 or args[0] != "--issue" or not (args[1].isdigit() or re.fullmatch(r"[0-9A-Za-z]{22}-[a-z]+", args[1])):
-        raise SystemExit("usage: antonina-scheduler-worktrees --issue ISSUE [--json]")
+    if len(args) != 2 or args[0] != "--issue" or not args[1] or args[1].strip() != args[1]:
+        raise SystemExit("usage: antonina-scheduler-worktrees --issue ISSUE_ID [--json]")
     issue = args[1]
     running = running_agents()
     occupied = {

@@ -1,5 +1,8 @@
 # Antonina public object identifiers (issue #320)
 
+**Current invariant (2026-10-20):** Antonina has exactly one identity per board issue and per managed agent, represented everywhere outside persisted-wire adapters as a case-sensitive, opaque string. Old issue `320` is the string `"320"` when consumed; a new ID such as `7Ka9mQ2xP4vT8nB3cR5dH1-otter` is just another string. No consumer distinguishes them, validates the generator's spelling, casts the ID to an integer, parses the word, or introduces a separate public and private issue identity. Only the generator knows the construction. The board issue object's historically named `number` field contains that string ID. Sequence counters in stored legacy metadata are **not** new identity allocators. Old signed numeric wire payloads are verified in their original representation, then adapted to string IDs *after* signature verification. In the CLI, `board create --json` returns a complete issue object (`number` is its ID), whereas `agent new --json` returns an object containing `id`.
+
+
 $id-320-random-word-ids
 title: New persistent entity identities are independent random base62-word IDs
 date: 2026/10/19

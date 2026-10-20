@@ -27,6 +27,8 @@ No global cap or fixed target agent count. No fairness quota or project-specific
 
 ## Board and agent authority
 
+**Identifier contract:** Board issue IDs and managed-agent IDs are full, case-sensitive opaque strings. A digit-only legacy ID and a new random word-suffixed ID are equally valid; do not parse, lowercase, abbreviate, identify an ID's format or convert it to an integer. Pass the exact ID returned by Antonina through `--issue`, `--id`, and `Project #ISSUE_ID: ...` title markers. A word by itself is never a valid reference. `agent new` and `board create` generate their own IDs and print them on ordinary stdout; `agent new --json` returns `id`, while `board create --json` returns an issue with string `number`.
+
 - Use only the Antonina CLI for board and agent coordination. Board issue descriptions and newest comments identify scope and dependencies; `antonina agent list --running --page 1 --json` identifies actual live owners.
 - Read pages explicitly. The queue order is human authority and is not modified merely because issues are working or blocked.
 - A board comment is append-only coordination evidence, not a filesystem reservation. Do not mistake a stale historical claim for a live agent.

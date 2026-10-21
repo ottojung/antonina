@@ -79,6 +79,17 @@ test('the retired execution-target command family is not part of the public CLI'
   }
 });
 
+test('model is a nested agent command group, with no separate namespace', () => {
+  assert.deepEqual(run('agent', ['model', 'list']), ['model', 'list']);
+  assert.deepEqual(run('agent', ['model', 'select']), ['model', 'select']);
+  assert.equal(preparePublicCommand('agent', ['model', '--help']).kind, 'help');
+  assert.throws(
+    () => preparePublicCommand('agent', ['model']),
+    (error) => error instanceof PublicCliUsageError && /model requires a subcommand/.test(error.message),
+  );
+  assert.throws(() => preparePublicCommand('agent', ['model', 'select', 'extra']), PublicCliUsageError);
+});
+
 test('every public leaf command has both long and short help', () => {
   for (const namespace of ['agent', 'board', 'daemon']) {
     for (const path of publicCommandPaths(namespace)) {

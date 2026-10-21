@@ -100,7 +100,7 @@ test('scheduler is topology-only and never owns repositories or workspaces', () 
   assert.doesNotMatch(loop, /board list|board resource|agent run/);
   assert.match(scheduler, /topology-only/);
   assert.match(scheduler, /positive marginal speedup/);
-  assert.match(scheduler, /antonina model list/);
+  assert.match(scheduler, /antonina agent model list/);
   assert.match(scheduler, /no built-in default/);
   assert.match(scheduler, /Do not select a model absent from the configured list/);
   assert.match(scheduler, /no global limit/);

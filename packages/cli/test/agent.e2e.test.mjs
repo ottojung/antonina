@@ -956,9 +956,22 @@ test('legacy top-level agent command spellings are not accepted', (t) => {
   const { env } = fixture(t);
   const result = run(['list', '--json'], env);
   assert.equal(result.status, 2);
-  assert.match(result.stderr, /expected "agent", "board", "daemon" or "model" command namespace/);
+  assert.match(result.stderr, /expected "agent", "board" or "daemon" command namespace/);
 });
 
+
+test('model commands are nested under agent and top-level model is rejected', (t) => {
+  const { env } = fixture(t);
+  const list = run(['agent', 'model', 'list'], env);
+  assert.equal(list.status, 0, list.stderr);
+  assert.equal(JSON.parse(list.stdout).models[0].model, 'opencode-go/longcat-2.5-preview-free');
+  const select = run(['agent', 'model', 'select'], env);
+  assert.equal(select.status, 0, select.stderr);
+  assert.equal(select.stdout.trim(), 'opencode-go/longcat-2.5-preview-free');
+  const old = run(['model', 'select'], env);
+  assert.equal(old.status, 2);
+  assert.match(old.stderr, /expected "agent", "board" or "daemon" command namespace/);
+});
 
 test('public CLI help is available at the top level, namespaces, groups, and leaf commands', (t) => {
   const { env } = fixture(t);
@@ -966,6 +979,8 @@ test('public CLI help is available at the top level, namespaces, groups, and lea
     ['--help'],
     ['-h'],
     ['agent', '--help'],
+    ['agent', 'model', '--help'],
+    ['agent', 'model', 'select', '--help'],
     ['board', 'queue', '--help'],
     ['board', 'create', '-h'],
     ['daemon', 'status', '--help'],

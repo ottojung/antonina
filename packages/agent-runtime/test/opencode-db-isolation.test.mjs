@@ -129,7 +129,8 @@ function scratch(t) {
     ANTONINA_RUNNER_OWNER_TOKEN: LAUNCHER_TOKEN,
   };
   mkdirSync(env.XDG_STATE_HOME, { recursive: true });
-  mkdirSync(env.XDG_CONFIG_HOME, { recursive: true });
+  mkdirSync(join(env.XDG_CONFIG_HOME, 'antonina'), { recursive: true });
+  writeFileSync(join(env.XDG_CONFIG_HOME, 'antonina', 'config.json'), JSON.stringify({ models: [{ model: 'example.test/mock', comment: 'fixture' }] }));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return env;
 }
@@ -160,6 +161,7 @@ function fakeBackend(t, logFile, rows) {
 printf '%s|%s\\n' "$OPENCODE_DB" "$*" >>'${logFile}'
 case "$1" in
   session) printf '%s\\n' '${JSON.stringify(rows)}' ;;
+  models) echo example.test/mock ;;
 esac
 exit 0
 `, { mode: 0o755 });
@@ -294,7 +296,7 @@ test('the probe path and the spawn path are given the same database', (t) => {
   if (bin === null) return;
 
   const one = agent(t, env, 'b18608', { native_session_id: null });
-  const backendEnv = { ...opencodeBackendEnv(one.meta, { env }), [OPENCODE_BIN_ENV]: bin };
+  const backendEnv = { ...env, ...opencodeBackendEnv(one.meta, { env }), [OPENCODE_BIN_ENV]: bin };
   const expected = opencodeDbPath('b18608', { env });
 
   // The probe: `buildAgentCommand` in continue mode probes for the session to
@@ -304,7 +306,7 @@ test('the probe path and the spawn path are given the same database', (t) => {
   const command = buildAgentCommand(readMeta('b18608', { env }), 'work', true, backendEnv);
   assert.ok(command !== null, 'continue mode built no command');
   assert.ok(command.includes('ses_b18608'));
-  assert.ok(command.includes('opencode-go/longcat-2.5-preview-free'));
+  assert.ok(command.includes('example.test/mock'));
   assert.equal(command.at(-1), 'work');
 
   assert.equal(discoverSessionId('b18608', backendEnv), 'ses_b18608');
@@ -406,6 +408,7 @@ function runnerBackend(t, id, logFile) {
     const bin = join(root, 'opencode');
     const sessionId = `ses_${id.replace(/[^A-Za-z0-9]/g, '')}`;
     writeFileSync(bin, `#!/bin/sh
+if [ "$1" = "models" ]; then echo example.test/mock; exit 0; fi
 printf '%s|%s\\n' "$OPENCODE_DB" "$*" >>'${logFile}'
 case "$1" in
   run) printf '%s\\n' '${sessionId}' > "$OPENCODE_DB.sessions" ;;
@@ -435,7 +438,8 @@ function runnerScratch(t, bin) {
     ANTONINA_RUNNER_OWNER_TOKEN: LAUNCHER_TOKEN,
   };
   mkdirSync(env.XDG_STATE_HOME, { recursive: true });
-  mkdirSync(env.XDG_CONFIG_HOME, { recursive: true });
+  mkdirSync(join(env.XDG_CONFIG_HOME, 'antonina'), { recursive: true });
+  writeFileSync(join(env.XDG_CONFIG_HOME, 'antonina', 'config.json'), JSON.stringify({ models: [{ model: 'example.test/mock', comment: 'fixture' }] }));
   const saved = { ...process.env };
   Object.assign(process.env, env);
   t.after(() => {

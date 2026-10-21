@@ -8,7 +8,7 @@ An Antonina host is a provisioned execution environment that can access the boar
 
 ## Current implementation
 
-Antonina uses TypeScript/Node.js for its CLI, managed-agent runtime, shared board core, and web application. The repository currently includes a local managed-agent runtime built around OpenCode. Managed Antonina agents and the OpenClaw scheduler must use only `opencode-go/longcat-2.5-preview-free` (LongCat 2.5 Preview Free) with OpenCode `--variant low`; no other model or fallback is permitted, and legacy records carrying an older model or variant value do not downgrade new invocations. That runtime is an implementation available to hosts, not the product boundary of Antonina. The authoritative constraint is `docs/intent-records/agent.md`.
+Antonina uses TypeScript/Node.js for its CLI, managed-agent runtime, shared board core, and web application. The repository currently includes a local managed-agent runtime built around OpenCode. Managed agents and the orchestrator select the first available model in the ordered, host-local `~/.config/antonina/config.json` `models` array. Each `{ "model": "provider/id", "comment": "..." }` entry may be reordered and annotated by orchestrators as reliability evidence changes. Comments should record dated successes, error modes, counts or duration where known, evidence sources, and uncertainty rather than just a preference label. There is no compiled-in model or fallback when configuration is missing; `antonina model list` shows preferences and `antonina model select` probes availability. The OpenCode variant remains `low`. That runtime is an implementation available to hosts, not the product boundary of Antonina. The authoritative constraint is `docs/intent-records/agent.md`.
 
 ## Requirements
 

@@ -13,8 +13,8 @@ import {
   type AgentMetadata,
 } from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
+import { configuredModels, firstAvailableConfiguredModel, modelConfigPath } from './model-config.js';
 
-export const AGENT_MODEL = 'opencode-go/longcat-2.5-preview-free';
 export const OPENCODE_TITLE_PREFIX = 'antonina-';
 export const DEFAULT_OPENCODE_BIN = 'opencode';
 export const OPENCODE_BIN_ENV = 'ANTONINA_OPENCODE_BIN';
@@ -111,7 +111,7 @@ export function classifySignalDeath(evidence: SignalDeathEvidence): BackendError
   return {
     classification: SIGNAL_DEATH_CLASSIFICATION,
     provider: null,
-    model: AGENT_MODEL,
+    model: null,
     request_boundary: isContinue ? 'continuation' : 'fresh_session',
     reference: null,
     transient: false,
@@ -408,9 +408,9 @@ export function discoverSessionId(
   return matches[0]?.id ?? null;
 }
 
-export function configuredModelAvailable(
+function availableOpenCodeModels(
   env: Record<string, string | undefined> = process.env,
-): boolean | null {
+): Set<string> | null {
   const childEnv = probeEnv(env);
   const result = spawnSync(resolveOpencode(childEnv), ['models'], {
     encoding: 'utf8',
@@ -419,7 +419,32 @@ export function configuredModelAvailable(
     stdio: ['ignore', 'pipe', 'ignore'],
   });
   if (result.error || result.status !== 0 || typeof result.stdout !== 'string') return null;
-  return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).includes(AGENT_MODEL);
+  return new Set(result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+}
+
+export function configuredModelAvailable(
+  env: Record<string, string | undefined> = process.env,
+): boolean | null {
+  // An absent/empty configuration is an operator error, not an availability miss.
+  configuredModels(env);
+  const available = availableOpenCodeModels(env);
+  return available === null ? null : firstAvailableConfiguredModel(available, env) !== null;
+}
+
+/** Resolve afresh for every invocation; never select a model from source-code defaults. */
+export function selectConfiguredModel(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  configuredModels(env); // fail immediately, before touching a backend, if unconfigured
+  const available = availableOpenCodeModels(env);
+  if (available === null) {
+    throw new Error('Cannot query available OpenCode models; refusing to guess a model');
+  }
+  const chosen = firstAvailableConfiguredModel(available, env);
+  if (chosen === null) {
+    throw new Error(`No configured Antonina model is advertised by OpenCode; reorder or edit ${modelConfigPath(env)}`);
+  }
+  return chosen;
 }
 
 export function buildAgentCommand(
@@ -437,6 +462,7 @@ export function buildAgentCommand(
   persistedVariant(meta);
   const variant = DEFAULT_VARIANT;
   const executable = resolveOpencode(env);
+  const model = selectConfiguredModel(env);
   if (isContinue) {
     const recorded = persistedNativeSessionId(meta);
     const sessionId = recorded ?? discoverSessionId(agentId, env, cwd);
@@ -444,7 +470,7 @@ export function buildAgentCommand(
     return [
       executable, 'run', '--auto',
       '--session', sessionId,
-      '--model', AGENT_MODEL,
+      '--model', model,
       '--variant', variant,
       '--thinking',
       '--dir', cwd,
@@ -454,7 +480,7 @@ export function buildAgentCommand(
   return [
     executable, 'run', '--auto',
     '--title', `${OPENCODE_TITLE_PREFIX}${agentId}`,
-    '--model', AGENT_MODEL,
+    '--model', model,
     '--variant', variant,
     '--thinking',
     '--dir', cwd,
@@ -549,7 +575,7 @@ export function classifyBackendFailure(
     return {
       classification: UNRECOGNIZED_BACKEND_FAILURE,
       provider: null,
-      model: AGENT_MODEL,
+      model: null,
       request_boundary: isContinue ? 'continuation' : 'fresh_session',
       reference: null,
       transient: false,
@@ -563,7 +589,7 @@ export function classifyBackendFailure(
   return {
     classification: rule.classification,
     provider: rule.provider,
-    model: AGENT_MODEL,
+    model: null,
     request_boundary: isContinue ? 'continuation' : 'fresh_session',
     reference: match?.[1] ?? null,
     transient: rule.transient,

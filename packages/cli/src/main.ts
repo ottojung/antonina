@@ -7,6 +7,7 @@ import { runAgentCommand, type AgentCommandContext } from './agent.js';
 import { versionFields, versionJson, versionLine } from './build-identity.js';
 import { runBoardCommand } from './board.js';
 import { runDaemonCommand } from './daemon.js';
+import { runModelCommand } from './model.js';
 import {
   PublicCliUsageError,
   TOP_LEVEL_HELP,
@@ -73,6 +74,7 @@ async function runPublicNamespace(namespace: PublicNamespace, args: string[]): P
     process.stdout.write(plan.text + '\n');
     return 0;
   }
+  if (namespace === 'model') return runModelCommand(plan.args, process.env);
   if (namespace === 'board') return runBoardCommand(plan.args, { env: process.env, io: io() });
   if (namespace === 'daemon') return runDaemonCommand(plan.args, { env: process.env, io: io() });
   return runAgentCommand(plan.args, agentContext());
@@ -100,10 +102,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     await runManagedRunner(agentId, mode, generation, { env: process.env });
     return 0;
   }
-  if (namespace === 'board' || namespace === 'daemon' || namespace === 'agent') {
+  if (namespace === 'board' || namespace === 'daemon' || namespace === 'agent' || namespace === 'model') {
     return runPublicNamespace(namespace, args);
   }
-  process.stderr.write('antonina: expected "agent", "board" or "daemon" command namespace\n');
+  process.stderr.write('antonina: expected "agent", "board", "daemon" or "model" command namespace\n');
   process.stderr.write("Try 'antonina --help'.\n");
   return 2;
 }

@@ -11,7 +11,7 @@ import { resolve } from 'node:path';
 import { newEntityId } from '../../core/src/ids.js';
 import {
   backendCapabilities,
-  configuredModelAvailable,
+  selectConfiguredModel,
   describeSignalDeath,
   discoverSessionId,
   honoursInvocationCwd,
@@ -71,6 +71,7 @@ import {
   type AgentMetadata,
 } from '../../agent-runtime/src/metadata.js';
 import { normalizeAgentId } from '../../agent-runtime/src/process.js';
+import { configuredModels } from '../../agent-runtime/src/model-config.js';
 import {
   MetadataReadError,
   agentDir,
@@ -898,7 +899,8 @@ function statusJson(
     next_steer: steers.length > 0 ? steers[0]!.prompt.split('\n', 1)[0] : null,
     steer_preempting: intent.value === 'steer',
     steer_metadata_error: null,
-    model: 'opencode-go/longcat-2.5-preview-free',
+    // This is the *current preference*, not a persisted claim about an older invocation.
+    model: (() => { try { return configuredModels(env)[0]?.model ?? null; } catch { return null; } })(),
     variant: persistedVariant(meta),
     backend_error: sanitizeBackendError(meta.backend_error),
     host_capacity: hostCapacityJson(readHostCapacity()),
@@ -1259,9 +1261,8 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   // list and writes no session row, so it could safely use any database -- but
   // leaving it on the shared one would keep every `run` touching the file whose
   // lock contention this change exists to remove.
-  if (configuredModelAvailable({ ...context.env, ...opencodeBackendEnv(observed, paths(context)) }) === false) {
-    throw new Error('configured OpenCode model opencode-go/longcat-2.5-preview-free is unavailable');
-  }
+  // Refuse missing configuration and unavailable models before accepting the prompt.
+  selectConfiguredModel({ ...context.env, ...opencodeBackendEnv(observed, paths(context)) });
   const decision: {
     action?: 'busy' | 'spawn' | 'reuse';
     mode?: 'new' | 'continue';

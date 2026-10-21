@@ -17,11 +17,18 @@ function fixture(t) {
   const root = nodeFs.mkdtempSync(join(tmpdir(), 'antonina-cli-fault-'));
   const work = join(root, 'work');
   nodeFs.mkdirSync(work);
+  const configHome = join(root, 'config');
+  nodeFs.mkdirSync(join(configHome, 'antonina'), { recursive: true });
+  nodeFs.writeFileSync(join(configHome, 'antonina', 'config.json'), JSON.stringify({ models: [
+    { model: 'example.test/mock', comment: 'isolated fixture for locking tests' },
+  ] }));
+  const mockOpenCode = join(root, 'mock-opencode');
+  nodeFs.writeFileSync(mockOpenCode, '#!/bin/sh\nif [ "$1" = "models" ]; then echo example.test/mock; exit 0; fi\nexit 0\n', { mode: 0o755 });
   t.after(() => nodeFs.rmSync(root, { recursive: true, force: true }));
   return {
     root,
     work,
-    state: { env: { XDG_STATE_HOME: join(root, 'state') }, home: join(root, 'home') },
+    state: { env: { XDG_STATE_HOME: join(root, 'state'), XDG_CONFIG_HOME: configHome, ANTONINA_OPENCODE_BIN: mockOpenCode }, home: join(root, 'home') },
   };
 }
 

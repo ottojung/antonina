@@ -23,9 +23,11 @@ test('scheduler is a single agentic OpenClaw scheduling lane owned by the superv
   assert.match(loop, /trap on_exit TERM INT HUP/);
   assert.doesNotMatch(loop, /pgrep -f .*ANTONINA-SCHEDULER-TURN/);
   assert.match(turn, /timeout -k 15s 900s/);
-  assert.match(turn, /--model opencode-go\/longcat-2.5-preview-free/);
+  assert.match(turn, /selected_model=.*model select/);
+  assert.match(turn, /--model "\$selected_model"/);
+  assert.doesNotMatch(turn, /--model opencode-go\//);
   assert.match(turn, /--variant low/);
-  assert.match(turn, /never fall back to any other model/);
+  assert.match(turn, /never invent an unconfigured fallback/);
   assert.doesNotMatch(turn, /--thinking/);
 });
 
@@ -98,8 +100,9 @@ test('scheduler is topology-only and never owns repositories or workspaces', () 
   assert.doesNotMatch(loop, /board list|board resource|agent run/);
   assert.match(scheduler, /topology-only/);
   assert.match(scheduler, /positive marginal speedup/);
-  assert.match(scheduler, /opencode-go\/longcat-2.5-preview-free/);
-  assert.match(scheduler, /Do not substitute any other model/);
+  assert.match(scheduler, /antonina model list/);
+  assert.match(scheduler, /no built-in default/);
+  assert.match(scheduler, /Do not select a model absent from the configured list/);
   assert.match(scheduler, /no global limit/);
   assert.doesNotMatch(scheduler, /memory\.pressure|memory\.stat|memory\.events|reclaimable file cache|oom_kill|PSI/);
 });

@@ -956,7 +956,7 @@ test('legacy top-level agent command spellings are not accepted', (t) => {
   const { env } = fixture(t);
   const result = run(['list', '--json'], env);
   assert.equal(result.status, 2);
-  assert.match(result.stderr, /expected "agent", "board" or "daemon" command namespace/);
+  assert.match(result.stderr, /expected "agent", "board", "daemon" or "model" command namespace/);
 });
 
 
@@ -1186,7 +1186,7 @@ test('fixture guard: an uncreatable fixture parent is a named failure, never a s
   );
 });
 
-test('fixture guard: an unpinned backend falls into the PATH trap instead of a real opencode', async (t) => {
+test('fixture guard: an unpinned backend probes the PATH trap and fails closed before running', async (t) => {
   const handle = fixture(t);
   const { root, work, env, escapes, invocations } = handle;
   // Simulate the defect: no exact backend path, so a bare `opencode` lookup is
@@ -1194,10 +1194,11 @@ test('fixture guard: an unpinned backend falls into the PATH trap instead of a r
   const unpinned = { ...env };
   delete unpinned[OPENCODE_BIN_ENV];
   const agent_b00b = newAgent(unpinned, ['--cwd', work]);
-  assert.equal(run(['agent', 'run', '--id', agent_b00b, '--detach', '--prompt', 'unpinned'], unpinned).status, 0);
-  const done = await waitFor(root, agent_b00b, (meta) => meta.state !== 'running' && meta.active_runner === false);
-  assert.equal(done.state, 'failed');
-  assert.equal(done.exit_code, 70);
+  const refused = run(['agent', 'run', '--id', agent_b00b, '--detach', '--prompt', 'unpinned'], unpinned);
+  assert.equal(refused.status, 1, refused.stderr);
+  assert.match(refused.stderr, /Cannot query available OpenCode models/);
+  const done = JSON.parse(readFileSync(join(root, 'state', 'antonina', 'agents', agent_b00b, 'meta.json'), 'utf8'));
+  assert.equal(done.state, 'idle', 'failed discovery must not mutate or launch the agent');
   const trapped = readFileSync(escapes, 'utf8');
   assert.match(trapped, /path-bin\/opencode/);
   assert.equal(existsSync(invocations), false, 'the fixture backend must not have run');

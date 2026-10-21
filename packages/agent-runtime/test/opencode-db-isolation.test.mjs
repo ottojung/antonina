@@ -408,6 +408,7 @@ function runnerBackend(t, id, logFile) {
     const bin = join(root, 'opencode');
     const sessionId = `ses_${id.replace(/[^A-Za-z0-9]/g, '')}`;
     writeFileSync(bin, `#!/bin/sh
+if [ "$1" = "models" ]; then echo example.test/mock; exit 0; fi
 printf '%s|%s\\n' "$OPENCODE_DB" "$*" >>'${logFile}'
 case "$1" in
   run) printf '%s\\n' '${sessionId}' > "$OPENCODE_DB.sessions" ;;

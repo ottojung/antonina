@@ -112,9 +112,12 @@ function fixture(t) {
   // no longer runs.
   const invoked = join(root, 'backend-invoked');
   const opencode = join(bin, 'opencode');
-  writeFileSync(opencode, `#!/bin/sh\nprintf 'invoked %s\\n' "$*" >>'${invoked}'\nexit 0\n`, { mode: 0o755 });
+  writeFileSync(opencode, `#!/bin/sh\nif [ "$1" = "models" ]; then echo example.test/mock; exit 0; fi\nprintf 'invoked %s\\n' "$*" >>'${invoked}'\nexit 0\n`, { mode: 0o755 });
   const work = join(root, 'work');
   mkdirSync(work);
+  const modelConfigDir = join(root, 'config', 'antonina');
+  mkdirSync(modelConfigDir, { recursive: true });
+  writeFileSync(join(modelConfigDir, 'config.json'), JSON.stringify({ models: [{ model: 'example.test/mock', comment: 'local test model' }] }));
   const env = {
     ...process.env,
     XDG_STATE_HOME: join(root, 'state'),

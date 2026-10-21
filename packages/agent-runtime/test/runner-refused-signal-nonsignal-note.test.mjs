@@ -9,6 +9,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { installModelFixture, withModelProbe } from './support/model-fixture.mjs';
 
 import { idleMeta, mintRunnerReservationOwnerToken } from '../dist/packages/agent-runtime/src/metadata.js';
 import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
@@ -74,7 +75,7 @@ function fixture(t, id, options, intent, exitCode) {
     options.env.XDG_STATE_HOME, options.env.XDG_CONFIG_HOME, String(exitCode),
   ].map((v) => JSON.stringify(v)).join(' ');
   const bin = join(root, 'opencode');
-  writeFileSync(bin, `#!/bin/sh\necho "starting"\nexec ${argv} "$@"\n`, { mode: 0o755 });
+  writeFileSync(bin, withModelProbe(`#!/bin/sh\necho "starting"\nexec ${argv} "$@"\n`), { mode: 0o755 });
   return { bin, signalledPath: signalled };
 }
 
@@ -89,6 +90,7 @@ for (const intent of ['stop', 'kill']) {
       const saved = { ...process.env };
       process.env.XDG_STATE_HOME = stateHome;
       process.env.XDG_CONFIG_HOME = configHome;
+      installModelFixture(configHome);
       t.after(() => { Object.assign(process.env, saved); });
       const options = { env: { XDG_STATE_HOME: stateHome, XDG_CONFIG_HOME: configHome, ANTONINA_RUNNER_OWNER_TOKEN: LAUNCHER_TOKEN } };
 

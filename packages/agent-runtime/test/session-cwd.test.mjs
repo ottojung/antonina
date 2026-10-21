@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { installModelFixture, withModelProbe } from './support/model-fixture.mjs';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,8 +14,10 @@ test('session discovery uses the agent worktree, not the caller directory', () =
     mkdirSync(worktree);
     const executable = join(root, 'fake-opencode');
     const rows = JSON.stringify([{id:'ses_verified', title:'antonina-cd123', created:14}]);
-    writeFileSync(executable, '#!/bin/sh\nif [ "$(pwd -P)" = ' + JSON.stringify(worktree) + ' ]; then printf "%s\\n" ' + JSON.stringify(rows) + '; fi\n', {mode:0o755});
-    const env={ANTONINA_OPENCODE_BIN:executable};
+    writeFileSync(executable, withModelProbe('#!/bin/sh\nif [ "$(pwd -P)" = ' + JSON.stringify(worktree) + ' ]; then printf "%s\\n" ' + JSON.stringify(rows) + '; fi\n'), {mode:0o755});
+    const configHome = join(root, 'config');
+    installModelFixture(configHome);
+    const env={ANTONINA_OPENCODE_BIN:executable, XDG_CONFIG_HOME:configHome};
     assert.equal(discoverSessionId('cd123',env,worktree),'ses_verified');
     const meta = idleMeta('cd123', worktree, 'agent');
     meta.native_session_id = null;

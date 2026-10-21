@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { installModelFixture, FIXTURE_MODEL } from './support/model-fixture.mjs';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,7 +23,7 @@ function fixture(t, id, outageCount, orphan = false) {
   const lines = [
     '#!/bin/sh',
     'if [ "$1" = "session" ]; then exit 1; fi',
-    'if [ "$1" = "models" ]; then echo opencode-go/longcat-2.5-preview-free; exit 0; fi',
+    'if [ "$1" = "models" ]; then echo example.test/mock; exit 0; fi',
     'COUNT=' + JSON.stringify(counter),
     'EFFECTS=' + JSON.stringify(effects),
     'ORPHAN=' + JSON.stringify(orphanPid),
@@ -52,6 +53,7 @@ function fixture(t, id, outageCount, orphan = false) {
     ANTONINA_OPENCODE_BIN: executable,
     ANTONINA_RUNNER_OWNER_TOKEN: ownerToken,
   };
+  installModelFixture(env.XDG_CONFIG_HOME);
   const options = { env };
   assert.equal(createAgentDirectory(id, options), true);
   const meta = idleMeta(id, cwd, null, 1);

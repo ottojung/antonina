@@ -39,6 +39,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
+import { installModelFixture, withModelProbe } from './support/model-fixture.mjs';
 
 import * as backendModule from '../dist/packages/agent-runtime/src/backend.js';
 import { reconcileDeadMeta } from '../dist/packages/agent-runtime/src/lifecycle.js';
@@ -100,7 +101,7 @@ function fakeBackend(t, body) {
     });
     if (execProbe(root, 'probe-')) {
       const bin = join(root, 'opencode');
-      writeFileSync(bin, body, { mode: 0o755 });
+      writeFileSync(bin, withModelProbe(body), { mode: 0o755 });
       return bin;
     }
     failures.push(`${root}: fixture is not exec-capable`);
@@ -131,6 +132,7 @@ function scratch(t, backend) {
   const configHome = join(root, 'config');
   mkdirSync(stateHome);
   mkdirSync(configHome);
+  installModelFixture(configHome);
   const env = { XDG_STATE_HOME: stateHome, XDG_CONFIG_HOME: configHome, ANTONINA_OPENCODE_BIN: backend, ANTONINA_RUNNER_OWNER_TOKEN: LAUNCHER_TOKEN };
   const saved = { ...process.env };
   Object.assign(process.env, env);

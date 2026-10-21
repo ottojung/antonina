@@ -19,6 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
+import { installModelFixture, withModelProbe } from './support/model-fixture.mjs';
 
 import { idleMeta, mintRunnerReservationOwnerToken } from '../dist/packages/agent-runtime/src/metadata.js';
 import { envHasAgentMarker, envHasInvocationMarker, procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
@@ -84,7 +85,7 @@ function fakeBackend(t, body) {
     });
     if (execProbe(root, 'probe-').ok) {
       const bin = join(root, 'opencode');
-      writeFileSync(bin, body, { mode: 0o755 });
+      writeFileSync(bin, withModelProbe(body), { mode: 0o755 });
       return { bin, root };
     }
     failures.push(`${root}: fixture is not exec-capable`);
@@ -110,6 +111,7 @@ function scratch(t, backendBin) {
   const configHome = join(root, 'config');
   mkdirSync(stateHome);
   mkdirSync(configHome);
+  installModelFixture(configHome);
   const env = {
     XDG_STATE_HOME: stateHome,
     XDG_CONFIG_HOME: configHome,

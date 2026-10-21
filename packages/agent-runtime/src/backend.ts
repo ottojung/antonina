@@ -14,6 +14,7 @@ import {
 } from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
 import { configuredModels, firstAvailableConfiguredModel, modelConfigPath } from './model-config.js';
+import { eligibleAgentModel } from './model-failover.js';
 
 export const OPENCODE_TITLE_PREFIX = 'antonina-';
 export const DEFAULT_OPENCODE_BIN = 'opencode';
@@ -187,12 +188,64 @@ export function describeBackendDeath(
 interface BackendFailureRule {
   marker: string;
   classification: string;
-  provider: string;
+  provider: string | null;
   transient: boolean;
   automaticRetrySafe: boolean;
 }
 
 const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
+  // Explicit exhausted quota differs from a short network hiccup.
+  {
+    marker: 'insufficient_quota',
+    classification: 'model_quota_exhausted',
+    provider: null,
+    transient: false,
+    automaticRetrySafe: false,
+  },
+  {
+    marker: 'You have reached your usage limit',
+    classification: 'model_quota_exhausted',
+    provider: null,
+    transient: false,
+    automaticRetrySafe: false,
+  },
+  {
+    marker: 'usage limit exceeded',
+    classification: 'model_quota_exhausted',
+    provider: null,
+    transient: false,
+    automaticRetrySafe: false,
+  },
+  {
+    marker: 'Your credit balance is too low',
+    classification: 'model_quota_exhausted',
+    provider: null,
+    transient: false,
+    automaticRetrySafe: false,
+  },
+  {
+    marker: 'model_not_found',
+    classification: 'model_unavailable',
+    provider: null,
+    transient: false,
+    automaticRetrySafe: false,
+  },
+  // Invalid credentials and billing errors need operator action, not another
+  // invocation potentially using the same billable credentials.
+  {
+    marker: 'invalid_api_key',
+    classification: 'backend_authentication_failed',
+    provider: 'openai',
+    transient: false,
+    automaticRetrySafe: false,
+  },
+  {
+    marker: 'Payment Required',
+    classification: 'backend_billing_required',
+    provider: 'openai',
+    transient: false,
+    automaticRetrySafe: false,
+  },
   // An OpenCode Go request may fail temporarily even after the previous
   // turn has performed tool actions. Classify the outage for operators and
   // the scheduler, and the operator explicitly accepts at-least-once tool effects on recovery.
@@ -408,7 +461,7 @@ export function discoverSessionId(
   return matches[0]?.id ?? null;
 }
 
-function availableOpenCodeModels(
+export function availableOpenCodeModels(
   env: Record<string, string | undefined> = process.env,
 ): Set<string> | null {
   const childEnv = probeEnv(env);
@@ -447,6 +500,22 @@ export function selectConfiguredModel(
   return chosen;
 }
 
+/**
+ * Per-agent selection skips only this agent's unexpired model cooldowns.
+ */
+export function selectConfiguredAgentModel(
+  meta: AgentMetadata,
+  env: Record<string, string | undefined> = process.env,
+  now: number = Date.now() / 1000,
+): string {
+  const preferences = configuredModels(env);
+  const advertised = availableOpenCodeModels(env);
+  if (advertised === null) throw new Error('Cannot query available OpenCode models; refusing to guess a model');
+  const chosen = eligibleAgentModel(meta, preferences, advertised, now);
+  if (chosen === null) throw new Error('No eligible configured model for this agent: remaining models are unavailable or cooling down');
+  return chosen;
+}
+
 export function buildAgentCommand(
   meta: AgentMetadata,
   prompt: string,
@@ -462,7 +531,7 @@ export function buildAgentCommand(
   persistedVariant(meta);
   const variant = DEFAULT_VARIANT;
   const executable = resolveOpencode(env);
-  const model = selectConfiguredModel(env);
+  const model = selectConfiguredAgentModel(meta, env);
   if (isContinue) {
     const recorded = persistedNativeSessionId(meta);
     const sessionId = recorded ?? discoverSessionId(agentId, env, cwd);

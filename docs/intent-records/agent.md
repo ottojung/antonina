@@ -1,3 +1,11 @@
+$id-20261021-per-agent-model-recovery
+title: Bounded per-agent model failover with expiring cooldowns
+date: 2026/10/21
+source: @ottojung
+kind: constraint
+
+Managed agents use the host's existing ordered model configuration but maintain independent durable model cooldowns. A definitively exhausted quota, provider throttle or unavailable model advances immediately; a transient endpoint/server failure retries the same model twice with bounded backoff before advancing. After six hours, a previously cooled-down higher-priority model becomes eligible again only at the next invocation boundary. Switching must not interrupt a productive live invocation or reset agent identity. Track the actual invocation model and persist cooldown reason/time in canonical per-agent metadata, without introducing another service. Unknown failures, credential problems, billing problems, tool failures, operator stop/kill and resource signals must not silently cause model replay. Reuse the existing OpenCode session on recovery, and do not replay untracked fresh invocations that may already have executed tools. The software must not introduce new models or auth routes beyond the operator-maintained configured list. User explicitly does not authorize usage-based OpenAI API billing; ChatGPT OAuth and external free tiers are distinct. This supersedes the prior no-automatic-model-fallback restriction, but preserves all historical model observations below.
+
 $id-20261021-agent-model-subcommands
 title: Model inspection and selection belong to the agent command namespace
 date: 2026/10/21

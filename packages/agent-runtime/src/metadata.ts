@@ -1,3 +1,4 @@
+import { validModelFailover } from './model-failover.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 
@@ -137,6 +138,7 @@ export const OPTIONAL_TOP_LEVEL_FIELDS = [
   'invocation_cwd',
   RUN_LOG_CURSOR_FIELD,
   OPENCODE_DB_FIELD,
+  'model_failover',
 ] as const;
 
 export class MalformedPendingPromptMetadataError extends Error {
@@ -343,6 +345,9 @@ export function validateAgentMetadata(meta: AgentMetadata): void {
   if (!nullableString(meta.title, true)) throw new MalformedAgentMetadataError('managed-agent title is malformed');
   persistedVariant(meta);
   persistedNativeSessionId(meta);
+  if (meta.model_failover !== undefined && meta.model_failover !== null && !validModelFailover(meta.model_failover)) {
+    throw new MalformedAgentMetadataError('managed-agent model_failover is malformed');
+  }
 
   const pidFields = [meta.pid, meta.pgid, meta.start_time, meta.invocation_id];
   const invocationAbsent = pidFields.every((value) => value === null);

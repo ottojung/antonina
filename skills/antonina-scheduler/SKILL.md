@@ -23,7 +23,7 @@ A failed launch is an operational failure, **not a scheduling veto**. Record the
 
 ## Model and authority
 
-The authorized model is `opencode-go/longcat-2.5-preview-free` with `--variant low`, for both scheduler and workers. Do not substitute any other model. Follow the newest intent record in `docs/intent-records/agent.md` if an authorized model change is made.
+Read `antonina model list` (host-local `~/.config/antonina/config.json`): its ordered model IDs and free-form comments record observed success and availability. Use `antonina model select` to choose the first configured model currently advertised by OpenCode; there is no built-in default. You may atomically reorder the list and update comments based on concrete model performance without changing the code. Do not select a model absent from the configured list. Missing/empty configuration is an operational failure, not a topological refusal. Agents use the same list at invocation time. Keep `--variant low`.
 
 The Antonina board owns priorities, issue status, comments and dependencies. **Every issue ID and agent ID is one exact, case-sensitive opaque string**, including old digit-only issue IDs. Use complete IDs unchanged; neither the word suffix nor a numeric-looking spelling is interpreted by scheduler consumers. The snapshot's `live_issue_ids` entries are strings. Live Antonina agent IDs/titles are the source of active ownership. Read the full priority-ordered queue and relevant recent comments; do not equate a historical claim with a live agent. Human decisions in issue comments take precedence over speculative scheduler assumptions.
 

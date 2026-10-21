@@ -86,7 +86,7 @@ Avoid huge comments and do not narrate routine process steps. Only a real topolo
 
 ## Model policy
 
-Use exclusively `opencode-go/longcat-2.5-preview-free`, variant `low`, unless the latest explicit human intent record changes that policy. Do not silently fall back to any other provider or model. An invocation failure is reported as such, not an admission refusal.
+Use `antonina model list` to inspect the host-local `~/.config/antonina/config.json` ordered `models` array and free-form reliability comments. `antonina model select` chooses the first configured model advertised by OpenCode; there is no hardcoded model or default. Orchestrators may atomically reorder entries and update comments based on concrete availability/success/failure evidence. Do not use an unconfigured fallback. If missing or none available, report the actual error, not a topological admission refusal. Managed agents independently resolve the same list at invocation time. The OpenCode variant remains `low`.
 
 
 ## Evidence reconciliation for open issues

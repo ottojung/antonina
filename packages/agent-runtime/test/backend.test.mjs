@@ -6,7 +6,6 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 import {
-  AGENT_MODEL,
   BACKEND_DIAGNOSTIC_MAX_BYTES,
   BACKEND_RETRY_BASE_MS,
   DEFAULT_OPENCODE_BIN,
@@ -30,6 +29,13 @@ import { validateAgentMetadata } from '../dist/packages/agent-runtime/src/metada
 
 const REPO_FIXTURE_PARENT = resolve('.antonina-test-tmp');
 const PROBE_SENTINEL = 'ANTONINA-FIXTURE-EXEC-OK';
+const FIXTURE_MODEL = 'example.test/test-free';
+function installModelConfig(path) {
+  const configDir = join(path, 'antonina');
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, 'config.json'), JSON.stringify({ models: [{ model: FIXTURE_MODEL, comment: 'test fixture' }] }));
+}
+
 
 // A fixture backend is only useful if it can actually exec. On a host whose
 // tmpdir() is mounted noexec the fake would fail with EACCES and a bare
@@ -121,8 +127,8 @@ function xdgScope(t, prefix) {
   return root;
 }
 
-test('Antonina is locked to LongCat 2.5 Preview Free without an alternate backend model', () => {
-  assert.equal(AGENT_MODEL, 'opencode-go/longcat-2.5-preview-free');
+test('test-only model identifier does not come from a product constant', () => {
+  assert.equal(FIXTURE_MODEL, 'example.test/test-free');
 });
 
 test('recognized OpenCode server failure becomes bounded structured diagnostics', (t) => {
@@ -220,7 +226,7 @@ test('status sanitizer drops arbitrary persisted backend data', () => {
   const sanitized = sanitizeBackendError({
     classification: 'transient_backend_server_error',
     provider: 'opencode',
-    model: AGENT_MODEL,
+    model: FIXTURE_MODEL,
     request_boundary: 'continuation',
     reference: 'err_abc',
     transient: true,
@@ -233,7 +239,7 @@ test('status sanitizer drops arbitrary persisted backend data', () => {
   assert.deepEqual(sanitized, {
     classification: 'transient_backend_server_error',
     provider: 'opencode',
-    model: AGENT_MODEL,
+    model: FIXTURE_MODEL,
     request_boundary: 'continuation',
     reference: 'err_abc',
     transient: true,
@@ -261,20 +267,22 @@ exit 70
   writeFileSync(bin, `#!/bin/sh
 printf '%s %s\\n' "$0" "$*" >>'${calls}'
 if [ "$1" = models ]; then
-  printf "%s\\n" other/model opencode-go/longcat-2.5-preview-free
+  printf "%s\\n" other/model example.test/test-free
   exit 0
 fi
 exit 2
 `, { mode: 0o755 });
 
-  const env = { [OPENCODE_BIN_ENV]: bin, PATH: pathBin };
+  const config = join(root, 'cfg');
+  installModelConfig(config);
+  const env = { [OPENCODE_BIN_ENV]: bin, PATH: pathBin, XDG_CONFIG_HOME: config };
   assert.equal(env[OPENCODE_BIN_ENV], bin);
   assert.ok(isAbsolute(bin));
   // Positive control: the fixture is exec-able at the exact path that is passed
   // to the production code.
   const direct = spawnSync(bin, ['models'], { env, encoding: 'utf8', timeout: 15_000 });
   assert.equal(direct.status, 0, `fixture is not runnable: ${direct.error?.code ?? direct.stderr}`);
-  assert.match(direct.stdout, new RegExp(AGENT_MODEL));
+  assert.match(direct.stdout, new RegExp(FIXTURE_MODEL));
 
   rmSync(calls, { force: true });
   assert.equal(configuredModelAvailable(env), true);
@@ -311,16 +319,18 @@ function assertFixtureRan(bin, calls, escapes) {
 test('backend executable resolves to an exact configured path, not a PATH lookup', (t) => {
   const root = fixture(t);
   const bin = join(root, 'opencode');
-  writeFileSync(bin, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(bin, '#!/bin/sh\nif [ "$1" = models ]; then echo example.test/test-free; fi\n', { mode: 0o755 });
+  const config = join(root, 'cfg');
+  installModelConfig(config);
 
   assert.equal(resolveOpencode({}), DEFAULT_OPENCODE_BIN);
   assert.equal(resolveOpencode({ PATH: '/nowhere' }), DEFAULT_OPENCODE_BIN);
   assert.equal(resolveOpencode({ [OPENCODE_BIN_ENV]: bin }), bin);
 
   const meta = idleMeta('a11d', root, null, 1);
-  const fresh = buildAgentCommand(meta, 'work', false, { [OPENCODE_BIN_ENV]: bin });
+  const fresh = buildAgentCommand(meta, 'work', false, { [OPENCODE_BIN_ENV]: bin, XDG_CONFIG_HOME: config });
   assert.equal(fresh[0], bin, 'buildAgentCommand must not fall back to a bare backend name');
-  assert.equal(buildAgentCommand(meta, 'work', false, {})[0], DEFAULT_OPENCODE_BIN);
+  assert.throws(() => buildAgentCommand(meta, 'work', false, { XDG_CONFIG_HOME: join(root, 'unconfigured') }), /models are not configured/);
 });
 
 test('a malformed backend override is rejected instead of silently ignored', () => {
@@ -443,13 +453,18 @@ printf '%s\\n' '${JSON.stringify(rows)}'
   assert.deepEqual(recordedInvocations(escapes), [], 'a non-fixture opencode was executed via PATH');
 });
 
-test('continuation command uses the persisted session', () => {
+test('continuation command uses the persisted session', (t) => {
   const meta = idleMeta('a11d', '/tmp', null, 1);
   meta.native_session_id = 'ses_123';
-  const command = buildAgentCommand(meta, 'continue work', true, {});
+  const root = fixture(t);
+  const config = join(root, 'cfg');
+  installModelConfig(config);
+  const bin = join(root, 'opencode');
+  writeFileSync(bin, '#!/bin/sh\nif [ "$1" = models ]; then echo example.test/test-free; fi\n', { mode: 0o755 });
+  const command = buildAgentCommand(meta, 'continue work', true, { [OPENCODE_BIN_ENV]: bin, XDG_CONFIG_HOME: config });
   assert.ok(command !== null);
   assert.ok(command.includes('ses_123'));
-  assert.ok(command.includes(AGENT_MODEL));
+  assert.ok(command.includes(FIXTURE_MODEL));
   assert.equal(command.at(-1), 'continue work');
 });
 

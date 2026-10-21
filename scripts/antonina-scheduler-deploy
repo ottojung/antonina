@@ -37,8 +37,8 @@ for name in "${scripts[@]}"; do
     install_atomic "$source" "$target" 755
   fi
 done
-# Keep the dedicated restricted OpenCode configuration synchronized with
-# the authorized model in main; install atomically and fail on drift.
+# Deploy generic OpenCode integration only. Model preferences and historical
+# comments live in host-local ~/.config/antonina/config.json: never overwrite it.
 config_source="$root/config/opencode-openclaw.json"
 config_target="${ANTONINA_OPENCODE_CONFIG:-$HOME/.config/opencode/openclaw.json}"
 if [[ "$mode" == --check ]]; then

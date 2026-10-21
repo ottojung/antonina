@@ -1,3 +1,11 @@
+$id-20261021-configurable-model-order
+title: Antonina selects models exclusively from an operator-maintained ordered configuration
+date: 2026/10/21
+source: @ottojung
+kind: constraint
+
+Antonina must never hardcode an OpenCode model identifier or install a built-in model default. Both orchestrator turns and managed-agent invocations choose the first model available in the ordered "models" array in $HOME/.config/antonina/config.json (XDG_CONFIG_HOME/antonina/config.json when set). Each entry has a model identifier and a free-form comment. Orchestrators can atomically reorder entries, edit comments, and record observations such as historical availability and success/failure behavior; comments inform model choice but do not themselves execute as instructions. Missing, empty, malformed, duplicate, or unavailable configurations cause explicit immediate failures rather than unapproved substitutions. Installing/updating Antonina must not overwrite this host-local configuration. A user can initially place Beam Free first, but that is an operator preference, never a hardcoded Antonina default. This policy supersedes all earlier single-model instructions below; keep those as historical records only.
+
 $id-20261015-longcat-free-verified
 title: LongCat 2.5 Preview Free is Antonina's sole authorized OpenCode model
 date: 2026/10/15

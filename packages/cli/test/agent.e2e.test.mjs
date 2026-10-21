@@ -170,6 +170,11 @@ case "$1" in
 esac
 `);
   chmodSync(opencode, 0o755);
+  const modelDir = join(root, 'config', 'antonina');
+  mkdirSync(modelDir, { recursive: true });
+  writeFileSync(join(modelDir, 'config.json'), JSON.stringify({ models: [
+    { model: 'opencode-go/longcat-2.5-preview-free', comment: 'isolated fixture; not a product default' },
+  ] }));
   const env = {
     ...process.env,
     PATH: `${pathBin}:${process.env.PATH ?? ''}`,

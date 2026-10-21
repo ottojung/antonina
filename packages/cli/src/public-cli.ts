@@ -1,6 +1,6 @@
 export class PublicCliUsageError extends Error {}
 
-export type PublicNamespace = 'agent' | 'board' | 'daemon';
+export type PublicNamespace = 'agent' | 'board' | 'daemon' | 'model';
 
 export interface PublicRunPlan {
   readonly kind: 'run';
@@ -374,20 +374,27 @@ const DAEMON_SPECS: readonly CommandSpec[] = [
   },
 ];
 
+const MODEL_SPECS: readonly CommandSpec[] = [
+  { path: ['list'], summary: 'Show ordered model preferences and comments.', normalize: () => ['list'] },
+  { path: ['select'], summary: 'Print the first configured model available in OpenCode.', normalize: () => ['select'] },
+];
+
 const SPECS: Readonly<Record<PublicNamespace, readonly CommandSpec[]>> = {
   agent: AGENT_SPECS,
   board: BOARD_SPECS,
   daemon: DAEMON_SPECS,
+  model: MODEL_SPECS,
 };
 
 const GROUPS: Readonly<Record<PublicNamespace, readonly string[]>> = {
   agent: [],
   board: ['credential', 'queue', 'resource', 'collect'],
   daemon: [],
+  model: [],
 };
 
 export const TOP_LEVEL_HELP = [
-  'Usage: antonina <agent|board|daemon> <command> [options]',
+  'Usage: antonina <agent|board|daemon|model> <command> [options]',
   '',
   'Antonina uses positional words only for command/subcommand selection.',
   'Every data argument is a named --option. Use -h or --help at any command level.',
@@ -396,6 +403,7 @@ export const TOP_LEVEL_HELP = [
   '  agent   manage delegated coding agents',
   '  board   read and mutate the signed coordination board',
   '  daemon  inspect or run the persistent host daemon',
+  '  model   inspect configured model preferences and select an available model',
 ].join('\n');
 
 function specKey(path: readonly string[]): string {

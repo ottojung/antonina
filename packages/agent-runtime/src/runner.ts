@@ -46,6 +46,12 @@ import {
   runnerReservationState,
   type AgentMetadata,
 } from './metadata.js';
+import {
+  TRANSIENT_MODEL_RETRIES,
+  coolDownAgentModel,
+  recordAgentModel,
+  type ModelFailureReason,
+} from './model-failover.js';
 import { procStartTicks, persistedProcessInteger, signalMarkedInvocationProcesses } from './process.js';
 import {
   logPath,
@@ -62,6 +68,27 @@ const RETRY_CLEANUP_MAX_MS = 2_000;
 const RETRY_CLEANUP_POLL_MS = 100;
 const RETRY_CONTROL_POLL_MS = 200;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+function modelFailureReason(error: BackendError | null, attempt: number): ModelFailureReason | null {
+  if (error === null) return null;
+  switch (error.classification) {
+    case 'model_quota_exhausted': return 'quota_exhausted';
+    case 'upstream_rate_limited': return 'rate_limited';
+    case 'model_unavailable': return 'model_unavailable';
+    case 'upstream_endpoint_unavailable':
+    case 'transient_backend_server_error':
+      return attempt >= TRANSIENT_MODEL_RETRIES ? 'transient_backend' : null;
+    default: return null;
+  }
+}
+
+/** Extract only the selected model from a command Antonina itself assembled. */
+function commandModel(command: string[]): string {
+  const flag = command.indexOf('--model');
+  const model = flag < 0 ? undefined : command[flag + 1];
+  if (typeof model !== 'string') throw new Error('Antonina backend command omitted its configured model');
+  return model;
+}
 
 /** Reap verified descendants of the previous invocation before replaying work.
  * The leader was already reaped by childResult. Descendants may have moved to
@@ -786,6 +813,7 @@ async function runInvocation(
 
   let attempt = 0;
   let retryAsContinue = isContinue;
+  let activeModel = commandModel(command);
   while (true) {
     // Inside the loop, not above it: a retry is a launch too, so every spawn
     // this invocation can perform is decided by the same gate against the
@@ -800,6 +828,10 @@ async function runInvocation(
       }, options);
       return false;
     }
+    await updateMeta(agentId, (current) => {
+      if (current.state !== 'running') return;
+      recordAgentModel(current, activeModel);
+    }, options);
     const invocationId = randomBytes(16).toString('hex');
     const logFile = logPath(agentId, options);
     const fd = openSync(logFile, 'a', 0o600);
@@ -936,10 +968,61 @@ async function runInvocation(
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);
     const backendError = classifyBackendFailure(logFile, invocationLogStart, code, retryAsContinue);
+    if (backendError !== null && backendError.classification !== 'external_signal_kill') {
+      backendError.model = activeModel;
+    }
+
+    // Model-specific failure, not an agent-global outage: only this agent is
+    // moved to the next eligible model. Transient failures get two retries.
+    const failoverReason = result.signal === null && !result.operatorSignalled
+      ? modelFailureReason(backendError, attempt) : null;
+    if (failoverReason !== null) {
+      // A fresh invocation may have already performed tool actions. Reuse its
+      // session if one exists. Never blindly replay untracked tool effects.
+      if (!retryAsContinue) await rememberFreshSession(agentId, options);
+      await updateMeta(agentId, (current) => {
+        if (current.state !== 'running') return;
+        coolDownAgentModel(current, activeModel, failoverReason);
+        current.backend_error = backendError;
+        current.error = 'model ' + activeModel + ' failed (' + failoverReason + '); selecting the next eligible model';
+        current.last_activity_at = Date.now() / 1000;
+      }, options);
+      const latest = readMeta(agentId, options);
+      if (latest !== null && latest.state === 'running') {
+        const canContinue = retryAsContinue || persistedNativeSessionId(latest) !== null;
+        // The existing endpoint-outage policy permits at-least-once replay.
+        // Other failures require a real recorded session for safe recovery.
+        if (canContinue || backendError?.automatic_retry_safe === true) {
+          try {
+            const nextCommand = buildAgentCommand(
+              latest, prompt, canContinue, { ...options.env, ...opencodeBackendEnv(latest, options) },
+            );
+            if (nextCommand !== null && commandModel(nextCommand) !== activeModel) {
+              await settlePreviousInvocation(agentId, invocationId);
+              const next = await waitForRecovery(agentId, 0, options);
+              if (next === 'stop') return false;
+              if (next === 'steer') return true;
+              command = nextCommand;
+              activeModel = commandModel(nextCommand);
+              retryAsContinue = canContinue;
+              attempt = 0;
+              continue;
+            }
+          } catch {
+            // If the catalog is unavailable or all models are cooling down,
+            // report the original backend failure instead of guessing.
+          }
+        }
+      }
+    }
+
     const retryDelay = options.retryDelayMs !== undefined
       ? options.retryDelayMs(attempt)
-      : backendRetryDelay(backendError, attempt);
-    if (retryDelay !== null && result.signal === null && !result.operatorSignalled) {
+      : backendRetryDelay(backendError, attempt)
+        ?? (backendError?.classification === 'transient_backend_server_error' && retryAsContinue
+          ? 500 * (2 ** attempt) : null);
+    if (failoverReason === null && attempt < TRANSIENT_MODEL_RETRIES
+      && retryDelay !== null && result.signal === null && !result.operatorSignalled) {
       // If a failed fresh invocation created a session, resume that session.
       // If not, at-least-once replay of the original request is acceptable.
       if (!retryAsContinue && backendError?.classification === 'upstream_endpoint_unavailable') {

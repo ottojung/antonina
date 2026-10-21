@@ -1,3 +1,11 @@
+$id-20261021-agent-model-subcommands
+title: Model inspection and selection belong to the agent command namespace
+date: 2026/10/21
+source: @ottojung
+kind: constraint
+
+The public interface for inspecting and selecting the ordered, host-local model configuration is `antonina agent model list` and `antonina agent model select`, not a top-level `antonina model` command. Every orchestrator caller, public help surface, test, and current deployment document must use the nested agent namespace. The model ordering and evidence-rich comments, and the absence of compiled-in defaults or fallback models, remain unchanged. This supersedes the earlier command-path choice recorded in the configuration implementation.
+
 $id-20261021-configurable-model-order
 title: Antonina selects models exclusively from an operator-maintained ordered configuration
 date: 2026/10/21

@@ -1639,52 +1639,24 @@ test('a/d. a full host still launches, because launch is not host-capacity polic
   assertFixtureInvoked(handle, 'work');
 });
 
-test('5. agent status exposes host headroom without a separate command', async (t) => {
+test('agent status reports only agent state, without shared host or cgroup headroom', async (t) => {
   const handle = fixture(t);
   const { work, env } = handle;
-  const agent_ca93 = newAgent(env, ['--cwd', work]);
+  const agentId = newAgent(env, ['--cwd', work]);
 
-  const status = run(['agent', 'status', '--id', agent_ca93, '--json'], env);
+  const status = run(['agent', 'status', '--id', agentId, '--json'], env);
   assert.equal(status.status, 0, status.stderr);
-  const capacity = JSON.parse(status.stdout).host_capacity;
-  // The shape an operator reads after a death: what the kernel reported. There
-  // is no threshold, no verdict and no refusal field, because there is no
-  // decision to report: the intent record requires that the agent command not
-  // decide whether the host has room.
-  for (const gone of ['min_headroom_bytes', 'min_headroom', 'refused', 'outcome', 'reason', 'override_applied']) {
-    assert.equal(gone in capacity, false, `host_capacity must not report ${gone}: it is admission policy`);
-  }
-  // The limit and usage behind the headroom are exposed so a number in status
-  // can be checked against the readings that produced it. That identity holds
-  // only where the host really is in a limited cgroup; on a host with no hard
-  // limit the reading degrades to a stated reason instead (covered
-  // deterministically in the runtime suite). Assert whichever shape this host
-  // actually has, and never the weather.
-  if (capacity.degraded_reason === null) {
-    assert.equal(capacity.source, 'cgroup_v2');
-    assert.equal(typeof capacity.headroom_bytes, 'number');
-    // The raw kernel identity remains independently auditable; the effective
-    // estimate, when memory.stat is available, is not just this subtraction.
-    assert.equal(capacity.headroom_bytes, Math.max(0,capacity.limit_bytes-capacity.usage_bytes));
-    assert.equal(capacity.raw_unused_bytes,capacity.headroom_bytes);
-    assert.ok(capacity.estimated_headroom_bytes === null
-      || capacity.estimated_headroom_bytes >= capacity.raw_unused_bytes);
-    if (capacity.estimated_headroom_bytes !== null) {
-      assert.equal(typeof capacity.estimated_headroom_percent,'number');
-      assert.match(capacity.headroom,/estimated/);
-    } else {
-      assert.match(capacity.headroom,/unknown/);
-    }
+  const data = JSON.parse(status.stdout);
+  assert.equal(data.id, agentId);
+  assert.equal(typeof data.state, 'string');
+  assert.equal(Object.hasOwn(data, 'host_capacity'), false);
+  assert.equal(Object.hasOwn(data, 'headroom'), false);
+  assert.equal(Object.hasOwn(data, 'memory'), false);
 
-    // The human-readable form labels the estimated and raw readings.
-    const human = run(['agent', 'status', '--id', agent_ca93], env);
-    assert.equal(human.status, 0, human.stderr);
-    assert.match(human.stdout, /headroom:.*(hard limit|estimate unknown)/);
-    if (capacity.estimated_headroom_bytes !== null) {
-      assert.match(human.stdout,/raw unused:/);
-    }
-    assert.doesNotMatch(human.stdout, /required/);
-  }
+  const human = run(['agent', 'status', '--id', agentId], env);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /state:/);
+  assert.doesNotMatch(human.stdout, /headroom:|raw unused:|pressure:|^host:/m);
 });
 
 test('e. a signal-killed agent is reported as an external kill through status', async (t) => {

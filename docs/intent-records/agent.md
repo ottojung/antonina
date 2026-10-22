@@ -1,3 +1,19 @@
+$id-20261022-no-host-headroom-in-agent-status
+title: Agent status is agent-specific; remove cgroup headroom observations
+date: 2026/10/22
+source: @ottojung
+kind: constraint
+
+The antonina agent status command, in both human-readable and JSON output,
+reports only the individual agent's state and diagnostics. It must not read or
+display host/cgroup memory headroom, pressure, or capacity. Resource counters
+describe a host or cgroup, not the individual agent, and the CLI process's
+cgroup may differ from the agent's. Preserve the underlying host-capacity
+diagnostic implementation and its tests for future host-level use, without
+adding a capacity-derived admission check or a new agent-status field.
+This intent supersedes the earlier agent-status presentation requirement for
+reclaim-aware headroom; it does not undo the reclaim-aware accounting itself.
+
 $id-20261022-reclaim-aware-headroom-diagnostics
 title: Report memory pressure and reclaim-aware headroom, not only unused bytes
 date: 2026/10/22

@@ -70,10 +70,22 @@ test('specific backend errors distinguish exhausted quota, throttling, model abs
   const dir=mkdtempSync(join(tmpdir(),'antonina-failover-'));
   try{
     const path=join(dir,'log');
+    const apiError = (message, statusCode) => JSON.stringify({
+      type:'error',sessionID:'ses_realcase',error:{
+        name:'APIError',data:{message,statusCode,isRetryable:true},
+      },
+    });
     const cases=[
       ['Error: insufficient_quota', 'model_quota_exhausted'],
-      ['Error: You have reached your usage limit', 'model_quota_exhausted'],
       ['Error: The usage limit has been reached', 'model_quota_exhausted'],
+      [apiError('The usage limit has been reached',429), 'model_quota_exhausted'],
+      [apiError('Temporary provider throttle',429), 'upstream_rate_limited'],
+      [apiError('Gateway error',503), 'transient_backend_server_error'],
+      [apiError('Invalid argument',400), 'unrecognized_backend_failure'],
+      [JSON.stringify({type:'text',part:{text:'statusCode 429'},error:{
+        name:'APIError',data:{statusCode:429},
+      }}), 'unrecognized_backend_failure'],
+      ['Error: You have reached your usage limit', 'model_quota_exhausted'],
       ['Error: model_not_found', 'model_unavailable'],
       ['Error: invalid_api_key', 'backend_authentication_failed'],
       ['Error: Payment Required', 'backend_billing_required'],

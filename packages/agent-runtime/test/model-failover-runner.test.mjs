@@ -29,9 +29,13 @@ async function exercise(t, kind) {
     + 'printf "%s\\n" "$model" >> "$ANTONINA_TEST_TRACE"\n'
     + 'sleep 0.12\n'
     + (kind==='fresh-quota'
-        ? 'if [ "$model" = "example.test/luna" ]; then [ "$format" = "json" ] || exit 43; printf \'{"type":"step_start","sessionID":"ses_checkpoint_demo","part":{"type":"step-start"}}\\n\'; sleep 0.3; printf \'{"type":"error","sessionID":"ses_checkpoint_demo","error":{"data":{"message":"insufficient_quota"}}}\\n\'; exit 1; fi\n'
+        ? 'if [ "$model" = "example.test/luna" ]; then [ "$format" = "json" ] || exit 43; printf \'{"type":"step_start","sessionID":"ses_checkpoint_demo","part":{"type":"step-start"}}\\n\'; sleep 0.3; printf \'{"type":"error","sessionID":"ses_checkpoint_demo","error":{"data":{"message":"The usage limit has been reached"}}}\\n\'; exit 1; fi\n'
         : kind==='quota'
-          ? 'if [ "$model" = "example.test/luna" ]; then echo "Error: insufficient_quota" >&2; exit 1; fi\n'
+          ? 'if [ "$model" = "example.test/luna" ]; then echo "Error: The usage limit has been reached" >&2; exit 1; fi\n'
+          : kind==='throttle-json'
+            ? 'if [ "$model" = "example.test/luna" ]; then printf \'{"type":"error","error":{"name":"APIError","data":{"message":"Temporary throttle","statusCode":429}}}\\n\'; exit 1; fi\n'
+          : kind==='transient-json'
+            ? 'if [ "$model" = "example.test/luna" ]; then printf \'{"type":"error","error":{"name":"APIError","data":{"message":"Gateway error","statusCode":503}}}\\n\'; exit 1; fi\n'
           : 'if [ "$model" = "example.test/luna" ]; then echo "Error: Endpoint is unavailable" >&2; exit 1; fi\n')
     + (kind==='fresh-quota' ? '[ "$session" = "ses_checkpoint_demo" ] || exit 44\n' : '')
     + 'echo "SUCCESS"; exit 0\n';
@@ -49,7 +53,7 @@ async function exercise(t, kind) {
   const token=mintRunnerReservationOwnerToken();
   env.ANTONINA_RUNNER_OWNER_TOKEN=token;
   const options={env};
-  const id=kind==='fresh-quota'?'model-fresh':kind==='quota'?'model-quota':'model-transient';
+  const id='model-'+kind;
   const cwd=join(root,'work');
   mkdirSync(cwd);
   assert.equal(createAgentDirectory(id,options),true);
@@ -79,12 +83,15 @@ async function exercise(t, kind) {
   assert.equal(result.model_failover.selected_model,BEAM);
   if (kind==='fresh-quota') assert.equal(result.native_session_id,'ses_checkpoint_demo');
   assert.equal(result.model_failover.cooldowns[0].model,LUNA);
-  assert.equal(result.model_failover.cooldowns[0].reason,kind==='transient'?'transient_backend':'quota_exhausted');
+  assert.equal(result.model_failover.cooldowns[0].reason,kind.startsWith('transient')?'transient_backend':kind==='throttle-json'?'rate_limited':'quota_exhausted');
   const actual=readFileSync(trace,'utf8').trim().split('\n');
-  assert.deepEqual(actual.filter(model => model === LUNA || model === BEAM),kind==='transient'?[LUNA,LUNA,LUNA,BEAM]:[LUNA,BEAM]);
+  assert.deepEqual(actual.filter(model => model === LUNA || model === BEAM),kind.startsWith('transient')?[LUNA,LUNA,LUNA,BEAM]:[LUNA,BEAM]);
 }
 
 test('quota failure switches model within the same agent and same recorded session', {timeout:150000},async t=>exercise(t,'quota'));
 test('transient failure gets two retries before model failover', {timeout:150000},async t=>exercise(t,'transient'));
 
 test('fresh first-invocation quota failure resumes checkpointed JSON session even when session list is empty', {timeout:150000},async t=>exercise(t,'fresh-quota'));
+
+test('structured HTTP 429 throttling advances directly to Beam', {timeout:150000},async t=>exercise(t,'throttle-json'));
+test('structured HTTP 503 retries twice then advances to Beam', {timeout:150000},async t=>exercise(t,'transient-json'));

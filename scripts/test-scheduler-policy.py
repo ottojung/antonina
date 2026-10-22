@@ -495,6 +495,15 @@ class SchedulerDeploymentTests(unittest.TestCase):
 
 
 class OrchestratorModelRecoveryTests(unittest.TestCase):
+    def test_real_oauth_quota_and_structured_rate_throttle(self):
+        helper = load_helper("antonina-orchestrator-model")
+        self.assertEqual(helper.classify(1, b"Error: The usage limit has been reached"), "quota_exhausted")
+        self.assertEqual(helper.classify(1, b'{"type":"error","error":{"name":"APIError","data":{"message":"The usage limit has been reached","statusCode":429}}}'), "quota_exhausted")
+        self.assertEqual(helper.classify(1, b'{"type":"error","error":{"name":"APIError","data":{"message":"Throttled","statusCode": 429}}}'), "rate_limited")
+        self.assertEqual(helper.classify(1, b"Error: invalid_api_key; The usage limit has been reached"), None)
+        self.assertEqual(helper.classify(1, b"Error: Failed to compile user project"), None)
+        self.assertEqual(helper.classify(1, b"Error: Endpoint is unavailable"), "transient_backend")
+
     def test_quota_switches_persistently_and_recovers_after_six_hours(self):
         import os
         import tempfile
@@ -595,7 +604,7 @@ class OrchestratorModelRecoveryTests(unittest.TestCase):
                 'previous=""\n'
                 'for arg in "$@"; do\n'
                 '  if [ "$previous" = "--model" ]; then\n'
-                '    if [ "$arg" = "example/luna" ]; then echo "Error: insufficient_quota" >&2; exit 1; fi\n'
+                '    if [ "$arg" = "example/luna" ]; then echo "Error: The usage limit has been reached" >&2; exit 1; fi\n'
                 '    if [ "$arg" = "example/beam" ]; then echo "ORCHESTRATOR_RECOVERED"; exit 0; fi\n'
                 '  fi\n'
                 '  previous="$arg"\n'
@@ -608,7 +617,7 @@ class OrchestratorModelRecoveryTests(unittest.TestCase):
             turn = str(ROOT / "antonina-orchestrator-turn")
             first = subprocess.run([turn], env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(first.returncode, 75, first.stderr)
-            self.assertIn("insufficient_quota", first.stdout)
+            self.assertIn("The usage limit has been reached", first.stdout)
             second = subprocess.run([turn], env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertIn("ORCHESTRATOR_RECOVERED", second.stdout)

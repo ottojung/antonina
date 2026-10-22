@@ -1,3 +1,11 @@
+$id-20261022-failure-scoped-soft-model-selection
+title: Model errors classified by permanence and scope with soft transient fallback
+date: 2026/10/22
+source: @ottojung
+kind: constraint
+
+For managed agents and the supervised orchestrator, classify failures by their evidence and recoverability rather than treating all request errors as a six-hour model outage. Preserve the ordered configured list: choose the highest-ranked healthy configured model; if none is healthy, choose randomly among models with transient server failures, independently on each new run/turn. Such models are unreliable, not disqualified. Apply short backoffs with jitter before transient retries and never loop endlessly through models in a single accepted run. Definitive quota exhaustion remains excluded until its provider reset timestamp when reliable, otherwise the conservative six-hour fallback; rate limits use shorter temporary exclusion. A known absent/unsupported model and provider-specific authentication/billing failures are hard exclusions under unchanged configuration; provider-scoped errors apply to models sharing that exact provider identifier rather than unrelated providers. Ambiguous, request-specific, host, tool, or unclassified errors are NOT evidence for permanent model exclusions or unsafe replay. A hard exclusion is not an assertion that all services are permanently offline: changed model configuration or explicit operator repair can make another candidate eligible. Keep existing managed-agent metadata readable; old long transient cooldown records are soft evidence, not bans. The standalone orchestrator supervisor must follow the same reliability policy without reading an OpenCode model catalog, and model switching must preserve recorded native sessions and process identity safety checks. Do not add host-specific limits or fixed execution caps.
+
 $id-20261022-managed-agent-model-step-stall
 title: Conservative managed-agent liveness and safe model switching
 date: 2026/10/22

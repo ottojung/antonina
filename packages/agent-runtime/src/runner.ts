@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomInt } from 'node:crypto';
 import { closeSync, fstatSync, openSync, statSync } from 'node:fs';
 import { constants } from 'node:os';
 
@@ -51,9 +51,13 @@ import {
   MODEL_COOLDOWN_SECONDS,
   TRANSIENT_MODEL_RETRIES,
   coolDownAgentModel,
+  excludeAgentProvider,
+  modelCooldownSeconds,
+  modelSoftPenaltySeconds,
   recordAgentModel,
   type ModelFailureReason,
 } from './model-failover.js';
+import { configuredModels } from './model-config.js';
 import { SessionCheckpointReader } from './session-checkpoint.js';
 import {
   InvocationActivity, BACKEND_ERROR_GRACE_MS, LIVENESS_POLL_MS,
@@ -82,6 +86,8 @@ function modelFailureReason(error: BackendError | null, attempt: number): ModelF
     case 'model_quota_exhausted': return 'quota_exhausted';
     case 'upstream_rate_limited': return 'rate_limited';
     case 'model_unavailable': return 'model_unavailable';
+    case 'backend_authentication_failed': return 'provider_authentication_failed';
+    case 'backend_billing_required': return 'provider_billing_required';
     case 'upstream_endpoint_unavailable':
     case 'transient_backend_server_error':
       return attempt >= TRANSIENT_MODEL_RETRIES ? 'transient_backend' : null;
@@ -856,12 +862,22 @@ async function runInvocation(
   let attempt = 0;
   let retryAsContinue = isContinue;
   let activeModel = commandModel(command);
+  // Never recycle an exhausted candidate within the same accepted prompt.
+  // The random all-transient pool must not create an infinite switch loop.
+  const failedModelsThisRun = new Set<string>();
   while (true) {
     // Inside the loop, not above it: a retry is a launch too, so every spawn
     // this invocation can perform is decided by the same gate against the
     // record as it stands at that moment. A refusal is a failed invocation with
     // a stated reason, exactly like the refusals above it, so the accepted
     // prompt is never left pending behind a front that will not run it.
+    // All candidates may have recent transient errors. Allow another try,
+    // but stagger retries across agents instead of hammering an outage.
+    if (modelSoftPenaltySeconds(readMeta(agentId, options) ?? meta, activeModel) > 0) {
+      const waiting = await waitForRecovery(agentId, 1_000 + randomInt(0, 2_000), options);
+      if (waiting === 'stop') return false;
+      if (waiting === 'steer') return true;
+    }
     const authorization = await authorizeLaunch(options);
     if (!authorization.allowed) {
       await updateMeta(agentId, (current) => {
@@ -963,7 +979,10 @@ async function runInvocation(
       // Only a durable native session and another eligible configured model
       // authorize recovery. In particular, first-invocation silence without a
       // checkpointed session cannot justify replay of unknown side effects.
-      if (!safeAlternativeModel(current, activeModel, { ...process.env, ...options.env })) return false;
+      if (!safeAlternativeModel(
+        current, activeModel, { ...process.env, ...options.env },
+        Date.now() / 1000, failedModelsThisRun, observation.backendFailure,
+      )) return false;
       livenessState.observation = observation;
       return true;
     };
@@ -1065,11 +1084,17 @@ async function runInvocation(
         request_boundary: retryAsContinue ? 'continuation' : 'fresh_session',
         reference: null, transient: true, automatic_retry_safe: false,
         fresh_session_useful: retryAsContinue ? null : true,
-        backend_scope: 'model', diagnostic_bytes: 0,
+        backend_scope: livenessClassification === 'backend_authentication_failed'
+          || livenessClassification === 'backend_billing_required' ? 'provider' : 'model',
+        diagnostic_bytes: 0,
       }
       : classifyBackendFailure(logFile, invocationLogStart, code, retryAsContinue);
     if (backendError !== null && backendError.classification !== 'external_signal_kill') {
       backendError.model = activeModel;
+      if (backendError.classification === 'backend_authentication_failed'
+        || backendError.classification === 'backend_billing_required') {
+        backendError.backend_scope = 'provider';
+      }
     }
 
     // Model-specific failure, not an agent-global outage: only this agent is
@@ -1083,13 +1108,20 @@ async function runInvocation(
       const failedAt = Date.now() / 1000;
       const cooldownSeconds = failoverReason === 'quota_exhausted'
         ? quotaResetDelaySeconds(logFile, invocationLogStart, failedAt) ?? MODEL_COOLDOWN_SECONDS
-        : MODEL_COOLDOWN_SECONDS;
+        : modelCooldownSeconds(failoverReason) + (
+          failoverReason === 'transient_backend' || failoverReason === 'rate_limited' ? randomInt(0, 30) : 0
+        );
+      failedModelsThisRun.add(activeModel);
       // A fresh invocation may have already performed tool actions. Reuse its
       // session if one exists. Never blindly replay untracked tool effects.
       if (!retryAsContinue) await rememberFreshSession(agentId, options);
       await updateMeta(agentId, (current) => {
         if (current.state !== 'running') return;
-        coolDownAgentModel(current, activeModel, failoverReason, failedAt, cooldownSeconds);
+        if (failoverReason === 'provider_authentication_failed' || failoverReason === 'provider_billing_required') {
+          excludeAgentProvider(current, activeModel, configuredModels({ ...process.env, ...options.env }), failoverReason, failedAt);
+        } else {
+          coolDownAgentModel(current, activeModel, failoverReason, failedAt, cooldownSeconds);
+        }
         current.backend_error = backendError;
         current.error = stalled
           ? 'model ' + activeModel + ' interrupted after '
@@ -1107,6 +1139,7 @@ async function runInvocation(
           try {
             const nextCommand = buildAgentCommand(
               latest, prompt, canContinue, { ...options.env, ...opencodeBackendEnv(latest, options) },
+              failedModelsThisRun,
             );
             if (nextCommand !== null && commandModel(nextCommand) !== activeModel) {
               await settlePreviousInvocation(agentId, invocationId);

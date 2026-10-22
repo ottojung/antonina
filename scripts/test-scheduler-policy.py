@@ -500,7 +500,7 @@ class OrchestratorModelRecoveryTests(unittest.TestCase):
         self.assertEqual(helper.classify(1, b"Error: The usage limit has been reached"), "quota_exhausted")
         self.assertEqual(helper.classify(1, b'{"type":"error","error":{"name":"APIError","data":{"message":"The usage limit has been reached","statusCode":429}}}'), "quota_exhausted")
         self.assertEqual(helper.classify(1, b'{"type":"error","error":{"name":"APIError","data":{"message":"Throttled","statusCode": 429}}}'), "rate_limited")
-        self.assertEqual(helper.classify(1, b"Error: invalid_api_key; The usage limit has been reached"), None)
+        self.assertEqual(helper.classify(1, b"Error: invalid_api_key; The usage limit has been reached"), "provider_authentication_failed")
         self.assertEqual(helper.classify(1, b"Error: Failed to compile user project"), None)
         self.assertEqual(helper.classify(1, b"Error: Endpoint is unavailable"), "transient_backend")
 
@@ -540,7 +540,27 @@ class OrchestratorModelRecoveryTests(unittest.TestCase):
             self.assertEqual(helper.choose(), "test/beam")
             self.assertEqual(helper.read_state()["cooldowns"][0]["reason"], "transient_backend")
 
-    def test_auth_unknown_and_tool_failures_do_not_switch(self):
+    def test_provider_hard_errors_exclude_related_models_not_distinct_providers(self):
+        import os
+        import tempfile
+        helper = load_helper("antonina-orchestrator-model")
+        order = ["openai/luna", "openai/another", "opencode-go/beam"]
+        with tempfile.TemporaryDirectory() as root, \
+                patch.dict(os.environ, {"XDG_STATE_HOME": root}), \
+                patch.object(helper, "configured_models", return_value=order), \
+                patch.object(helper.time, "time", return_value=1000):
+            self.assertEqual(helper.choose(), "openai/luna")
+            self.assertEqual(helper.record_result("openai/luna", 1, b"invalid_api_key"), 75)
+            self.assertEqual(helper.choose(), "opencode-go/beam")
+            state = helper.read_state()
+            self.assertEqual([e["model"] for e in state["cooldowns"]], order[:2])
+            self.assertTrue(all(e["reason"] == "provider_authentication_failed" for e in state["cooldowns"]))
+            self.assertTrue(all(e["until"] == helper.PERMANENT_UNTIL for e in state["cooldowns"]))
+            self.assertEqual(helper.record_result("opencode-go/beam", 1, b"Payment Required"), 75)
+            with self.assertRaisesRegex(ValueError, "hard exclusions"):
+                helper.choose()
+
+    def test_unknown_request_failure_does_not_poison_other_models(self):
         import os
         import tempfile
         helper = load_helper("antonina-orchestrator-model")
@@ -548,11 +568,54 @@ class OrchestratorModelRecoveryTests(unittest.TestCase):
                 patch.dict(os.environ, {"XDG_STATE_HOME": root}), \
                 patch.object(helper, "configured_models", return_value=["test/luna", "test/beam"]):
             helper.choose()
-            for line in (b"invalid_api_key", b"Payment Required",
-                         b"Error: failed to compile user project"):
+            for line in (b"Error: failed to compile user project", b"Invalid context length"):
                 self.assertEqual(helper.record_result("test/luna", 1, line), 1)
                 self.assertEqual(helper.choose(), "test/luna")
                 self.assertFalse(helper.read_state()["cooldowns"])
+
+    def test_when_all_models_are_soft_unreliable_each_turn_draws_at_random(self):
+        import os
+        import tempfile
+        helper = load_helper("antonina-orchestrator-model")
+        models = ["test/luna", "test/beam", "test/longcat"]
+        with tempfile.TemporaryDirectory() as root, \
+                patch.dict(os.environ, {"XDG_STATE_HOME": root}), \
+                patch.object(helper, "configured_models", return_value=models), \
+                patch.object(helper.time, "time", return_value=1000):
+            state = helper.read_state()
+            state["cooldowns"] = [
+                {"model": name, "reason": "transient_backend", "until": 1000 + 21600}
+                for name in models
+            ]
+            helper.save_state(state)  # Existing six-hour transient records remain valid, but soft.
+            with patch.object(helper.secrets, "choice", side_effect=lambda pool: pool[0]):
+                self.assertEqual(helper.choose(), models[0])
+            with patch.object(helper.secrets, "choice", side_effect=lambda pool: pool[-1]):
+                self.assertEqual(helper.choose(), models[-1])
+            self.assertTrue(helper.read_state()["cooldowns"])
+
+    def test_hard_exclusions_never_enter_random_transient_pool(self):
+        import os
+        import tempfile
+        helper = load_helper("antonina-orchestrator-model")
+        models = ["test/luna", "test/beam", "test/longcat"]
+        with tempfile.TemporaryDirectory() as root, \
+                patch.dict(os.environ, {"XDG_STATE_HOME": root}), \
+                patch.object(helper, "configured_models", return_value=models), \
+                patch.object(helper.time, "time", return_value=1000):
+            state = helper.read_state()
+            state["cooldowns"] = [
+                {"model": models[0], "reason": "quota_exhausted", "until": 2000},
+                {"model": models[1], "reason": "model_unavailable", "until": helper.PERMANENT_UNTIL},
+                {"model": models[2], "reason": "transient_backend", "until": 1300},
+            ]
+            helper.save_state(state)
+            with patch.object(helper.secrets, "choice", side_effect=lambda pool: pool[0]):
+                self.assertEqual(helper.choose(), models[2])
+            with patch.object(helper.time, "time", return_value=1400):
+                self.assertEqual(helper.choose(), models[2])
+            with patch.object(helper.time, "time", return_value=2100):
+                self.assertEqual(helper.choose(), models[0])
 
     def test_real_child_output_is_forwarded_and_status_tracked(self):
         import subprocess

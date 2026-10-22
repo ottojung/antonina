@@ -7,7 +7,8 @@ const source = (path) => readFileSync(fileURLToPath(new URL(path, import.meta.ur
 
 test('model configuration is authoritative and no model is hardcoded in launch surfaces', () => {
   const intent = source('../../../docs/intent-records/agent.md');
-  assert.match(intent, /^\$id-20261022-managed-agent-model-step-stall/);
+  assert.match(intent, /^\$id-20261022-failure-scoped-soft-model-selection/);
+  assert.match(intent, /\$id-20261022-managed-agent-model-step-stall/);
   assert.match(intent, /\$id-20261021-orchestrator-model-recovery-session-checkpoint/);
   assert.match(intent, /\$id-20261021-no-opencode-model-discovery/);
   assert.match(intent, /\$id-20261021-agent-model-subcommands/);

@@ -313,6 +313,25 @@ function structuredBackendFailureRule(text: string): BackendFailureRule | undefi
     if (error.name !== 'APIError' || typeof error.data !== 'object' || error.data === null || Array.isArray(error.data)) continue;
     const data = error.data as Record<string, unknown>;
     const statusCode = data.statusCode;
+    if (statusCode === 401 || statusCode === 402) {
+      return {
+        marker: statusCode === 401 ? 'OpenCode APIError HTTP 401' : 'OpenCode APIError HTTP 402',
+        classification: statusCode === 401 ? 'backend_authentication_failed' : 'backend_billing_required',
+        provider: null,
+        transient: false,
+        automaticRetrySafe: false,
+      };
+    }
+    if (statusCode === 404 && typeof data.message === 'string'
+      && /model_not_found|model not found|unknown model/i.test(data.message)) {
+      return {
+        marker: 'OpenCode APIError unknown model',
+        classification: 'model_unavailable',
+        provider: null,
+        transient: false,
+        automaticRetrySafe: false,
+      };
+    }
     if (statusCode === 429) {
       return {
         marker: 'OpenCode APIError HTTP 429',
@@ -518,9 +537,10 @@ export function selectConfiguredAgentModel(
   meta: AgentMetadata,
   env: Record<string, string | undefined> = process.env,
   now: number = Date.now() / 1000,
+  excludedModels: ReadonlySet<string> = new Set(),
 ): string {
-  const chosen = eligibleAgentModel(meta, configuredModels(env), now);
-  if (chosen === null) throw new Error('No eligible configured model for this agent: all configured models are cooling down');
+  const chosen = eligibleAgentModel(meta, configuredModels(env), now, undefined, excludedModels);
+  if (chosen === null) throw new Error('No eligible configured model: all candidates have an active quota, rate limit, hard exclusion, or were tried this invocation');
   return chosen;
 }
 
@@ -529,6 +549,7 @@ export function buildAgentCommand(
   prompt: string,
   isContinue: boolean,
   env: Record<string, string | undefined> = process.env,
+  excludedModels: ReadonlySet<string> = new Set(),
 ): string[] | null {
   const agentId = requiredPersistedAgentId(meta);
   const cwd = requiredAgentCwd(meta);
@@ -539,7 +560,7 @@ export function buildAgentCommand(
   persistedVariant(meta);
   const variant = DEFAULT_VARIANT;
   const executable = resolveOpencode(env);
-  const model = selectConfiguredAgentModel(meta, env);
+  const model = selectConfiguredAgentModel(meta, env, Date.now() / 1000, excludedModels);
   if (isContinue) {
     const recorded = persistedNativeSessionId(meta);
     const sessionId = recorded ?? discoverSessionId(agentId, env, cwd);

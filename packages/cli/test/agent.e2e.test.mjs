@@ -861,7 +861,7 @@ test('prompt recovers an existing OpenCode session when durable session id was l
   assert.equal(done.native_session_id, 'ses_fake');
 
   const calls = readFileSync(env.ANTONINA_TEST_CALLS, 'utf8');
-  assert.match(calls, /run --auto --session ses_fake .* recovered/);
+  assert.match(calls, /run --auto --format json --session ses_fake .* recovered/);
   assertFixtureInvoked(handle, 'recovered');
 });
 

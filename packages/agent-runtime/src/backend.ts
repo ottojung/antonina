@@ -209,6 +209,15 @@ const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
     automaticRetrySafe: false,
   },
   {
+    // OpenCode's current OpenAI OAuth quota diagnostic on billy-dev.
+    // Treat it as exhausted quota, not an unrecognized retryable failure.
+    marker: 'The usage limit has been reached',
+    classification: 'model_quota_exhausted',
+    provider: null,
+    transient: false,
+    automaticRetrySafe: false,
+  },
+  {
     marker: 'usage limit exceeded',
     classification: 'model_quota_exhausted',
     provider: null,

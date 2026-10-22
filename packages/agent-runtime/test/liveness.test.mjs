@@ -89,6 +89,9 @@ test('restart requires a recorded native session and an eligible alternative mod
     meta.model_failover={selected_model:'example/luna',cooldowns:[
       {model:'example/beam',reason:'transient_backend',until:Date.now()/1000+3600},
     ]};
+    // A transient penalty is soft, not a reason to refuse a safe fallback.
+    assert.equal(safeAlternativeModel(meta,'example/luna',env),true);
+    meta.model_failover.cooldowns[0].reason='quota_exhausted';
     assert.equal(safeAlternativeModel(meta,'example/luna',env),false);
   }finally{rmSync(root,{recursive:true,force:true});}
 });
@@ -132,12 +135,15 @@ test('a terminal OpenCode APIError followed by its display footer triggers model
 
 test('refuse automatic failover on authentication, billing, unknown errors and tool activity', () => {
   const samples=[
-    [401,'Unauthorized'], [402,'Payment Required'], [403,'invalid_api_key'],
-    [400,'Failed to compile user project'], [429,'invalid_api_key: The usage limit has been reached'],
+    [401,'Unauthorized','backend_authentication_failed'],
+    [402,'Payment Required','backend_billing_required'],
+    [403,'permission denied',null],
+    [400,'Failed to compile user project',null],
+    [429,'invalid_api_key: The usage limit has been reached','backend_authentication_failed'],
   ];
-  for (const [statusCode,message] of samples) {
+  for (const [statusCode,message,expected] of samples) {
     const e={type:'error',sessionID:'ses_live',error:{name:'APIError',data:{message,statusCode}}};
-    assert.equal(recoverableOpenCodeError(e),null);
+    assert.equal(recoverableOpenCodeError(e),expected);
   }
   const valid={type:'error',sessionID:'ses_live',error:{name:'APIError',data:{message:'rate limit exceeded',statusCode:429}}};
   assert.equal(recoverableOpenCodeError(valid),'upstream_rate_limited');
@@ -151,6 +157,6 @@ test('refuse automatic failover on authentication, billing, unknown errors and t
     appendFileSync(file,JSON.stringify({type:'error',sessionID:'ses_live',
       error:{name:'APIError',data:{message:'invalid_api_key',statusCode:401}}})+'\n');
     assert.equal(monitor.observe(pid,ticks,2100,100,100).diagnosis,'progressing_or_uncertain');
-    assert.equal(monitor.observe(pid,ticks,2400,100,100).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,2400,100,100).diagnosis,'backend_error_silent');
   }finally{rmSync(dir,{recursive:true,force:true});}
 });

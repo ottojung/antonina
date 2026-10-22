@@ -2,7 +2,7 @@ import { closeSync, openSync, readSync, statSync } from 'node:fs';
 
 import { persistedNativeSessionId, type AgentMetadata } from './metadata.js';
 import { configuredModels } from './model-config.js';
-import { agentModelFailover } from './model-failover.js';
+import { eligibleAgentModel } from './model-failover.js';
 import { readProcStat, type ProcStat } from './process.js';
 
 /**
@@ -23,7 +23,9 @@ export type RecoverableBackendClassification =
   | 'upstream_rate_limited'
   | 'model_unavailable'
   | 'transient_backend_server_error'
-  | 'upstream_endpoint_unavailable';
+  | 'upstream_endpoint_unavailable'
+  | 'backend_authentication_failed'
+  | 'backend_billing_required';
 
 export type AgentLivenessDiagnosis =
   | 'model_step_silent'
@@ -54,9 +56,15 @@ export function recoverableOpenCodeError(event: Record<string, unknown>): Recove
   const data = error.data as Record<string, unknown>;
   const message = typeof data.message === 'string' ? data.message.toLowerCase() : '';
   const code = data.statusCode;
-  // Billing and authentication are not alternate-model selection signals.
-  if (code === 401 || code === 402 || code === 403
-    || /invalid_api_key|authentication|payment required|billing|credit balance/.test(message)) return null;
+  // A credential or billing failure is hard and provider-scoped, not a
+  // transient model failure. A distinct provider may still be eligible.
+  if (code === 401 || /invalid_api_key|invalid api key|authentication failed/.test(message)) {
+    return 'backend_authentication_failed';
+  }
+  if (code === 402 || /payment required|billing required|credit balance/.test(message)) {
+    return 'backend_billing_required';
+  }
+  if (code === 403) return null; // Ambiguous permission failures are not retry authority.
   if (message.includes('model_not_found') || message.includes('model not found')) return 'model_unavailable';
   if (message.includes('insufficient_quota') || message.includes('the usage limit has been reached')
     || message.includes('usage limit exceeded') || message.includes('you have reached your usage limit')
@@ -233,17 +241,28 @@ export class InvocationActivity {
   }
 }
 
-/** Do not interrupt a session unless an actual alternate model is eligible. */
+/**
+ * Interrupt only when another untried model can continue the same session.
+ * Soft transient penalties stay eligible; quota and hard exclusions do not.
+ */
 export function safeAlternativeModel(
   meta: AgentMetadata,
   activeModel: string,
   env: Record<string, string | undefined> = process.env,
   now = Date.now() / 1000,
+  alreadyTried: ReadonlySet<string> = new Set(),
+  classification: RecoverableBackendClassification | null = null,
 ): boolean {
   if (persistedNativeSessionId(meta) === null) return false;
   try {
-    const exclusions = agentModelFailover(meta).cooldowns;
-    return configuredModels(env).some(({ model }) =>
-      model !== activeModel && !exclusions.some((entry) => entry.model === model && entry.until > now));
+    const models = configuredModels(env);
+    const excluded = new Set([...alreadyTried, activeModel]);
+    if (classification === 'backend_authentication_failed' || classification === 'backend_billing_required') {
+      const provider = activeModel.split('/')[0];
+      for (const entry of models) {
+        if (entry.model.split('/')[0] === provider) excluded.add(entry.model);
+      }
+    }
+    return eligibleAgentModel(meta, models, now, undefined, excluded) !== null;
   } catch { return false; }
 }

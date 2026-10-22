@@ -7,7 +7,9 @@ import { join } from 'node:path';
 import { idleMeta, validateAgentMetadata } from '../dist/packages/agent-runtime/src/metadata.js';
 import {
   MODEL_COOLDOWN_SECONDS, TRANSIENT_MODEL_RETRIES, agentModelFailover,
-  coolDownAgentModel, eligibleAgentModel, recordAgentModel,
+  coolDownAgentModel, eligibleAgentModel, excludeAgentProvider,
+  modelCooldownSeconds, PERMANENT_EXCLUSION_UNTIL, TRANSIENT_UNRELIABLE_SECONDS,
+  RATE_LIMIT_BACKOFF_SECONDS, recordAgentModel,
 } from '../dist/packages/agent-runtime/src/model-failover.js';
 import {
   classifyBackendFailure, quotaResetDelaySeconds, buildAgentCommand,
@@ -71,7 +73,7 @@ test('cooldowns track opaque model IDs across preference reordering', () => {
   assert.equal(eligibleAgentModel(a,[prefs[0]],NOW+10),null);
   coolDownAgentModel(a,prefs[0].model,'rate_limited',NOW+100);
   assert.equal(agentModelFailover(a).cooldowns.length,1);
-  assert.equal(agentModelFailover(a).cooldowns[0].until,NOW+100+MODEL_COOLDOWN_SECONDS);
+  assert.equal(agentModelFailover(a).cooldowns[0].until,NOW+100+RATE_LIMIT_BACKOFF_SECONDS);
 });
 
 test('malformed failover records are rejected by the canonical metadata schema', () => {
@@ -103,6 +105,9 @@ test('specific backend errors distinguish exhausted quota, throttling, model abs
       [apiError('The usage limit has been reached',429), 'model_quota_exhausted'],
       [apiError('Temporary provider throttle',429), 'upstream_rate_limited'],
       [apiError('Gateway error',503), 'transient_backend_server_error'],
+      [apiError('Unauthorized',401), 'backend_authentication_failed'],
+      [apiError('Payment Required',402), 'backend_billing_required'],
+      [apiError('model_not_found',404), 'model_unavailable'],
       [apiError('Invalid argument',400), 'unrecognized_backend_failure'],
       [JSON.stringify({type:'text',part:{text:'statusCode 429'},error:{
         name:'APIError',data:{statusCode:429},
@@ -122,4 +127,58 @@ test('specific backend errors distinguish exhausted quota, throttling, model abs
       assert.equal(result?.classification,classification,line);
     }
   }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('healthy preference outranks all transiently unreliable choices', () => {
+  const meta=testMeta();
+  coolDownAgentModel(meta,prefs[0].model,'transient_backend',NOW);
+  coolDownAgentModel(meta,prefs[1].model,'transient_backend',NOW);
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+1),prefs[2].model);
+  assert.equal(agentModelFailover(meta).cooldowns[0].until,NOW+TRANSIENT_UNRELIABLE_SECONDS);
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+TRANSIENT_UNRELIABLE_SECONDS),prefs[0].model);
+});
+
+test('all transiently unreliable models are randomly selected rather than excluded', () => {
+  const meta=testMeta();
+  for(const pref of prefs)coolDownAgentModel(meta,pref.model,'transient_backend',NOW);
+  validateAgentMetadata(meta);
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+1,()=>0),prefs[0].model);
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+1,()=>1),prefs[1].model);
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+1,()=>2),prefs[2].model);
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+1,()=>1,new Set([prefs[0].model])),prefs[2].model);
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+1,()=>0,new Set(prefs.map(p=>p.model))),null);
+  assert.throws(()=>eligibleAgentModel(meta,prefs,NOW+1,()=>100),/lottery index/);
+});
+
+test('quota and rate-limit candidates stay outside the transient random pool', () => {
+  const meta=testMeta();
+  coolDownAgentModel(meta,prefs[0].model,'quota_exhausted',NOW);
+  coolDownAgentModel(meta,prefs[1].model,'rate_limited',NOW);
+  coolDownAgentModel(meta,prefs[2].model,'transient_backend',NOW);
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+1,()=>0),prefs[2].model);
+  coolDownAgentModel(meta,prefs[2].model,'model_unavailable',NOW);
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+1,()=>0),null);
+  assert.equal(agentModelFailover(meta).cooldowns[2].until,PERMANENT_EXCLUSION_UNTIL);
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+RATE_LIMIT_BACKOFF_SECONDS+1),prefs[1].model);
+});
+
+test('hard model exclusion persists until changed, while adding a new model works', () => {
+  const meta=testMeta();
+  coolDownAgentModel(meta,prefs[0].model,'model_unavailable',NOW);
+  assert.equal(eligibleAgentModel(meta,[prefs[0]],NOW+100000000),null);
+  assert.equal(eligibleAgentModel(meta,[{model:'openai/replacement',comment:'new'}],NOW+1),'openai/replacement');
+  assert.equal(modelCooldownSeconds('provider_authentication_failed'),PERMANENT_EXCLUSION_UNTIL);
+});
+
+test('provider authentication and billing failures exclude its models, not other providers', () => {
+  const meta=testMeta();
+  const all=[{model:'openai/a',comment:''},{model:'openai/b',comment:''},{model:'opencode-go/c',comment:''}];
+  excludeAgentProvider(meta,'openai/a',all,'provider_authentication_failed',NOW);
+  validateAgentMetadata(meta);
+  assert.equal(eligibleAgentModel(meta,all,NOW+1),all[2].model);
+  assert.equal(eligibleAgentModel(meta,all.slice(0,2),NOW+1),null);
+  assert.deepEqual(agentModelFailover(meta).cooldowns.map(x=>x.reason),
+    ['provider_authentication_failed','provider_authentication_failed']);
+  excludeAgentProvider(meta,'opencode-go/c',all,'provider_billing_required',NOW);
+  assert.equal(eligibleAgentModel(meta,all,NOW+1),null);
 });

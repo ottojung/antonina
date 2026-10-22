@@ -28,7 +28,9 @@ async function exercise(t, kind) {
     + 'model=""\nsession=""\nformat=""\nprev=""\nfor a in "$@"; do if [ "$prev" = "--model" ]; then model="$a"; fi; if [ "$prev" = "--session" ]; then session="$a"; fi; if [ "$prev" = "--format" ]; then format="$a"; fi; prev="$a"; done\n'
     + 'printf "%s\\n" "$model" >> "$ANTONINA_TEST_TRACE"\n'
     + 'sleep 0.12\n'
-    + (kind==='fresh-quota'
+    + (kind==='all-transient'
+        ? 'echo "Error: Unexpected server error" >&2; exit 1\n'
+        : kind==='fresh-quota'
         ? 'if [ "$model" = "example.test/luna" ]; then [ "$format" = "json" ] || exit 43; printf \'{"type":"step_start","sessionID":"ses_checkpoint_demo","part":{"type":"step-start"}}\\n\'; sleep 0.3; printf \'{"type":"error","sessionID":"ses_checkpoint_demo","error":{"data":{"message":"The usage limit has been reached"}}}\\n\'; exit 1; fi\n'
         : kind==='quota'
           ? 'if [ "$model" = "example.test/luna" ]; then echo "Error: The usage limit has been reached" >&2; exit 1; fi\n'
@@ -78,6 +80,15 @@ async function exercise(t, kind) {
     }
   }
   const result=readMeta(id,options);
+  if (kind==='all-transient') {
+    // All configured models are soft unreliable after their retry budgets.
+    // A single accepted prompt must not spin indefinitely through them.
+    assert.equal(result.state,'failed');
+    const attempts=readFileSync(trace,'utf8').trim().split('\n');
+    assert.deepEqual(attempts,[LUNA,LUNA,LUNA,BEAM,BEAM,BEAM]);
+    assert.deepEqual(result.model_failover.cooldowns.map(x=>x.reason),['transient_backend','transient_backend']);
+    return;
+  }
   assert.equal(result.state,'succeeded',JSON.stringify({state:result.state,error:result.error,backend_error:result.backend_error}));
   assert.equal(result.exit_code,0);
   assert.equal(result.model_failover.selected_model,BEAM);
@@ -95,3 +106,5 @@ test('fresh first-invocation quota failure resumes checkpointed JSON session eve
 
 test('structured HTTP 429 throttling advances directly to Beam', {timeout:150000},async t=>exercise(t,'throttle-json'));
 test('structured HTTP 503 retries twice then advances to Beam', {timeout:150000},async t=>exercise(t,'transient-json'));
+
+test('all-transient pool never cycles indefinitely within one invocation', {timeout:150000},async t=>exercise(t,'all-transient'));

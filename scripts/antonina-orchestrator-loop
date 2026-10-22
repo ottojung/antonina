@@ -58,15 +58,22 @@ while :; do
       if wait "$child_pid" 2>/dev/null; then
         failure_backoff=0
       else
-        if [ "$failure_backoff" -eq 0 ]; then
-          failure_backoff="$failure_retry"
+        turn_status=$?
+        if [ "$turn_status" -eq 75 ]; then
+          # A known provider failure was recorded. Choose a new model or retry
+          # on the next fresh snapshot, without generic failure backoff.
+          failure_backoff=0
         else
-          failure_backoff=$((failure_backoff * 2))
-          if [ "$failure_backoff" -gt "$max_failure_retry" ]; then
-            failure_backoff="$max_failure_retry"
+          if [ "$failure_backoff" -eq 0 ]; then
+            failure_backoff="$failure_retry"
+          else
+            failure_backoff=$((failure_backoff * 2))
+            if [ "$failure_backoff" -gt "$max_failure_retry" ]; then
+              failure_backoff="$max_failure_retry"
+            fi
           fi
+          printf "Antonina scheduler turn failed; next attempt in %ss\n" "$failure_backoff" >>"$state_dir/orchestrator-turn.log"
         fi
-        printf "Antonina scheduler turn failed; next attempt in %ss\n" "$failure_backoff" >>"$state_dir/orchestrator-turn.log"
       fi
       child_pid=""
     fi

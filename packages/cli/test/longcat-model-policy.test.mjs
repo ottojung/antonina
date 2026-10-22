@@ -7,7 +7,8 @@ const source = (path) => readFileSync(fileURLToPath(new URL(path, import.meta.ur
 
 test('model configuration is authoritative and no model is hardcoded in launch surfaces', () => {
   const intent = source('../../../docs/intent-records/agent.md');
-  assert.match(intent, /^\$id-20261021-no-opencode-model-discovery/);
+  assert.match(intent, /^\$id-20261021-orchestrator-model-recovery-session-checkpoint/);
+  assert.match(intent, /\$id-20261021-no-opencode-model-discovery/);
   assert.match(intent, /\$id-20261021-agent-model-subcommands/);
   assert.match(intent, /\$id-20261021-configurable-model-order/);
   const runtime = source('../../agent-runtime/src/backend.ts');
@@ -19,7 +20,7 @@ test('model configuration is authoritative and no model is hardcoded in launch s
   assert.match(config, /configuredModels/);
   assert.match(runtime, /selectConfiguredModel/);
   assert.match(cli, /selectConfiguredModel/);
-  assert.match(scheduler, /antonina" agent model select/);
+  assert.match(scheduler, /antonina-orchestrator-model" select/);
   assert.match(scheduler, /model_preferences/);
   for (const [path, contents] of [
     ['backend', runtime], ['CLI', cli], ['orchestrator', scheduler],

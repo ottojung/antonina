@@ -10,7 +10,7 @@ case "$mode" in
   *) echo "usage: antonina-scheduler-deploy [--install|--check]" >&2; exit 2 ;;
 esac
 scripts=(antonina-orchestrator-loop antonina-orchestrator-restart
-         antonina-orchestrator-turn antonina-scheduler-issue
+         antonina-orchestrator-turn antonina-orchestrator-model antonina-scheduler-issue
          antonina-scheduler-launch antonina-scheduler-snapshot)
 skills=(antonina-orchestrator antonina-scheduler)
 install_atomic() {

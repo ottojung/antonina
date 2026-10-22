@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Persistent, host-local model recovery for the single supervised orchestrator."""
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+COOLDOWN_SECONDS = 6 * 60 * 60
+TRANSIENT_RETRIES = 2
+RETRY_EXIT = 75
+TAIL_BYTES = 16 * 1024
+
+
+def state_path():
+    return Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")) / "antonina" / "orchestrator-model.json"
+
+
+def read_state():
+    path = state_path()
+    if not path.exists():
+        return {"version": 1, "selected_model": None, "cooldowns": [], "transient": None}
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict) or set(value) != {"version", "selected_model", "cooldowns", "transient"} or value["version"] != 1:
+        raise ValueError("orchestrator model state is malformed")
+    if value["selected_model"] is not None and not isinstance(value["selected_model"], str):
+        raise ValueError("orchestrator selected model is malformed")
+    if not isinstance(value["cooldowns"], list) or len(value["cooldowns"]) > 100:
+        raise ValueError("orchestrator cooldowns are malformed")
+    seen = set()
+    for entry in value["cooldowns"]:
+        if (not isinstance(entry, dict) or set(entry) != {"model", "reason", "until"}
+            or not isinstance(entry["model"], str) or entry["model"] in seen
+            or entry["reason"] not in ("quota_exhausted", "rate_limited", "model_unavailable", "transient_backend")
+            or not isinstance(entry["until"], (int, float)) or isinstance(entry["until"], bool)
+            or not 0 <= entry["until"] < 10**12):
+            raise ValueError("orchestrator cooldown entry is malformed")
+        seen.add(entry["model"])
+    transient = value["transient"]
+    if transient is not None and (not isinstance(transient, dict) or set(transient) != {"model", "count"}
+                                  or not isinstance(transient["model"], str)
+                                  or type(transient["count"]) is not int
+                                  or not 0 <= transient["count"] <= TRANSIENT_RETRIES):
+        raise ValueError("orchestrator transient retry state is malformed")
+    return value
+
+
+def save_state(value):
+    path = state_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, temp = tempfile.mkstemp(dir=path.parent, prefix=".orchestrator-model-")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temp, 0o600)
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+def configured_models():
+    # Reuse Antonina's canonical config parser, never query OpenCode's catalog.
+    cli = str(Path.home() / ".local/bin/antonina")
+    result = subprocess.run([cli, "agent", "model", "list"], capture_output=True, text=True, timeout=20, check=True)
+    data = json.loads(result.stdout)
+    models = [entry["model"] for entry in data["models"]]
+    if not models or any(not isinstance(model, str) or not model for model in models) or len(set(models)) != len(models):
+        raise ValueError("no canonical configured model order")
+    return models
+
+
+def choose():
+    models = configured_models()
+    state = read_state()
+    now = time.time()
+    state["cooldowns"] = [row for row in state["cooldowns"] if row["until"] > now and row["model"] in models]
+    eligible = [model for model in models if not any(row["model"] == model for row in state["cooldowns"])]
+    if not eligible:
+        raise ValueError("every configured orchestrator model is cooling down")
+    selected = eligible[0]
+    if state["selected_model"] != selected:
+        state["transient"] = None
+    state["selected_model"] = selected
+    save_state(state)
+    return selected
+
+
+def classify(returncode, tail):
+    # Auth/billing errors are not recoverable via a silent provider switch.
+    text = tail.decode("utf-8", errors="replace").lower()
+    if any(marker in text for marker in ("invalid_api_key", "payment required", "authentication failed", "unauthorized", "billing_required")):
+        return None
+    if any(marker in text for marker in ("insufficient_quota", "usage limit exceeded", "you have reached your usage limit", "credit balance is too low", "quota exhausted")):
+        return "quota_exhausted"
+    if any(marker in text for marker in ("rate limit exceeded", "too many requests", "statuscode\":429", "status code 429")):
+        return "rate_limited"
+    if any(marker in text for marker in ("model_not_found", "model not found", "model is not available")):
+        return "model_unavailable"
+    if returncode == 124 or any(marker in text for marker in ("endpoint is unavailable", "unexpected server error", "connection reset", "temporarily unavailable", "service unavailable", "etimedout", "econnreset", "http 502", "http 503", "statuscode\":503")):
+        return "transient_backend"
+    return None
+
+
+def record_result(model, returncode, tail):
+    state = read_state()
+    if state["selected_model"] != model:
+        raise ValueError("orchestrator selected model changed during the turn")
+    if returncode == 0:
+        state["transient"] = None
+        save_state(state)
+        return 0
+    reason = classify(returncode, tail)
+    if reason is None:
+        state["transient"] = None
+        save_state(state)
+        return returncode if 1 <= returncode <= 125 and returncode != RETRY_EXIT else 1
+    if reason == "transient_backend":
+        previous = state["transient"]
+        count = previous["count"] if previous is not None and previous["model"] == model else 0
+        if count < TRANSIENT_RETRIES:
+            state["transient"] = {"model": model, "count": count + 1}
+            save_state(state)
+            print(f"Antonina orchestrator: transient model failure; retry {count + 1}/{TRANSIENT_RETRIES} on {model}", file=sys.stderr)
+            return RETRY_EXIT
+    now = time.time()
+    state["cooldowns"] = [
+        row for row in state["cooldowns"] if row["model"] != model and row["until"] > now
+    ] + [{"model": model, "reason": reason, "until": now + COOLDOWN_SECONDS}]
+    state["transient"] = None
+    save_state(state)
+    print(f"Antonina orchestrator: {model} cooling down for 6h ({reason}); advancing on next turn", file=sys.stderr)
+    return RETRY_EXIT
+
+
+def run(model, argv):
+    if not argv or argv[0] != "--" or len(argv) < 2:
+        raise ValueError("run requires -- followed by the exact backend command")
+    if read_state()["selected_model"] != model:
+        raise ValueError("orchestrator model differs from the persisted selection")
+    command = argv[1:]
+    child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    def forward(signal_number, _frame):
+        try:
+            os.killpg(child.pid, signal_number)
+        except ProcessLookupError:
+            pass
+    prior_term = signal.signal(signal.SIGTERM, forward)
+    prior_int = signal.signal(signal.SIGINT, forward)
+    tail = b""
+    try:
+        assert child.stdout is not None
+        while True:
+            chunk = child.stdout.read1(4096)
+            if not chunk:
+                break
+            os.write(1, chunk)
+            tail = (tail + chunk)[-TAIL_BYTES:]
+        status = child.wait()
+    finally:
+        signal.signal(signal.SIGTERM, prior_term)
+        signal.signal(signal.SIGINT, prior_int)
+    return record_result(model, status, tail)
+
+
+def main():
+    try:
+        if len(sys.argv) == 2 and sys.argv[1] == "select":
+            print(choose())
+            return 0
+        if len(sys.argv) >= 5 and sys.argv[1] == "run":
+            return run(sys.argv[2], sys.argv[3:])
+        raise ValueError("usage: antonina-orchestrator-model select | run MODEL -- COMMAND ...")
+    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        print(f"Antonina orchestrator model: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

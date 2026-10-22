@@ -510,6 +510,7 @@ export function buildAgentCommand(
   }
   return [
     executable, 'run', '--auto',
+    '--format', 'json',
     '--title', `${OPENCODE_TITLE_PREFIX}${agentId}`,
     '--model', model,
     '--variant', variant,

@@ -23,11 +23,11 @@ test('scheduler is a single agentic OpenClaw scheduling lane owned by the superv
   assert.match(loop, /trap on_exit TERM INT HUP/);
   assert.doesNotMatch(loop, /pgrep -f .*ANTONINA-SCHEDULER-TURN/);
   assert.match(turn, /timeout -k 15s 900s/);
-  assert.match(turn, /selected_model=.*model select/);
+  assert.match(turn, /selected_model=.*orchestrator-model\" select/);
   assert.match(turn, /--model "\$selected_model"/);
   assert.doesNotMatch(turn, /--model opencode-go\//);
   assert.match(turn, /--variant low/);
-  assert.match(turn, /never invent an unconfigured fallback/);
+  assert.match(turn, /invent an unconfigured fallback/);
   assert.doesNotMatch(turn, /--thinking/);
 });
 

@@ -24,15 +24,19 @@ async function exercise(t, kind) {
   const trace=join(root,'calls.log');
   const script = '#!/bin/sh\n'
     + 'if [ "$1" = "models" ]; then printf "example.test/luna\\nexample.test/beam\\n"; exit 0; fi\n'
-    + 'model=""\nprev=""\nfor a in "$@"; do if [ "$prev" = "--model" ]; then model="$a"; fi; prev="$a"; done\n'
+    + 'if [ "$1" = "session" ]; then echo "[]"; exit 0; fi\n'
+    + 'model=""\nsession=""\nformat=""\nprev=""\nfor a in "$@"; do if [ "$prev" = "--model" ]; then model="$a"; fi; if [ "$prev" = "--session" ]; then session="$a"; fi; if [ "$prev" = "--format" ]; then format="$a"; fi; prev="$a"; done\n'
     + 'printf "%s\\n" "$model" >> "$ANTONINA_TEST_TRACE"\n'
     + 'sleep 0.12\n'
-    + (kind==='quota'
-        ? 'if [ "$model" = "example.test/luna" ]; then echo "Error: insufficient_quota" >&2; exit 1; fi\n'
-        : 'if [ "$model" = "example.test/luna" ]; then echo "Error: Endpoint is unavailable" >&2; exit 1; fi\n')
+    + (kind==='fresh-quota'
+        ? 'if [ "$model" = "example.test/luna" ]; then [ "$format" = "json" ] || exit 43; printf \'{"type":"step_start","sessionID":"ses_checkpoint_demo","part":{"type":"step-start"}}\\n\'; sleep 0.3; printf \'{"type":"error","sessionID":"ses_checkpoint_demo","error":{"data":{"message":"insufficient_quota"}}}\\n\'; exit 1; fi\n'
+        : kind==='quota'
+          ? 'if [ "$model" = "example.test/luna" ]; then echo "Error: insufficient_quota" >&2; exit 1; fi\n'
+          : 'if [ "$model" = "example.test/luna" ]; then echo "Error: Endpoint is unavailable" >&2; exit 1; fi\n')
+    + (kind==='fresh-quota' ? '[ "$session" = "ses_checkpoint_demo" ] || exit 44\n' : '')
     + 'echo "SUCCESS"; exit 0\n';
   writeFileSync(bin,script,{mode:0o755});
-  const probe=spawnSync(bin,['--help'],{encoding:'utf8',timeout:5000});
+  const probe=spawnSync(bin,['models'],{encoding:'utf8',timeout:5000});
   if(probe.error){t.skip('temporary fixture filesystem not executable');return;}
   assert.equal(probe.status,0);
   const env={
@@ -45,15 +49,16 @@ async function exercise(t, kind) {
   const token=mintRunnerReservationOwnerToken();
   env.ANTONINA_RUNNER_OWNER_TOKEN=token;
   const options={env};
-  const id=kind==='quota'?'model-quota':'model-transient';
+  const id=kind==='fresh-quota'?'model-fresh':kind==='quota'?'model-quota':'model-transient';
   const cwd=join(root,'work');
   mkdirSync(cwd);
   assert.equal(createAgentDirectory(id,options),true);
   const meta=idleMeta(id,cwd,null);
-  meta.native_session_id='ses_fixed';
+  meta.native_session_id=kind==='fresh-quota'?null:'ses_fixed';
   meta.runner_gen=1;
+  const mode=kind==='fresh-quota'?'new':'continue';
   meta.runner_reservation={
-    state:'reserved',gen:1,mode:'continue',reserved_at:1,
+    state:'reserved',gen:1,mode,reserved_at:1,
     owner_pid:process.pid,owner_start_ticks:procStartTicks(process.pid),owner_token:token,
   };
   meta.pending_prompt='Continue the test work.';
@@ -61,7 +66,7 @@ async function exercise(t, kind) {
   const prev={};
   for(const [key,value] of Object.entries(env)){prev[key]=process.env[key];process.env[key]=value;}
   try{
-    await runManagedRunner(id,'continue',1,options);
+    await runManagedRunner(id,mode,1,options);
   }finally{
     for(const key of Object.keys(env)){
       if(prev[key]===undefined) delete process.env[key];
@@ -72,11 +77,14 @@ async function exercise(t, kind) {
   assert.equal(result.state,'succeeded',JSON.stringify({state:result.state,error:result.error,backend_error:result.backend_error}));
   assert.equal(result.exit_code,0);
   assert.equal(result.model_failover.selected_model,BEAM);
+  if (kind==='fresh-quota') assert.equal(result.native_session_id,'ses_checkpoint_demo');
   assert.equal(result.model_failover.cooldowns[0].model,LUNA);
-  assert.equal(result.model_failover.cooldowns[0].reason,kind==='quota'?'quota_exhausted':'transient_backend');
+  assert.equal(result.model_failover.cooldowns[0].reason,kind==='transient'?'transient_backend':'quota_exhausted');
   const actual=readFileSync(trace,'utf8').trim().split('\n');
-  assert.deepEqual(actual.filter(model => model === LUNA || model === BEAM),kind==='quota'?[LUNA,BEAM]:[LUNA,LUNA,LUNA,BEAM]);
+  assert.deepEqual(actual.filter(model => model === LUNA || model === BEAM),kind==='transient'?[LUNA,LUNA,LUNA,BEAM]:[LUNA,BEAM]);
 }
 
 test('quota failure switches model within the same agent and same recorded session', {timeout:150000},async t=>exercise(t,'quota'));
 test('transient failure gets two retries before model failover', {timeout:150000},async t=>exercise(t,'transient'));
+
+test('fresh first-invocation quota failure resumes checkpointed JSON session even when session list is empty', {timeout:150000},async t=>exercise(t,'fresh-quota'));

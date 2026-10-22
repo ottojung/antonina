@@ -1,3 +1,11 @@
+$id-20261021-orchestrator-model-recovery-session-checkpoint
+title: Supervised orchestrator model failover and early managed-agent session checkpoints
+date: 2026/10/21
+source: @ottojung
+kind: constraint
+
+The supervised orchestrator must use the operator's existing ordered model list, without model catalog queries, and maintain its own durable host-local model cooldowns independently of managed agents. Definitive quota exhaustion, rate limiting and unavailable models advance to the next configured model immediately on the next supervised turn; transient endpoint/server failures retry the same model twice before advancing. Cooldowns expire after six hours and are re-evaluated at turn boundaries. Unknown, authentication, billing, signal and task errors retain the existing generic failure handling; no new providers or credentials are introduced. Every restarted turn must rebuild its live snapshot to avoid replaying stale dispatch decisions; a recognised failover must not unnecessarily trigger the generic supervisor failure backoff. On managed agents' fresh OpenCode invocations, use structured backend events to checkpoint the actual native session ID durably while the process is running, preserving that conversation across a subsequent failure or steer. Resume that recorded session without inventing another and without replaying untracked tool effects. If no trustworthy session ID is available, fail closed rather than guessing. These two changes are the complete scope of this request; leave other orchestration architecture unchanged.
+
 $id-20261021-no-opencode-model-discovery
 title: Configured models are authoritative without catalog discovery
 date: 2026/10/21

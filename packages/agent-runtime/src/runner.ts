@@ -52,6 +52,7 @@ import {
   recordAgentModel,
   type ModelFailureReason,
 } from './model-failover.js';
+import { SessionCheckpointReader } from './session-checkpoint.js';
 import { procStartTicks, persistedProcessInteger, signalMarkedInvocationProcesses } from './process.js';
 import {
   logPath,
@@ -249,12 +250,13 @@ function signalNumber(signal: NodeJS.Signals | null): number | null {
   return constants.signals[signal] ?? null;
 }
 
-function childResult(child: ChildProcess, agentId: string, options: RunnerOptions): Promise<ChildResult> {
+function childResult(child: ChildProcess, agentId: string, options: RunnerOptions, onPoll?: () => void): Promise<ChildResult> {
   return new Promise((resolve) => {
     let controlStartedAt: number | null = null;
     let operatorSignalled = false;
     let operatorSignalDelivered = false;
     const timer = setInterval(() => {
+      onPoll?.();
       const meta = readMeta(agentId, options);
       if (meta === null) return;
       const intent = persistedControlField(meta, 'intent');
@@ -877,6 +879,25 @@ async function runInvocation(
       return false;
     }
     closeSync(fd);
+    // JSONL session identifiers are observed before tools can run. Persist
+    // them while the backend lives, rather than relying on a later probe.
+    const sessionReader = retryAsContinue ? null : new SessionCheckpointReader(logFile, invocationLogStart);
+    let checkpointId: string | null = null;
+    let checkpointWrite = Promise.resolve();
+    let checkpointFailure: unknown = null;
+    const checkpointSession = (): void => {
+      if (sessionReader === null || checkpointId !== null) return;
+      let id: string | null;
+      try { id = sessionReader.scan(); } catch { return; }
+      if (id === null) return;
+      checkpointId = id;
+      checkpointWrite = checkpointWrite.then(async () => {
+        await updateMeta(agentId, (current) => {
+          if (current.state !== 'running' || deletePendingFlag(current) !== false) return;
+          if (current.native_session_id === null) current.native_session_id = id;
+        }, options);
+      }).catch((error: unknown) => { checkpointFailure = error; });
+    };
     const pid = child.pid;
     if (pid === undefined) {
       await updateMeta(agentId, (current) => {
@@ -885,7 +906,7 @@ async function runInvocation(
       }, options);
       return false;
     }
-    const resultPromise = childResult(child, agentId, options);
+    const resultPromise = childResult(child, agentId, options, checkpointSession);
     const startTicks = (options.childStartTicks ?? procStartTicks)(pid);
 
     let result: ChildResult;
@@ -964,6 +985,9 @@ async function runInvocation(
     // different process groups. Reap by the unique inherited invocation
     // markers before retrying or finalizing this invocation.
     signalMarkedInvocationProcesses(agentId, invocationId, 'SIGKILL');
+    checkpointSession();
+    await checkpointWrite;
+    if (checkpointFailure !== null) throw checkpointFailure;
 
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);

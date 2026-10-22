@@ -494,5 +494,134 @@ class SchedulerDeploymentTests(unittest.TestCase):
             self.assertIn("out of sync", result.stderr)
 
 
+class OrchestratorModelRecoveryTests(unittest.TestCase):
+    def test_quota_switches_persistently_and_recovers_after_six_hours(self):
+        import os
+        import tempfile
+        helper = load_helper("antonina-orchestrator-model")
+        with tempfile.TemporaryDirectory() as root, \
+                patch.dict(os.environ, {"XDG_STATE_HOME": root}), \
+                patch.object(helper, "configured_models", return_value=["test/luna", "test/beam"]), \
+                patch.object(helper.time, "time", return_value=1000):
+            self.assertEqual(helper.choose(), "test/luna")
+            self.assertEqual(helper.record_result("test/luna", 1, b"Error: insufficient_quota"), 75)
+            saved = json.loads(helper.state_path().read_text())
+            self.assertEqual(saved["cooldowns"][0]["reason"], "quota_exhausted")
+            self.assertEqual(saved["cooldowns"][0]["until"], 1000 + 21600)
+            self.assertEqual(helper.choose(), "test/beam")
+            self.assertEqual(helper.record_result("test/beam", 0, b"worked"), 0)
+            with patch.object(helper.time, "time", return_value=1000 + 21601):
+                self.assertEqual(helper.choose(), "test/luna")
+            self.assertEqual(helper.read_state()["selected_model"], "test/luna")
+
+    def test_transient_retries_twice_then_switches(self):
+        import os
+        import tempfile
+        helper = load_helper("antonina-orchestrator-model")
+        with tempfile.TemporaryDirectory() as root, \
+                patch.dict(os.environ, {"XDG_STATE_HOME": root}), \
+                patch.object(helper, "configured_models", return_value=["test/luna", "test/beam"]), \
+                patch.object(helper.time, "time", return_value=2000):
+            self.assertEqual(helper.choose(), "test/luna")
+            for count in (1, 2):
+                self.assertEqual(helper.record_result("test/luna", 1, b"Endpoint is unavailable"), 75)
+                self.assertEqual(helper.read_state()["transient"], {"model": "test/luna", "count": count})
+                self.assertEqual(helper.choose(), "test/luna")
+            self.assertEqual(helper.record_result("test/luna", 1, b"Endpoint is unavailable"), 75)
+            self.assertEqual(helper.choose(), "test/beam")
+            self.assertEqual(helper.read_state()["cooldowns"][0]["reason"], "transient_backend")
+
+    def test_auth_unknown_and_tool_failures_do_not_switch(self):
+        import os
+        import tempfile
+        helper = load_helper("antonina-orchestrator-model")
+        with tempfile.TemporaryDirectory() as root, \
+                patch.dict(os.environ, {"XDG_STATE_HOME": root}), \
+                patch.object(helper, "configured_models", return_value=["test/luna", "test/beam"]):
+            helper.choose()
+            for line in (b"invalid_api_key", b"Payment Required",
+                         b"Error: failed to compile user project"):
+                self.assertEqual(helper.record_result("test/luna", 1, line), 1)
+                self.assertEqual(helper.choose(), "test/luna")
+                self.assertFalse(helper.read_state()["cooldowns"])
+
+    def test_real_child_output_is_forwarded_and_status_tracked(self):
+        import subprocess
+        import os
+        import sys
+        import tempfile
+        helper = load_helper("antonina-orchestrator-model")
+        with tempfile.TemporaryDirectory() as root, \
+                patch.dict(os.environ, {"XDG_STATE_HOME": root}), \
+                patch.object(helper, "configured_models", return_value=["test/luna", "test/beam"]):
+            self.assertEqual(helper.choose(), "test/luna")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "antonina-orchestrator-model"),
+                 "run", "test/luna", "--", "/bin/sh", "-c",
+                 "printf 'Endpoint is unavailable\\n'; exit 1"],
+                env={**os.environ, "XDG_STATE_HOME": root}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 75, result.stderr)
+            self.assertIn("Endpoint is unavailable", result.stdout)
+            self.assertEqual(helper.read_state()["transient"]["count"], 1)
+
+    def test_real_orchestrator_turn_advances_to_configured_fallback(self):
+        import os
+        import subprocess
+        import shutil
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            bin_dir = base / ".local" / "bin"
+            bin_dir.mkdir(parents=True)
+            helper = bin_dir / "antonina-orchestrator-model"
+            shutil.copy2(ROOT / "antonina-orchestrator-model", helper)
+            helper.chmod(0o755)
+            fake_cli = bin_dir / "antonina"
+            fake_cli.write_text(
+                '#!/bin/sh\n'
+                'if [ "$1" = "agent" ] && [ "$2" = "model" ] && [ "$3" = "list" ]; then\n'
+                '  printf \'{"models":[{"model":"example/luna","comment":"tested"},{"model":"example/beam","comment":"tested"}]}\n\'\n'
+                '  exit 0\n'
+                'fi\n'
+                'exit 2\n'
+            )
+            fake_cli.chmod(0o755)
+            snapshot = bin_dir / "antonina-scheduler-snapshot"
+            snapshot.write_text('#!/bin/sh\necho \'{"open_issues":[],"live_agents":[]}\'\n')
+            snapshot.chmod(0o755)
+            fake_backend = bin_dir / "opencode-openclaw"
+            fake_backend.write_text(
+                '#!/bin/sh\n'
+                'previous=""\n'
+                'for arg in "$@"; do\n'
+                '  if [ "$previous" = "--model" ]; then\n'
+                '    if [ "$arg" = "example/luna" ]; then echo "Error: insufficient_quota" >&2; exit 1; fi\n'
+                '    if [ "$arg" = "example/beam" ]; then echo "ORCHESTRATOR_RECOVERED"; exit 0; fi\n'
+                '  fi\n'
+                '  previous="$arg"\n'
+                'done\n'
+                'exit 3\n'
+            )
+            fake_backend.chmod(0o755)
+            env = dict(os.environ)
+            env.update({"HOME": root, "XDG_STATE_HOME": str(base / "state")})
+            turn = str(ROOT / "antonina-orchestrator-turn")
+            first = subprocess.run([turn], env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(first.returncode, 75, first.stderr)
+            self.assertIn("insufficient_quota", first.stdout)
+            second = subprocess.run([turn], env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIn("ORCHESTRATOR_RECOVERED", second.stdout)
+            self.assertEqual(json.loads((base / "state/antonina/orchestrator-model.json").read_text())["selected_model"],
+                             "example/beam")
+
+    def test_recovery_exit_does_not_trigger_generic_failure_backoff(self):
+        loop = (ROOT / "antonina-orchestrator-loop").read_text()
+        self.assertIn('if [ "$turn_status" -eq 75 ]; then', loop)
+        self.assertIn('failure_backoff=0', loop)
+        self.assertIn('antonina-orchestrator-model', (ROOT / "antonina-orchestrator-turn").read_text())
+        self.assertIn('antonina-orchestrator-model', (ROOT / "antonina-scheduler-deploy").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

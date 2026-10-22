@@ -620,6 +620,31 @@ export function honoursInvocationCwd(capabilities: unknown): boolean {
   return (capabilities as Record<string, unknown>).invocation_cwd === true;
 }
 
+/**
+ * Respect a documented provider quota reset in the current invocation log.
+ * Nested JSON is escaped once in OpenCode's JSONL response body.
+ * If the hint is missing or unsafe, retain the default model cooldown.
+ */
+export function quotaResetDelaySeconds(
+  path: string, start: number, now = Date.now() / 1000,
+): number | null {
+  if (!Number.isSafeInteger(start) || start < 0 || !Number.isFinite(now)) return null;
+  let text: string;
+  try {
+    const size = statSync(path).size;
+    const begin = Math.max(start, size - BACKEND_DIAGNOSTIC_MAX_BYTES);
+    text = readFileSync(path).subarray(begin, size).toString('utf8');
+  } catch {
+    return null;
+  }
+  const decoded = text.replace(/\\\"/g, '"');
+  if (!decoded.includes('usage_limit_reached')) return null;
+  const matches = [...decoded.matchAll(/"resets_at"\s*:\s*(\d{10})/g)];
+  const resetAt = Number(matches.at(-1)?.[1]);
+  if (!Number.isSafeInteger(resetAt) || resetAt <= now || resetAt > now + 6 * 3600) return null;
+  return Math.min(6 * 3600, Math.max(60, Math.ceil(resetAt - now) + 120));
+}
+
 export function classifyBackendFailure(
   path: string,
   start: number,

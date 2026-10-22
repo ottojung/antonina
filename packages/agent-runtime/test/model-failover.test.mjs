@@ -10,7 +10,7 @@ import {
   coolDownAgentModel, eligibleAgentModel, recordAgentModel,
 } from '../dist/packages/agent-runtime/src/model-failover.js';
 import {
-  classifyBackendFailure, buildAgentCommand,
+  classifyBackendFailure, quotaResetDelaySeconds, buildAgentCommand,
 } from '../dist/packages/agent-runtime/src/backend.js';
 
 const prefs = ['openai/gpt-6-luna', 'opencode-go/beam-free', 'opencode-go/longcat-2.5-preview-free']
@@ -22,6 +22,28 @@ function testMeta() {
   validateAgentMetadata(meta);
   return meta;
 }
+
+test('quota reset diagnostic wins over the fixed six-hour cooldown when reliable', () => {
+  const dir=mkdtempSync(join(tmpdir(),'antonina-provider-quota-'));
+  try {
+    const path=join(dir,'log');
+    const resetAt=NOW+5400;
+    const payload=JSON.stringify({responseBody:JSON.stringify({
+      error:{type:'usage_limit_reached',message:'The usage limit has been reached',resets_at:resetAt}
+    })});
+    writeFileSync(path,payload);
+    assert.equal(quotaResetDelaySeconds(path,0,NOW),5520);
+    // Do not attribute a prior invocation's provider reset to a new failure.
+    writeFileSync(path,payload+'\n'+'Unrecognized backend failure');
+    assert.equal(quotaResetDelaySeconds(path,payload.length+1,NOW),null);
+    writeFileSync(path,payload.replace('usage_limit_reached','random_error'));
+    assert.equal(quotaResetDelaySeconds(path,0,NOW),null);
+    writeFileSync(path,payload.replace(String(resetAt),String(NOW-1)));
+    assert.equal(quotaResetDelaySeconds(path,0,NOW),null);
+    writeFileSync(path,payload.replace(String(resetAt),String(NOW+7*3600)));
+    assert.equal(quotaResetDelaySeconds(path,0,NOW),null);
+  } finally { rmSync(dir,{recursive:true,force:true}); }
+});
 
 test('per-agent exhaustion, cooldown persistence and six-hour recovery', () => {
   const a = testMeta();

@@ -684,8 +684,16 @@ function hostCapacityJson(capacity: HostCapacity): Record<string, unknown> {
     cgroup_path: capacity.cgroupPath,
     limit_bytes: capacity.limitBytes,
     usage_bytes: capacity.usageBytes,
+    // Preserve the raw kernel difference as a separate, exact observation.
     headroom_bytes: capacity.headroomBytes,
-    headroom: formatBytes(capacity.headroomBytes),
+    raw_unused_bytes: capacity.headroomBytes,
+    potentially_reclaimable_bytes: capacity.potentiallyReclaimableBytes,
+    estimated_working_set_bytes: capacity.estimatedWorkingSetBytes,
+    estimated_headroom_bytes: capacity.estimatedHeadroomBytes,
+    estimated_headroom_percent: capacity.estimatedHeadroomPercent,
+    headroom: capacity.estimatedHeadroomBytes === null
+      ? 'unknown (memory.stat unavailable)' : formatBytes(capacity.estimatedHeadroomBytes) + ' estimated',
+    pressure_scope: capacity.pressureScope,
     pressure_full_avg10: capacity.pressureFullAvg10,
     oom: capacity.oom,
     oom_kill: capacity.oomKill,
@@ -951,7 +959,22 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
     // Host memory as reported by the kernel, so a pass can see the state a
     // death happened in rather than inferring it from an empty log.
     const capacity = status.host_capacity as Record<string, unknown>;
-    context.io.stdout(`headroom:   ${shown(capacity.headroom)} of ${shown(capacity.limit_bytes)} limit`);
+    // Byte-only unused cgroup space hides reclaimable file cache and slab.
+    // Report an estimate with denominator as well as the raw observation.
+    if (typeof capacity.estimated_headroom_percent === 'number') {
+      context.io.stdout('headroom:   ' + shown(capacity.headroom)
+        + ' (' + capacity.estimated_headroom_percent.toFixed(1) + '% of '
+        + formatBytes(capacity.limit_bytes as number) + ' hard limit)');
+      context.io.stdout('raw unused: ' + formatBytes(capacity.raw_unused_bytes as number)
+        + ', potential reclaim: ' + formatBytes(capacity.potentially_reclaimable_bytes as number));
+    } else {
+      context.io.stdout('headroom:   estimate unknown; raw unused '
+        + formatBytes(capacity.raw_unused_bytes as number | null));
+    }
+    if (typeof capacity.pressure_full_avg10 === 'number') {
+      context.io.stdout('pressure:   ' + capacity.pressure_full_avg10
+        + '% full avg10 (' + shown(capacity.pressure_scope) + ')');
+    }
     if (capacity.degraded_reason !== null) {
       context.io.stdout(`host:       ${String(capacity.degraded_reason)}`);
     }

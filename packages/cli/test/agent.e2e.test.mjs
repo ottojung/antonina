@@ -1663,13 +1663,26 @@ test('5. agent status exposes host headroom without a separate command', async (
   if (capacity.degraded_reason === null) {
     assert.equal(capacity.source, 'cgroup_v2');
     assert.equal(typeof capacity.headroom_bytes, 'number');
-    assert.equal(capacity.limit_bytes, capacity.usage_bytes + capacity.headroom_bytes);
-    assert.notEqual(capacity.headroom, 'unknown');
+    // The raw kernel identity remains independently auditable; the effective
+    // estimate, when memory.stat is available, is not just this subtraction.
+    assert.equal(capacity.headroom_bytes, Math.max(0,capacity.limit_bytes-capacity.usage_bytes));
+    assert.equal(capacity.raw_unused_bytes,capacity.headroom_bytes);
+    assert.ok(capacity.estimated_headroom_bytes === null
+      || capacity.estimated_headroom_bytes >= capacity.raw_unused_bytes);
+    if (capacity.estimated_headroom_bytes !== null) {
+      assert.equal(typeof capacity.estimated_headroom_percent,'number');
+      assert.match(capacity.headroom,/estimated/);
+    } else {
+      assert.match(capacity.headroom,/unknown/);
+    }
 
-    // The human-readable form names the same reading.
+    // The human-readable form labels the estimated and raw readings.
     const human = run(['agent', 'status', '--id', agent_ca93], env);
     assert.equal(human.status, 0, human.stderr);
-    assert.match(human.stdout, /headroom:.*of .*limit/);
+    assert.match(human.stdout, /headroom:.*(hard limit|estimate unknown)/);
+    if (capacity.estimated_headroom_bytes !== null) {
+      assert.match(human.stdout,/raw unused:/);
+    }
     assert.doesNotMatch(human.stdout, /required/);
   }
 });

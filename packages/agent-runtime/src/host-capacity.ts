@@ -61,7 +61,18 @@ export interface HostCapacity {
   cgroupPath: string | null;
   limitBytes: number | null;
   usageBytes: number | null;
+  /** Exact unused bytes below memory.max, without reclaim. */
   headroomBytes: number | null;
+  /** Conservative potential reclaim from inactive file cache and reclaimable slab. */
+  potentiallyReclaimableBytes: number | null;
+  /** Current usage after subtracting potentially reclaimable bytes, NOT measured RSS. */
+  estimatedWorkingSetBytes: number | null;
+  /** Raw unused bytes plus potential reclaim, capped by memory.max. */
+  estimatedHeadroomBytes: number | null;
+  /** Estimated headroom as a percentage of the cgroup hard limit. */
+  estimatedHeadroomPercent: number | null;
+  /** Whether reported memory pressure belongs to this cgroup or the host. */
+  pressureScope: 'cgroup' | 'host' | null;
   pressureFullAvg10: number | null;
   oom: number | null;
   oomKill: number | null;
@@ -132,6 +143,11 @@ function degraded(reason: CapacityDegradedReason, detail: string, partial: Parti
     limitBytes: null,
     usageBytes: null,
     headroomBytes: null,
+    potentiallyReclaimableBytes: null,
+    estimatedWorkingSetBytes: null,
+    estimatedHeadroomBytes: null,
+    estimatedHeadroomPercent: null,
+    pressureScope: null,
     pressureFullAvg10: null,
     oom: null,
     oomKill: null,
@@ -216,15 +232,47 @@ export function readHostCapacity(options: HostCapacityReadOptions = {}): HostCap
     );
   }
 
-  const pressureText = readText(pressurePath);
-  const eventsText = readText(join(cgroupPath, 'memory.events'));
+  // memory.current includes cache that the kernel can reclaim when memory
+  // pressure rises. Subtracting the entire file cache is wrong too: shmem,
+  // dirty/writeback pages, and active pages cannot safely be assumed free.
+  // This is only a *potential* reclaim estimate, never an admission threshold.
+  // Missing or malformed counters yield an unknown estimate, not invented zero.
+  const stats = readText(join(cgroupPath, 'memory.stat'));
+  const counters = stats === null ? null : [
+    'inactive_file', 'file', 'shmem', 'file_dirty', 'file_writeback', 'slab_reclaimable',
+  ].map((key) => parseCounterLine(stats, key));
+  const estimateKnown = counters !== null && counters.every((value) => value !== null);
+  const [inactiveFile, file, shmem, dirty, writeback, slabReclaimable] = counters ?? [];
   const headroomBytes = Math.max(0, limitBytes - usageBytes);
+  const potentiallyReclaimableBytes = estimateKnown
+    ? Math.min(usageBytes,
+        Math.min(inactiveFile!, Math.max(0, file! - shmem! - dirty! - writeback!)) + slabReclaimable!)
+    : null;
+  const estimatedWorkingSetBytes = potentiallyReclaimableBytes === null
+    ? null : Math.max(0, usageBytes - potentiallyReclaimableBytes);
+  // Use the estimated working set, not raw headroom plus reclaim: memory.current
+  // may temporarily exceed memory.max, and that excess must be accounted for.
+  const estimatedHeadroomBytes = estimatedWorkingSetBytes === null
+    ? null : Math.max(0, limitBytes - estimatedWorkingSetBytes);
+  const estimatedHeadroomPercent = estimatedHeadroomBytes === null || limitBytes === 0
+    ? null : 100 * estimatedHeadroomBytes / limitBytes;
+
+  // Prefer this cgroup's pressure. The fallback is explicitly labeled as
+  // host-wide pressure, which may differ greatly from the cgroup's contention.
+  const cgroupPressure = readText(join(cgroupPath, 'memory.pressure'));
+  const pressureText = cgroupPressure ?? readText(pressurePath);
+  const eventsText = readText(join(cgroupPath, 'memory.events'));
   return {
     source: 'cgroup_v2',
     cgroupPath,
     limitBytes,
     usageBytes,
     headroomBytes,
+    potentiallyReclaimableBytes,
+    estimatedWorkingSetBytes,
+    estimatedHeadroomBytes,
+    estimatedHeadroomPercent,
+    pressureScope: cgroupPressure !== null ? 'cgroup' : pressureText !== null ? 'host' : null,
     pressureFullAvg10: pressureText === null ? null : parsePressureFullAvg10(pressureText),
     oom: eventsText === null ? null : parseCounterLine(eventsText, 'oom'),
     oomKill: eventsText === null ? null : parseCounterLine(eventsText, 'oom_kill'),
@@ -271,8 +319,14 @@ export function describeHostCapacity(capacity: HostCapacity): string {
   return [
     `memory.max ${formatBytes(capacity.limitBytes)}`,
     `memory.current ${formatBytes(capacity.usageBytes)}`,
-    `headroom ${formatBytes(capacity.headroomBytes)}`,
-    capacity.pressureFullAvg10 === null ? null : `pressure full avg10=${capacity.pressureFullAvg10}%`,
+    'raw unused below hard limit ' + formatBytes(capacity.headroomBytes),
+    capacity.estimatedHeadroomBytes === null
+      ? 'reclaim-aware headroom estimate unknown (memory.stat incomplete)'
+      : 'estimated reclaim-aware headroom ' + formatBytes(capacity.estimatedHeadroomBytes)
+        + ' (' + capacity.estimatedHeadroomPercent!.toFixed(1) + '% of hard limit; potential reclaim '
+        + formatBytes(capacity.potentiallyReclaimableBytes) + ')',
+    capacity.pressureFullAvg10 === null
+      ? null : (capacity.pressureScope ?? 'unknown') + ' memory pressure full avg10=' + capacity.pressureFullAvg10 + '%',
     capacity.oom === null || capacity.oomKill === null
       ? null
       : `memory.events oom ${capacity.oom} oom_kill ${capacity.oomKill}`,

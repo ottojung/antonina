@@ -1,3 +1,11 @@
+$id-20261022-reclaim-aware-headroom-diagnostics
+title: Report memory pressure and reclaim-aware headroom, not only unused bytes
+date: 2026/10/22
+source: @ottojung
+kind: constraint
+
+Agent status and host-capacity diagnostics must not equate memory headroom with the raw subtraction memory.max minus memory.current. Cgroup memory.current includes inactive file cache and reclaimable kernel slabs; use cgroup-v2 memory.stat to report a bounded, explicitly approximate working-set and potential-reclaim estimate, keeping the exact raw unused bytes visible separately. Do not treat shmem/tmpfs, dirty or writeback pages as freely reclaimable. Report estimate as a percentage of the actual cgroup hard limit and prefer cgroup memory.pressure over host-wide pressure, labeling the scope. Missing or malformed counters mean the reclaim-aware estimate is unknown, not zero; retain the raw observation. Never use this estimate, PSI, or other host resources to refuse, delay or cap agent launches. Scheduler parallelism remains determined by work topology rather than a byte threshold.
+
 $id-20261022-failure-scoped-soft-model-selection
 title: Model errors classified by permanence and scope with soft transient fallback
 date: 2026/10/22

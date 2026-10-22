@@ -17,6 +17,16 @@ function cgroupFiles(overrides = {}) {
   return new Map(Object.entries({
     '/sys/fs/cgroup/memory.max': '32212254720',
     '/sys/fs/cgroup/memory.current': String(1 * GIB),
+    '/sys/fs/cgroup/memory.stat': [
+      'anon ' + String(GIB / 2),
+      'file ' + String(GIB / 2),
+      'shmem ' + String(GIB / 16),
+      'inactive_file ' + String(GIB / 4),
+      'file_dirty ' + String(GIB / 32),
+      'file_writeback ' + String(GIB / 32),
+      'slab_reclaimable ' + String(GIB / 8),
+    ].join('\n'),
+    '/sys/fs/cgroup/memory.pressure': 'some avg10=0.18 total=120\nfull avg10=0.07 total=60\n',
     '/sys/fs/cgroup/memory.events': 'low 0\nhigh 0\nmax 2476825\noom 39\noom_kill 3\noom_group_kill 0\n',
     '/proc/self/cgroup': '0::/\n',
     '/proc/pressure/memory': 'some avg10=1.16 avg60=0.56 avg300=0.70 total=5600622157\nfull avg10=1.16 avg60=0.56 avg300=0.63 total=4874730146\n',
@@ -125,7 +135,10 @@ test('OOM counters are read for the death bracket, and their absence is reported
 });
 
 test('a missing PSI file leaves pressure unknown without degrading the cgroup reading', () => {
-  const capacity = readHostCapacity({ readText: fakeCgroup({ '/proc/pressure/memory': null }) });
+  const capacity = readHostCapacity({ readText: fakeCgroup({
+    '/proc/pressure/memory': null,
+    '/sys/fs/cgroup/memory.pressure': null,
+  }) });
   assert.equal(capacity.source, 'cgroup_v2');
   assert.equal(capacity.headroomBytes, 29 * GIB);
   assert.equal(capacity.pressureFullAvg10, null);
@@ -227,7 +240,10 @@ test('describeHostCapacity names the readings behind a death', () => {
   const described = describeHostCapacity(readHostCapacity({ readText: fakeCgroup() }));
   assert.match(described, /memory\.max 30\.00 GiB/);
   assert.match(described, /memory\.current 1\.00 GiB/);
-  assert.match(described, /headroom 29\.00 GiB/);
+  assert.match(described, /raw unused below hard limit 29\.00 GiB/);
+  assert.match(described, /estimated reclaim-aware headroom 29\.38 GiB/);
+  assert.match(described, /potential reclaim 384\.00 MiB/);
+  assert.match(described, /cgroup memory pressure full avg10=0\.07%/);
   assert.match(described, /oom 39/);
   assert.match(described, /oom_kill 3/);
 });
@@ -246,4 +262,110 @@ test('formatBytes renders an unknown reading as unknown rather than as zero', ()
   assert.equal(formatBytes(null), 'unknown');
   assert.equal(formatBytes(Number.NaN), 'unknown');
   assert.equal(formatBytes(0), '0 B');
+});
+
+test('reclaimable cache produces a labeled estimate even with zero raw unused bytes', () => {
+  const capacity=readHostCapacity({readText: fakeCgroup({
+    '/sys/fs/cgroup/memory.current': String(30*GIB),
+    '/sys/fs/cgroup/memory.stat': [
+      'anon '+String(22*GIB),
+      'file '+String(7*GIB),
+      'shmem '+String(1*GIB),
+      'inactive_file '+String(5*GIB),
+      'file_dirty 0',
+      'file_writeback 0',
+      'slab_reclaimable '+String(GIB),
+    ].join('\n'),
+  })});
+  assert.equal(capacity.headroomBytes,0);
+  assert.equal(capacity.potentiallyReclaimableBytes,6*GIB);
+  assert.equal(capacity.estimatedWorkingSetBytes,24*GIB);
+  assert.equal(capacity.estimatedHeadroomBytes,6*GIB);
+  assert.equal(capacity.estimatedHeadroomPercent,20);
+  assert.equal(capacity.pressureScope,'cgroup');
+  assert.match(describeHostCapacity(capacity),/20\.0% of hard limit/);
+});
+
+test('shmem, dirty and writeback pages are not assumed reclaimable', () => {
+  const capacity=readHostCapacity({readText: fakeCgroup({
+    '/sys/fs/cgroup/memory.current': String(30*GIB),
+    '/sys/fs/cgroup/memory.stat': [
+      'file '+String(10*GIB),
+      'shmem '+String(5*GIB),
+      'inactive_file '+String(9*GIB),
+      'file_dirty '+String(GIB),
+      'file_writeback '+String(GIB),
+      'slab_reclaimable '+String(GIB),
+    ].join('\n'),
+  })});
+  assert.equal(capacity.potentiallyReclaimableBytes,4*GIB);
+  assert.equal(capacity.estimatedWorkingSetBytes,26*GIB);
+  assert.equal(capacity.estimatedHeadroomBytes,4*GIB);
+});
+
+test('incomplete memory.stat gives unknown estimate, not invented zero or a false precise headroom', () => {
+  for (const raw of [null,'inactive_file 400\nfile 800\n','inactive_file bogus\nfile 800\n']) {
+    const capacity=readHostCapacity({readText:fakeCgroup({
+      '/sys/fs/cgroup/memory.stat':raw,
+    })});
+    assert.equal(capacity.source,'cgroup_v2');
+    assert.equal(capacity.headroomBytes,29*GIB);
+    assert.equal(capacity.estimatedHeadroomBytes,null);
+    assert.equal(capacity.estimatedHeadroomPercent,null);
+    assert.equal(capacity.potentiallyReclaimableBytes,null);
+    assert.match(describeHostCapacity(capacity),/headroom estimate unknown/);
+  }
+});
+
+test('cgroup memory pressure is preferred, host pressure is labeled when falling back', () => {
+  const scoped=readHostCapacity({readText:fakeCgroup()});
+  assert.equal(scoped.pressureScope,'cgroup');
+  assert.equal(scoped.pressureFullAvg10,0.07);
+  const fallback=readHostCapacity({readText:fakeCgroup({
+    '/sys/fs/cgroup/memory.pressure':null,
+  })});
+  assert.equal(fallback.pressureScope,'host');
+  assert.equal(fallback.pressureFullAvg10,1.16);
+  const unavailable=readHostCapacity({readText:fakeCgroup({
+    '/sys/fs/cgroup/memory.pressure':null,
+    '/proc/pressure/memory':null,
+  })});
+  assert.equal(unavailable.pressureScope,null);
+  assert.equal(unavailable.pressureFullAvg10,null);
+});
+
+test('over-limit usage consumes potential reclaim before claiming any headroom', () => {
+  const capacity=readHostCapacity({readText:fakeCgroup({
+    '/sys/fs/cgroup/memory.current':String(35*GIB),
+    '/sys/fs/cgroup/memory.stat':[
+      'file '+String(2*GIB),
+      'shmem 0',
+      'inactive_file '+String(GIB),
+      'file_dirty 0',
+      'file_writeback 0',
+      'slab_reclaimable 0',
+    ].join('\n'),
+  })});
+  assert.equal(capacity.headroomBytes,0);
+  assert.equal(capacity.potentiallyReclaimableBytes,GIB);
+  assert.equal(capacity.estimatedWorkingSetBytes,34*GIB);
+  assert.equal(capacity.estimatedHeadroomBytes,0);
+  assert.equal(capacity.estimatedHeadroomPercent,0);
+});
+
+test('inconsistent reclaimable counters never yield more than the cgroup hard limit', () => {
+  const capacity=readHostCapacity({readText:fakeCgroup({
+    '/sys/fs/cgroup/memory.current':String(2*GIB),
+    '/sys/fs/cgroup/memory.stat':[
+      'file '+String(30*GIB),
+      'shmem 0',
+      'inactive_file '+String(30*GIB),
+      'file_dirty 0',
+      'file_writeback 0',
+      'slab_reclaimable '+String(30*GIB),
+    ].join('\n'),
+  })});
+  assert.equal(capacity.potentiallyReclaimableBytes,2*GIB);
+  assert.equal(capacity.estimatedHeadroomBytes,30*GIB);
+  assert.equal(capacity.estimatedHeadroomPercent,100);
 });

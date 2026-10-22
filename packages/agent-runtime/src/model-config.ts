@@ -49,11 +49,3 @@ export function configuredModels(env: Record<string, string | undefined> = proce
     return { model, comment: record.comment };
   });
 }
-
-/** A preference is eligible only if OpenCode advertises that exact identifier. */
-export function firstAvailableConfiguredModel(
-  available: ReadonlySet<string>,
-  env: Record<string, string | undefined> = process.env,
-): string | null {
-  return configuredModels(env).find((item) => available.has(item.model))?.model ?? null;
-}

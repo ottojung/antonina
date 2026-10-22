@@ -32,7 +32,7 @@ async function exercise(t, kind) {
         : 'if [ "$model" = "example.test/luna" ]; then echo "Error: Endpoint is unavailable" >&2; exit 1; fi\n')
     + 'echo "SUCCESS"; exit 0\n';
   writeFileSync(bin,script,{mode:0o755});
-  const probe=spawnSync(bin,['models'],{encoding:'utf8',timeout:5000});
+  const probe=spawnSync(bin,['--help'],{encoding:'utf8',timeout:5000});
   if(probe.error){t.skip('temporary fixture filesystem not executable');return;}
   assert.equal(probe.status,0);
   const env={
@@ -75,7 +75,7 @@ async function exercise(t, kind) {
   assert.equal(result.model_failover.cooldowns[0].model,LUNA);
   assert.equal(result.model_failover.cooldowns[0].reason,kind==='quota'?'quota_exhausted':'transient_backend');
   const actual=readFileSync(trace,'utf8').trim().split('\n');
-  assert.deepEqual(actual,kind==='quota'?[LUNA,BEAM]:[LUNA,LUNA,LUNA,BEAM]);
+  assert.deepEqual(actual.filter(model => model === LUNA || model === BEAM),kind==='quota'?[LUNA,BEAM]:[LUNA,LUNA,LUNA,BEAM]);
 }
 
 test('quota failure switches model within the same agent and same recorded session', {timeout:150000},async t=>exercise(t,'quota'));

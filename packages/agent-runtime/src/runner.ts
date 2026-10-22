@@ -1009,7 +1009,7 @@ async function runInvocation(
               continue;
             }
           } catch {
-            // If the catalog is unavailable or all models are cooling down,
+            // If all configured models are cooling down,
             // report the original backend failure instead of guessing.
           }
         }

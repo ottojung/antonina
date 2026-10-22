@@ -1201,25 +1201,12 @@ test('fixture guard: an uncreatable fixture parent is a named failure, never a s
   );
 });
 
-test('fixture guard: an unpinned backend probes the PATH trap and fails closed before running', async (t) => {
-  const handle = fixture(t);
-  const { root, work, env, escapes, invocations } = handle;
-  // Simulate the defect: no exact backend path, so a bare `opencode` lookup is
-  // the only option and must hit the recorded trap rather than a real backend.
-  const unpinned = { ...env };
-  delete unpinned[OPENCODE_BIN_ENV];
-  const agent_b00b = newAgent(unpinned, ['--cwd', work]);
-  const refused = run(['agent', 'run', '--id', agent_b00b, '--detach', '--prompt', 'unpinned'], unpinned);
-  assert.equal(refused.status, 1, refused.stderr);
-  assert.match(refused.stderr, /Cannot query available OpenCode models/);
-  const done = JSON.parse(readFileSync(join(root, 'state', 'antonina', 'agents', agent_b00b, 'meta.json'), 'utf8'));
-  assert.equal(done.state, 'idle', 'failed discovery must not mutate or launch the agent');
-  const trapped = readFileSync(escapes, 'utf8');
-  assert.match(trapped, /path-bin\/opencode/);
-  assert.equal(existsSync(invocations), false, 'the fixture backend must not have run');
-  // The escape was produced on purpose here; clear it so the shared guard does
-  // not double-report it.
-  rmSync(escapes, { force: true });
+test('model selection reads local preferences without invoking OpenCode', (t) => {
+  const { env, invocations } = fixture(t);
+  const result = run(['agent', 'model', 'select'], env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'opencode-go/longcat-2.5-preview-free');
+  assert.equal(existsSync(invocations), false, 'model selection must not launch OpenCode');
 });
 
 // ---------------------------------------------------------------- GAP-CLI-1

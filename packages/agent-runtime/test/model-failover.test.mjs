@@ -73,6 +73,7 @@ test('specific backend errors distinguish exhausted quota, throttling, model abs
     const cases=[
       ['Error: insufficient_quota', 'model_quota_exhausted'],
       ['Error: You have reached your usage limit', 'model_quota_exhausted'],
+      ['Error: The usage limit has been reached', 'model_quota_exhausted'],
       ['Error: model_not_found', 'model_unavailable'],
       ['Error: invalid_api_key', 'backend_authentication_failed'],
       ['Error: Payment Required', 'backend_billing_required'],

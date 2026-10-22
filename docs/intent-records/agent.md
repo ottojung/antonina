@@ -6,6 +6,14 @@ kind: constraint
 
 Detect a backend's process identity and kernel state, and observe actual OpenCode structured output at low cost. Do not equate process existence with progress or elapsed time alone with a backend failure. On a new managed-agent invocation, when a canonical step_start event is the last completed event for at least fifteen minutes, the backend process is the identical living interruptibly sleeping process, a genuine recorded native OpenCode session exists, and at least one alternate configured model is eligible, the runner may deliver a checked signal and use its existing session-preserving model-failover and cooldown path. Operator stop/kill/steer wins; never switch because of a tool or unstructured/partial log, unknown state, missing session, no alternative, or kernel D-state/disk I/O blockage. Never replay untracked tool effects. Implement inside the runtime, not as a resource gate or host-specific scheduler restriction. Existing agents are not interrupted merely by installing a new executable; liveness applies to invocations launched with the new runtime.
 
+$id-20261022-recover-silent-startup-and-provider-error
+title: Recover silent managed-agent invocations after launch and terminal API errors
+date: 2026/10/22
+source: @ottojung
+kind: constraint
+
+A managed-agent runner must not treat process survival as forward progress. In addition to unfinished model steps, independently detect (1) a silent new backend process with a durably recorded existing OpenCode session, and (2) a backend that emitted an authoritative terminal OpenCode APIError (such as HTTP 429 usage-limit exhaustion or HTTP 5xx) but did not exit. Use the existing per-agent configured-model cooldowns to move to the next eligible model and resume the exact native session after a bounded observation window. Accept the provider error only from a top-level structured event in the current invocation, not earlier sessions or arbitrary tool output; ignore presentation-only OpenCode model footers after it. A fresh silent invocation without an actual checkpointed session must not be replayed. Preserve the existing fail-closed behavior for host kernel D-state, active or unverified tool operations, unknown/authentication/billing errors, operator controls, pid reuse, and missing alternative models. This is runtime-local liveness, not a resource-dependent admission restriction. Existing runners must be replaced through safe same-session continuation if new recovery functionality is required immediately; installing binaries alone does not retrofit an already running process.
+
 $id-20261021-orchestrator-model-recovery-session-checkpoint
 title: Supervised orchestrator model failover and early managed-agent session checkpoints
 date: 2026/10/21

@@ -55,7 +55,10 @@ import {
   type ModelFailureReason,
 } from './model-failover.js';
 import { SessionCheckpointReader } from './session-checkpoint.js';
-import { InvocationActivity, LIVENESS_POLL_MS, MODEL_STEP_SILENCE_MS, safeAlternativeModel } from './liveness.js';
+import {
+  InvocationActivity, BACKEND_ERROR_GRACE_MS, LIVENESS_POLL_MS,
+  MODEL_STEP_SILENCE_MS, safeAlternativeModel, type LivenessObservation,
+} from './liveness.js';
 import { procStartTicks, persistedProcessInteger, signalMarkedInvocationProcesses } from './process.js';
 import {
   logPath,
@@ -192,6 +195,8 @@ export interface RunnerOptions extends StatePathsOptions {
   modelStepSilenceMs?: number;
   /** Test seam only: production samples liveness every five seconds. */
   livenessPollMs?: number;
+  /** Test seam only: production allows OpenCode 30 seconds to exit after a provider error. */
+  backendErrorGraceMs?: number;
   /**
    * Seam for the decision to retry a failed backend spawn. Production leaves it
    * unset so `backendRetryDelay` decides, and today that classifier marks every
@@ -943,15 +948,24 @@ async function runInvocation(
     }
     const startTicks = (options.childStartTicks ?? procStartTicks)(pid);
     const activity = new InvocationActivity(logFile, invocationLogStart);
+    const livenessState: { observation: LivenessObservation | null } = { observation: null };
     const stallCandidate = (current: AgentMetadata): boolean => {
       if (startTicks === null || current.pid !== pid || current.start_time !== startTicks
         || current.invocation_id !== invocationId || current.state !== 'running') return false;
-      const observation = activity.observe(pid, startTicks, Date.now(), options.modelStepSilenceMs ?? MODEL_STEP_SILENCE_MS);
-      if (observation.diagnosis !== 'model_step_silent') return false;
-      // A recorded conversation and another eligible configured model are
-      // prerequisites. Without them, do not risk replaying tool effects or
-      // needlessly killing an agent with nowhere to continue.
-      return safeAlternativeModel(current, activeModel, { ...process.env, ...options.env });
+      const observation = activity.observe(
+        pid, startTicks, Date.now(),
+        options.modelStepSilenceMs ?? MODEL_STEP_SILENCE_MS,
+        options.backendErrorGraceMs ?? BACKEND_ERROR_GRACE_MS,
+      );
+      if (observation.diagnosis !== 'model_step_silent'
+        && observation.diagnosis !== 'startup_silent'
+        && observation.diagnosis !== 'backend_error_silent') return false;
+      // Only a durable native session and another eligible configured model
+      // authorize recovery. In particular, first-invocation silence without a
+      // checkpointed session cannot justify replay of unknown side effects.
+      if (!safeAlternativeModel(current, activeModel, { ...process.env, ...options.env })) return false;
+      livenessState.observation = observation;
+      return true;
     };
     const resultPromise = childResult(child, agentId, options, checkpointSession, stallCandidate);
 
@@ -1039,11 +1053,14 @@ async function runInvocation(
     const code = result.code ?? (signal === null ? 1 : -signal);
     const stalled = result.livenessTriggered && !result.operatorSignalled
       && !(result.code === 0 && result.signal === null);
-    // A signal sent by our liveness detector is *not* an external signal death
-    // and is not attributed to a provider error parsed from unrelated output.
+    // A signal sent by our liveness detector is *not* an external signal
+    // death. Prefer its isolated, authoritative top-level APIError diagnosis
+    // over scanning arbitrary earlier tool text in the invocation log.
+    const livenessClassification = stalled && livenessState.observation?.diagnosis === 'backend_error_silent'
+      ? livenessState.observation.backendFailure : null;
     const backendError: BackendError | null = stalled
       ? {
-        classification: 'model_step_stalled',
+        classification: livenessClassification ?? 'model_step_stalled',
         provider: null, model: activeModel,
         request_boundary: retryAsContinue ? 'continuation' : 'fresh_session',
         reference: null, transient: true, automatic_retry_safe: false,
@@ -1058,7 +1075,8 @@ async function runInvocation(
     // Model-specific failure, not an agent-global outage: only this agent is
     // moved to the next eligible model. A confirmed quiet model step switches
     // immediately; ordinary transient provider errors get two retries.
-    const failoverReason = stalled ? 'transient_backend'
+    const failoverReason = stalled
+      ? modelFailureReason(backendError, TRANSIENT_MODEL_RETRIES) ?? 'transient_backend'
       : result.signal === null && !result.operatorSignalled
         ? modelFailureReason(backendError, attempt) : null;
     if (failoverReason !== null) {
@@ -1074,7 +1092,9 @@ async function runInvocation(
         coolDownAgentModel(current, activeModel, failoverReason, failedAt, cooldownSeconds);
         current.backend_error = backendError;
         current.error = stalled
-          ? 'model ' + activeModel + ' stopped after a silent OpenCode model step; safely resuming its recorded session on the next eligible model'
+          ? 'model ' + activeModel + ' interrupted after '
+            + (livenessState.observation?.diagnosis ?? 'verified backend silence')
+            + ' (' + failoverReason + '); resuming its recorded session on the next eligible model'
           : 'model ' + activeModel + ' failed (' + failoverReason + '); selecting the next eligible model';
         current.last_activity_at = Date.now() / 1000;
       }, options);

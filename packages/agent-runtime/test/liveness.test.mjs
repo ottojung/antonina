@@ -4,7 +4,7 @@ import { appendFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { InvocationActivity, safeAlternativeModel } from '../dist/packages/agent-runtime/src/liveness.js';
+import { InvocationActivity, recoverableOpenCodeError, safeAlternativeModel } from '../dist/packages/agent-runtime/src/liveness.js';
 import { procStartTicks, readProcStat } from '../dist/packages/agent-runtime/src/process.js';
 import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
 
@@ -91,4 +91,66 @@ test('restart requires a recorded native session and an eligible alternative mod
     ]};
     assert.equal(safeAlternativeModel(meta,'example/luna',env),false);
   }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test('a resumed invocation silent from its first byte is detected independently of step_start', () => {
+  const dir=mkdtempSync(join(tmpdir(),'antonina-liveness-startup-'));
+  try {
+    const file=join(dir,'log');
+    writeFileSync(file,'prior invocation had tool output\n');
+    const offset=Buffer.byteLength('prior invocation had tool output\n');
+    const monitor=new InvocationActivity(file,offset,0,()=>({...readProcStat(pid),state:'S'}));
+    assert.equal(monitor.observe(pid,ticks,200,500).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,550,500).diagnosis,'startup_silent');
+    // OpenCode's own cosmetic footer is not a tool operation or proof of a new step.
+    appendFileSync(file,'\u001b[0m> build · beam-free\n');
+    assert.equal(monitor.observe(pid,ticks,600,500).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,1200,500).diagnosis,'startup_silent');
+    appendFileSync(file,'Unstructured backend diagnostic\n');
+    assert.equal(monitor.observe(pid,ticks,2100,500).diagnosis,'progressing_or_uncertain');
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('a terminal OpenCode APIError followed by its display footer triggers model recovery', () => {
+  const dir=mkdtempSync(join(tmpdir(),'antonina-liveness-provider-'));
+  try {
+    const file=join(dir,'log');
+    writeFileSync(file,'');
+    const monitor=new InvocationActivity(file,0,0,()=>({...readProcStat(pid),state:'S'}));
+    const errorEvent=(message,statusCode)=>JSON.stringify({type:'error',sessionID:'ses_live',
+      error:{name:'APIError',data:{message,statusCode,isRetryable:true}}})+'\n';
+    appendFileSync(file,errorEvent('The usage limit has been reached',429)+'\u001b[0m> build · beam-free\n');
+    assert.equal(monitor.observe(pid,ticks,100,1000,300).diagnosis,'progressing_or_uncertain');
+    const observed=monitor.observe(pid,ticks,450,1000,300);
+    assert.equal(observed.diagnosis,'backend_error_silent');
+    assert.equal(observed.backendFailure,'model_quota_exhausted');
+    appendFileSync(file,event('step_start'));
+    assert.equal(monitor.observe(pid,ticks,490,1000,300).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,1600,1000,300).diagnosis,'model_step_silent');
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('refuse automatic failover on authentication, billing, unknown errors and tool activity', () => {
+  const samples=[
+    [401,'Unauthorized'], [402,'Payment Required'], [403,'invalid_api_key'],
+    [400,'Failed to compile user project'], [429,'invalid_api_key: The usage limit has been reached'],
+  ];
+  for (const [statusCode,message] of samples) {
+    const e={type:'error',sessionID:'ses_live',error:{name:'APIError',data:{message,statusCode}}};
+    assert.equal(recoverableOpenCodeError(e),null);
+  }
+  const valid={type:'error',sessionID:'ses_live',error:{name:'APIError',data:{message:'rate limit exceeded',statusCode:429}}};
+  assert.equal(recoverableOpenCodeError(valid),'upstream_rate_limited');
+  assert.equal(recoverableOpenCodeError({type:'error',error:{name:'Error',data:{statusCode:429}}}),null);
+  const dir=mkdtempSync(join(tmpdir(),'antonina-liveness-unsafe-'));
+  try {
+    const file=join(dir,'log');
+    writeFileSync(file,event('tool_use',{type:'tool',state:{status:'running'}}));
+    const monitor=new InvocationActivity(file,0,0,()=>({...readProcStat(pid),state:'S'}));
+    assert.equal(monitor.observe(pid,ticks,2000,100,100).diagnosis,'progressing_or_uncertain');
+    appendFileSync(file,JSON.stringify({type:'error',sessionID:'ses_live',
+      error:{name:'APIError',data:{message:'invalid_api_key',statusCode:401}}})+'\n');
+    assert.equal(monitor.observe(pid,ticks,2100,100,100).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,2400,100,100).diagnosis,'progressing_or_uncertain');
+  }finally{rmSync(dir,{recursive:true,force:true});}
 });

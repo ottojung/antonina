@@ -2,6 +2,7 @@
 """Persistent, host-local model recovery for the single supervised orchestrator."""
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -97,9 +98,9 @@ def classify(returncode, tail):
     text = tail.decode("utf-8", errors="replace").lower()
     if any(marker in text for marker in ("invalid_api_key", "payment required", "authentication failed", "unauthorized", "billing_required")):
         return None
-    if any(marker in text for marker in ("insufficient_quota", "usage limit exceeded", "you have reached your usage limit", "credit balance is too low", "quota exhausted")):
+    if any(marker in text for marker in ("insufficient_quota", "usage limit exceeded", "you have reached your usage limit", "the usage limit has been reached", "credit balance is too low", "quota exhausted")):
         return "quota_exhausted"
-    if any(marker in text for marker in ("rate limit exceeded", "too many requests", "statuscode\":429", "status code 429")):
+    if any(marker in text for marker in ("rate limit exceeded", "too many requests", "statuscode\":429", "status code 429")) or re.search(r'"statuscode"\s*:\s*429', text):
         return "rate_limited"
     if any(marker in text for marker in ("model_not_found", "model not found", "model is not available")):
         return "model_unavailable"

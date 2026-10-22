@@ -297,6 +297,43 @@ const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
     automaticRetrySafe: false,
   },
 ];
+// OpenCode emits structured JSONL API errors for fresh run invocations.
+// Real OAuth/provider errors may contain only statusCode 429 or 503 rather
+// than one of the older provider-specific prose diagnostics. Inspect
+// top-level OpenCode error events, not arbitrary JSON in tool output.
+function structuredBackendFailureRule(text: string): BackendFailureRule | undefined {
+  const lines = text.split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(lines[index]!); } catch { continue; }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) continue;
+    const event = parsed as Record<string, unknown>;
+    if (event.type !== 'error' || typeof event.error !== 'object' || event.error === null || Array.isArray(event.error)) continue;
+    const error = event.error as Record<string, unknown>;
+    if (error.name !== 'APIError' || typeof error.data !== 'object' || error.data === null || Array.isArray(error.data)) continue;
+    const data = error.data as Record<string, unknown>;
+    const statusCode = data.statusCode;
+    if (statusCode === 429) {
+      return {
+        marker: 'OpenCode APIError HTTP 429',
+        classification: 'upstream_rate_limited',
+        provider: null,
+        transient: true,
+        automaticRetrySafe: false,
+      };
+    }
+    if (typeof statusCode === 'number' && Number.isInteger(statusCode) && statusCode >= 500 && statusCode < 600) {
+      return {
+        marker: 'OpenCode APIError HTTP 5xx',
+        classification: 'transient_backend_server_error',
+        provider: null,
+        transient: true,
+        automaticRetrySafe: false,
+      };
+    }
+  }
+  return undefined;
+}
 
 /**
  * Classification for a non-zero backend exit that matched no rule.
@@ -603,7 +640,8 @@ export function classifyBackendFailure(
     return null;
   }
   const text = data.toString('utf8');
-  const rule = BACKEND_FAILURE_RULES.find((candidate) => text.includes(candidate.marker));
+  const rule = BACKEND_FAILURE_RULES.find((candidate) => text.includes(candidate.marker))
+    ?? structuredBackendFailureRule(text);
   if (rule === undefined) {
     // An empty window is not an unrecognised failure: a spawn that never
     // produced a byte (`child.once('error')` yields exit 127) also exits

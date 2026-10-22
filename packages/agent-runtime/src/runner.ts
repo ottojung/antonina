@@ -8,6 +8,7 @@ import {
   backendRetryDelay,
   buildAgentCommand,
   classifyBackendFailure,
+  quotaResetDelaySeconds,
   classifySignalDeath,
   describeBackendDeath,
   describeSignalDeath,
@@ -47,6 +48,7 @@ import {
   type AgentMetadata,
 } from './metadata.js';
 import {
+  MODEL_COOLDOWN_SECONDS,
   TRANSIENT_MODEL_RETRIES,
   coolDownAgentModel,
   recordAgentModel,
@@ -1078,12 +1080,16 @@ async function runInvocation(
       : result.signal === null && !result.operatorSignalled
         ? modelFailureReason(backendError, attempt) : null;
     if (failoverReason !== null) {
+      const failedAt = Date.now() / 1000;
+      const cooldownSeconds = failoverReason === 'quota_exhausted'
+        ? quotaResetDelaySeconds(logFile, invocationLogStart, failedAt) ?? MODEL_COOLDOWN_SECONDS
+        : MODEL_COOLDOWN_SECONDS;
       // A fresh invocation may have already performed tool actions. Reuse its
       // session if one exists. Never blindly replay untracked tool effects.
       if (!retryAsContinue) await rememberFreshSession(agentId, options);
       await updateMeta(agentId, (current) => {
         if (current.state !== 'running') return;
-        coolDownAgentModel(current, activeModel, failoverReason);
+        coolDownAgentModel(current, activeModel, failoverReason, failedAt, cooldownSeconds);
         current.backend_error = backendError;
         current.error = stalled
           ? 'model ' + activeModel + ' interrupted after '

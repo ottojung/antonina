@@ -13,7 +13,7 @@ import {
   type AgentMetadata,
 } from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
-import { configuredModels, firstAvailableConfiguredModel, modelConfigPath } from './model-config.js';
+import { configuredModels } from './model-config.js';
 import { eligibleAgentModel } from './model-failover.js';
 
 export const OPENCODE_TITLE_PREFIX = 'antonina-';
@@ -21,7 +21,6 @@ export const DEFAULT_OPENCODE_BIN = 'opencode';
 export const OPENCODE_BIN_ENV = 'ANTONINA_OPENCODE_BIN';
 const SESSION_LIST_MAX_COUNT = 100;
 const SESSION_LIST_TIMEOUT_MS = 10_000;
-const MODEL_LIST_TIMEOUT_MS = 10_000;
 export const BACKEND_DIAGNOSTIC_MAX_BYTES = 16 * 1024;
 export const BACKEND_RETRY_MAX_ATTEMPTS = 2;
 export const BACKEND_RETRY_BASE_MS = 500;
@@ -418,7 +417,7 @@ function parseSessionRows(value: unknown): SessionRow[] | null {
  *
  * Board 197: the per-invocation owner token authorises one runner's claim on one
  * reservation and nothing else, and the probe is not that runner -- it is a short
- * `models`/`session list` the runtime runs beside the invocation. It is dropped
+ * `session list` the runtime runs beside the invocation. It is dropped
  * here rather than at each call site so no probe can be added later that leaks
  * it by forgetting. `delete` rather than a blank value, so a later spread cannot
  * reintroduce a copy.
@@ -461,58 +460,21 @@ export function discoverSessionId(
   return matches[0]?.id ?? null;
 }
 
-export function availableOpenCodeModels(
-  env: Record<string, string | undefined> = process.env,
-): Set<string> | null {
-  const childEnv = probeEnv(env);
-  const result = spawnSync(resolveOpencode(childEnv), ['models'], {
-    encoding: 'utf8',
-    timeout: MODEL_LIST_TIMEOUT_MS,
-    env: childEnv,
-    stdio: ['ignore', 'pipe', 'ignore'],
-  });
-  if (result.error || result.status !== 0 || typeof result.stdout !== 'string') return null;
-  return new Set(result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
-}
-
-export function configuredModelAvailable(
-  env: Record<string, string | undefined> = process.env,
-): boolean | null {
-  // An absent/empty configuration is an operator error, not an availability miss.
-  configuredModels(env);
-  const available = availableOpenCodeModels(env);
-  return available === null ? null : firstAvailableConfiguredModel(available, env) !== null;
-}
-
-/** Resolve afresh for every invocation; never select a model from source-code defaults. */
+/** The configured order is authoritative. Never probe the OpenCode model catalog. */
 export function selectConfiguredModel(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  configuredModels(env); // fail immediately, before touching a backend, if unconfigured
-  const available = availableOpenCodeModels(env);
-  if (available === null) {
-    throw new Error('Cannot query available OpenCode models; refusing to guess a model');
-  }
-  const chosen = firstAvailableConfiguredModel(available, env);
-  if (chosen === null) {
-    throw new Error(`No configured Antonina model is advertised by OpenCode; reorder or edit ${modelConfigPath(env)}`);
-  }
-  return chosen;
+  return configuredModels(env)[0]!.model;
 }
 
-/**
- * Per-agent selection skips only this agent's unexpired model cooldowns.
- */
+/** Per-agent selection skips only this agent's unexpired model cooldowns. */
 export function selectConfiguredAgentModel(
   meta: AgentMetadata,
   env: Record<string, string | undefined> = process.env,
   now: number = Date.now() / 1000,
 ): string {
-  const preferences = configuredModels(env);
-  const advertised = availableOpenCodeModels(env);
-  if (advertised === null) throw new Error('Cannot query available OpenCode models; refusing to guess a model');
-  const chosen = eligibleAgentModel(meta, preferences, advertised, now);
-  if (chosen === null) throw new Error('No eligible configured model for this agent: remaining models are unavailable or cooling down');
+  const chosen = eligibleAgentModel(meta, configuredModels(env), now);
+  if (chosen === null) throw new Error('No eligible configured model for this agent: all configured models are cooling down');
   return chosen;
 }
 

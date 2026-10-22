@@ -17,7 +17,6 @@ import {
   buildAgentCommand,
   classifyBackendFailure,
   classifySignalDeath,
-  configuredModelAvailable,
   describeSignalDeath,
   discoverSessionId,
   honoursInvocationCwd,
@@ -251,50 +250,17 @@ test('status sanitizer drops arbitrary persisted backend data', () => {
   assert.equal(sanitizeBackendError({ classification: '' }), null);
 });
 
-test('configured model catalog distinguishes absence from transport failure', (t) => {
+test('model selection never invokes OpenCode, even if the backend would fail', (t) => {
   const root = fixture(t);
-  const bin = join(root, 'opencode');
-  const pathBin = join(root, 'path-bin');
-  mkdirSync(pathBin);
-  const escapes = join(root, 'path-escapes.log');
-  const calls = join(root, 'fixture-calls.log');
-  // Any bare `opencode` lookup in this environment must land on the recorded
-  // trap, never on a real host backend.
-  writeFileSync(join(pathBin, 'opencode'), `#!/bin/sh
-printf '%s %s\\n' "$0" "$*" >>'${escapes}'
-exit 70
-`, { mode: 0o755 });
-  writeFileSync(bin, `#!/bin/sh
-printf '%s %s\\n' "$0" "$*" >>'${calls}'
-if [ "$1" = models ]; then
-  printf "%s\\n" other/model example.test/test-free
-  exit 0
-fi
-exit 2
-`, { mode: 0o755 });
-
+  const bin = join(root, 'unavailable-opencode');
+  const calls = join(root, 'unexpected-calls.log');
+  writeFileSync(bin, '#!/bin/sh\nexit 70\n', { mode: 0o755 });
   const config = join(root, 'cfg');
   installModelConfig(config);
-  const env = { [OPENCODE_BIN_ENV]: bin, PATH: pathBin, XDG_CONFIG_HOME: config };
-  assert.equal(env[OPENCODE_BIN_ENV], bin);
-  assert.ok(isAbsolute(bin));
-  // Positive control: the fixture is exec-able at the exact path that is passed
-  // to the production code.
-  const direct = spawnSync(bin, ['models'], { env, encoding: 'utf8', timeout: 15_000 });
-  assert.equal(direct.status, 0, `fixture is not runnable: ${direct.error?.code ?? direct.stderr}`);
-  assert.match(direct.stdout, new RegExp(FIXTURE_MODEL));
-
-  rmSync(calls, { force: true });
-  assert.equal(configuredModelAvailable(env), true);
-  assertFixtureRan(bin, calls, escapes);
-
-  writeFileSync(bin, '#!/bin/sh\necho other/model\n', { mode: 0o755 });
-  assert.equal(configuredModelAvailable(env), false);
-  assertFixtureRan(bin, calls, escapes);
-
-  writeFileSync(bin, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
-  assert.equal(configuredModelAvailable(env), null);
-  assertFixtureRan(bin, calls, escapes);
+  const env = { [OPENCODE_BIN_ENV]: bin, XDG_CONFIG_HOME: config };
+  const meta = idleMeta('a11d', root, null, 1);
+  assert.equal(buildAgentCommand(meta, 'work', false, env).includes(FIXTURE_MODEL), true);
+  assert.equal(existsSync(calls), false, 'no OpenCode subprocess may run during model selection');
 });
 
 function recordedInvocations(path) {
@@ -302,19 +268,6 @@ function recordedInvocations(path) {
   return readFileSync(path, 'utf8').split('\n').filter(Boolean);
 }
 
-function assertFixtureRan(bin, calls, escapes) {
-  assert.deepEqual(
-    recordedInvocations(escapes),
-    [],
-    'a non-fixture opencode was executed via PATH',
-  );
-  const recorded = recordedInvocations(calls);
-  assert.ok(recorded.length > 0, 'the fixture backend did not run');
-  for (const line of recorded) {
-    assert.equal(line.split(' ')[0], bin, `a different program ran as the backend: ${line}`);
-  }
-  assert.equal(recorded.at(-1).split(' ').slice(1).join(' '), 'models');
-}
 
 test('backend executable resolves to an exact configured path, not a PATH lookup', (t) => {
   const root = fixture(t);

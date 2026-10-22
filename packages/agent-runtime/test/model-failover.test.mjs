@@ -15,7 +15,6 @@ import {
 
 const prefs = ['openai/gpt-6-luna', 'opencode-go/beam-free', 'opencode-go/longcat-2.5-preview-free']
   .map(model => ({model, comment: 'mock'}));
-const advertised = new Set(prefs.map(x=>x.model));
 const NOW = 1792600000;
 
 function testMeta() {
@@ -27,27 +26,27 @@ function testMeta() {
 test('per-agent exhaustion, cooldown persistence and six-hour recovery', () => {
   const a = testMeta();
   const b = testMeta();
-  assert.equal(eligibleAgentModel(a,prefs,advertised,NOW),prefs[0].model);
+  assert.equal(eligibleAgentModel(a,prefs,NOW),prefs[0].model);
   recordAgentModel(a,prefs[0].model);
   coolDownAgentModel(a,prefs[0].model,'quota_exhausted',NOW);
   validateAgentMetadata(a);
   const persisted = JSON.parse(JSON.stringify(a));
   validateAgentMetadata(persisted);
   assert.equal(agentModelFailover(persisted).selected_model,prefs[0].model);
-  assert.equal(eligibleAgentModel(persisted,prefs,advertised,NOW + 60),prefs[1].model);
-  assert.equal(eligibleAgentModel(b,prefs,advertised,NOW + 60),prefs[0].model);
-  assert.equal(eligibleAgentModel(persisted,prefs,advertised,NOW+MODEL_COOLDOWN_SECONDS-1),prefs[1].model);
-  assert.equal(eligibleAgentModel(persisted,prefs,advertised,NOW+MODEL_COOLDOWN_SECONDS),prefs[0].model);
+  assert.equal(eligibleAgentModel(persisted,prefs,NOW + 60),prefs[1].model);
+  assert.equal(eligibleAgentModel(b,prefs,NOW + 60),prefs[0].model);
+  assert.equal(eligibleAgentModel(persisted,prefs,NOW+MODEL_COOLDOWN_SECONDS-1),prefs[1].model);
+  assert.equal(eligibleAgentModel(persisted,prefs,NOW+MODEL_COOLDOWN_SECONDS),prefs[0].model);
   coolDownAgentModel(persisted,prefs[1].model,'transient_backend',NOW + 100);
-  assert.equal(eligibleAgentModel(persisted,prefs,advertised,NOW+200),prefs[2].model);
+  assert.equal(eligibleAgentModel(persisted,prefs,NOW+200),prefs[2].model);
   assert.equal(TRANSIENT_MODEL_RETRIES,2);
 });
 
 test('cooldowns track opaque model IDs across preference reordering', () => {
   const a=testMeta();
   coolDownAgentModel(a,prefs[0].model,'quota_exhausted',NOW);
-  assert.equal(eligibleAgentModel(a,[prefs[2],prefs[0],prefs[1]],advertised,NOW+10),prefs[2].model);
-  assert.equal(eligibleAgentModel(a,prefs,new Set([prefs[0].model]),NOW+10),null);
+  assert.equal(eligibleAgentModel(a,[prefs[2],prefs[0],prefs[1]],NOW+10),prefs[2].model);
+  assert.equal(eligibleAgentModel(a,[prefs[0]],NOW+10),null);
   coolDownAgentModel(a,prefs[0].model,'rate_limited',NOW+100);
   assert.equal(agentModelFailover(a).cooldowns.length,1);
   assert.equal(agentModelFailover(a).cooldowns[0].until,NOW+100+MODEL_COOLDOWN_SECONDS);

@@ -57,12 +57,11 @@ export function agentModelFailover(meta: AgentMetadata): ModelFailoverState {
 export function eligibleAgentModel(
   meta: AgentMetadata,
   preferences: readonly ModelPreference[],
-  advertised: ReadonlySet<string>,
   now: number = Date.now() / 1000,
 ): string | null {
   const state = agentModelFailover(meta);
-  return preferences.find((preference) => advertised.has(preference.model)
-    && !state.cooldowns.some((item) => item.model === preference.model && item.until > now))?.model ?? null;
+  return preferences.find((preference) =>
+    !state.cooldowns.some((item) => item.model === preference.model && item.until > now))?.model ?? null;
 }
 
 export function recordAgentModel(meta: AgentMetadata, model: string): void {

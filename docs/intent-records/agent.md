@@ -1,3 +1,11 @@
+$id-20261021-no-opencode-model-discovery
+title: Configured models are authoritative without catalog discovery
+date: 2026/10/21
+source: @ottojung
+kind: constraint
+
+Antonina must never query OpenCode for a catalog or list of models during orchestrator turns, agent launch, agent continuation, or CLI model selection. Use the first identifier in the local ordered model configuration directly for orchestrators; for each managed agent, use the highest-preference configured identifier without an active per-agent failure cooldown. Only real inference failures drive per-agent retry and failover, preserving the existing cooldown policy. Do not invent models, edit the host-local preferences automatically on discovery failure, or use a catalog probe as admission preflight. Model research, when desired, belongs to autonomous agents or orchestrators rather than Antonina implementation. The CLI model select command reports the first configured identifier without checking external availability. This supersedes earlier requirements for selecting only model IDs advertised by OpenCode.
+
 $id-20261021-per-agent-model-recovery
 title: Bounded per-agent model failover with expiring cooldowns
 date: 2026/10/21

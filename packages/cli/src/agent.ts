@@ -1256,13 +1256,9 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     // the defect this replaces, so the launch is refused and says why.
     throw new Error(`run: agent ${agentId} has no declared working directory; pass --cwd /absolute/path`);
   }
-  // Board 186. The model probe has no agent identity of its own, so it is given
-  // the database of the record this command is about to run. It reads the model
-  // list and writes no session row, so it could safely use any database -- but
-  // leaving it on the shared one would keep every `run` touching the file whose
-  // lock contention this change exists to remove.
-  // Refuse missing configuration and unavailable models before accepting the prompt.
-  selectConfiguredModel({ ...context.env, ...opencodeBackendEnv(observed, paths(context)) });
+  // Validate local model configuration without invoking OpenCode.
+  // Real inference failures drive the per-agent failover ladder.
+  selectConfiguredModel(context.env);
   const decision: {
     action?: 'busy' | 'spawn' | 'reuse';
     mode?: 'new' | 'continue';

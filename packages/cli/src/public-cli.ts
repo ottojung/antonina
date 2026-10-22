@@ -270,7 +270,7 @@ const AGENT_SPECS: readonly CommandSpec[] = [
   },
   {
     path: ['model', 'select'],
-    summary: 'Print the first configured model advertised by OpenCode.',
+    summary: 'Print the first model in local configured preference order (no discovery).',
     normalize: () => ['model', 'select'],
   },
   {

@@ -53,6 +53,7 @@ import {
   type ModelFailureReason,
 } from './model-failover.js';
 import { SessionCheckpointReader } from './session-checkpoint.js';
+import { InvocationActivity, LIVENESS_POLL_MS, MODEL_STEP_SILENCE_MS, safeAlternativeModel } from './liveness.js';
 import { procStartTicks, persistedProcessInteger, signalMarkedInvocationProcesses } from './process.js';
 import {
   logPath,
@@ -185,6 +186,10 @@ export interface RunnerOptions extends StatePathsOptions {
    * still happens in the declared directory of a record that says so.
    */
   selfStartTicks?: (pid: number) => number | null;
+  /** Test seam only: production uses the fixed conservative model-step silence window. */
+  modelStepSilenceMs?: number;
+  /** Test seam only: production samples liveness every five seconds. */
+  livenessPollMs?: number;
   /**
    * Seam for the decision to retry a failed backend spawn. Production leaves it
    * unset so `backendRetryDelay` decides, and today that classifier marks every
@@ -243,6 +248,8 @@ interface ChildResult {
    * indistinguishable from a delivered one in durable state.
    */
   operatorSignalDelivered: boolean;
+  /** A verified quiet model step was interrupted by this runner, not the operator. */
+  livenessTriggered: boolean;
 }
 
 function signalNumber(signal: NodeJS.Signals | null): number | null {
@@ -250,17 +257,26 @@ function signalNumber(signal: NodeJS.Signals | null): number | null {
   return constants.signals[signal] ?? null;
 }
 
-function childResult(child: ChildProcess, agentId: string, options: RunnerOptions, onPoll?: () => void): Promise<ChildResult> {
+function childResult(
+  child: ChildProcess,
+  agentId: string,
+  options: RunnerOptions,
+  onPoll?: () => void,
+  onLiveness?: (meta: AgentMetadata) => boolean,
+): Promise<ChildResult> {
   return new Promise((resolve) => {
     let controlStartedAt: number | null = null;
     let operatorSignalled = false;
     let operatorSignalDelivered = false;
+    let livenessTriggered = false;
+    let livenessSignalledAt: number | null = null;
+    let nextLivenessPollAt = Date.now() + (options.livenessPollMs ?? LIVENESS_POLL_MS);
     const timer = setInterval(() => {
       onPoll?.();
       const meta = readMeta(agentId, options);
       if (meta === null) return;
       const intent = persistedControlField(meta, 'intent');
-      if (intent.malformed || intent.value === null) return;
+      if (intent.malformed) return;
       if (intent.value === 'kill') {
         operatorSignalled = true;
         if (signalInvocation(meta, 'SIGKILL')) operatorSignalDelivered = true;
@@ -271,15 +287,32 @@ function childResult(child: ChildProcess, agentId: string, options: RunnerOption
         const signal = Date.now() - controlStartedAt >= CONTROL_GRACE_MS ? 'SIGKILL' : 'SIGTERM';
         operatorSignalled = true;
         if (signalInvocation(meta, signal)) operatorSignalDelivered = true;
+        return;
+      }
+      // Stop/steer/kill always takes precedence. A liveness switch is a
+      // checked backend signal, never a CLI operator command or a replay.
+      if (intent.value !== null || intent.malformed) return;
+      if (livenessSignalledAt !== null) {
+        if (Date.now() - livenessSignalledAt >= CONTROL_GRACE_MS) {
+          signalInvocation(meta, 'SIGKILL');
+        }
+        return;
+      }
+      if (onLiveness === undefined || Date.now() < nextLivenessPollAt) return;
+      nextLivenessPollAt = Date.now() + (options.livenessPollMs ?? LIVENESS_POLL_MS);
+      if (!onLiveness(meta)) return;
+      if (signalInvocation(meta, 'SIGTERM')) {
+        livenessTriggered = true;
+        livenessSignalledAt = Date.now();
       }
     }, CONTROL_POLL_MS);
     child.once('close', (code, signal) => {
       clearInterval(timer);
-      resolve({ code, signal, operatorSignalled, operatorSignalDelivered });
+      resolve({ code, signal, operatorSignalled, operatorSignalDelivered, livenessTriggered });
     });
     child.once('error', () => {
       clearInterval(timer);
-      resolve({ code: 127, signal: null, operatorSignalled, operatorSignalDelivered });
+      resolve({ code: 127, signal: null, operatorSignalled, operatorSignalDelivered, livenessTriggered });
     });
   });
 }
@@ -906,8 +939,19 @@ async function runInvocation(
       }, options);
       return false;
     }
-    const resultPromise = childResult(child, agentId, options, checkpointSession);
     const startTicks = (options.childStartTicks ?? procStartTicks)(pid);
+    const activity = new InvocationActivity(logFile, invocationLogStart);
+    const stallCandidate = (current: AgentMetadata): boolean => {
+      if (startTicks === null || current.pid !== pid || current.start_time !== startTicks
+        || current.invocation_id !== invocationId || current.state !== 'running') return false;
+      const observation = activity.observe(pid, startTicks, Date.now(), options.modelStepSilenceMs ?? MODEL_STEP_SILENCE_MS);
+      if (observation.diagnosis !== 'model_step_silent') return false;
+      // A recorded conversation and another eligible configured model are
+      // prerequisites. Without them, do not risk replaying tool effects or
+      // needlessly killing an agent with nowhere to continue.
+      return safeAlternativeModel(current, activeModel, { ...process.env, ...options.env });
+    };
+    const resultPromise = childResult(child, agentId, options, checkpointSession, stallCandidate);
 
     let result: ChildResult;
     if (startTicks === null) {
@@ -991,15 +1035,30 @@ async function runInvocation(
 
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);
-    const backendError = classifyBackendFailure(logFile, invocationLogStart, code, retryAsContinue);
+    const stalled = result.livenessTriggered && !result.operatorSignalled
+      && !(result.code === 0 && result.signal === null);
+    // A signal sent by our liveness detector is *not* an external signal death
+    // and is not attributed to a provider error parsed from unrelated output.
+    const backendError: BackendError | null = stalled
+      ? {
+        classification: 'model_step_stalled',
+        provider: null, model: activeModel,
+        request_boundary: retryAsContinue ? 'continuation' : 'fresh_session',
+        reference: null, transient: true, automatic_retry_safe: false,
+        fresh_session_useful: retryAsContinue ? null : true,
+        backend_scope: 'model', diagnostic_bytes: 0,
+      }
+      : classifyBackendFailure(logFile, invocationLogStart, code, retryAsContinue);
     if (backendError !== null && backendError.classification !== 'external_signal_kill') {
       backendError.model = activeModel;
     }
 
     // Model-specific failure, not an agent-global outage: only this agent is
-    // moved to the next eligible model. Transient failures get two retries.
-    const failoverReason = result.signal === null && !result.operatorSignalled
-      ? modelFailureReason(backendError, attempt) : null;
+    // moved to the next eligible model. A confirmed quiet model step switches
+    // immediately; ordinary transient provider errors get two retries.
+    const failoverReason = stalled ? 'transient_backend'
+      : result.signal === null && !result.operatorSignalled
+        ? modelFailureReason(backendError, attempt) : null;
     if (failoverReason !== null) {
       // A fresh invocation may have already performed tool actions. Reuse its
       // session if one exists. Never blindly replay untracked tool effects.
@@ -1008,7 +1067,9 @@ async function runInvocation(
         if (current.state !== 'running') return;
         coolDownAgentModel(current, activeModel, failoverReason);
         current.backend_error = backendError;
-        current.error = 'model ' + activeModel + ' failed (' + failoverReason + '); selecting the next eligible model';
+        current.error = stalled
+          ? 'model ' + activeModel + ' stopped after a silent OpenCode model step; safely resuming its recorded session on the next eligible model'
+          : 'model ' + activeModel + ' failed (' + failoverReason + '); selecting the next eligible model';
         current.last_activity_at = Date.now() / 1000;
       }, options);
       const latest = readMeta(agentId, options);

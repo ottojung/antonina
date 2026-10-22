@@ -1,3 +1,11 @@
+$id-20261022-managed-agent-model-step-stall
+title: Conservative managed-agent liveness and safe model switching
+date: 2026/10/22
+source: @ottojung
+kind: constraint
+
+Detect a backend's process identity and kernel state, and observe actual OpenCode structured output at low cost. Do not equate process existence with progress or elapsed time alone with a backend failure. On a new managed-agent invocation, when a canonical step_start event is the last completed event for at least fifteen minutes, the backend process is the identical living interruptibly sleeping process, a genuine recorded native OpenCode session exists, and at least one alternate configured model is eligible, the runner may deliver a checked signal and use its existing session-preserving model-failover and cooldown path. Operator stop/kill/steer wins; never switch because of a tool or unstructured/partial log, unknown state, missing session, no alternative, or kernel D-state/disk I/O blockage. Never replay untracked tool effects. Implement inside the runtime, not as a resource gate or host-specific scheduler restriction. Existing agents are not interrupted merely by installing a new executable; liveness applies to invocations launched with the new runtime.
+
 $id-20261021-orchestrator-model-recovery-session-checkpoint
 title: Supervised orchestrator model failover and early managed-agent session checkpoints
 date: 2026/10/21

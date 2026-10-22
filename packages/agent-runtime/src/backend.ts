@@ -546,6 +546,7 @@ export function buildAgentCommand(
     if (sessionId === null) return null;
     return [
       executable, 'run', '--auto',
+      '--format', 'json',
       '--session', sessionId,
       '--model', model,
       '--variant', variant,

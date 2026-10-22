@@ -6,19 +6,29 @@ import { agentModelFailover } from './model-failover.js';
 import { readProcStat, type ProcStat } from './process.js';
 
 /**
- * A model request with no backend output for this long is suspected stalled.
- * The watchdog never applies this duration to a tool execution or an unknown
- * backend phase: elapsed time is evidence about silence, not proof of failure.
+ * No-output startup and unfinished model steps receive the same conservative
+ * timeout. A structured provider error is stronger evidence: allow OpenCode
+ * a short grace to exit by itself before recovering its existing session.
  */
 export const MODEL_STEP_SILENCE_MS = 15 * 60 * 1000;
+export const BACKEND_ERROR_GRACE_MS = 30_000;
 export const LIVENESS_POLL_MS = 5_000;
 const READ_CHUNK_BYTES = 16 * 1024;
 const MAX_JSONL_ROW_BYTES = 64 * 1024;
 const MAX_SCAN_BYTES_PER_POLL = 256 * 1024;
 const SESSION_ID = /^ses_[A-Za-z0-9_]+$/;
 
+export type RecoverableBackendClassification =
+  | 'model_quota_exhausted'
+  | 'upstream_rate_limited'
+  | 'model_unavailable'
+  | 'transient_backend_server_error'
+  | 'upstream_endpoint_unavailable';
+
 export type AgentLivenessDiagnosis =
   | 'model_step_silent'
+  | 'startup_silent'
+  | 'backend_error_silent'
   | 'host_io_blocked'
   | 'process_unavailable'
   | 'progressing_or_uncertain';
@@ -27,20 +37,57 @@ export interface LivenessObservation {
   diagnosis: AgentLivenessDiagnosis;
   silentMs: number;
   processState: string | null;
+  backendFailure: RecoverableBackendClassification | null;
 }
 
 /**
- * Tracks only bytes appended by this particular invocation, and the phase of
- * authoritative OpenCode JSON events. In particular, a long-running tool can
- * be silent indefinitely without making a model-step-stall candidate.
+ * Trust only top-level OpenCode APIError events, never diagnostics embedded
+ * in a tool response. Authentication/billing/unknown errors are not model
+ * switching authority, even if their text happens to contain a quota phrase.
+ */
+export function recoverableOpenCodeError(event: Record<string, unknown>): RecoverableBackendClassification | null {
+  if (event.type !== 'error' || typeof event.error !== 'object' || event.error === null
+    || Array.isArray(event.error)) return null;
+  const error = event.error as Record<string, unknown>;
+  if (error.name !== 'APIError' || typeof error.data !== 'object' || error.data === null
+    || Array.isArray(error.data)) return null;
+  const data = error.data as Record<string, unknown>;
+  const message = typeof data.message === 'string' ? data.message.toLowerCase() : '';
+  const code = data.statusCode;
+  // Billing and authentication are not alternate-model selection signals.
+  if (code === 401 || code === 402 || code === 403
+    || /invalid_api_key|authentication|payment required|billing|credit balance/.test(message)) return null;
+  if (message.includes('model_not_found') || message.includes('model not found')) return 'model_unavailable';
+  if (message.includes('insufficient_quota') || message.includes('the usage limit has been reached')
+    || message.includes('usage limit exceeded') || message.includes('you have reached your usage limit')
+    || message.includes('quota exhausted')) return 'model_quota_exhausted';
+  if (code === 429 || message.includes('rate limit exceeded') || message.includes('too many requests')) {
+    return 'upstream_rate_limited';
+  }
+  if (typeof code === 'number' && Number.isInteger(code) && code >= 500 && code < 600) {
+    return 'transient_backend_server_error';
+  }
+  if (message.includes('endpoint is unavailable') || message.includes('upstream endpoint unavailable')) {
+    return 'upstream_endpoint_unavailable';
+  }
+  return null;
+}
+
+/**
+ * Tracks only this invocation's appended output and authoritative JSONL event
+ * boundaries. A tool execution or an invalid/partial event is never assumed to
+ * be a model request. Silent startup is considered only when a durable native
+ * session and another eligible model permit same-session recovery.
  *
- * An incomplete, oversized, non-JSON, or unrecognized event invalidates phase
- * evidence, rather than accidentally justifying a restart.
+ * The known OpenCode status footer (> build · model) is presentation, not a
+ * new tool or model step. It may follow a structured provider error; do not
+ * erase that reliable failure evidence merely because OpenCode writes a footer.
  */
 export class InvocationActivity {
   private offset: number;
   private lastOutputAt: number;
-  private phase: 'model_step' | 'unknown' = 'unknown';
+  private phase: 'startup' | 'model_step' | 'backend_error' | 'unknown' = 'startup';
+  private backendFailure: RecoverableBackendClassification | null = null;
   private partial = '';
   private observedSize: number;
 
@@ -57,37 +104,56 @@ export class InvocationActivity {
 
   private acceptLine(line: string): void {
     if (!line.trim()) return;
+    // OpenCode's terminal footer is not a new operation. Its syntax is
+    // deliberately narrow: arbitrary unstructured output still fails closed.
+    // eslint-disable-next-line no-control-regex
+    const plain = line.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').trim();
+    if (/^>\s+(?:build|plan|general)\s+·\s+[A-Za-z0-9_.-]+$/.test(plain)) return;
     if (Buffer.byteLength(line) > MAX_JSONL_ROW_BYTES) {
       this.phase = 'unknown';
+      this.backendFailure = null;
       return;
     }
     let event: unknown;
     try { event = JSON.parse(line); } catch {
       this.phase = 'unknown';
+      this.backendFailure = null;
       return;
     }
     if (typeof event !== 'object' || event === null || Array.isArray(event)) {
       this.phase = 'unknown';
+      this.backendFailure = null;
       return;
     }
     const record = event as Record<string, unknown>;
     if (typeof record.sessionID !== 'string' || !SESSION_ID.test(record.sessionID)) {
       this.phase = 'unknown';
+      this.backendFailure = null;
       return;
     }
-    // step_start is the one positive event proving OpenCode entered a new
-    // model step. A tool-use/step-finish/text/error is NOT such evidence.
-    this.phase = record.type === 'step_start' ? 'model_step' : 'unknown';
+    if (record.type === 'step_start') {
+      this.phase = 'model_step';
+      this.backendFailure = null;
+    } else if (record.type === 'error') {
+      const failure = recoverableOpenCodeError(record);
+      this.backendFailure = failure;
+      this.phase = failure === null ? 'unknown' : 'backend_error';
+    } else {
+      this.phase = 'unknown';
+      this.backendFailure = null;
+    }
   }
 
   private pollLog(now: number): void {
     const st = statSync(this.file, { throwIfNoEntry: false });
     if (st === undefined || !st.isFile()) {
       this.phase = 'unknown';
+      this.backendFailure = null;
       return;
     }
     if (st.size < this.offset || st.size < this.observedSize) {
       this.phase = 'unknown';
+      this.backendFailure = null;
       this.offset = st.size;
       this.observedSize = st.size;
       this.partial = '';
@@ -95,8 +161,7 @@ export class InvocationActivity {
       return;
     }
     if (st.size !== this.observedSize) {
-      // New output makes a previous silence observation obsolete regardless
-      // of whether its contents are valid JSON.
+      // New output makes the previous silence observation obsolete.
       this.lastOutputAt = now;
       this.observedSize = st.size;
     }
@@ -104,6 +169,7 @@ export class InvocationActivity {
     let fd: number;
     try { fd = openSync(this.file, 'r'); } catch {
       this.phase = 'unknown';
+      this.backendFailure = null;
       return;
     }
     try {
@@ -119,39 +185,55 @@ export class InvocationActivity {
         if (Buffer.byteLength(this.partial) > MAX_JSONL_ROW_BYTES) {
           this.partial = '';
           this.phase = 'unknown';
+          this.backendFailure = null;
         }
         for (const line of lines) this.acceptLine(line);
       }
       if (this.offset < st.size) {
-        // Cannot establish the final event state from a truncated scan.
+        // A truncated scan cannot establish the final event state.
         this.phase = 'unknown';
+        this.backendFailure = null;
         this.offset = st.size;
         this.partial = '';
       }
     } finally { closeSync(fd); }
   }
 
-  observe(pid: number, startTicks: number, now = Date.now(), quietMs = MODEL_STEP_SILENCE_MS): LivenessObservation {
+  observe(
+    pid: number,
+    startTicks: number,
+    now = Date.now(),
+    quietMs = MODEL_STEP_SILENCE_MS,
+    errorGraceMs = BACKEND_ERROR_GRACE_MS,
+  ): LivenessObservation {
     try { this.pollLog(now); } catch {
       this.phase = 'unknown';
+      this.backendFailure = null;
     }
     const stat = this.readStat(pid);
-    if (stat === null || stat.startTicks !== startTicks || stat.state === 'Z' || stat.state === 'X') {
-      return { diagnosis: 'process_unavailable', silentMs: now - this.lastOutputAt, processState: stat?.state ?? null };
-    }
     const silentMs = Math.max(0, now - this.lastOutputAt);
-    if (stat.state === 'D' && silentMs >= quietMs) {
-      // D-state is host/kernel I/O, not evidence that a model is faulty.
-      return { diagnosis: 'host_io_blocked', silentMs, processState: stat.state };
+    const observation = (diagnosis: AgentLivenessDiagnosis): LivenessObservation => ({
+      diagnosis, silentMs, processState: stat?.state ?? null,
+      backendFailure: diagnosis === 'backend_error_silent' ? this.backendFailure : null,
+    });
+    if (stat === null || stat.startTicks !== startTicks || stat.state === 'Z' || stat.state === 'X') {
+      return observation('process_unavailable');
     }
-    if (stat.state === 'S' && this.phase === 'model_step' && this.partial.length === 0 && silentMs >= quietMs) {
-      return { diagnosis: 'model_step_silent', silentMs, processState: stat.state };
+    if (stat.state === 'D' && silentMs >= Math.min(quietMs, errorGraceMs)) {
+      // Host/kernel I/O is not a model failure.
+      return observation('host_io_blocked');
     }
-    return { diagnosis: 'progressing_or_uncertain', silentMs, processState: stat.state };
+    if (stat.state !== 'S' || this.partial.length > 0) return observation('progressing_or_uncertain');
+    if (this.phase === 'backend_error' && silentMs >= errorGraceMs) return observation('backend_error_silent');
+    if (silentMs >= quietMs) {
+      if (this.phase === 'model_step') return observation('model_step_silent');
+      if (this.phase === 'startup') return observation('startup_silent');
+    }
+    return observation('progressing_or_uncertain');
   }
 }
 
-/** A watchdog must never kill an invocation unless safe same-session fallback exists. */
+/** Do not interrupt a session unless an actual alternate model is eligible. */
 export function safeAlternativeModel(
   meta: AgentMetadata,
   activeModel: string,

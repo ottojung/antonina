@@ -1258,3 +1258,49 @@ test('a spawn rejected by a stop between the runner read and its write leaves th
   assert.equal(rerun.active_runner, false);
   assert.equal(rerun.runner_reservation, null);
 });
+
+
+test('verified silence after finished tool calls terminates even without another eligible model', {timeout: INTENT_TEST_TIMEOUT_MS}, async (t) => {
+  if (!requireProc(t)) return;
+  const script = '#!/bin/sh\n'
+    + "printf '%s\\n' '{\"type\":\"step_start\",\"sessionID\":\"ses_hung\"}'\n"
+    + "printf '%s\\n' '{\"type\":\"tool_use\",\"sessionID\":\"ses_hung\",\"part\":{\"state\":{\"status\":\"completed\"}}}'\n"
+    + "printf '%s\\n' '{\"type\":\"step_finish\",\"sessionID\":\"ses_hung\",\"part\":{\"reason\":\"tool-calls\"}}'\n"
+    + 'exec sleep 30\n';
+  const backend=fakeBackend(t,script);
+  if (backend===null) return;
+  const options=scratch(t,backend);
+  const id=agent(t,options,{
+    runner_gen:7,runner_reservation:reservation({gen:7}),pending_prompt:'work',
+  });
+  await runManagedRunner(id,'new',7,{
+    ...options,modelStepSilenceMs:400,livenessPollMs:50,
+    capacity:{readText:cgroup(1)},
+  });
+  const after=readMeta(id,options);
+  assert.equal(after.state,'failed');
+  assert.equal(after.native_session_id,'ses_hung');
+  assert.equal(after.backend_error.classification,'model_step_stalled');
+  assert.match(after.error,/model_step_stalled|SIGTERM|model step/i);
+});
+
+test('a running tool remains untouched by the model-silence watchdog', {timeout: INTENT_TEST_TIMEOUT_MS}, async (t) => {
+  if (!requireProc(t)) return;
+  const script = '#!/bin/sh\n'
+    + "printf '%s\\n' '{\"type\":\"step_start\",\"sessionID\":\"ses_tool\"}'\n"
+    + "printf '%s\\n' '{\"type\":\"tool_use\",\"sessionID\":\"ses_tool\",\"part\":{\"state\":{\"status\":\"running\"}}}'\n"
+    + 'exec sleep 2\n';
+  const backend=fakeBackend(t,script);
+  if (backend===null) return;
+  const options=scratch(t,backend);
+  const id=agent(t,options,{
+    runner_gen:7,runner_reservation:reservation({gen:7}),pending_prompt:'work',
+  });
+  await runManagedRunner(id,'new',7,{
+    ...options,modelStepSilenceMs:300,livenessPollMs:50,
+    capacity:{readText:cgroup(1)},
+  });
+  const after=readMeta(id,options);
+  assert.equal(after.state,'succeeded');
+  assert.equal(after.exit_signal,null);
+});

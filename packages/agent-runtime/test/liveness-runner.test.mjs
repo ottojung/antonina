@@ -63,7 +63,7 @@ async function exercise(t, fixture) {
     'echo "$model" >> "$ANTONINA_LIVENESS_CALLS"',
     'if [ "$model" = "example.test/luna" ]; then',
     eventCommand,
-    '  sleep 3600',
+    '  exec sleep 3600',
     '  exit 1',
     'fi',
     '[ "$session" = "ses_liveness" ] || exit 49',

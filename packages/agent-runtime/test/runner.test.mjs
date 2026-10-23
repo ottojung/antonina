@@ -1304,3 +1304,36 @@ test('a running tool remains untouched by the model-silence watchdog', {timeout:
   assert.equal(after.state,'succeeded');
   assert.equal(after.exit_signal,null);
 });
+
+
+test('unreported long-running compiler subprocess is not interrupted after step_start',
+  {timeout: INTENT_TEST_TIMEOUT_MS}, async (t) => {
+  if (!requireProc(t)) return;
+  // OpenCode reports completed tool_use only AFTER the command exits.
+  // The interval between step_start and tool_use must not be treated as
+  // model silence while the backend still has a real child tool.
+  const script = '#!/bin/sh\n'
+    + "printf '%s\\n' '{\"type\":\"step_start\",\"sessionID\":\"ses_compiler\"}'\n"
+    + 'sleep 2 &\n'
+    + 'wait $!\n'
+    + "printf '%s\\n' '{\"type\":\"tool_use\",\"sessionID\":\"ses_compiler\",\"part\":{\"type\":\"tool\",\"state\":{\"status\":\"completed\"}}}'\n"
+    + "printf '%s\\n' '{\"type\":\"step_finish\",\"sessionID\":\"ses_compiler\",\"part\":{\"reason\":\"stop\"}}'\n"
+    + 'exit 0\n';
+  const backend=fakeBackend(t,script);
+  if (backend===null) return;
+  const options=scratch(t,backend);
+  const id=agent(t,options,{
+    runner_gen:7,runner_reservation:reservation({gen:7}),pending_prompt:'work',
+  });
+  await runManagedRunner(id,'new',7,{
+    ...options,modelStepSilenceMs:300,livenessPollMs:50,
+    capacity:{readText:cgroup(1)},
+  });
+  const after=readMeta(id,options);
+  assert.equal(after.state,'succeeded',JSON.stringify({
+    state:after.state, error:after.error, backend_error:after.backend_error,
+  }));
+  assert.equal(after.exit_signal,null);
+  assert.equal(after.model_failover?.selected_model ?? null,
+    'example.test/mock','the tool did not trigger a spurious model switch');
+});

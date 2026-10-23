@@ -30,6 +30,9 @@ export type RecoverableBackendClassification =
 export type AgentLivenessDiagnosis =
   | 'model_step_silent'
   | 'startup_silent'
+  | 'step_finished_silent'
+  | 'unverifiable_silent'
+  | 'tool_running_silent'
   | 'backend_error_silent'
   | 'host_io_blocked'
   | 'process_unavailable'
@@ -83,8 +86,8 @@ export function recoverableOpenCodeError(event: Record<string, unknown>): Recove
 
 /**
  * Tracks only this invocation's appended output and authoritative JSONL event
- * boundaries. A tool execution or an invalid/partial event is never assumed to
- * be a model request. Silent startup is considered only when a durable native
+ * boundaries. Tool execution remains protected; a finished tool-call step is
+ * not a running tool and must not become an indefinite blind spot. Silent startup is considered only when a durable native
  * session and another eligible model permit same-session recovery.
  *
  * The known OpenCode status footer (> build · model) is presentation, not a
@@ -94,7 +97,7 @@ export function recoverableOpenCodeError(event: Record<string, unknown>): Recove
 export class InvocationActivity {
   private offset: number;
   private lastOutputAt: number;
-  private phase: 'startup' | 'model_step' | 'backend_error' | 'unknown' = 'startup';
+  private phase: 'startup' | 'model_step' | 'tool_running' | 'step_finished' | 'backend_error' | 'unknown' = 'startup';
   private backendFailure: RecoverableBackendClassification | null = null;
   private partial = '';
   private observedSize: number;
@@ -142,14 +145,25 @@ export class InvocationActivity {
     if (record.type === 'step_start') {
       this.phase = 'model_step';
       this.backendFailure = null;
+    } else if (record.type === 'tool_use') {
+      // No automatic interruption while a tool might still be executing,
+      // including after a single tool reports completion in a parallel batch.
+      // Only the enclosing step_finish proves all tool calls have returned.
+      this.phase = 'tool_running';
+      this.backendFailure = null;
+    } else if (record.type === 'step_finish') {
+      // OpenCode emits this AFTER tool results, before starting another model
+      // request. It is an authoritative boundary, not an in-flight tool.
+      // Both tool-calls and stop/other finish reasons must exit or continue.
+      this.phase = 'step_finished';
+      this.backendFailure = null;
     } else if (record.type === 'error') {
       const failure = recoverableOpenCodeError(record);
       this.backendFailure = failure;
       this.phase = failure === null ? 'unknown' : 'backend_error';
-    } else {
-      this.phase = 'unknown';
-      this.backendFailure = null;
     }
+    // Text, reasoning, and unknown well-formed events do not invalidate the
+    // last authoritative step/tool boundary; only new authoritative events do.
   }
 
   private pollLog(now: number): void {
@@ -231,11 +245,20 @@ export class InvocationActivity {
       // Host/kernel I/O is not a model failure.
       return observation('host_io_blocked');
     }
-    if (stat.state !== 'S' || this.partial.length > 0) return observation('progressing_or_uncertain');
+    if (stat.state !== 'S') return observation('progressing_or_uncertain');
+    // A partial/corrupt frame or missing log cannot prove that the backend
+    // is inside a model request. Surface it rather than silently treating a
+    // permanent unknown phase as healthy (the caller must not auto-replay it).
+    if (silentMs >= quietMs && (this.partial.length > 0 || this.phase === 'unknown')) {
+      return observation('unverifiable_silent');
+    }
+    if (this.partial.length > 0) return observation('progressing_or_uncertain');
     if (this.phase === 'backend_error' && silentMs >= errorGraceMs) return observation('backend_error_silent');
     if (silentMs >= quietMs) {
       if (this.phase === 'model_step') return observation('model_step_silent');
       if (this.phase === 'startup') return observation('startup_silent');
+      if (this.phase === 'step_finished') return observation('step_finished_silent');
+      if (this.phase === 'tool_running') return observation('tool_running_silent');
     }
     return observation('progressing_or_uncertain');
   }

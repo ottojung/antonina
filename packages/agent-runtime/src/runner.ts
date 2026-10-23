@@ -649,7 +649,10 @@ async function finalizeInvocation(
     // it were the delivery classified a refused-signal death as the operator's,
     // which under `stop` and `kill` intent is the silence board 167 is about.
     const operatorSignalDelivered = result.operatorSignalDelivered;
-    const externalSignalDeath = signal !== null && !operatorSignalDelivered;
+    // A watchdog-triggered SIGTERM is neither an external kill nor an
+    // operator stop. childResult only sets livenessTriggered when the verified
+    // invocation was actually signalled. Preserve its model-stall evidence.
+    const externalSignalDeath = signal !== null && !operatorSignalDelivered && !result.livenessTriggered;
     let state: 'succeeded' | 'failed' | 'stopped' | 'killed';
     if (intent.value === 'stop') state = 'stopped';
     else if (intent.value === 'kill') state = 'killed';
@@ -673,10 +676,11 @@ async function finalizeInvocation(
         lifetimeSeconds: oom === null ? null : Date.now() / 1000 - oom.startedAt,
       })
       : null;
-    // A death on a signal is not a backend failure, whatever the log says: the
-    // signal death (external) or the operator signal (clean stop/kill) already
-    // accounts for it.
-    meta.backend_error = code === 0 || signal !== null || death !== null ? death : backendError;
+    // The watchdog signal is the EXCEPTION to the ordinary signal-death
+    // rule: it deliberately interrupted a verified silent backend. Keep the
+    // stall classification; an external kill still takes precedence otherwise.
+    meta.backend_error = code === 0 || death !== null
+      || (signal !== null && !result.livenessTriggered) ? death : backendError;
     // Board 159. A `failed` with no signal and a captured non-zero exit is the
     // backend saying it failed, and that record used to carry no reason at all:
     // `state failed`, `exit_code 1`, `backend_error null`, `error null`. It was
@@ -724,9 +728,11 @@ async function finalizeInvocation(
     // shape the note describes.
     const note = death !== null
       ? describeSignalDeath(death) ?? undefined
-      : code !== 0 && signal === null && !operatorSignalDelivered
-        ? describeBackendDeath(backendError, tailExcerpt, result.operatorSignalled) ?? undefined
-        : undefined;
+      : result.livenessTriggered
+        ? 'watchdog interrupted stalled backend: ' + (backendError?.classification ?? 'unknown')
+        : code !== 0 && signal === null && !operatorSignalDelivered
+          ? describeBackendDeath(backendError, tailExcerpt, result.operatorSignalled) ?? undefined
+          : undefined;
     finalizeTerminal(meta, state, Date.now() / 1000, code, signal, note);
   }, options);
 }
@@ -968,6 +974,7 @@ async function runInvocation(
     const startTicks = (options.childStartTicks ?? procStartTicks)(pid);
     const activity = new InvocationActivity(logFile, invocationLogStart);
     const livenessState: { observation: LivenessObservation | null } = { observation: null };
+    let reportedUnsafeSilence = false;
     const stallCandidate = (current: AgentMetadata): boolean => {
       if (startTicks === null || current.pid !== pid || current.start_time !== startTicks
         || current.invocation_id !== invocationId || current.state !== 'running') return false;
@@ -976,18 +983,50 @@ async function runInvocation(
         options.modelStepSilenceMs ?? MODEL_STEP_SILENCE_MS,
         options.backendErrorGraceMs ?? BACKEND_ERROR_GRACE_MS,
       );
-      if (observation.diagnosis !== 'model_step_silent'
-        && observation.diagnosis !== 'startup_silent'
-        && observation.diagnosis !== 'backend_error_silent') return false;
-      // Only a durable native session and another eligible configured model
-      // authorize recovery. In particular, first-invocation silence without a
-      // checkpointed session cannot justify replay of unknown side effects.
-      if (!safeAlternativeModel(
+      const verified = observation.diagnosis === 'model_step_silent'
+        || observation.diagnosis === 'startup_silent'
+        || observation.diagnosis === 'step_finished_silent'
+        || observation.diagnosis === 'backend_error_silent';
+      const checkpointed = persistedNativeSessionId(current) !== null;
+      // A provider credential/billing rejection is not evidence that another
+      // model under the same provider can work. Fail over only to a separately
+      // eligible provider, never on authentication/billing failure alone.
+      const providerFailure = observation.backendFailure === 'backend_authentication_failed'
+        || observation.backendFailure === 'backend_billing_required';
+      const eligible = !providerFailure || safeAlternativeModel(
         current, activeModel, { ...process.env, ...options.env },
         Date.now() / 1000, failedModelsThisRun, observation.backendFailure,
-      )) return false;
-      livenessState.observation = observation;
-      return true;
+      );
+      if (verified && checkpointed && eligible) {
+        // Once the session is durable, terminate a verified hung backend even
+        // without a fallback. The caller resumes on an eligible model, or
+        // finalizes a visible failure without replaying unknown tool effects.
+        // An uncheckpointed invocation must not be blindly replayed.
+        livenessState.observation = observation;
+        return true;
+      }
+      if ((verified || observation.diagnosis === 'unverifiable_silent'
+        || observation.diagnosis === 'tool_running_silent'
+        || observation.diagnosis === 'host_io_blocked') && !reportedUnsafeSilence) {
+        reportedUnsafeSilence = true;
+        const reason = !checkpointed && verified
+          ? 'no durable OpenCode session available for safe recovery'
+          : !eligible && providerFailure
+            ? 'provider authentication or billing failure; no eligible distinct provider'
+          : observation.diagnosis === 'tool_running_silent'
+            ? 'tool execution has not reported completion'
+            : observation.diagnosis === 'host_io_blocked'
+              ? 'kernel I/O blocked'
+              : 'output cannot establish a safe model boundary';
+        // Keep the process alive when recovery cannot be proven safe, but
+        // never hide an indefinitely silent invocation as healthy.
+        void updateMeta(agentId, (record) => {
+          if (record.state === 'running' && record.invocation_id === invocationId) {
+            record.error = 'watchdog: ' + observation.diagnosis + '; ' + reason;
+          }
+        }, options).catch(() => undefined);
+      }
+      return false;
     };
     const resultPromise = childResult(child, agentId, options, checkpointSession, stallCandidate);
 
@@ -1101,9 +1140,9 @@ async function runInvocation(
       }
     }
 
-    // Model-specific failure, not an agent-global outage: only this agent is
-    // moved to the next eligible model. A confirmed quiet model step switches
-    // immediately; ordinary transient provider errors get two retries.
+    // Model-specific failure, not an agent-global outage. A verified stall
+    // with no eligible fallback becomes a visible failure, not an immortal
+    // 'running' reservation. Ordinary transient errors retain their retries.
     const failoverReason = stalled
       ? modelFailureReason(backendError, TRANSIENT_MODEL_RETRIES) ?? 'transient_backend'
       : result.signal === null && !result.operatorSignalled
@@ -1130,7 +1169,7 @@ async function runInvocation(
         current.error = stalled
           ? 'model ' + activeModel + ' interrupted after '
             + (livenessState.observation?.diagnosis ?? 'verified backend silence')
-            + ' (' + failoverReason + '); resuming its recorded session on the next eligible model'
+            + ' (' + failoverReason + '); attempting safe session recovery'
           : 'model ' + activeModel + ' failed (' + failoverReason + '); selecting the next eligible model';
         current.last_activity_at = Date.now() / 1000;
       }, options);

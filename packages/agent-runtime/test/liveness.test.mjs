@@ -26,11 +26,10 @@ test('only a silent, authoritative ongoing model step becomes a failover candida
     appendFileSync(log, event('step_start'));
     assert.equal(monitor.observe(pid, ticks, 1100, 500).diagnosis, 'progressing_or_uncertain');
     assert.equal(monitor.observe(pid, ticks, 1800, 500).diagnosis, 'model_step_silent');
-    // Tool execution is not an available model request. Never attribute a
-    // slow tool or a partial JSON frame to a failing model.
+    // A finished tool-call step is different from a tool still executing.
     appendFileSync(log, event('step_finish', { reason: 'tool-calls' }));
     assert.equal(monitor.observe(pid, ticks, 2500, 500).diagnosis, 'progressing_or_uncertain');
-    assert.equal(monitor.observe(pid, ticks, 5000, 500).diagnosis, 'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid, ticks, 5000, 500).diagnosis, 'step_finished_silent');
     appendFileSync(log, event('step_start'));
     assert.equal(monitor.observe(pid, ticks, 5200, 500).diagnosis, 'progressing_or_uncertain');
     appendFileSync(log, '{"type":"text","sessionID":"ses_live"');
@@ -159,4 +158,73 @@ test('refuse automatic failover on authentication, billing, unknown errors and t
     assert.equal(monitor.observe(pid,ticks,2100,100,100).diagnosis,'progressing_or_uncertain');
     assert.equal(monitor.observe(pid,ticks,2400,100,100).diagnosis,'backend_error_silent');
   }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('both observed production stall patterns recover after the final tool-call step', () => {
+  const dir=mkdtempSync(join(tmpdir(),'antonina-liveness-repro-'));
+  try {
+    for (const name of ['volodyslav-92','pyreports-201']) {
+      const file=join(dir,name);
+      writeFileSync(file,'');
+      const monitor=new InvocationActivity(file,0,0,()=>({...readProcStat(pid),state:'S'}));
+      appendFileSync(file,event('step_start'));
+      appendFileSync(file,JSON.stringify({type:'tool_use',sessionID:'ses_live',
+        part:{type:'tool',tool:'bash',state:{status:'completed',metadata:{exit:0}}}})+'\n');
+      appendFileSync(file,event('step_finish',{reason:'tool-calls'}));
+      assert.equal(monitor.observe(pid,ticks,5,100).diagnosis,'progressing_or_uncertain',name);
+      assert.equal(monitor.observe(pid,ticks,200,100).diagnosis,'step_finished_silent',name);
+    }
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('watchdog differentiates running tools, intermediate tool results and complete steps', () => {
+  const dir=mkdtempSync(join(tmpdir(),'antonina-liveness-boundaries-'));
+  try {
+    const file=join(dir,'log');writeFileSync(file,'');
+    const monitor=new InvocationActivity(file,0,0,()=>({...readProcStat(pid),state:'S'}));
+    appendFileSync(file,event('step_start'));
+    appendFileSync(file,JSON.stringify({type:'tool_use',sessionID:'ses_live',
+      part:{type:'tool',state:{status:'running'}}})+'\n');
+    assert.equal(monitor.observe(pid,ticks,1000,100).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,1200,100).diagnosis,'tool_running_silent');
+    appendFileSync(file,JSON.stringify({type:'tool_use',sessionID:'ses_live',
+      part:{type:'tool',state:{status:'completed'}}})+'\n');
+    assert.equal(monitor.observe(pid,ticks,1300,100).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,1500,100).diagnosis,'tool_running_silent',
+      'other tools may still be in flight');
+    appendFileSync(file,event('step_finish',{reason:'tool-calls'}));
+    appendFileSync(file,event('text',{text:'after finish'}));
+    appendFileSync(file,event('reasoning',{text:'ordinary non-boundary event'}));
+    assert.equal(monitor.observe(pid,ticks,1600,100).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,1800,100).diagnosis,'step_finished_silent');
+    appendFileSync(file,event('step_start'));
+    assert.equal(monitor.observe(pid,ticks,1900,100).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,2100,100).diagnosis,'model_step_silent');
+    appendFileSync(file,event('step_finish',{reason:'stop'}));
+    assert.equal(monitor.observe(pid,ticks,2200,100).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,2400,100).diagnosis,'step_finished_silent',
+      'finished response must not leave an immortal process');
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('incomplete frames and unknown errors are reported as unverifiable rather than silently healthy', () => {
+  const dir=mkdtempSync(join(tmpdir(),'antonina-liveness-uncertain-'));
+  try {
+    const file=join(dir,'log');writeFileSync(file,event('step_start'));
+    const monitor=new InvocationActivity(file,0,0,()=>({...readProcStat(pid),state:'S'}));
+    appendFileSync(file,'{\"type\":\"text\",\"sessionID\":\"ses_live\"');
+    assert.equal(monitor.observe(pid,ticks,100,100).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,250,100).diagnosis,'unverifiable_silent');
+    appendFileSync(file,'}\n');
+    assert.equal(monitor.observe(pid,ticks,300,100).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,500,100).diagnosis,'model_step_silent',
+      'complete non-boundary frames cannot erase a confirmed model step');
+    appendFileSync(file,'bad non-JSON output\n');
+    assert.equal(monitor.observe(pid,ticks,600,100).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,800,100).diagnosis,'unverifiable_silent');
+    appendFileSync(file,event('step_start'));
+    assert.equal(monitor.observe(pid,ticks,900,100).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,1100,100).diagnosis,'model_step_silent');
+  } finally {rmSync(dir,{recursive:true,force:true});}
 });

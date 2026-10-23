@@ -1941,6 +1941,32 @@ test('--cwd is refused while a front exists, and changes nothing', async (t) => 
   );
 });
 
+// Early steering cannot destroy the only invocation before the backend has
+// created any native session: refusing must leave the prompt and process alive.
+test('live steer without a backend session is refused without losing original work', async (t) => {
+  const { root, work, env } = fixture(t);
+  const agent = newAgent(env, ['--cwd', work]);
+  const sessionlessEnv = { ...env, ANTONINA_FIXTURE_SESSION_AGENT: 'other-agent' };
+  assert.equal(run(['agent', 'run', '--id', agent, '--detach', '--prompt', 'slow'], sessionlessEnv).status, 0);
+  const live = await waitFor(root, agent, (meta) =>
+    meta.state === 'running' && typeof meta.pid === 'number' && typeof meta.runner_pid === 'number');
+  t.after(() => {
+    try { process.kill(-live.pid, 'SIGKILL'); } catch {}
+    try { process.kill(live.pid, 'SIGKILL'); } catch {}
+  });
+  const before = readFileSync(metaPath(root, agent), 'utf8');
+  const attempt = run(
+    ['agent', 'run', '--id', agent, '--cwd', work, '--steer', '--detach', '--prompt', 'premature'],
+    sessionlessEnv,
+  );
+  assert.equal(attempt.status, 1, attempt.stderr);
+  assert.match(attempt.stderr, /no recoverable OpenCode session yet/);
+  assert.equal(readFileSync(metaPath(root, agent), 'utf8'), before,
+    'rejected unsafe steer may not record a new prompt, intent or signal');
+  assert.equal(run(['agent', 'stop', '--id', agent], sessionlessEnv).status, 0);
+  await waitFor(root, agent, (meta) => meta.state === 'stopped');
+});
+
 // Managed callers reassert their already-declared directory on every
 // invocation. Such a steer preserves the live front's cwd and MUST be accepted.
 test('a same-directory --cwd is accepted during a live steer', async (t) => {

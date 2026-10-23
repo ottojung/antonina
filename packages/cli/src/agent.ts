@@ -1233,7 +1233,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   // Real inference failures drive the per-agent failover ladder.
   selectConfiguredModel(context.env);
   const decision: {
-    action?: 'busy' | 'spawn' | 'reuse';
+    action?: 'busy' | 'unready' | 'spawn' | 'reuse';
     mode?: 'new' | 'continue';
     generation?: number;
     ownerToken?: string;
@@ -1241,6 +1241,21 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     recoverBusy?: boolean;
   } = {};
   const steer = parsed.flags.has('--steer');
+  // Never hard-preempt a first invocation before OpenCode has recorded a
+  // resumable session. Otherwise the queued steer is acknowledged, the backend
+  // dies with SIGTERM, and the runner cannot continue the nonexistent session.
+  // Probe outside the durable write lock. Refuse safely on any missing evidence.
+  let liveSteerSession: string | null = null;
+  if (steer && invocationAlive(observed)) {
+    liveSteerSession = persistedNativeSessionId(observed);
+    if (liveSteerSession === null) {
+      liveSteerSession = discoverSessionId(
+        agentId,
+        { ...context.env, ...opencodeBackendEnv(observed, paths(context)), ANTONINA_AGENT_ID: agentId },
+        recordedCwd!,
+      );
+    }
+  }
   // Observed before this command accepts anything, so it bounds the history it
   // did not cause even on the paths that accept no new invocation of their own.
   const historyLength = logSize(agentId, paths(context));
@@ -1263,10 +1278,16 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
         decision.action = 'busy';
         return;
       }
+      const nativeSession = persistedNativeSessionId(meta) ?? liveSteerSession;
+      if (nativeSession === null) {
+        decision.action = 'unready';
+        return;
+      }
       if (!queueSteer(meta, prompt, Date.now() / 1000)) {
         decision.action = 'busy';
         return;
       }
+      if (persistedNativeSessionId(meta) === null) meta.native_session_id = nativeSession;
       meta.intent = 'steer';
       decision.action = 'reuse';
       decision.interrupt = true;
@@ -1392,6 +1413,9 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     decision.ownerToken = ownerToken;
   }, paths(context));
 
+  if (decision.action === 'unready') {
+    throw new Error("run: this front has no recoverable OpenCode session yet; refusing --steer without interrupting it. Retry after session creation");
+  }
   if (decision.action === 'busy' || decision.action === undefined) {
     throw new Error(`agent ${agentId} is still running; use --steer to redirect it`);
   }

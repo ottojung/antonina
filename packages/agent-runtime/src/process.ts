@@ -79,6 +79,47 @@ export function readProcStat(pid: number, procRoot = '/proc'): ProcStat | null {
   }
 }
 
+/**
+ * Conservative Linux /proc process-tree probe for unattended model recovery.
+ * OpenCode emits tool_use only AFTER many tools finish. A silent step_start
+ * may therefore conceal an actively running bash/Lean/compiler child.
+ *
+ * 'clear' is authority ONLY that the enumerated tree has no live child at
+ * this instant; transient /proc errors, overflow and unverified identities
+ * fail closed instead of authorizing a destructive model switch.
+ */
+export function processTreeActivity(
+  pid: number, startTicks: number, procRoot = '/proc',
+): 'active' | 'clear' | 'unverifiable' {
+  const leader = readProcStat(pid, procRoot);
+  if (leader === null || leader.startTicks !== startTicks) return 'unverifiable';
+  const queue = [pid];
+  const seen = new Set<number>();
+  while (queue.length > 0) {
+    const parent = queue.shift()!;
+    if (seen.has(parent) || seen.size >= 2048) return 'unverifiable';
+    seen.add(parent);
+    let raw: string;
+    try {
+      raw = readFileSync(join(procRoot, String(parent), 'task', String(parent), 'children'), 'utf8');
+    } catch {
+      // Children can disappear during a scan; failing closed prevents
+      // mistaking an unobservable tool for an idle model.
+      return 'unverifiable';
+    }
+    for (const word of raw.trim().split(/\s+/).filter(Boolean)) {
+      const child = Number(word);
+      if (!Number.isSafeInteger(child) || child <= 0) return 'unverifiable';
+      const stat = readProcStat(child, procRoot);
+      if (stat === null) return 'unverifiable';
+      if (stat.ppid !== parent) return 'unverifiable';
+      if (stat.state !== 'Z' && stat.state !== 'X') return 'active';
+      queue.push(child);
+    }
+  }
+  return 'clear';
+}
+
 export function procStartTicks(pid: number, procRoot = '/proc'): number | null {
   return readProcStat(pid, procRoot)?.startTicks ?? null;
 }

@@ -64,7 +64,7 @@ import {
   InvocationActivity, BACKEND_ERROR_GRACE_MS, LIVENESS_POLL_MS,
   MODEL_STEP_SILENCE_MS, safeAlternativeModel, type LivenessObservation,
 } from './liveness.js';
-import { procStartTicks, persistedProcessInteger, signalMarkedInvocationProcesses } from './process.js';
+import { procStartTicks, persistedProcessInteger, processTreeActivity, signalMarkedInvocationProcesses } from './process.js';
 import {
   logPath,
   logSize,
@@ -997,7 +997,12 @@ async function runInvocation(
         current, activeModel, { ...process.env, ...options.env },
         Date.now() / 1000, failedModelsThisRun, observation.backendFailure,
       );
-      if (verified && checkpointed && eligible) {
+      // A completed tool can be reported after it exits. During a long
+      // compiler/build the stream still says step_start and looks like a
+      // frozen model. Never signal while a live child process exists, or
+      // while /proc cannot reliably account for children.
+      const processTree = verified ? processTreeActivity(pid, startTicks) : 'clear';
+      if (verified && checkpointed && eligible && processTree === 'clear') {
         // Once the session is durable, terminate a verified hung backend even
         // without a fallback. The caller resumes on an eligible model, or
         // finalizes a visible failure without replaying unknown tool effects.
@@ -1009,8 +1014,12 @@ async function runInvocation(
         || observation.diagnosis === 'tool_running_silent'
         || observation.diagnosis === 'host_io_blocked') && !reportedUnsafeSilence) {
         reportedUnsafeSilence = true;
-        const reason = !checkpointed && verified
-          ? 'no durable OpenCode session available for safe recovery'
+        const reason = processTree === 'active'
+          ? 'active subprocess (possibly an unreported tool); recovery withheld'
+          : processTree === 'unverifiable'
+            ? 'unable to verify subprocess tree; recovery withheld'
+          : !checkpointed && verified
+            ? 'no durable OpenCode session available for safe recovery'
           : !eligible && providerFailure
             ? 'provider authentication or billing failure; no eligible distinct provider'
           : observation.diagnosis === 'tool_running_silent'

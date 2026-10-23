@@ -182,6 +182,8 @@ export function forkMetaSnapshot(
   // which is a fact about the agent rather than about a run); the directory a
   // past run of a *different* agent used is not the clone's history.
   clone.invocation_cwd = null;
+  // Forked agent never launched these models itself. Do not inherit observations.
+  clone.observed_models = [];
   // Process identity: not copied. A pid means "this agent launched and owns
   // that process"; the clone launched nothing.
   clone.pid = null;

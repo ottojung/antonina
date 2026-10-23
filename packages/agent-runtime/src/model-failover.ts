@@ -40,6 +40,28 @@ export interface ModelFailoverState {
 const MODEL_ID = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const MAX_ENTRIES = 100;
 
+/** Model identities witnessed at a backend process launch, newest last.
+ * This is independent of selected_model, which records an intention and can be
+ * written even when a launch is subsequently refused.
+ */
+export function observedAgentModels(meta: AgentMetadata): string[] {
+  const value: unknown = meta.observed_models;
+  if (value === undefined) return []; // Canonical older records have no observation.
+  if (!Array.isArray(value) || value.length > MAX_ENTRIES
+    || value.some((item) => typeof item !== 'string' || !MODEL_ID.test(item))
+    || new Set(value).size !== value.length) {
+    throw new Error('managed-agent observed_models is malformed');
+  }
+  return value as string[];
+}
+
+/** Call only after a real backend spawn is established, never on selection. */
+export function recordObservedAgentModel(meta: AgentMetadata, model: string): void {
+  if (!MODEL_ID.test(model)) throw new Error('Invalid observed model');
+  const previous = observedAgentModels(meta);
+  meta.observed_models = [...previous.filter((x) => x !== model), model].slice(-MAX_ENTRIES);
+}
+
 export function validModelFailover(value: unknown): value is ModelFailoverState {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;

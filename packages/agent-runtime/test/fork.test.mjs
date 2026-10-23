@@ -115,6 +115,7 @@ function finishedMeta(agentId, overrides = {}) {
     run_log_offset: 4_096,
     // Board issue 178: the source has run, so it has an observation.
     invocation_cwd: '/srv/work',
+    observed_models: ['example.test/source-only'],
     ...overrides,
   };
   validateAgentMetadata(meta);
@@ -576,4 +577,12 @@ test('a fork keeps the record canonical even at a field boundary', (t) => {
   const clone = forkMetaSnapshot(source, 'b2', 2_000);
   assert.equal(Object.keys(clone.backend_error).length, BACKEND_ERROR_FIELDS);
   assert.throws(() => validateAgentMetadata({ ...clone, id: 'B.2' }), /id is malformed/);
+});
+
+test('fork resets model observations inherited from its source', () => {
+  const source = finishedMeta('a1', { observed_models: ['example.test/one', 'example.test/two'] });
+  const clone = forkMetaSnapshot(source, 'a2', 2000);
+  assert.deepEqual(source.observed_models, ['example.test/one', 'example.test/two']);
+  assert.deepEqual(clone.observed_models, []);
+  validateAgentMetadata(clone);
 });

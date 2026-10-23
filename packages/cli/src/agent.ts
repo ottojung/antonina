@@ -66,7 +66,7 @@ import {
   type AgentMetadata,
 } from '../../agent-runtime/src/metadata.js';
 import { normalizeAgentId } from '../../agent-runtime/src/process.js';
-import { configuredModels } from '../../agent-runtime/src/model-config.js';
+import { observedAgentModels } from '../../agent-runtime/src/model-failover.js';
 import {
   MetadataReadError,
   agentDir,
@@ -833,9 +833,9 @@ export function displayableAgentError(meta: AgentMetadata): string | null {
 function statusJson(
   agentId: string,
   meta: AgentMetadata,
-  env: Record<string, string | undefined> = process.env,
 ): Record<string, unknown> {
   const item = summary(meta);
+  const observedModels = observedAgentModels(meta);
   const sequence = steerSequence(meta);
   const steers = steerQueue(meta, sequence);
   if (sequence === null || steers === null) throw new Error('canonical steer metadata invariant violated');
@@ -873,8 +873,9 @@ function statusJson(
     next_steer: steers.length > 0 ? steers[0]!.prompt.split('\n', 1)[0] : null,
     steer_preempting: intent.value === 'steer',
     steer_metadata_error: null,
-    // This is the *current preference*, not a persisted claim about an older invocation.
-    model: (() => { try { return configuredModels(env)[0]?.model ?? null; } catch { return null; } })(),
+    // Only process launches observed for this agent; never guess from preferences or failover intentions.
+    model: observedModels.at(-1) ?? null,
+    models_used: observedModels,
     variant: persistedVariant(meta),
     backend_error: sanitizeBackendError(meta.backend_error),
 
@@ -888,7 +889,7 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
   const agentId = requireAgentId(parsed.values.get('--id'), 'status');
   await reconcileAgent(agentId, context);
   const meta = requireMeta(agentId, context);
-  const status = statusJson(agentId, meta, context.env);
+  const status = statusJson(agentId, meta);
   status.log = logPath(agentId, paths(context));
   if (parsed.flags.has('--json')) {
     context.io.stdout(JSON.stringify(status, null, 2));
@@ -922,6 +923,10 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
       context.io.stdout(`last error: ${String(status.last_error)}`);
     }
     context.io.stdout(`prompts:    ${shown(status.prompts, '0')}`);
+    context.io.stdout(`model:      ${shown(status.model, 'not observed')}`);
+    if (Array.isArray(status.models_used) && status.models_used.length > 1) {
+      context.io.stdout(`models used: ${status.models_used.join(', ')}`);
+    }
     if (status.steer_metadata_error) {
       context.io.stdout(`steers:     ${String(status.steer_metadata_error)}`);
     } else if (typeof status.steers_pending === 'number' && status.steers_pending > 0) {

@@ -55,6 +55,7 @@ import {
   modelCooldownSeconds,
   modelSoftPenaltySeconds,
   recordAgentModel,
+  recordObservedAgentModel,
   type ModelFailureReason,
 } from './model-failover.js';
 import { configuredModels } from './model-config.js';
@@ -528,6 +529,7 @@ async function recordSpawned(
   startTicks: number | null,
   invocationId: string,
   launchCwd: string,
+  model: string,
   options: RunnerOptions,
 ): Promise<boolean> {
   let accepted = false;
@@ -537,6 +539,7 @@ async function recordSpawned(
     // the child exists, make durable status name the variant that actually ran;
     // this also upgrades legacy records that still carried `low`.
     meta.variant = DEFAULT_VARIANT;
+    recordObservedAgentModel(meta, model);
     // Board issue 178: the observation is written here, in the same durable
     // write that publishes the spawned process identity, and nowhere earlier.
     // Everything that can precede a spawn -- accepting the prompt, queueing a
@@ -1011,6 +1014,7 @@ async function runInvocation(
           // actor already decided how this invocation ends, and a runner that
           // has lost the record must not add a durable write to it.
           if (deletePendingFlag(current) !== false || stopLikeOrMalformed(current)) return;
+          recordObservedAgentModel(current, activeModel);
           current.invocation_cwd = launchCwd;
         }, options);
         result = quick.value;
@@ -1037,7 +1041,7 @@ async function runInvocation(
     } else {
       let accepted: boolean;
       try {
-        accepted = await recordSpawned(agentId, pid, startTicks, invocationId, launchCwd, options);
+        accepted = await recordSpawned(agentId, pid, startTicks, invocationId, launchCwd, activeModel, options);
       } catch (error) {
         try { process.kill(-pid, 'SIGKILL'); } catch {}
         await resultPromise.catch(() => undefined);

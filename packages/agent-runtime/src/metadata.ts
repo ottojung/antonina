@@ -1,4 +1,4 @@
-import { validModelFailover } from './model-failover.js';
+import { observedAgentModels, validModelFailover } from './model-failover.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 
@@ -139,6 +139,7 @@ export const OPTIONAL_TOP_LEVEL_FIELDS = [
   RUN_LOG_CURSOR_FIELD,
   OPENCODE_DB_FIELD,
   'model_failover',
+  'observed_models',
 ] as const;
 
 export class MalformedPendingPromptMetadataError extends Error {
@@ -347,6 +348,9 @@ export function validateAgentMetadata(meta: AgentMetadata): void {
   persistedNativeSessionId(meta);
   if (meta.model_failover !== undefined && meta.model_failover !== null && !validModelFailover(meta.model_failover)) {
     throw new MalformedAgentMetadataError('managed-agent model_failover is malformed');
+  }
+  try { observedAgentModels(meta); } catch {
+    throw new MalformedAgentMetadataError('managed-agent observed_models is malformed');
   }
 
   const pidFields = [meta.pid, meta.pgid, meta.start_time, meta.invocation_id];
@@ -625,6 +629,7 @@ export function idleMeta(agentId: string, cwd: string | null, title: string | nu
     // Board issue 178. The observation starts null on every new record: an agent
     // that has never been launched has never run anywhere.
     invocation_cwd: null,
+    observed_models: [],
     title,
     variant: DEFAULT_VARIANT,
     native_session_id: null,

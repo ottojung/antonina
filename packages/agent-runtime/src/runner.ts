@@ -62,7 +62,7 @@ import { configuredModels } from './model-config.js';
 import { SessionCheckpointReader } from './session-checkpoint.js';
 import {
   InvocationActivity, BACKEND_ERROR_GRACE_MS, LIVENESS_POLL_MS,
-  MODEL_STEP_SILENCE_MS, type LivenessObservation,
+  MODEL_STEP_SILENCE_MS, safeAlternativeModel, type LivenessObservation,
 } from './liveness.js';
 import { procStartTicks, persistedProcessInteger, signalMarkedInvocationProcesses } from './process.js';
 import {
@@ -988,7 +988,16 @@ async function runInvocation(
         || observation.diagnosis === 'step_finished_silent'
         || observation.diagnosis === 'backend_error_silent';
       const checkpointed = persistedNativeSessionId(current) !== null;
-      if (verified && checkpointed) {
+      // A provider credential/billing rejection is not evidence that another
+      // model under the same provider can work. Fail over only to a separately
+      // eligible provider, never on authentication/billing failure alone.
+      const providerFailure = observation.backendFailure === 'backend_authentication_failed'
+        || observation.backendFailure === 'backend_billing_required';
+      const eligible = !providerFailure || safeAlternativeModel(
+        current, activeModel, { ...process.env, ...options.env },
+        Date.now() / 1000, failedModelsThisRun, observation.backendFailure,
+      );
+      if (verified && checkpointed && eligible) {
         // Once the session is durable, terminate a verified hung backend even
         // without a fallback. The caller resumes on an eligible model, or
         // finalizes a visible failure without replaying unknown tool effects.
@@ -1002,6 +1011,8 @@ async function runInvocation(
         reportedUnsafeSilence = true;
         const reason = !checkpointed && verified
           ? 'no durable OpenCode session available for safe recovery'
+          : !eligible && providerFailure
+            ? 'provider authentication or billing failure; no eligible distinct provider'
           : observation.diagnosis === 'tool_running_silent'
             ? 'tool execution has not reported completion'
             : observation.diagnosis === 'host_io_blocked'

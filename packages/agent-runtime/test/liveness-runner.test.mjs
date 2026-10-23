@@ -28,6 +28,9 @@ async function exercise(t, fixture) {
   const jsonShell = (value) => "printf '%s\\n' '" + JSON.stringify(value) + "'";
   let eventCommand = jsonShell({ type: 'step_start', sessionID: 'ses_liveness', part: { type: 'step-start' } });
   if (fixture === 'pending-tool') {
+    eventCommand = jsonShell({ type: 'tool_use', sessionID: 'ses_liveness',
+      part: { type: 'tool', state: { status: 'running' } } });
+  } else if (fixture === 'finished-tool') {
     eventCommand = jsonShell({ type: 'step_finish', sessionID: 'ses_liveness', part: { reason: 'tool-calls' } });
   } else if (fixture === 'no-session') {
     eventCommand = 'echo "unstructured backend output"';
@@ -137,6 +140,7 @@ test('quiet resumed model step switches to Beam with the same native session', {
 test('silent resumed startup switches models while preserving the native session', { timeout: 45000 }, t => exercise(t, 'startup-resume'));
 test('structured HTTP 429 hang triggers quota cooldown and same-session failover', { timeout: 45000 }, t => exercise(t, 'error-quota'));
 test('structured HTTP 503 hang triggers transient cooldown and same-session failover', { timeout: 45000 }, t => exercise(t, 'error-503'));
+test('finished tool step with no further progress switches to Beam', { timeout: 45000 }, t => exercise(t, 'finished-tool'));
 test('pending tool never triggers model failover', { timeout: 45000 }, t => exercise(t, 'pending-tool'));
 test('unstructured output never authorizes a model restart', { timeout: 45000 }, t => exercise(t, 'no-session'));
 test('silent fresh startup without a native session is not replayed', { timeout: 45000 }, t => exercise(t, 'startup-no-session'));

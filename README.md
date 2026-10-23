@@ -115,6 +115,8 @@ A managed front runs in a working directory an operator declares with `--cwd`; i
 
 Two different facts are reported, and they are not interchangeable: `cwd` is the declared default, and `invocation_cwd` is the directory the current or most recent invocation was launched in (`ran in:` in human `agent status`, `never ran` when no invocation has been launched). Neither is an observation of where the front has since worked -- read `agent log` for that.
 
+`agent status` reports only **observed backend model launches**: `model` in JSON is the most recently launched model (or `null` when none can be established), and `models_used` lists distinct witnessed models, in order of last use. The human output shows `model` and, after a switch, `models used`. The saved model preference and failover selection are not evidence of an actual launch. Older agent records lacking this observation report `not observed` rather than guessing; only subsequent runs populate it. Forks start their own empty model history, even when they inherit a backend session.
+
 Lifecycle controls are available through `stop`, `kill`, `delete`, and `clean`. Local runtime state is stored under `$XDG_STATE_HOME/antonina`, defaulting to `$HOME/.local/state/antonina`. That is a different tree from the board configuration above: `clean` sweeps runtime state and never touches your board trust anchor or credential.
 
 ## Host daemon

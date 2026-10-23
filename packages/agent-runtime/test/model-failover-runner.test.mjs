@@ -80,6 +80,7 @@ async function exercise(t, kind) {
     }
   }
   const result=readMeta(id,options);
+  assert.deepEqual(result.observed_models, [LUNA, BEAM], 'only truly launched models, newest last');
   if (kind==='all-transient') {
     // All configured models are soft unreliable after their retry budgets.
     // A single accepted prompt must not spin indefinitely through them.

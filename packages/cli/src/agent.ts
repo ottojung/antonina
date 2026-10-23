@@ -1192,12 +1192,11 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   ) {
     throw new Error(`agent ${agentId} is still running; use --steer to redirect it`);
   }
-  // `--cwd` declares the directory this front runs in, and the record is
-  // corrected to it in the same durable write that accepts the prompt, so the
-  // two can never disagree. It is only ever a statement about a front that does
-  // not exist yet: under a live invocation, an accepted prompt, or an unclaimed
-  // runner reservation it would make the record name a directory the front that
-  // already exists is not in, so it is refused without writing anything.
+  // `--cwd` declares the directory this invocation runs in. With no
+  // existing front, the accepted invocation may change that declaration.
+  // With a live/pending/reserved front, reasserting its SAME directory is
+  // harmless (and required by callers which always pass explicit --cwd).
+  // Only a different directory would silently relocate work already owned.
   const runCwd = parsed.values.has('--cwd') ? declaredCwd(parsed.values.get('--cwd')!, 'run') : null;
   // The directory this invocation will actually launch in: the one named on
   // this command if there is one, otherwise the agent's declared default. The
@@ -1219,7 +1218,10 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
       throw new Error(`run: agent ${agentId} has malformed pending prompt authority`);
     }
     if (invocationAlive(observed) || reservationInFlight(observed) || acceptedPending !== null) {
-      throw new Error(`run: agent ${agentId} already owns work; --cwd cannot be declared while a front exists`);
+      const runningCwd = persistedInvocationCwd(observed);
+      if (runCwd !== recordedCwd || (invocationAlive(observed) && runningCwd !== null && runCwd !== runningCwd)) {
+        throw new Error(`run: agent ${agentId} already owns work in another directory; --cwd cannot change an existing front`);
+      }
     }
   } else if (recordedCwd === null) {
     // The operator has no directory to give. There is still no honest value to

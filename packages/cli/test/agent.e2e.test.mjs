@@ -1941,6 +1941,29 @@ test('--cwd is refused while a front exists, and changes nothing', async (t) => 
   );
 });
 
+// Managed callers reassert their already-declared directory on every
+// invocation. Such a steer preserves the live front's cwd and MUST be accepted.
+test('a same-directory --cwd is accepted during a live steer', async (t) => {
+  const { root, work, env } = fixture(t);
+  const agent_5eed = newAgent(env, ['--cwd', work]);
+  assert.equal(run(['agent', 'run', '--id', agent_5eed, '--detach', '--prompt', 'slow'], env).status, 0);
+  const live = await waitFor(root, agent_5eed, (meta) =>
+    meta.state === 'running' && typeof meta.pid === 'number' && typeof meta.runner_pid === 'number');
+  t.after(() => {
+    try { process.kill(-live.pid, 'SIGKILL'); } catch {}
+    try { process.kill(live.pid, 'SIGKILL'); } catch {}
+  });
+  const result = run(
+    ['agent', 'run', '--id', agent_5eed, '--steer', '--cwd', work, '--detach', '--prompt', 'same-directory'],
+    env,
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const after = JSON.parse(readFileSync(metaPath(root, agent_5eed), 'utf8'));
+  assert.equal(after.cwd, work);
+  assert.ok(JSON.stringify(after).includes('same-directory') || after.prompt_count > live.prompt_count,
+    'the same-directory steer must accept the prompt, not just return success');
+});
+
 // Board issue 178, the observation half. `cwd` is a declaration and
 // `invocation_cwd` is an observation of where a front was actually launched.
 // Reporting only the declaration made `status` a statement about intent dressed

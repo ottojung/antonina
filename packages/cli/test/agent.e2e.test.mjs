@@ -148,7 +148,15 @@ case "$1" in
       exit 0
     fi
     if [ "$last" = "server-error" ]; then
-      echo '{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_e2e"}}'
+      marker="$ANTONINA_TEST_CALLS.first-server-error"
+      if [ ! -f "$marker" ]; then
+        : >"$marker"
+        echo '{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_e2e"}}'
+        exit 1
+      fi
+    fi
+    if [ "$last" = "fatal-error" ]; then
+      echo 'Error: Failed to execute statement'
       exit 1
     fi
     if [ "$last" = "die-by-signal" ]; then
@@ -814,21 +822,25 @@ test('delete tombstone blocks later prompt reservation', (t) => {
 });
 
 
-test('backend server failure is persisted and sanitized through status', async (t) => {
+test('transient backend 5xx recovers without replaying the original prompt', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;
   const agent_bad1 = newAgent(env, ['--cwd', work]);
   assert.equal(run(['agent', 'run', '--id', agent_bad1, '--detach', '--prompt', 'server-error'], env).status, 0);
-  await waitFor(root, agent_bad1, (meta) => meta.state === 'failed' && meta.active_runner === false);
+  await waitFor(root, agent_bad1, (meta) => meta.state === 'succeeded' && meta.active_runner === false);
 
   const status = run(['agent', 'status', '--id', agent_bad1, '--json'], env);
   assert.equal(status.status, 0, status.stderr);
   const body = JSON.parse(status.stdout);
-  assert.equal(body.state, 'failed');
-  assert.equal(body.backend_error.classification, 'transient_backend_server_error');
-  assert.equal(body.backend_error.reference, 'err_e2e');
-  assert.equal(body.backend_error.automatic_retry_safe, false);
-  assert.equal(body.backend_error.request_boundary, 'fresh_session');
+  assert.equal(body.state, 'succeeded');
+  assert.equal(body.backend_error, null, 'a recovered provider failure is not terminal');
+  assert.equal(body.prompts, 1, 'the one accepted user turn has one successful result');
+  const calls = readFileSync(env.ANTONINA_TEST_CALLS, 'utf8').split('\n').filter(Boolean);
+  assert.equal(calls.length, 2);
+  assert.match(calls[0], /server-error$/);
+  assert.match(calls[1], /--session ses_fake/);
+  assert.match(calls[1], /Antonina is recovering/);
+  assert.doesNotMatch(calls[1], /server-error/);
   assertFixtureInvoked(handle, 'server-error');
 });
 
@@ -1218,13 +1230,13 @@ test('attached prompt reports the invocation outcome, not unconditional success'
   const handle = fixture(t);
   const { work, env } = handle;
   const agent_a7ac = newAgent(env, ['--cwd', work]);
-  const failing = run(['agent', 'run', '--id', agent_a7ac, '--prompt', 'server-error'], env);
+  const failing = run(['agent', 'run', '--id', agent_a7ac, '--prompt', 'fatal-error'], env);
   assert.equal(
     failing.status,
     1,
     `an attached prompt whose backend failed must exit non-zero; stderr: ${failing.stderr}`,
   );
-  assertFixtureInvoked(handle, 'server-error');
+  assertFixtureInvoked(handle, 'fatal-error');
   // The succeeding path stays pinned too: the same command, same exit-code
   // wiring, opposite outcome.
   const agent_a7ad = newAgent(env, ['--cwd', work]);

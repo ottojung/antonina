@@ -29,7 +29,7 @@ async function exercise(t, kind) {
     + 'printf "%s\\n" "$model" >> "$ANTONINA_TEST_TRACE"\n'
     + 'sleep 0.12\n'
     + (kind==='all-transient'
-        ? 'echo "Error: Unexpected server error" >&2; exit 1\n'
+        ? 'if [ "$(wc -l < "$ANTONINA_TEST_TRACE")" -le 6 ]; then echo "Error: Unexpected server error" >&2; exit 1; fi\n'
         : kind==='fresh-quota'
         ? 'if [ "$model" = "example.test/luna" ]; then [ "$format" = "json" ] || exit 43; printf \'{"type":"step_start","sessionID":"ses_checkpoint_demo","part":{"type":"step-start"}}\\n\'; sleep 0.3; printf \'{"type":"error","sessionID":"ses_checkpoint_demo","error":{"data":{"message":"The usage limit has been reached"}}}\\n\'; exit 1; fi\n'
         : kind==='quota'
@@ -80,14 +80,19 @@ async function exercise(t, kind) {
     }
   }
   const result=readMeta(id,options);
-  assert.deepEqual(result.observed_models, [LUNA, BEAM], 'only truly launched models, newest last');
+  if (kind === 'all-transient') {
+    assert.deepEqual([...result.observed_models].sort(), [BEAM, LUNA].sort(), 'both genuinely launched; last model chosen randomly');
+  } else {
+    assert.deepEqual(result.observed_models, [LUNA, BEAM], 'only truly launched models, newest last');
+  }
   if (kind==='all-transient') {
-    // All configured models are soft unreliable after their retry budgets.
-    // A single accepted prompt must not spin indefinitely through them.
-    assert.equal(result.state,'failed');
+    // The old implementation stranded an agent after all configured models
+    // returned temporary failures. Exhaustion of a SOFT pool is recoverable.
+    assert.equal(result.state, 'succeeded');
     const attempts=readFileSync(trace,'utf8').trim().split('\n');
-    assert.deepEqual(attempts,[LUNA,LUNA,LUNA,BEAM,BEAM,BEAM]);
-    assert.deepEqual(result.model_failover.cooldowns.map(x=>x.reason),['transient_backend','transient_backend']);
+    assert.equal(attempts.length, 7);
+    assert.ok(attempts.includes(LUNA) && attempts.includes(BEAM));
+    assert.ok(result.model_failover.cooldowns.every(x=>x.reason==='transient_backend'));
     return;
   }
   assert.equal(result.state,'succeeded',JSON.stringify({state:result.state,error:result.error,backend_error:result.backend_error}));
@@ -97,15 +102,15 @@ async function exercise(t, kind) {
   assert.equal(result.model_failover.cooldowns[0].model,LUNA);
   assert.equal(result.model_failover.cooldowns[0].reason,kind.startsWith('transient')?'transient_backend':kind==='throttle-json'?'rate_limited':'quota_exhausted');
   const actual=readFileSync(trace,'utf8').trim().split('\n');
-  assert.deepEqual(actual.filter(model => model === LUNA || model === BEAM),kind.startsWith('transient')?[LUNA,LUNA,LUNA,BEAM]:[LUNA,BEAM]);
+  assert.deepEqual(actual.filter(model => model === LUNA || model === BEAM),[LUNA,BEAM]);
 }
 
 test('quota failure switches model within the same agent and same recorded session', {timeout:150000},async t=>exercise(t,'quota'));
-test('transient failure gets two retries before model failover', {timeout:150000},async t=>exercise(t,'transient'));
+test('transient failure changes models immediately and reconciles previous effects', {timeout:150000},async t=>exercise(t,'transient'));
 
 test('fresh first-invocation quota failure resumes checkpointed JSON session even when session list is empty', {timeout:150000},async t=>exercise(t,'fresh-quota'));
 
 test('structured HTTP 429 throttling advances directly to Beam', {timeout:150000},async t=>exercise(t,'throttle-json'));
-test('structured HTTP 503 retries twice then advances to Beam', {timeout:150000},async t=>exercise(t,'transient-json'));
+test('structured HTTP 503 fails over and recovers without exhausting the agent', {timeout:150000},async t=>exercise(t,'transient-json'));
 
-test('all-transient pool never cycles indefinitely within one invocation', {timeout:150000},async t=>exercise(t,'all-transient'));
+test('all-transient soft model pool recovers across multiple rounds', {timeout:150000},async t=>exercise(t,'all-transient'));

@@ -26,7 +26,8 @@ agent.
    fresh randomized pass through that soft pool. Transient errors never turn
    into an unconditional per-invocation exhaustion halt. Retry delay grows
    exponentially but is capped at 30 seconds plus bounded jitter.
-5. Quota/rate-limit cooldowns are respected; when *only* timed exclusions
+5. A verified silent model step with a durable native session and no active tool subprocess is also recoverable on its **original model** when alternatives are unavailable. Silence with unresolved tools or an unverifiable process tree is not proof of safe interruption.
+6. Quota/rate-limit cooldowns are respected; when *only* timed exclusions
    remain, await expiry while periodically checking for changed configuration,
    stop and steer. Genuine unsupported models, authentication failures and
    billing exclusions are not retried with the same invalid credentials.

@@ -1260,9 +1260,11 @@ test('a spawn rejected by a stop between the runner read and its write leaves th
 });
 
 
-test('verified silence after finished tool calls terminates even without another eligible model', {timeout: INTENT_TEST_TIMEOUT_MS}, async (t) => {
+test('verified silence after finished tool calls recovers on the same model when no other is eligible', {timeout: INTENT_TEST_TIMEOUT_MS}, async (t) => {
   if (!requireProc(t)) return;
   const script = '#!/bin/sh\n'
+    + 'if [ -f ".antonina-hung-once" ]; then echo "RECOVERED_SAME_MODEL"; exit 0; fi\n'
+    + 'touch .antonina-hung-once\n'
     + "printf '%s\\n' '{\"type\":\"step_start\",\"sessionID\":\"ses_hung\"}'\n"
     + "printf '%s\\n' '{\"type\":\"tool_use\",\"sessionID\":\"ses_hung\",\"part\":{\"state\":{\"status\":\"completed\"}}}'\n"
     + "printf '%s\\n' '{\"type\":\"step_finish\",\"sessionID\":\"ses_hung\",\"part\":{\"reason\":\"tool-calls\"}}'\n"
@@ -1278,10 +1280,11 @@ test('verified silence after finished tool calls terminates even without another
     capacity:{readText:cgroup(1)},
   });
   const after=readMeta(id,options);
-  assert.equal(after.state,'failed');
+  assert.equal(after.state,'succeeded', 'verified model silence is recoverable without a different model');
   assert.equal(after.native_session_id,'ses_hung');
-  assert.equal(after.backend_error.classification,'model_step_stalled');
-  assert.match(after.error,/model_step_stalled|SIGTERM|model step/i);
+  assert.equal(after.active_runner,false);
+  assert.equal(after.backend_error,null);
+  assert.equal(after.model_failover?.selected_model ?? null,'example.test/mock');
 });
 
 test('a running tool remains untouched by the model-silence watchdog', {timeout: INTENT_TEST_TIMEOUT_MS}, async (t) => {

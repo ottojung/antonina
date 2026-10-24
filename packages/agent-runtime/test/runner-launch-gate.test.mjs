@@ -784,7 +784,7 @@ test('a retry re-decides the launch gate, so a capability withdrawn after the fi
   const marker = join(tmpdir(), `antonina-launch-gate-${process.pid}-retry.marker`);
   rmSync(marker, { force: true });
   t.after(() => rmSync(marker, { force: true }));
-  const backend = fakeBackend(t, marker, `#!/bin/sh\nprintf '%s %s\\n' "$$" "$(pwd -P)" >> ${JSON.stringify(marker)}\nprintf '%s\\n' 'Unexpected server error'\nexit 1\n`);
+  const backend = fakeBackend(t, marker, `#!/bin/sh\n[ "$1" = run ] || exit 0\nprintf '%s %s\\n' "$$" "$(pwd -P)" >> ${JSON.stringify(marker)}\nprintf '%s\\n' 'Unexpected server error'\nexit 1\n`);
   if (backend === null) return;
   const options = scratch(t, backend);
   const { id, cwd } = agent(t, options, {
@@ -807,7 +807,8 @@ test('a retry re-decides the launch gate, so a capability withdrawn after the fi
       return 1;
     },
   });
-
+  assert.equal(retryDelayRequests, 1, 'fault seam must run before second launch');
+  assert.equal(retryable.env.ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD, '1');
   assert.equal(
     backendRuns(marker).filter((line) => line.split(' ')[1] === cwd).length,
     1,

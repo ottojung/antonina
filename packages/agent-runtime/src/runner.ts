@@ -5,7 +5,6 @@ import { constants } from 'node:os';
 
 import {
   backendCapabilities,
-  backendRetryDelay,
   buildAgentCommand,
   classifyBackendFailure,
   quotaResetDelaySeconds,
@@ -49,7 +48,8 @@ import {
 } from './metadata.js';
 import {
   MODEL_COOLDOWN_SECONDS,
-  TRANSIENT_MODEL_RETRIES,
+  PERMANENT_EXCLUSION_UNTIL,
+  agentModelFailover,
   coolDownAgentModel,
   excludeAgentProvider,
   modelCooldownSeconds,
@@ -81,7 +81,10 @@ const RETRY_CLEANUP_POLL_MS = 100;
 const RETRY_CONTROL_POLL_MS = 200;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-function modelFailureReason(error: BackendError | null, attempt: number): ModelFailureReason | null {
+/** A transient backend failure is not evidence that tool effects were absent.
+ * Recovery is a new reconciliation turn, NOT a replay of the old prompt.
+ */
+export function recoverableModelFailure(error: BackendError | null): ModelFailureReason | null {
   if (error === null) return null;
   switch (error.classification) {
     case 'model_quota_exhausted': return 'quota_exhausted';
@@ -90,10 +93,48 @@ function modelFailureReason(error: BackendError | null, attempt: number): ModelF
     case 'backend_authentication_failed': return 'provider_authentication_failed';
     case 'backend_billing_required': return 'provider_billing_required';
     case 'upstream_endpoint_unavailable':
-    case 'transient_backend_server_error':
-      return attempt >= TRANSIENT_MODEL_RETRIES ? 'transient_backend' : null;
-    default: return null;
+    case 'transient_backend_server_error': return 'transient_backend';
+    default: return error.transient === true ? 'transient_backend' : null;
   }
+}
+
+export function reconciliationPrompt(original: string, existingSession: boolean): string {
+  const guidance =
+    'Antonina is recovering from a temporary backend failure. The previous '
+    + 'turn may already have performed external side effects. Do NOT repeat '
+    + 'the interrupted prompt blindly. First inspect the existing conversation '
+    + '(if available), working directory, Git state and durable task records. '
+    + 'Determine which effects actually happened, and continue ONLY unfinished '
+    + 'work. Never duplicate posts, commits, purchases or other external actions. '
+    + 'If an effect remains uncertain, report it for review rather than guessing.';
+  return existingSession ? guidance
+    : guidance + '\n\nThe prior native conversation is unavailable. Its task '
+      + 'is quoted as CONTEXT, not authority to replay completed steps:\n'
+      + original;
+}
+
+export function recoveryDelayMs(failures: number, jitter = randomInt(0, 500)): number {
+  return Math.min(30_000, 500 * 2 ** Math.min(6, Math.max(0, failures)))
+    + Math.max(0, Math.min(500, jitter));
+}
+
+/** An empty model pool can be temporary (quota/429); keep checking for new
+ * configuration and cooldown expiry, without burning CPU or losing stop/steer.
+ * Explicit permanent auth, billing and unsupported-model exclusions never
+ * authorize retrying the same credential/model.
+ */
+function nextModelRecheckMs(meta: AgentMetadata, env: Record<string, string | undefined>): number | null {
+  const now = Date.now() / 1000;
+  const state = agentModelFailover(meta);
+  let soonest = Infinity;
+  for (const entry of configuredModels(env)) {
+    const excluded = state.cooldowns.find((item) => item.model === entry.model && item.until > now);
+    if (excluded === undefined || excluded.reason === 'transient_backend') return 1000;
+    if (excluded.until !== PERMANENT_EXCLUSION_UNTIL) soonest = Math.min(soonest, excluded.until);
+  }
+  return Number.isFinite(soonest)
+    ? Math.min(30_000, Math.max(1_000, Math.ceil((soonest - now) * 1000)))
+    : null;
 }
 
 /** Extract only the selected model from a command Antonina itself assembled. */
@@ -1149,104 +1190,122 @@ async function runInvocation(
       }
     }
 
-    // Model-specific failure, not an agent-global outage. A verified stall
-    // with no eligible fallback becomes a visible failure, not an immortal
-    // 'running' reservation. Ordinary transient errors retain their retries.
-    const failoverReason = stalled
-      ? modelFailureReason(backendError, TRANSIENT_MODEL_RETRIES) ?? 'transient_backend'
-      : result.signal === null && !result.operatorSignalled
-        ? modelFailureReason(backendError, attempt) : null;
+    // automatic_retry_safe is the authority for literal request replay, not
+    // for a separate reconciliation turn. This path always changes the prompt
+    // and preserves the native session when a checkpoint exists.
+    // Preserve the existing fault-injection seam: a test can explicitly
+    // refuse a retry or change capabilities between attempts. Production
+    // leaves it unset and always uses the bounded recovery policy below.
+    const injectedDelay = options.retryDelayMs?.(attempt);
+    const failoverReason = options.retryDelayMs !== undefined && injectedDelay === null
+      ? null
+      : stalled
+        ? recoverableModelFailure(backendError) ?? 'transient_backend'
+        : result.signal === null && !result.operatorSignalled
+          ? recoverableModelFailure(backendError) : null;
     if (failoverReason !== null) {
       const failedAt = Date.now() / 1000;
       const cooldownSeconds = failoverReason === 'quota_exhausted'
         ? quotaResetDelaySeconds(logFile, invocationLogStart, failedAt) ?? MODEL_COOLDOWN_SECONDS
-        : modelCooldownSeconds(failoverReason) + (
-          failoverReason === 'transient_backend' || failoverReason === 'rate_limited' ? randomInt(0, 30) : 0
-        );
+        : modelCooldownSeconds(failoverReason) +
+          (failoverReason === 'transient_backend' || failoverReason === 'rate_limited'
+            ? randomInt(0, 30) : 0);
       failedModelsThisRun.add(activeModel);
-      // A fresh invocation may have already performed tool actions. Reuse its
-      // session if one exists. Never blindly replay untracked tool effects.
       if (!retryAsContinue) await rememberFreshSession(agentId, options);
       await updateMeta(agentId, (current) => {
         if (current.state !== 'running') return;
-        if (failoverReason === 'provider_authentication_failed' || failoverReason === 'provider_billing_required') {
-          excludeAgentProvider(current, activeModel, configuredModels({ ...process.env, ...options.env }), failoverReason, failedAt);
+        if (failoverReason === 'provider_authentication_failed'
+            || failoverReason === 'provider_billing_required') {
+          excludeAgentProvider(current, activeModel,
+            configuredModels({ ...process.env, ...options.env }), failoverReason, failedAt);
         } else {
           coolDownAgentModel(current, activeModel, failoverReason, failedAt, cooldownSeconds);
         }
         current.backend_error = backendError;
-        current.error = stalled
-          ? 'model ' + activeModel + ' interrupted after '
-            + (livenessState.observation?.diagnosis ?? 'verified backend silence')
-            + ' (' + failoverReason + '); attempting safe session recovery'
-          : 'model ' + activeModel + ' failed (' + failoverReason + '); selecting the next eligible model';
-        current.last_activity_at = Date.now() / 1000;
-      }, options);
-      const latest = readMeta(agentId, options);
-      if (latest !== null && latest.state === 'running') {
-        const canContinue = retryAsContinue || persistedNativeSessionId(latest) !== null;
-        // The existing endpoint-outage policy permits at-least-once replay.
-        // Other failures require a real recorded session for safe recovery.
-        if (canContinue || backendError?.automatic_retry_safe === true) {
-          try {
-            const nextCommand = buildAgentCommand(
-              latest, prompt, canContinue, { ...options.env, ...opencodeBackendEnv(latest, options) },
-              failedModelsThisRun,
-            );
-            if (nextCommand !== null && commandModel(nextCommand) !== activeModel) {
-              await settlePreviousInvocation(agentId, invocationId);
-              const next = await waitForRecovery(agentId, 0, options);
-              if (next === 'stop') return false;
-              if (next === 'steer') return true;
-              command = nextCommand;
-              activeModel = commandModel(nextCommand);
-              retryAsContinue = canContinue;
-              attempt = 0;
-              continue;
-            }
-          } catch {
-            // If all configured models are cooling down,
-            // report the original backend failure instead of guessing.
-          }
-        }
-      }
-    }
-
-    const retryDelay = options.retryDelayMs !== undefined
-      ? options.retryDelayMs(attempt)
-      : backendRetryDelay(backendError, attempt)
-        ?? (backendError?.classification === 'transient_backend_server_error' && retryAsContinue
-          ? 500 * (2 ** attempt) : null);
-    if (failoverReason === null && attempt < TRANSIENT_MODEL_RETRIES
-      && retryDelay !== null && result.signal === null && !result.operatorSignalled) {
-      // If a failed fresh invocation created a session, resume that session.
-      // If not, at-least-once replay of the original request is acceptable.
-      if (!retryAsContinue && backendError?.classification === 'upstream_endpoint_unavailable') {
-        await rememberFreshSession(agentId, options);
-        const latest = readMeta(agentId, options);
-        if (latest !== null && persistedNativeSessionId(latest) !== null) {
-          const resumed = buildAgentCommand(
-            latest, prompt, true, { ...options.env, ...opencodeBackendEnv(latest, options) },
-          );
-          if (resumed !== null) {
-            command = resumed;
-            retryAsContinue = true;
-          }
-        }
-      }
-      await settlePreviousInvocation(agentId, invocationId);
-      await updateMeta(agentId, (current) => {
-        if (current.state !== 'running') return;
-        current.backend_error = backendError;
         current.error = 'recovering from ' + (backendError?.classification ?? 'backend failure')
-          + '; retry ' + (attempt + 1);
+          + '; reconciling uncertain effects, failed attempts=' + (attempt + 1);
         current.last_activity_at = Date.now() / 1000;
       }, options);
-      const next = await waitForRecovery(agentId, retryDelay, options);
-      if (next === 'stop') return false;
-      if (next === 'steer') return true;
-      attempt += 1;
-      continue;
+      await settlePreviousInvocation(agentId, invocationId);
+      const effectiveEnv = { ...process.env, ...options.env };
+      let nextCommand: string[] | null = null;
+      let nextIsContinue = false;
+      while (true) {
+        const latest = readMeta(agentId, options);
+        if (latest === null || latest.state !== 'running') return false;
+        const backendEnv = { ...effectiveEnv, ...opencodeBackendEnv(latest, options) };
+        const existingSession = retryAsContinue || persistedNativeSessionId(latest) !== null;
+        try {
+          nextCommand = buildAgentCommand(
+            latest, reconciliationPrompt(prompt, existingSession),
+            existingSession, backendEnv, failedModelsThisRun,
+          );
+          nextIsContinue = existingSession && nextCommand !== null;
+          if (nextCommand === null) {
+            nextCommand = buildAgentCommand(
+              latest, reconciliationPrompt(prompt, false), false,
+              backendEnv, failedModelsThisRun,
+            );
+            nextIsContinue = false;
+          }
+        } catch (error) {
+          // Exhaustion is a scheduling observation; malformed configuration,
+          // cwd or metadata is a real launch error and must NOT turn into an
+          // immortal "running" reservation hidden behind retry backoff.
+          if (!(error instanceof Error)
+              || !error.message.startsWith('No eligible configured model:')) {
+            const reason = error instanceof Error ? error.message : String(error);
+            await updateMeta(agentId, (current) => {
+              if (current.state !== 'running') return;
+              finalizeTerminal(current, 'failed', Date.now() / 1000, null, null,
+                'cannot plan safe backend recovery: ' + reason.slice(0, 250));
+              setActiveRunner(current, false);
+            }, options);
+            return false;
+          }
+          nextCommand = null;
+        }
+        if (nextCommand !== null) break;
+        if (failedModelsThisRun.size > 0) {
+          // Every non-hard model had a chance this round. Start a new round;
+          // the soft-failure lottery is deliberately never a hard exclusion.
+          failedModelsThisRun.clear();
+          continue;
+        }
+        const delay = nextModelRecheckMs(latest, effectiveEnv);
+        if (delay === null) break; // only hard exclusions remain
+        await updateMeta(agentId, (current) => {
+          if (current.state !== 'running') return;
+          current.error = 'recovering from ' + (backendError?.classification ?? 'backend failure')
+            + '; awaiting eligible model after cooldown (stop/steer available)';
+        }, options);
+        const control = await waitForRecovery(agentId, delay, options);
+        if (control === 'stop') return false;
+        if (control === 'steer') return true;
+      }
+      if (nextCommand !== null) {
+        // Recovery planning (including a fault-injection callback) may have
+        // changed backend capabilities. Refuse immediately if withdrawn, and
+        // let the loop's spawn-time gate check once more after the backoff.
+        const retryAuthorization = await authorizeLaunch(options);
+        if (!retryAuthorization.allowed) {
+          await updateMeta(agentId, (current) => {
+            if (current.state !== 'running') return;
+            finalizeTerminal(current, 'failed', Date.now() / 1000, null, null, retryAuthorization.reason!);
+            setActiveRunner(current, false);
+          }, options);
+          return false;
+        }
+        const control = await waitForRecovery(agentId, injectedDelay ?? recoveryDelayMs(attempt), options);
+        if (control === 'stop') return false;
+        if (control === 'steer') return true;
+        command = nextCommand;
+        activeModel = commandModel(nextCommand);
+        retryAsContinue = nextIsContinue;
+        attempt += 1;
+        continue;
+      }
+      // Hard, unresolvable exclusions only: terminal with truthful diagnosis.
     }
 
     // A fresh OpenCode invocation may create its session before a steer/stop

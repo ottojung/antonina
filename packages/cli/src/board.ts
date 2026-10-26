@@ -43,6 +43,7 @@ import {
   loadBoardConfigFiles,
 } from './board-config.js';
 
+const DEFAULT_BOARD_PAGE_SIZE = 50;
 export const BOARD_BASE_URL_ENV = 'ANTONINA_BOARD_URL';
 export const BOARD_HEAD_ENV = 'ANTONINA_BOARD_HEAD';
 export const BOARD_AUTHOR_ENV = 'ANTONINA_BOARD_AUTHOR';
@@ -170,7 +171,7 @@ function pageNumber(raw: string | undefined): number {
   return parsePositiveInteger(raw, '--page');
 }
 
-function pageSlice<T>(values: readonly T[], page: number, pageSize = DEFAULT_COLLECTION_PAGE_SIZE): T[] {
+function pageSlice<T>(values: readonly T[], page: number, pageSize = DEFAULT_BOARD_PAGE_SIZE): T[] {
   const start = (page - 1) * pageSize;
   if (!Number.isSafeInteger(start)) return [];
   return values.slice(start, start + pageSize);

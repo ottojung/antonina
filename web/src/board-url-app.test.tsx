@@ -561,7 +561,7 @@ describe('the board addressed by URL, mounted', () => {
   });
 
   it('cancels the browser navigation on the shared issue-link handler', async () => {
-    // The other two anchors — the issue links on Feed —
+    // Feed's issue links —
     // share one exported handler rather than an inline one, so it is checked where
     // it can be: `issueLinkClick` must call `preventDefault` on the event it is
     // given, and open the issue. Dropping the `preventDefault` leaves both
@@ -631,8 +631,6 @@ describe('the board addressed by URL, mounted', () => {
     // to prove where production persists that credential: api.test.ts separately
     // pins BrowserBoardSession + browserStorage against the real localStorage key.
     await openAt('/board');
-    await clickTab('feed');
-    await clickTab('feed');
     await clickTab('feed');
     await clickTab('issues');
     await clickFilter('Closed');

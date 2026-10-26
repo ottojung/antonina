@@ -58,7 +58,7 @@ async function boardWithComments(count) {
   const server = fakeSkrynia();
   const store = deterministicStore(server);
   const initialized = await store.initialize({
-    schemaVersion: 4,
+    schemaVersion: 5,
     nextIssueNumber: 2,
     issues: [{
       number: '1',
@@ -69,7 +69,6 @@ async function boardWithComments(count) {
       updatedAt: STAMP,
       messages: messages(count),
     }],
-    resources: [],
   });
   return { server, store, initialized };
 }

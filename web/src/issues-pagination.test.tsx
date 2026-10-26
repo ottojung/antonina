@@ -78,7 +78,7 @@ function overview(): BoardOverview {
       lastActivityAt: newestCommentAt(each.messages),
       hasBody: each.body.length > 0,
     })),
-    resources: [],
+
   };
 }
 

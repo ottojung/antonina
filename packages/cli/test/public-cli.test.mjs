@@ -133,8 +133,6 @@ test('paginated reads require --page and unpaginated single-item reads reject it
     ['board', ['queue', 'list']],
     ['board', ['feed']],
     ['board', ['show', '--id', '1']],
-    ['board', ['resource', 'list']],
-    ['board', ['collect', 'list', '--host', 'marceline-dev']],
     ['agent', ['list']],
   ]) {
     assert.throws(

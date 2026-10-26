@@ -174,7 +174,7 @@ test('a populated v3 board migrates to the current version through the gate, dro
   assert.equal(Object.hasOwn(migrated.board, 'dispatches'), false);
   // Unrelated data is carried across byte for byte, including the raw catalog.
   assert.deepEqual(migrated.board.issues, board.issues.map(issue => ({ ...issue, number: String(issue.number) })));
-  assert.deepEqual(migrated.board.resources, board.resources.map(resource => ({ ...resource, issueNumbers: resource.issueNumbers.map(String) })));
+  assert.equal(Object.hasOwn(migrated.board, 'resources'), false);
   assert.equal(migrated.board.nextIssueNumber, board.nextIssueNumber);
 });
 
@@ -228,7 +228,7 @@ test('a populated v3 board opens through the store read path with nothing else l
   assert.equal(Object.hasOwn(opened.state.board, 'targets'), false);
   assert.equal(Object.hasOwn(opened.state.board, 'dispatches'), false);
   assert.equal(opened.state.board.issues.length, 6);
-  assert.equal(opened.state.board.resources[0].path, '/srv/work');
+  assert.equal(Object.hasOwn(opened.state.board, 'resources'), false);
   assert.equal(canonicalJson(server.signed), before, 'opening must not rewrite what is stored');
 
   // The credential read path (what a migrated board is located by) agrees.

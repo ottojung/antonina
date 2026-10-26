@@ -168,7 +168,7 @@ test('a populated v3 board migrates to the current version through the gate, dro
   const board = v3Board(storedLog());
   const migrated = migrations.migratePersistedBoard(board);
   assert.equal(migrated.fromVersion, model.PREVIOUS_BOARD_SCHEMA_VERSION);
-  assert.deepEqual(migrated.throughVersions, [model.BOARD_SCHEMA_VERSION]);
+  assert.deepEqual(migrated.throughVersions, [model.RETIRED_BOARD_SCHEMA_VERSION, model.BOARD_SCHEMA_VERSION]);
   assert.equal(migrated.board.schemaVersion, model.BOARD_SCHEMA_VERSION);
   assert.equal(Object.hasOwn(migrated.board, 'targets'), false);
   assert.equal(Object.hasOwn(migrated.board, 'dispatches'), false);
@@ -189,7 +189,7 @@ test('a populated v3 board opens through signature verification and replay with 
   const opened = await verifyAndReplayOperationLog(signedV3, anchor);
 
   assert.equal(opened.migration.persistedVersion, model.PREVIOUS_BOARD_SCHEMA_VERSION);
-  assert.deepEqual(opened.migration.throughVersions, [model.BOARD_SCHEMA_VERSION]);
+  assert.deepEqual(opened.migration.throughVersions, [model.RETIRED_BOARD_SCHEMA_VERSION, model.BOARD_SCHEMA_VERSION]);
   assert.equal(Object.hasOwn(opened.board, 'targets'), false);
   assert.equal(Object.hasOwn(opened.board, 'dispatches'), false);
   assert.deepEqual(withoutMessageIds(opened.board), withoutMessageIds(baseline.board));
@@ -224,7 +224,7 @@ test('a populated v3 board opens through the store read path with nothing else l
   const before = canonicalJson(server.signed);
   const opened = await store.require(anchor);
   assert.equal(opened.state.migration.persistedVersion, model.PREVIOUS_BOARD_SCHEMA_VERSION);
-  assert.deepEqual(opened.state.migration.throughVersions, [model.BOARD_SCHEMA_VERSION]);
+  assert.deepEqual(opened.state.migration.throughVersions, [model.RETIRED_BOARD_SCHEMA_VERSION, model.BOARD_SCHEMA_VERSION]);
   assert.equal(Object.hasOwn(opened.state.board, 'targets'), false);
   assert.equal(Object.hasOwn(opened.state.board, 'dispatches'), false);
   assert.equal(opened.state.board.issues.length, 6);

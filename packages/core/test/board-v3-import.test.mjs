@@ -131,7 +131,7 @@ test('an import plan reports what would be carried across and writes nothing', a
     );
     assert.equal(report.feedEntries, fixture.feedEntryCount);
     assert.equal(report.queueLength, 3);
-    assert.equal(report.resources, 1);
+    assert.equal(report.resources, 0);
     assert.equal(report.equivalent, true, JSON.stringify(report.checks));
     // The checks are named, so a failure says which property broke.
     for (const name of ['issues', 'queue', 'resources', 'feed', 'feedServedNewestFirst', 'nextIssueNumber', 'feedCount', 'openIssueCount', 'closedIssueCount']) {
@@ -183,7 +183,7 @@ test('an import reproduces the board exactly, and the runtime serves the new sto
     assert.equal(closed.entries[0].number, '3');
     assert.equal(closed.total, 1);
     // The catalog.
-    assert.equal(board.resources[0].path, '/srv/legacy');
+    assert.equal(Object.hasOwn(board, 'resources'), false);
     assert.equal(Object.hasOwn(board, 'targets'), false);
     assert.equal(Object.hasOwn(board, 'dispatches'), false);
     // The feed, in order, across its pages, with the deleted issue's comments

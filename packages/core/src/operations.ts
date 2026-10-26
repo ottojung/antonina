@@ -689,52 +689,14 @@ export function applyBoardMutation(
       const payload = operation.payload as IssueReferencePayload;
       requireIssue(candidate, String(payload.number));
       candidate.issues = candidate.issues.filter((issue) => issue.number !== String(payload.number));
-      candidate.resources = candidate.resources.flatMap((resource) => {
-        const issueNumbers = resource.issueNumbers.filter((number) => number !== String(payload.number));
-        return issueNumbers.length === 0 ? [] : [{ ...resource, issueNumbers, updatedAt: operation.timestamp }];
-      });
       nextQueue = nextQueue.filter((number) => number !== String(payload.number));
       break;
     }
-    case 'resource.add': {
-      const payload = operation.payload as ResourcePayload;
-      const issue = requireIssue(candidate, String(payload.number));
-      if (issue.state !== 'open') throw new OperationLogVerificationError('A resource dependency requires an open issue');
-      const host = canonicalHost(payload.host);
-      const path = canonicalPath(payload.path);
-      const current = candidate.resources.find((resource) => resource.host === host && resource.path === path);
-      if (current) {
-        if (!current.issueNumbers.includes(String(payload.number))) {
-          current.issueNumbers.push(String(payload.number));
-          current.issueNumbers.sort();
-          current.updatedAt = operation.timestamp;
-        }
-      } else {
-        candidate.resources.push({
-          host,
-          path,
-          issueNumbers: [String(payload.number)],
-          createdAt: operation.timestamp,
-          updatedAt: operation.timestamp,
-        });
-      }
-      candidate.resources.sort((left, right) => left.host.localeCompare(right.host) || left.path.localeCompare(right.path));
+    // Historical signed resource operations remain verifiable, but they
+    // cannot change a canonical board or authorize filesystem deletion.
+    case 'resource.add':
+    case 'resource.remove':
       break;
-    }
-    case 'resource.remove': {
-      const payload = operation.payload as ResourcePayload;
-      const host = canonicalHost(payload.host);
-      const path = canonicalPath(payload.path);
-      const index = candidate.resources.findIndex((resource) => resource.host === host && resource.path === path);
-      const current = index < 0 ? undefined : candidate.resources[index];
-      if (!current || !current.issueNumbers.includes(String(payload.number))) {
-        throw new OperationLogVerificationError('Resource dependency does not exist');
-      }
-      current.issueNumbers = current.issueNumbers.filter((number) => number !== String(payload.number));
-      if (current.issueNumbers.length === 0) candidate.resources.splice(index, 1);
-      else current.updatedAt = operation.timestamp;
-      break;
-    }
     // Archived signed operations from the old registry are intentionally inert.
     case 'target.register':
     case 'target.set':

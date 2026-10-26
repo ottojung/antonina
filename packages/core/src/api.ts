@@ -858,34 +858,7 @@ export {
   type HostMemory,
   type HostTelemetry,
 } from './host-daemon.js';
-export {
-  boardApiCollectionReader,
-  collectiblePaths,
-  commitCollectionDeletion,
-  openCollectionClaim,
-  protectionOf,
-  readCollectionSnapshot,
-  recheckCollectionClaim,
-  unverifiedCollectionSnapshot,
-} from './collection.js';
 export type { Board, BoardIssue, IssueState } from './model.js';
-export type {
-  AuthorizedCollection,
-  CandidateFactsGatherer,
-  CollectionClaim,
-  CollectionFailure,
-  CollectionFailureKind,
-  CollectionOutcomeReason,
-  CollectionReader,
-  CollectionSnapshot,
-  CompletedCollection,
-  ProtectionDecision,
-  ProtectionStatus,
-  ProtectionVerdict,
-  VerifiedBoardRead,
-  VerifiedCollectionSnapshot,
-  UnverifiedCollectionSnapshot,
-} from './collection.js';
 export type { BoardCredential, CredentialAuthority, CredentialRejection } from './credential.js';
 export type {
   BoardCapability,

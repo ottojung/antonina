@@ -731,15 +731,6 @@ function expectedMigratedBoard() {
         messages: [],
       },
     ],
-    resources: [
-      {
-        host: 'lubko://gpu-01',
-        path: '/srv/work',
-        issueNumbers: ['1', '3', '5'],
-        createdAt: '2026-09-20T09:06:00.000Z',
-        updatedAt: '2026-09-20T09:08:00.000Z',
-      },
-    ],
   };
 }
 

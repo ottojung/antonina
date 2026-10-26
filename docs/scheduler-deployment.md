@@ -15,7 +15,7 @@ From a clean checkout of the desired main commit on each host:
 
 The deploy helper atomically installs six active scripts into ~/.local/bin and
 the two matching `SKILL.md` files and the orchestrator's `resources.md` companion into ~/.openclaw/skills, plus the restricted
-OpenCode configuration into ~/.config/opencode/openclaw.json. It also installs and verifies the **same source-controlled S6 service entrypoint** wherever an `antonina-orchestrator` service already exists; no private service wrapper or host-specific alternate script is supported. The prompt template is identical everywhere. The local hostname and any explicit `Execution host: HOSTNAME` description restriction determine which issues can actually be dispatched. This is ordinary issue text, not a label or new field. It restarts an existing
+OpenCode configuration into ~/.config/opencode/openclaw.json. It also installs and verifies the **same source-controlled S6 service entrypoint** wherever an `antonina-orchestrator` service already exists; no private service wrapper or host-specific alternate script is supported. The prompt template is identical everywhere. Neither the board nor the scheduler interprets host identity or placement rules. Execution context, including deployment preferences, may appear only as ordinary issue/comment text for agents to interpret. Temporary scheduler claims coordinate logical work across independent schedulers without including any machine identity. It restarts an existing
 s6-supervised antonina-orchestrator using the want-up-preserving restart
 helper; it does NOT create a second orchestrator service on hosts that have
 none. To stage without restarting, set

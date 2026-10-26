@@ -117,7 +117,7 @@ function overview(): BoardOverview {
     deleted: false,
     queue: [],
     issues: summaries,
-    resources: [],
+
   };
 }
 

@@ -117,7 +117,7 @@ function overview(issues: BoardIssue[]): BoardOverview {
       lastActivityAt: newestCommentAt(each.messages),
       hasBody: each.body.length > 0,
     })),
-    resources: [],
+
   };
 }
 
@@ -167,7 +167,6 @@ describe('the board app, mounted', () => {
     // The nav is real links: a tab's `href` is its own stable address.
     expect(Array.from(nav.querySelectorAll('a')).map((link) => [link.textContent, link.getAttribute('href')])).toEqual([
       ['issues', '/board'],
-      ['resources', '/board?view=resources'],
       ['feed', '/board?view=feed'],
     ]);
     // The verified read, not a fixture: the issue the board reported is on

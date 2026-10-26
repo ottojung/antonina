@@ -24,9 +24,6 @@ test('random opaque IDs survive all basic board operations and reload',async()=>
  await client.close(id);
  assert.equal((await client.getIssue(id)).state,'closed');
  await client.reopen(id);
- const resource=await client.addResourceDependency('lubko://example-host','/workspace/task',id);
- assert.deepEqual(resource.issueNumbers,[id]);
- assert.equal((await client.listResources(undefined,id))[0].issues[0].number,id);
  const fresh=mk({credential:init.credential,trustAnchor:init.trustAnchor});
  assert.equal((await fresh.getIssue(id)).number,id);
  await fresh.deleteIssue(id);

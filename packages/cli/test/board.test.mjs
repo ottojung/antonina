@@ -162,8 +162,6 @@ test('every read command names initialization while the board is missing', async
     ['list', '--page', '1', '--json'],
     ['show', '1', '--page', '1'],
     ['queue', 'list', '--page', '1'],
-    ['resource', 'list', '--page', '1'],
-    ['collect', 'list', '--page', '1', '--host', 'lubko://host-1'],
   ]) {
     const { code, err } = await run(command, { createClient: () => client(server) });
     assert.equal(code, 1, command.join(' '));
@@ -183,7 +181,6 @@ test('mutating commands name initialization before they demand a credential', as
     ['access'],
     ['create', 'Mine'],
     ['close', '1'],
-    ['resource', 'add', '1', 'lubko://host', '/workspace'],
   ]) {
     const { code, err } = await run(command, { createClient: () => reader });
     assert.equal(code, 1, command.join(' '));
@@ -219,8 +216,6 @@ test('every read command names the board credential when access is not configure
     ['list', '--page', '1'],
     ['show', '1', '--page', '1'],
     ['queue', 'list', '--page', '1'],
-    ['resource', 'list', '--page', '1'],
-    ['collect', 'list', '--page', '1', '--host', 'lubko://host-1'],
   ]) {
     const { code, err } = await run(command, { createClient: () => client(server) });
     assert.equal(code, 1, command.join(' '));
@@ -606,7 +601,7 @@ test('board CLI queue reorder requires a credential and leaves the board alone',
 });
 
 
-test('collection reads require an explicit page and board issue pages follow queue priority', async () => {
+test('issue reads require an explicit page and follow queue priority', async () => {
   const summaries = Array.from({ length: 55 }, (_, index) => ({
     number: String(index + 1),
     title: 'Issue ' + (index + 1),

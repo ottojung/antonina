@@ -346,10 +346,10 @@ test('read commands require the board key while readBoard still reports a missin
   const stranger = api(server);
   const absent = api(fakeSkrynia());
 
-  for (const read of [() => stranger.listIssues(), () => stranger.getQueue(), () => stranger.listResources()]) {
+  for (const read of [() => stranger.listIssues(), () => stranger.getQueue()]) {
     await assert.rejects(read, /credential|required|board credential/);
   }
-  for (const read of [() => absent.listIssues(), () => absent.getQueue(), () => absent.listResources()]) {
+  for (const read of [() => absent.listIssues(), () => absent.getQueue()]) {
     await assert.rejects(read, /does not exist/);
   }
   assert.equal(await absent.readBoard(), null);

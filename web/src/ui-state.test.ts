@@ -24,7 +24,6 @@ import {
   FEED_UNTRACKED_COPY,
   FEED_VERB,
   formatUpdatedAt,
-  groupResources,
   ISSUE_FORM_HINT,
   ISSUE_FORM_SUBMIT_HINT,
   issueCounts,
@@ -124,18 +123,6 @@ describe('issue UI state', () => {
   it('counts every issue view', () => {
     const issues = [issue(1, 'open'), issue(2, 'closed'), issue(3, 'open')];
     expect(issueCounts(issues)).toEqual({ open: 2, closed: 1, all: 3 });
-  });
-
-  it('groups resources by host for a separate hierarchical view', () => {
-    const resources = [
-      { host: 'lubko://z', path: '/b', issueNumbers: ['1'], createdAt: timestamp, updatedAt: timestamp },
-      { host: 'lubko://a', path: '/one', issueNumbers: ['1'], createdAt: timestamp, updatedAt: timestamp },
-      { host: 'lubko://a', path: '/two', issueNumbers: ['2'], createdAt: timestamp, updatedAt: timestamp },
-    ];
-    expect(groupResources(resources).map(([host, entries]) => [host, entries.map((entry) => entry.path)])).toEqual([
-      ['lubko://a', ['/one', '/two']],
-      ['lubko://z', ['/b']],
-    ]);
   });
 
   it('formats recent and older update times', () => {
@@ -284,7 +271,6 @@ describe('board load state', () => {
       messageCount: 0,
       hasBody: false,
     }],
-    resources: [],
   };
   const ready: BoardLoad = { status: 'ready', board: summaryBoard, queue: ['1'], head: 'head' };
 

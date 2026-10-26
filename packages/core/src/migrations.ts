@@ -10,18 +10,20 @@
  * ## The trust-preserving mechanism, chosen once and explicitly
  *
  * Legacy signed snapshots are verified before being projected into the current
- * model. Migration never changes signed bytes. V2 lifts to V3, then V3 lifts to
- * V4 by discarding only the obsolete target catalog and dispatch assignments.
- * Issues and resources are carried forward unchanged, including in read-only opens.
+ * model. Migration never changes signed bytes. V2 lifts to V3, V3 to V4, and V4 to V5. Historical resource metadata
+ * remains in verified signed bytes but is intentionally omitted from the
+ * current projection. Only issue content and coordination history remain live.
  */
 import {
   BOARD_SCHEMA_VERSION,
+  RETIRED_BOARD_SCHEMA_VERSION,
   LEGACY_BOARD_SCHEMA_VERSION,
   PREVIOUS_BOARD_SCHEMA_VERSION,
   PERSISTED_BOARD_VERSIONS,
   parseBoard,
   parseLegacyBoardV2,
   parseLegacyBoardV3,
+  parseLegacyBoardV4,
   type Board,
   type LegacyBoardV2,
   type PersistedBoardVersion,
@@ -102,15 +104,28 @@ const PERSISTED_BOARD_MIGRATIONS: { [V in SupersededPersistedBoardVersion]: Pers
   },
   [PREVIOUS_BOARD_SCHEMA_VERSION]: {
     from: PREVIOUS_BOARD_SCHEMA_VERSION,
-    to: BOARD_SCHEMA_VERSION,
+    to: RETIRED_BOARD_SCHEMA_VERSION,
     summary: 'retires centralized execution-target registrations and dispatch assignments',
     migrate(value: unknown): Record<string, unknown> {
       const legacy = parseLegacyBoardV3(value);
       return {
-        schemaVersion: BOARD_SCHEMA_VERSION,
+        schemaVersion: RETIRED_BOARD_SCHEMA_VERSION,
         nextIssueNumber: legacy.nextIssueNumber,
         issues: legacy.issues,
         resources: legacy.resources,
+      };
+    },
+  },
+  [RETIRED_BOARD_SCHEMA_VERSION]: {
+    from: RETIRED_BOARD_SCHEMA_VERSION,
+    to: BOARD_SCHEMA_VERSION,
+    summary: 'retires machine-addressed resource state from the canonical board',
+    migrate(value: unknown): Record<string, unknown> {
+      const legacy = parseLegacyBoardV4(value);
+      return {
+        schemaVersion: BOARD_SCHEMA_VERSION,
+        nextIssueNumber: legacy.nextIssueNumber,
+        issues: legacy.issues,
       };
     },
   },

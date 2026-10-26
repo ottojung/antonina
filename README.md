@@ -1,10 +1,10 @@
 # Antonina
 
-Antonina is a coordination system for shared software work. Its core is the Antonina board, a shared issue and durable-resource registry backed by Skrynia, together with compatible hosts that can inspect the board and participate in coordinated work.
+Antonina is a coordination system for shared software work. Its core is the Antonina board, a shared issue board backed by Skrynia. Execution environments and agents use its ordinary issue text to coordinate work.
 
 An Antonina host is a provisioned execution environment that can access the board and run whatever tools are appropriate there: human-operated commands, scripts, coding agents, or other automation. Antonina is not defined by any particular agent runtime, model provider, or coding harness.
 
-**Execution placement is an autonomous process responsibility, not a board feature.** The board has no execution-target registry, selection mechanism, or dispatch records. An orchestrator discovers suitable hosts, tools, and capabilities through whatever mechanisms it chooses, while retaining task-level requirements such as a mandated host. Generic agent lifecycle, host telemetry, and durable resource dependencies are independent of execution placement.
+**Execution placement is an autonomous process responsibility, not a board feature.** The board has no execution-target registry, selection mechanism, or dispatch records. An orchestrator discovers suitable hosts, tools, and capabilities through whatever mechanisms it chooses, while retaining task-level requirements such as a mandated host. Generic agent lifecycle, host telemetry, and the board never stores host ownership or resource/deletion registrations.
 
 ## Current implementation
 
@@ -32,7 +32,7 @@ This installs the `antonina` executable. Release artifacts should ship the alrea
 
 ### OpenClaw orchestrator skill
 
-The OpenClaw skill used by Antonina hosts is versioned in this repository at `skills/antonina-orchestrator/`. Deploy that directory as a unit so the skill and its companion resource instructions stay on the same revision as the CLI:
+The OpenClaw skill used by Antonina hosts is versioned in this repository at `skills/antonina-orchestrator/`. Deploy that directory as a unit so the skill and its companion work-continuity instructions stay on the same revision as the CLI:
 
 ```sh
 mkdir -p "$HOME/.openclaw/skills"

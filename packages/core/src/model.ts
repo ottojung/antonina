@@ -19,7 +19,8 @@ export {
   type BoardDefectKind,
 } from './board-diagnostics.js';
 
-export const BOARD_SCHEMA_VERSION = 4 as const;
+export const BOARD_SCHEMA_VERSION = 5 as const;
+export const RETIRED_BOARD_SCHEMA_VERSION = 4 as const;
 export const PREVIOUS_BOARD_SCHEMA_VERSION = 3 as const;
 export const LEGACY_BOARD_SCHEMA_VERSION = 2 as const;
 export const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
@@ -277,6 +278,13 @@ export interface Board {
   schemaVersion: typeof BOARD_SCHEMA_VERSION;
   nextIssueNumber: number;
   issues: BoardIssue[];
+}
+
+/** Only for verified pre-v5 signed history. Not exposed as active board state. */
+export interface LegacyBoardV4 {
+  schemaVersion: typeof RETIRED_BOARD_SCHEMA_VERSION;
+  nextIssueNumber: number;
+  issues: BoardIssue[];
   resources: BoardResource[];
 }
 
@@ -297,7 +305,7 @@ export interface LegacyBoardV3 {
   dispatches: unknown[];
 }
 
-export type PersistedBoard = Board | LegacyBoardV2 | LegacyBoardV3;
+export type PersistedBoard = Board | LegacyBoardV2 | LegacyBoardV3 | LegacyBoardV4;
 
 export interface ResourceDependencyView {
   number: string;
@@ -317,7 +325,6 @@ export function emptyBoard(): Board {
     schemaVersion: BOARD_SCHEMA_VERSION,
     nextIssueNumber: 1,
     issues: [],
-    resources: [],
   };
 }
 
@@ -362,14 +369,16 @@ function isPositiveSafeInteger(value: unknown): value is number {
 function normalizePersistedIdentifiers(value: unknown): unknown {
   if (!isRecord(value)) return value;
   const board = structuredClone(value);
-  if (!Array.isArray(board.issues) || !Array.isArray(board.resources)) return board;
+  if (!Array.isArray(board.issues)) return board;
   const asId = (id: unknown): unknown => isPositiveSafeInteger(id) ? String(id) : id;
   board.issues = board.issues.map((issue: unknown) =>
     isRecord(issue) ? { ...issue, number: asId(issue.number) } : issue);
-  board.resources = board.resources.map((resource: unknown) =>
-    isRecord(resource) && Array.isArray(resource.issueNumbers)
-      ? { ...resource, issueNumbers: resource.issueNumbers.map(asId).sort() }
-      : resource);
+  if (Array.isArray(board.resources)) {
+    board.resources = board.resources.map((resource: unknown) =>
+      isRecord(resource) && Array.isArray(resource.issueNumbers)
+        ? { ...resource, issueNumbers: resource.issueNumbers.map(asId).sort() }
+        : resource);
+  }
   return board;
 }
 function oldNumericMaximum(value: unknown): number {
@@ -481,6 +490,9 @@ function isResource(value: unknown, issueNumbers: Set<string>): value is BoardRe
 }
 
 const CANONICAL_BOARD_KEYS = [
+  'schemaVersion', 'nextIssueNumber', 'issues',
+] as const;
+const LEGACY_BOARD_V4_KEYS = [
   'schemaVersion', 'nextIssueNumber', 'issues', 'resources',
 ] as const;
 
@@ -720,7 +732,6 @@ function canonicalBoardDefect(value: unknown): BoardDefect {
       value: value.nextIssueNumber,
     },
     { field: 'issues', expected: 'an array of issues', ok: Array.isArray(value.issues), value: value.issues },
-    { field: 'resources', expected: 'an array of resources', ok: Array.isArray(value.resources), value: value.resources },
   ]);
   if (field !== null) return field;
   const issues = value.issues as unknown[];
@@ -732,6 +743,16 @@ function canonicalBoardDefect(value: unknown): BoardDefect {
   // where the issue numbers they refer to are known; naming their elements here
   // would need a second derivation of the same state for no gain.
   return { ...unclassifiedElementDefect('board', 0), subject: 'board', field: '' };
+}
+
+/** Historical v4 shape validation; active v5 boards never consume its resource fields. */
+function legacyBoardV4Defect(value: unknown): BoardDefect {
+  if (!isRecord(value)) return notARecordDefect('legacy board', value);
+  if (value.schemaVersion !== RETIRED_BOARD_SCHEMA_VERSION)
+    return versionDefect(value.schemaVersion, RETIRED_BOARD_SCHEMA_VERSION);
+  if (!hasExactKeys(value, LEGACY_BOARD_V4_KEYS))
+    return keySetDefect('legacy board', LEGACY_BOARD_V4_KEYS, value);
+  return { ...unclassifiedElementDefect('legacy board', 0), subject: 'legacy board', field: '' };
 }
 
 /** {@link canonicalBoardDefect} for the four-key v2 board shape. */
@@ -832,6 +853,7 @@ export function parseLegacyBoardV3(value: unknown): LegacyBoardV3 {
 export const PERSISTED_BOARD_VERSIONS = [
   LEGACY_BOARD_SCHEMA_VERSION,
   PREVIOUS_BOARD_SCHEMA_VERSION,
+  RETIRED_BOARD_SCHEMA_VERSION,
   BOARD_SCHEMA_VERSION,
 ] as const;
 
@@ -882,6 +904,7 @@ const PERSISTED_BOARD_PARSERS: {
 } = {
   [LEGACY_BOARD_SCHEMA_VERSION]: parseLegacyBoardV2,
   [PREVIOUS_BOARD_SCHEMA_VERSION]: parseLegacyBoardV3,
+  [RETIRED_BOARD_SCHEMA_VERSION]: parseLegacyBoardV4,
   [BOARD_SCHEMA_VERSION]: parseCanonicalBoard,
 };
 
@@ -927,7 +950,7 @@ export function parsePersistedBoard(value: unknown): PersistedBoard {
   return parseCanonicalBoard(value);
 }
 
-export function parseCanonicalBoard(value: unknown): Board {
+export function parseLegacyBoardV4(value: unknown): LegacyBoardV4 {
   const counterFloor = oldNumericMaximum(value);
   value = normalizePersistedIdentifiers(value);
   // The guard is unchanged from the one this parser always ran: it is the sole
@@ -937,17 +960,17 @@ export function parseCanonicalBoard(value: unknown): Board {
   // accepted. Every defect path below therefore throws in exactly the cases
   // this condition throws in, and no others.
   if (!isRecord(value)
-      || !hasExactKeys(value, CANONICAL_BOARD_KEYS)
-      || value.schemaVersion !== BOARD_SCHEMA_VERSION
+      || !hasExactKeys(value, LEGACY_BOARD_V4_KEYS)
+      || value.schemaVersion !== RETIRED_BOARD_SCHEMA_VERSION
       || !isPositiveSafeInteger(value.nextIssueNumber)
       || !Array.isArray(value.issues)
       || !value.issues.every(isIssue)
       || !Array.isArray(value.resources)
       ) {
-    throw new BoardIncompatibilityError(canonicalBoardDefect(value));
+    throw new BoardIncompatibilityError(legacyBoardV4Defect(value));
   }
 
-  const board = value as unknown as Board;
+  const board = value as unknown as LegacyBoardV4;
   const numbers = new Set<string>();
   for (const issue of board.issues) {
     if (numbers.has(issue.number)) {
@@ -1008,6 +1031,62 @@ export function parseCanonicalBoard(value: unknown): Board {
   };
 }
 
+export function parseCanonicalBoard(value: unknown): Board {
+  const counterFloor = oldNumericMaximum(value);
+  value = normalizePersistedIdentifiers(value);
+  // The guard is unchanged from the one this parser always ran: it is the sole
+  // authority on what a canonical board is, and it runs first and alone. The
+  // defect functions below are only reached when it has already refused, so
+  // they choose which reason an operator is told and cannot widen what is
+  // accepted. Every defect path below therefore throws in exactly the cases
+  // this condition throws in, and no others.
+  if (!isRecord(value)
+      || !hasExactKeys(value, CANONICAL_BOARD_KEYS)
+      || value.schemaVersion !== BOARD_SCHEMA_VERSION
+      || !isPositiveSafeInteger(value.nextIssueNumber)
+      || !Array.isArray(value.issues)
+      || !value.issues.every(isIssue)
+      ) {
+    throw new BoardIncompatibilityError(canonicalBoardDefect(value));
+  }
+
+  const board = value as unknown as Board;
+  const numbers = new Set<string>();
+  for (const issue of board.issues) {
+    if (numbers.has(issue.number)) {
+      throw new BoardIncompatibilityError(corruptDefect(
+        'board.issues', `number ${issue.number}`,
+        'is used by more than one issue',
+        'Antonina board issue number counter is inconsistent with its issues'));
+    }
+    numbers.add(issue.number);
+    for (let index = 1; index < issue.messages.length; index += 1) {
+      const previous = issue.messages[index - 1];
+      const current = issue.messages[index];
+      if (!previous || !current) {
+        throw new BoardIncompatibilityError(corruptDefect(
+          `board issue ${issue.number} messages`, `index ${index}`,
+          'is missing from an issue that has a message at the index before it',
+          `Antonina issue ${issue.number} has malformed messages`));
+      }
+      if (Date.parse(previous.createdAt) > Date.parse(current.createdAt)) {
+        throw new BoardIncompatibilityError(corruptDefect(
+          `board issue ${issue.number} messages`, `index ${index}`,
+          'was created before the message before it',
+          `Antonina issue ${issue.number} has messages out of chronological order`));
+      }
+    }
+  }
+  if (board.nextIssueNumber <= counterFloor) {
+    throw new BoardIncompatibilityError(corruptDefect(
+      'board', 'nextIssueNumber',
+      'does not exceed every issue number already on the board',
+      'Antonina board issue number counter is inconsistent with its issues'));
+  }
+
+  return board;
+}
+
 export const parseBoard = parseCanonicalBoard;
 
 export function resourceState(
@@ -1019,7 +1098,9 @@ export function resourceState(
     : 'collectible';
 }
 
-export function resourceViews(board: Board, host?: string, issueNumber?: string): ResourceView[] {
+/** Retained only for decoding historical readers; v5 has no resource inventory. */
+export function resourceViews(board: Board | LegacyBoardV4, host?: string, issueNumber?: string): ResourceView[] {
+  if (!('resources' in board)) return [];
   const issues = new Map(board.issues.map((issue) => [issue.number, issue] as const));
   return board.resources
     .filter((resource) => host === undefined || resource.host === host)

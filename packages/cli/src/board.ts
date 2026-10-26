@@ -26,12 +26,10 @@ import {
 import {
   type Board,
   type BoardIssue,
-  type BoardResource,
   parseReviewVerdict,
   reviewBlocksCompletion,
   type BoardReview,
   type IssueState,
-  type ResourceView,
   type ReviewVerdict,
 } from '../../core/src/model.js';
 import {
@@ -41,31 +39,14 @@ import {
   type BoardTrustAnchor,
 } from '../../core/src/operations.js';
 import {
-  CollectBoardError,
-  CollectRefusedError,
-  collectDelete,
-  collectList,
-  renderRevision,
-  type CollectDeleteReport,
-  type CollectDeleteReportBase,
-  type   CollectListEntry,
-} from './collection.js';
-import {
   configuredValue,
   loadBoardConfigFiles,
 } from './board-config.js';
 
+const DEFAULT_BOARD_PAGE_SIZE = 50;
 export const BOARD_BASE_URL_ENV = 'ANTONINA_BOARD_URL';
 export const BOARD_HEAD_ENV = 'ANTONINA_BOARD_HEAD';
 export const BOARD_AUTHOR_ENV = 'ANTONINA_BOARD_AUTHOR';
-const DEFAULT_COLLECTION_PAGE_SIZE = 50;
-// `ANTONINA_COLLECT_ROOTS`, the managed collection roots the `collect` commands
-// are configured from. It is named here, in the one block where an operator
-// looks for every environment name, but it is not declared or re-exported here:
-// the loader in `packages/agent-runtime/src/managed-roots-config.ts` owns the
-// name, and `collect delete` imports it from there. One constant, one owner, one
-// import path.
-
 /**
  * A board issue identifier.
  *
@@ -119,9 +100,6 @@ interface BoardClient {
   reopen(id: IssueId): Promise<BoardIssue>;
   deleteIssue(id: IssueId): Promise<Board>;
   deleteBoard(): Promise<void>;
-  listResources(host?: string, id?: IssueId): Promise<ResourceView[]>;
-  addResourceDependency(host: string, path: string, id: IssueId): Promise<BoardResource>;
-  removeResourceDependency(host: string, path: string, id: IssueId): Promise<BoardResource[]>;
   importBoard(options?: { confirm?: boolean }): Promise<BoardImportReport>;
 }
 
@@ -151,16 +129,11 @@ type CommandValue =
   | BoardIssue
   | BoardIssue[]
   | IssueListSummary[]
-  | BoardResource
-  | BoardResource[]
   | BoardReview
-  | ResourceView[]
   | BoardInitialization
   | BoardCredential
   | BoardAccessState
   | BoardTrustAnchor
-  | CollectListEntry[]
-  | CollectDeleteReportBase
   | BoardImportReport
   | BoardFeedPage
   | IssueId[]
@@ -198,7 +171,7 @@ function pageNumber(raw: string | undefined): number {
   return parsePositiveInteger(raw, '--page');
 }
 
-function pageSlice<T>(values: readonly T[], page: number, pageSize = DEFAULT_COLLECTION_PAGE_SIZE): T[] {
+function pageSlice<T>(values: readonly T[], page: number, pageSize = DEFAULT_BOARD_PAGE_SIZE): T[] {
   const start = (page - 1) * pageSize;
   if (!Number.isSafeInteger(start)) return [];
   return values.slice(start, start + pageSize);
@@ -330,37 +303,11 @@ const CREDENTIAL_ADVICE = 'save the shared board credential as'
  * the advice above, so a collector is never taught a different next step for
  * the same board state.
  */
-function collectionAdvice(kind: string): string | null {
-  if (kind === 'board-missing') return 'run: antonina board initialize to create it';
-  if (kind === 'board-unverifiable' || kind === 'board-state-rejected') {
-    return CREDENTIAL_ADVICE;
-  }
-  // A transport failure is the one kind with no established advice, so it is
-  // named as itself rather than flattened into another kind's advice.
-  if (kind === 'board-read-failed') {
-    return kind + ': check ' + BOARD_BASE_URL_ENV + ' and that this host can reach it';
-  }
-  return null;
-}
-
-/**
- * The CLI's advice for the states the shared API reports, so an operator is
- * never told to configure a trust anchor for a board that does not exist, left
- * guessing what to do about one it cannot verify, or left without a next step
- * for a deleted board or a refused storage capability.
- */
 function boardStateAdvice(error: unknown): string | null {
   if (error instanceof BoardMissingError) return 'run: antonina board initialize to create it';
   if (error instanceof BoardTrustRequiredError) return CREDENTIAL_ADVICE;
   if (error instanceof BoardDeletedError) return 'start a new board instead; this key is permanently occupied';
   if (error instanceof BoardStorageRejectedError) return CREDENTIAL_ADVICE;
-  // A collection snapshot classifies its own failures rather than throwing the
-  // board errors above, so it carries the kind across and is advised about
-  // here: `collect list` names initialization while the board is missing and
-  // the trust anchor while it cannot be verified, exactly as every other read
-  // command does.
-  if (error instanceof CollectBoardError) return collectionAdvice(error.kind);
-  if (error instanceof CollectRefusedError) return error.kind === null ? null : collectionAdvice(error.kind);
   return null;
 }
 
@@ -554,46 +501,6 @@ async function execute(
       if (parsed.args.length !== 0) throw new AntoninaApiError('delete-board takes no arguments');
       await client.deleteBoard();
       return { mode: 'deleted-board', value: null };
-    case 'resource': {
-      const [subcommand, ...args] = parsed.args;
-      if (subcommand === 'list') {
-        const hostOption = option(args, '--host');
-        const issueOption = option(hostOption.rest, '--issue');
-        const pageOption = option(issueOption.rest, '--page');
-        if (pageOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for resource list');
-        const issueId = issueOption.value === undefined
-          ? undefined
-          : requireIssueId(issueOption.value, '--issue');
-        return {
-          mode: 'resources',
-          // NOT a bounded read, and deliberately still not one. `--page` bounds
-          // what is PRINTED, never what is FETCHED: `listResources` is
-          // `resourceViews(await this.loadBoard())` in `packages/core/src/api.ts`,
-          // and per `docs/intent-records/board.md` the resource catalog is one
-          // materialized object (unlike issue summaries, which ARE paged in
-          // storage), so the whole collection crosses the wire before `pageSlice`
-          // takes one 50-row window of it. A true bounded read means sharding the
-          // catalog into resource pages — a storage-format and migration change,
-          // not a CLI or UI one, and out of scope here. The web Resources tab
-          // states the same limit rather than implying the UI alone fixes
-          // scaling; see the note above `RESOURCE_PAGE_SIZE` in
-          // `web/src/ui-state.ts`.
-          value: pageSlice(await client.listResources(hostOption.value, issueId), pageNumber(pageOption.value)),
-        };
-      }
-      if (subcommand === 'add' || subcommand === 'remove') {
-        if (args.length !== 3) {
-          throw new AntoninaApiError('resource ' + subcommand + ' requires ISSUE HOST PATH');
-        }
-        const issueId = requireIssueId(args[0], 'ISSUE');
-        const host = requireArg(args[1], 'HOST');
-        const path = requireArg(args[2], 'PATH');
-        return subcommand === 'add'
-          ? { mode: 'resource-added', value: await client.addResourceDependency(host, path, issueId) }
-          : { mode: 'resource-removed', value: await client.removeResourceDependency(host, path, issueId) };
-      }
-      throw new AntoninaApiError('resource requires list, add, or remove');
-    }
     case 'import': {
       const confirmFlag = flag(parsed.args, '--confirm');
       if (confirmFlag.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for import');
@@ -610,30 +517,6 @@ async function execute(
         mode: 'import',
         value: await client.importBoard({ confirm: confirmFlag.value }),
       };
-    }
-    case 'collect': {
-      const [subcommand, ...args] = parsed.args;
-      if (subcommand === 'list') {
-        const hostOption = option(args, '--host');
-        const pageOption = option(hostOption.rest, '--page');
-        if (pageOption.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for collect list');
-        const entries = (await collectList(raw, requireArg(hostOption.value, 'collect list --host'))).value;
-        return { mode: 'collect-list', value: pageSlice(entries, pageNumber(pageOption.value)) };
-      }
-      if (subcommand === 'delete') {
-        const hostOption = option(args, '--host');
-        const pathOption = option(hostOption.rest, '--path');
-        const confirmFlag = flag(pathOption.rest, '--confirm');
-        if (confirmFlag.rest.length !== 0) throw new AntoninaApiError('unexpected arguments for collect delete');
-        const collected = await collectDelete(raw, {
-          host: requireArg(hostOption.value, 'collect delete --host'),
-          path: requireArg(pathOption.value, 'collect delete --path'),
-          confirm: confirmFlag.value,
-          env: context.env,
-        });
-        return { mode: collected.mode, value: collected.value };
-      }
-      throw new AntoninaApiError('collect requires list or delete');
     }
     default:
       throw new AntoninaApiError('unsupported antonina board command: ' + parsed.command);
@@ -666,12 +549,6 @@ const FEED_VERB: { readonly [K in BoardFeedEntry['kind']]: string } = {
   'issue-closed': 'closed',
   'issue-reopened': 'reopened',
   'issue-deleted': 'deleted',
-};
-
-const REMOVAL_OUTCOME: { readonly [K in CollectDeleteReport['removal']]: string } = {
-  unlinked: 'deleted',
-  'unlinked-symlink': 'unlinked symlink',
-  absent: 'already absent',
 };
 
 function humanFeedEntry(entry: BoardFeedEntry): string {
@@ -726,11 +603,6 @@ function humanLines(result: CommandResult): string[] {
   if (result.mode === 'deleted-issue') return ['Issue deleted.'];
   if (result.mode === 'deleted-board') return ['Board deleted.'];
 
-  if (result.mode === 'resource-added') {
-    const resource = result.value as BoardResource;
-    return ['Resource added: ' + resource.host + ' ' + resource.path];
-  }
-  if (result.mode === 'resource-removed') return ['Resource dependency removed.'];
 
   if (result.mode === 'import') {
     const report = result.value as BoardImportReport;
@@ -791,41 +663,6 @@ function humanLines(result: CommandResult): string[] {
     return lines;
   }
 
-  if (result.mode === 'collect-list') {
-    const entries = result.value as CollectListEntry[];
-    if (entries.length === 0) return ['No path on this host is collectible.'];
-    return entries.map((entry) => {
-      const dependents = entry.closedDependents.length === 0
-        ? ''
-        : '; closed dependents ' + entry.closedDependents.map((number) => '#' + number).join(', ');
-      return 'collectible ' + entry.path + ' on ' + entry.host
-        + '; board ' + entry.boardId + ' rev ' + entry.revision + dependents;
-    });
-  }
-
-  if (result.mode === 'collect-pending') {
-    // The pending value is the *base* report and has no `removal`: nothing has been
-    // removed, so there is no removal to report. The line therefore states the two
-    // shapes the confirmed run could take rather than asserting one of them.
-    const report = result.value as CollectDeleteReportBase;
-    // Exactly one revision is named, and it is the one the re-check verified.
-    return [
-      `would delete ${report.path} on ${report.host} (a symlink would be unlinked as a link, `
-        + `anything else removed recursively); board ${report.boardId} `
-        + `${renderRevision(report.recheckHead)}; re-run with --confirm`,
-    ];
-  }
-  if (result.mode === 'collect-deleted') {
-    const report = result.value as CollectDeleteReport;
-    // A mapping over the removal union rather than a chain of comparisons, so a
-    // fourth removal result is a type error here instead of silently rendering as
-    // the last case: the report must name what actually happened, never a default.
-    return [
-      `${REMOVAL_OUTCOME[report.removal]} ${report.path} on ${report.host}; `
-        + `board ${report.boardId} ${renderRevision(report.recheckHead)}`,
-    ];
-  }
-
   if (result.mode === 'lease') {
     const lease = result.value as SchedulerLease | null;
     return [lease === null ? 'Scheduler lease released'
@@ -850,18 +687,6 @@ function humanLines(result: CommandResult): string[] {
   if (!Array.isArray(value)) return [humanIssue(value as BoardIssue)];
   return value.map((item) => {
     if (typeof item === 'string' || typeof item === 'number') return '#' + item;
-    if ('protected' in item) {
-      const view = item as ResourceView;
-      const states = view.issues
-        .map((entry) => '#' + entry.number + ' [' + entry.state + ']')
-        .join(', ');
-      return view.host + ' ' + view.path + ' ' + states + ' ' + (view.protected ? 'protected' : 'collectible');
-    }
-    if ('host' in item) {
-      const resource = item as BoardResource;
-      return resource.host + ' ' + resource.path + ' -> '
-        + resource.issueNumbers.map((id) => '#' + id).join(', ');
-    }
     const issue = item as BoardIssue;
     return '#' + issue.number + ' [' + issue.state + '] ' + issue.title;
   });

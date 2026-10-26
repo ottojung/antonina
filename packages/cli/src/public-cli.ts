@@ -223,60 +223,12 @@ const BOARD_SPECS: readonly CommandSpec[] = [
     normalize: (p) => ['delete-board', ...jsonArg(p)],
   }),
   withJson({
-    path: ['resource', 'list'],
-    summary: 'List one page of registered board resources.',
-    values: ['--host', '--issue', '--page'],
-    required: ['--page'],
-    normalize: (p) => ['resource', 'list', ...valueArgs(p, ['--host', '--issue', '--page']), ...jsonArg(p)],
-  }),
-  ...(['add', 'remove'] as const).map((subcommand): CommandSpec => withJson({
-    path: ['resource', subcommand],
-    summary: subcommand === 'add' ? 'Register an issue dependency on a resource.' : 'Remove an issue dependency on a resource.',
-    values: ['--issue', '--host', '--path'],
-    required: ['--issue', '--host', '--path'],
-    normalize: (p) => [
-      'resource',
-      subcommand,
-      p.values.get('--issue')!,
-      p.values.get('--host')!,
-      p.values.get('--path')!,
-      ...jsonArg(p),
-    ],
-  })),
-  withJson({
     path: ['import'],
     summary: 'Report or perform the board format cutover (operator action).',
     flags: ['--confirm'],
     normalize: (p) => ['import', ...flagArgs(p, ['--confirm']), ...jsonArg(p)],
   }),
-  withJson({
-    path: ['collect', 'list'],
-    summary: 'List one page of collectible resources on one host.',
-    values: ['--host', '--page'],
-    required: ['--host', '--page'],
-    normalize: (p) => [
-      'collect', 'list', '--host', p.values.get('--host')!,
-      ...valueArgs(p, ['--page']),
-      ...jsonArg(p),
-    ],
-  }),
-  withJson({
-    path: ['collect', 'delete'],
-    summary: 'Delete one collectible resource after re-verification.',
-    values: ['--host', '--path'],
-    flags: ['--confirm'],
-    required: ['--host', '--path'],
-    normalize: (p) => [
-      'collect',
-      'delete',
-      '--host',
-      p.values.get('--host')!,
-      '--path',
-      p.values.get('--path')!,
-      ...flagArgs(p, ['--confirm']),
-      ...jsonArg(p),
-    ],
-  }),
+
 ];
 
 const AGENT_SPECS: readonly CommandSpec[] = [
@@ -409,7 +361,7 @@ const SPECS: Readonly<Record<PublicNamespace, readonly CommandSpec[]>> = {
 
 const GROUPS: Readonly<Record<PublicNamespace, readonly string[]>> = {
   agent: ['model'],
-  board: ['credential', 'queue', 'resource', 'collect', 'lease'],
+  board: ['credential', 'queue', 'lease'],
   daemon: [],
 };
 

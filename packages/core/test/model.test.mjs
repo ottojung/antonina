@@ -47,7 +47,6 @@ test('canonical board parser rejects incompatible schemas and unknown issue fiel
     schemaVersion: BOARD_SCHEMA_VERSION,
     nextIssueNumber: 2,
     issues: [{ ...issue(1), assignee: 'agent' }],
-    resources: [],
   }), (error) => {
     assert.ok(error instanceof BoardIncompatibilityError);
     assert.equal(error.defect.kind, 'element');
@@ -62,7 +61,6 @@ test('canonical board parser rejects unsafe counters and out-of-order messages',
     schemaVersion: BOARD_SCHEMA_VERSION,
     nextIssueNumber: Number.MAX_SAFE_INTEGER + 1,
     issues: [],
-    resources: [],
   }), (error) => {
     assert.ok(error instanceof BoardIncompatibilityError);
     assert.equal(error.defect.field, 'nextIssueNumber');
@@ -78,32 +76,7 @@ test('canonical board parser rejects unsafe counters and out-of-order messages',
         { id: 'earlier', author: 'a', body: 'earlier', createdAt: timestamp },
       ],
     }],
-    resources: [],
   }), /chronological/);
-});
-
-test('resource schema is strict and resource views derive protection from open dependencies', () => {
-  const board = parseBoard({
-    schemaVersion: BOARD_SCHEMA_VERSION,
-    nextIssueNumber: 3,
-    issues: [issue(1), issue(2, 'closed')],
-    resources: [{
-      host: 'lubko://server',
-      path: '/workspace/project',
-      issueNumbers: [1, 2],
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    }],
-  });
-  assert.deepEqual(resourceViews(board), [{
-    host: 'lubko://server',
-    path: '/workspace/project',
-    issues: [{ number: '1', state: 'open' }, { number: '2', state: 'closed' }],
-    protected: true,
-    collectible: false,
-  }]);
-  assert.throws(() => parseBoard({ ...board, resources: [{ ...board.resources[0], issueNumbers: [1, 1] }] }), /resource/);
-  assert.throws(() => parseBoard({ ...board, resources: [{ ...board.resources[0], issueNumbers: [3] }] }), /resource/);
 });
 
 test('host and path canonicalization match the persisted resource contract', () => {

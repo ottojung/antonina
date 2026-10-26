@@ -83,7 +83,7 @@ test('valid root operations verify and replay deterministically', async () => {
   assert.equal(first.board.issues[0].title, 'First');
   assert.equal(first.board.issues[0].messages[0].body, 'hello');
   assert.deepEqual(first.queue, ['1']);
-  assert.deepEqual(first.board.resources[0].issueNumbers, ['1']);
+  assert.equal(Object.hasOwn(first.board, 'resources'), false);
 });
 
 test('equal and attenuated delegated capabilities are accepted', async () => {
@@ -275,7 +275,6 @@ test('initialization attests a non-empty starting board as root-signed state', a
       updatedAt: timestamp(0),
       messages: [],
     }],
-    resources: [],
   };
   await append(log, root, 'board.initialize', { board: initial }, 1);
 
@@ -312,9 +311,7 @@ test('repeated resource registration is a deterministic no-op', async () => {
   await append(log, root, 'resource.add', { number: 1, host: 'lubko://host', path: '/workspace' }, 2);
   await append(log, root, 'resource.add', { number: 1, host: 'lubko://host', path: '/workspace' }, 3);
   const replayed = await verifyAndReplayOperationLog(log, anchor);
-  assert.equal(replayed.board.resources.length, 1);
-  assert.deepEqual(replayed.board.resources[0].issueNumbers, ['1']);
-  assert.equal(replayed.board.resources[0].updatedAt, timestamp(2));
+  assert.equal(Object.hasOwn(replayed.board, 'resources'), false);
 });
 
 test('a recorded review blocker refuses the close that would complete the issue', async () => {

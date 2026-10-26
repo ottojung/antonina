@@ -231,3 +231,48 @@ export async function loadManagedRoots(
   }
   return { ok: true, roots: validated.roots };
 }
+
+/** Render a diagnostic for a local filesystem-root configuration failure. */
+export function describeRootsDefect(result: {
+  readonly spelling: string | null;
+  readonly defect: ManagedRootsConfigDefect;
+}): string {
+  const { spelling, defect } = result;
+  if (defect.kind === 'roots-not-configured') {
+    return `roots-not-configured: no managed collection roots are configured in ${defect.variable}; `
+      + `set it to a ":"-separated list of absolute directories the collector may remove from`;
+  }
+  if (defect.kind === 'malformed-root') {
+    return `malformed-root: a configured managed root is not a spelled/resolved pair${spelling === null ? '' : ` (${spelling})`}`;
+  }
+  if (defect.kind === 'path-form') {
+    return `path-form: configured managed root ${defect.path} is not a canonical absolute POSIX path (${defect.defect})`;
+  }
+  if (defect.kind === 'duplicate') {
+    return `duplicate: configured managed root ${defect.path} is listed twice`;
+  }
+  if (defect.kind === 'nested') {
+    return `nested: configured managed root ${defect.path} is inside configured managed root ${defect.within}`;
+  }
+  if (defect.kind === 'root-is-filesystem-root') {
+    return `root-is-filesystem-root: configured managed root ${defect.path} is the filesystem root; `
+      + 'it would make every absolute path collectible';
+  }
+  if (defect.kind === 'root-resolves-to-filesystem-root') {
+    return `root-resolves-to-filesystem-root: configured managed root ${defect.path} resolves to the `
+      + `filesystem root ${defect.resolved}; it would make every absolute path collectible`;
+  }
+  if (defect.kind === 'unresolvable-root') {
+    return `unresolvable-root: ${defect.message}`;
+  }
+  // Totality over the type, not a live case. `ManagedRootsConfigDefect` carries
+  // core's whole `ManagedRootDefect` because core's defect is handed back by
+  // identity rather than re-derived, so this function is total over a union that
+  // still names `empty`. The loader can never produce it: an absent or
+  // separator-only variable is refused above, as `roots-not-configured`, before
+  // `validateManagedRoots` is reached, so core is never asked to judge an empty
+  // set. It is rendered from the kind it was handed rather than as a second
+  // copy of the `roots-not-configured` sentence -- one situation, one wording.
+  return `${defect.kind}: the configured managed root set was refused by validation`
+    + (spelling === null ? '' : ` (${spelling})`);
+}

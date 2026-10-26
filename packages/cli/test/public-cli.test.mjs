@@ -126,14 +126,6 @@ test('paginated reads require --page and unpaginated single-item reads reject it
   assert.deepEqual(run('board', ['queue', 'list', '--page', '3']), ['queue', 'list', '--page', '3']);
   assert.deepEqual(run('board', ['feed', '--page', '4']), ['feed', '--page', '4']);
   assert.deepEqual(run('board', ['show', '--id', '1', '--page', '2']), ['show', '1', '--page', '2']);
-  assert.deepEqual(
-    run('board', ['resource', 'list', '--host', 'marceline-dev', '--page', '2']),
-    ['resource', 'list', '--host', 'marceline-dev', '--page', '2'],
-  );
-  assert.deepEqual(
-    run('board', ['collect', 'list', '--host', 'marceline-dev', '--page', '2']),
-    ['collect', 'list', '--host', 'marceline-dev', '--page', '2'],
-  );
   assert.deepEqual(run('agent', ['list', '--page', '2']), ['list', '--page', '2']);
 
   for (const [namespace, argv] of [
@@ -141,8 +133,6 @@ test('paginated reads require --page and unpaginated single-item reads reject it
     ['board', ['queue', 'list']],
     ['board', ['feed']],
     ['board', ['show', '--id', '1']],
-    ['board', ['resource', 'list']],
-    ['board', ['collect', 'list', '--host', 'marceline-dev']],
     ['agent', ['list']],
   ]) {
     assert.throws(

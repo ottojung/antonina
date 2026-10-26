@@ -496,6 +496,7 @@ test('a board at a supported version is readable, including at the next version 
   const boards = new Map([
     [migrations.CURRENT_PERSISTED_BOARD_VERSION, model.emptyBoard()],
     [model.PREVIOUS_BOARD_SCHEMA_VERSION, { schemaVersion: model.PREVIOUS_BOARD_SCHEMA_VERSION, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] }],
+    [model.RETIRED_BOARD_SCHEMA_VERSION, { schemaVersion: model.RETIRED_BOARD_SCHEMA_VERSION, nextIssueNumber: 1, issues: [], resources: [] }],
     [model.LEGACY_BOARD_SCHEMA_VERSION, storedLog().operations[0].payload.board],
   ]);
   for (const version of model.PERSISTED_BOARD_VERSIONS) {
@@ -730,15 +731,6 @@ function expectedMigratedBoard() {
         messages: [],
       },
     ],
-    resources: [
-      {
-        host: 'lubko://gpu-01',
-        path: '/srv/work',
-        issueNumbers: ['1', '3', '5'],
-        createdAt: '2026-09-20T09:06:00.000Z',
-        updatedAt: '2026-09-20T09:08:00.000Z',
-      },
-    ],
   };
 }
 
@@ -764,9 +756,7 @@ test('the migrated board reads through the public model, and reads deterministic
   assert.deepEqual(second, first);
 
   const board = first.board;
-  assert.deepEqual(model.resourceViews(board).map((view) => [view.host, view.path, view.protected]), [
-    ['lubko://gpu-01', '/srv/work', true],
-  ]);
+  assert.equal(Object.hasOwn(board, 'resources'), false);
   assert.equal(Object.hasOwn(board, 'targets'), false);
   assert.equal(Object.hasOwn(board, 'dispatches'), false);
   assert.deepEqual(board.issues.map((issue) => issue.number), ['1', '2', '3', '4', '5', '6']);
@@ -820,8 +810,9 @@ test('a legacy board rewritten into the current format in storage is rejected, n
   const log = storedLog();
   const board = log.operations[0].payload.board;
   log.operations[0].payload.board = {
-    ...board,
     schemaVersion: migrations.CURRENT_PERSISTED_BOARD_VERSION,
+    nextIssueNumber: board.nextIssueNumber,
+    issues: board.issues,
   };
   await assert.rejects(
     () => verifyAndReplayOperationLog(log, fixtureAnchor()),
@@ -840,7 +831,7 @@ test('a legacy history re-signed under the current format still cannot be rolled
   let previous = null;
   for (const original of log.operations) {
     const payload = original.kind === 'board.initialize'
-      ? { board: { ...original.payload.board, schemaVersion: current } }
+      ? { board: { schemaVersion: current, nextIssueNumber: original.payload.board.nextIssueNumber, issues: original.payload.board.issues } }
       : original.payload;
     const operation = await signBoardOperation({
       boardId: log.boardId,
@@ -931,13 +922,7 @@ test('a migrated board accepts writes, and those writes survive a reopen', async
   assert.equal(issue.title, 'Written after migration');
   assert.equal(issue.state, 'open');
   assert.deepEqual(issue.messages.map((message) => message.body), ['comment on a migrated board']);
-  assert.deepEqual(
-    reread.state.board.resources.map((resource) => [resource.host, resource.path, resource.issueNumbers]),
-    [
-      ['lubko://gpu-01', '/srv/work', ['1', '3', '5']],
-      ['lubko://gpu-02', '/srv/after', ['7']],
-    ],
-  );
+  assert.equal(Object.hasOwn(reread.state.board, 'resources'), false);
 
   // The first write migrates the board, and every state after it reports the
   // board at the current version through no versions: the board is materialized

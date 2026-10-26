@@ -36,7 +36,7 @@ function rejected(board) {
 test('current boards contain issues and resources but no centralized execution catalog', () => {
   const board = emptyBoard();
   assert.equal(board.schemaVersion, BOARD_SCHEMA_VERSION);
-  assert.deepEqual(Object.keys(board).sort(), ['issues', 'nextIssueNumber', 'resources', 'schemaVersion']);
+  assert.deepEqual(Object.keys(board).sort(), ['issues', 'nextIssueNumber', 'schemaVersion']);
   assert.deepEqual(parseBoard(board), board);
   assert.equal(rejected({ ...board, targets: [] }).defect.kind, 'key-set');
   assert.equal(rejected({ ...board, dispatches: [] }).defect.kind, 'key-set');
@@ -51,7 +51,7 @@ test('the schema mismatch is distinguished from a field-shape mistake', () => {
 });
 
 test('malformed nested issues and resources are rejected with useful indexed diagnostics', () => {
-  const value = { ...emptyBoard(), nextIssueNumber: 2, issues: [issue()], resources: [resource()] };
+  const value = { ...emptyBoard(), nextIssueNumber: 2, issues: [issue()] };
   assert.deepEqual(parseBoard(value), value);
   const invalidIssue = rejected({ ...value, issues: [{ ...issue(), state: 'waiting' }] });
   assert.equal(invalidIssue.defect.subject, 'board issue at index 0');
@@ -69,7 +69,7 @@ test('v2 and v3 historical formats remain readable but project into the v4 shape
   assert.deepEqual(parsePersistedBoard(v3), v3);
   for (const legacy of [v2, v3]) {
     const projection = migratePersistedBoard(legacy).board;
-    assert.deepEqual(projection, { ...v2, schemaVersion: BOARD_SCHEMA_VERSION });
+    assert.deepEqual(projection, { schemaVersion: BOARD_SCHEMA_VERSION, nextIssueNumber: v2.nextIssueNumber, issues: v2.issues });
     assert.equal(Object.hasOwn(projection, 'targets'), false);
     assert.equal(Object.hasOwn(projection, 'dispatches'), false);
   }

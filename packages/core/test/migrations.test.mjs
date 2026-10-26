@@ -810,8 +810,9 @@ test('a legacy board rewritten into the current format in storage is rejected, n
   const log = storedLog();
   const board = log.operations[0].payload.board;
   log.operations[0].payload.board = {
-    ...board,
     schemaVersion: migrations.CURRENT_PERSISTED_BOARD_VERSION,
+    nextIssueNumber: board.nextIssueNumber,
+    issues: board.issues,
   };
   await assert.rejects(
     () => verifyAndReplayOperationLog(log, fixtureAnchor()),
@@ -830,7 +831,7 @@ test('a legacy history re-signed under the current format still cannot be rolled
   let previous = null;
   for (const original of log.operations) {
     const payload = original.kind === 'board.initialize'
-      ? { board: { ...original.payload.board, schemaVersion: current } }
+      ? { board: { schemaVersion: current, nextIssueNumber: original.payload.board.nextIssueNumber, issues: original.payload.board.issues } }
       : original.payload;
     const operation = await signBoardOperation({
       boardId: log.boardId,

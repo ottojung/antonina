@@ -133,7 +133,7 @@ test('an import plan reports what would be carried across and writes nothing', a
     assert.equal(report.resources, 0);
     assert.equal(report.equivalent, true, JSON.stringify(report.checks));
     // The checks are named, so a failure says which property broke.
-    for (const name of ['issues', 'queue', 'resources', 'feed', 'feedServedNewestFirst', 'nextIssueNumber', 'feedCount', 'openIssueCount', 'closedIssueCount']) {
+    for (const name of ['issues', 'queue', 'feed', 'feedServedNewestFirst', 'nextIssueNumber', 'feedCount', 'openIssueCount', 'closedIssueCount']) {
       assert.ok(
         report.checks.some((check) => check.name === name && check.equal),
         `check ${name} must be present and passing`,

@@ -16,12 +16,14 @@
  */
 import {
   BOARD_SCHEMA_VERSION,
+  RETIRED_BOARD_SCHEMA_VERSION,
   LEGACY_BOARD_SCHEMA_VERSION,
   PREVIOUS_BOARD_SCHEMA_VERSION,
   PERSISTED_BOARD_VERSIONS,
   parseBoard,
   parseLegacyBoardV2,
   parseLegacyBoardV3,
+  parseLegacyBoardV4,
   type Board,
   type LegacyBoardV2,
   type PersistedBoardVersion,
@@ -102,15 +104,27 @@ const PERSISTED_BOARD_MIGRATIONS: { [V in SupersededPersistedBoardVersion]: Pers
   },
   [PREVIOUS_BOARD_SCHEMA_VERSION]: {
     from: PREVIOUS_BOARD_SCHEMA_VERSION,
-    to: BOARD_SCHEMA_VERSION,
+    to: RETIRED_BOARD_SCHEMA_VERSION,
     summary: 'retires centralized execution-target registrations and dispatch assignments',
     migrate(value: unknown): Record<string, unknown> {
       const legacy = parseLegacyBoardV3(value);
       return {
-        schemaVersion: BOARD_SCHEMA_VERSION,
+        schemaVersion: RETIRED_BOARD_SCHEMA_VERSION,
         nextIssueNumber: legacy.nextIssueNumber,
         issues: legacy.issues,
         resources: legacy.resources,
+      };
+    },
+  },  [RETIRED_BOARD_SCHEMA_VERSION]: {
+    from: RETIRED_BOARD_SCHEMA_VERSION,
+    to: BOARD_SCHEMA_VERSION,
+    summary: 'retires machine-addressed resource state from the canonical board',
+    migrate(value: unknown): Record<string, unknown> {
+      const legacy = parseLegacyBoardV4(value);
+      return {
+        schemaVersion: BOARD_SCHEMA_VERSION,
+        nextIssueNumber: legacy.nextIssueNumber,
+        issues: legacy.issues,
       };
     },
   },

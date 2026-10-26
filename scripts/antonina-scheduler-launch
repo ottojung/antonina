@@ -25,7 +25,6 @@ def run(args, check=True):
 def require_open_issue(issue):
     result = run([ANTONINA, "board", "show", "--id", str(issue), "--page", "1", "--json"])
     record = json.loads(result.stdout)
-    ensure_local_execution_host(record)
     if record.get("state") != "open":
         raise SystemExit(f"refusing launch on non-open board issue #{issue}: {record.get('state')}")
     return record

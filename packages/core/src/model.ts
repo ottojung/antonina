@@ -369,14 +369,16 @@ function isPositiveSafeInteger(value: unknown): value is number {
 function normalizePersistedIdentifiers(value: unknown): unknown {
   if (!isRecord(value)) return value;
   const board = structuredClone(value);
-  if (!Array.isArray(board.issues) || !Array.isArray(board.resources)) return board;
+  if (!Array.isArray(board.issues)) return board;
   const asId = (id: unknown): unknown => isPositiveSafeInteger(id) ? String(id) : id;
   board.issues = board.issues.map((issue: unknown) =>
     isRecord(issue) ? { ...issue, number: asId(issue.number) } : issue);
-  board.resources = board.resources.map((resource: unknown) =>
-    isRecord(resource) && Array.isArray(resource.issueNumbers)
-      ? { ...resource, issueNumbers: resource.issueNumbers.map(asId).sort() }
-      : resource);
+  if (Array.isArray(board.resources)) {
+    board.resources = board.resources.map((resource: unknown) =>
+      isRecord(resource) && Array.isArray(resource.issueNumbers)
+        ? { ...resource, issueNumbers: resource.issueNumbers.map(asId).sort() }
+        : resource);
+  }
   return board;
 }
 function oldNumericMaximum(value: unknown): number {

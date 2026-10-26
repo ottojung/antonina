@@ -686,7 +686,6 @@ function humanLines(result: CommandResult): string[] {
   if (!Array.isArray(value)) return [humanIssue(value as BoardIssue)];
   return value.map((item) => {
     if (typeof item === 'string' || typeof item === 'number') return '#' + item;
-    if ('protected' in item) {
     const issue = item as BoardIssue;
     return '#' + issue.number + ' [' + issue.state + '] ' + issue.title;
   });

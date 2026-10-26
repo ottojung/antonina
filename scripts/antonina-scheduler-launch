@@ -130,7 +130,7 @@ def agent_prompt(issue, prompt, agent_id):
 def lease_command(action, issue, agent_id, token):
     return [ANTONINA, "board", "lease", action, "--issue", str(issue),
             "--agent", agent_id, "--host", socket.gethostname(),
-            "--token", token, "--ttl", "1800", "--json"]
+            "--token", token, "--ttl", "600", "--json"]
 
 
 def release_claim(issue, agent_id, token):

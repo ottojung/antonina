@@ -592,7 +592,7 @@ describe('the store mints the field the web order consumes', () => {
       body: 'newest comment on the whole board, on the lowest-numbered issue',
       createdAt: COMMENTED,
     });
-    return { schemaVersion: 4 as const, nextIssueNumber: 4, issues, resources: [] };
+    return { schemaVersion: 5 as const, nextIssueNumber: 4, issues };
   }
 
   it('reads back a minted activity time and orders by it, and depends on it', async () => {

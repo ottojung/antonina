@@ -1,23 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createBrowserBoardApi, type BoardFeedEntry, type BoardFeedPage, type IssueCommentPage, type IssueListSummary } from './api';
-import { resourceState, type BoardIssue, type BoardResource } from './model';
-import {BOARD_VIEWS, DEFAULT_BOARD_URL_STATE, DEFAULT_COMMENT_PAGE, DEFAULT_FEED_PAGE, DEFAULT_ISSUE_PAGE, DEFAULT_RESOURCE_PAGE, ISSUE_FILTERS, boardHomeState, boardHref, boardUrlFor, issueHref, issueUrlState, parseBoardUrl, tabHref, type BoardUrlState, type BoardView, writeBoardUrl} from './board-url';
-import { clampCommentPage, clampIssuePage, COMMENT_PAGE_SIZE, COMMENT_PAGES_LABEL, commentPageRange, hasCommentPages, lastCommentPage, FIRST_COMMENT_PAGE, ISSUE_PAGE_NEXT, ISSUE_PAGE_PREVIOUS, COMMENT_PAGE_NEWER, COMMENT_PAGE_OLDER, ISSUE_PAGE_SIZE, hasIssuePages, issuePage, issuePageCount, issuePageRange, COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, ISSUE_LIST_PAGES_LABEL, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, groupResources, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, overviewLoaded, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedPage, clampFeedPage, hasFeedPages, feedPageRange, trustRequired, unplacedIssueIds, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, FEED_PAGES_LABEL, FEED_PAGE_SIZE, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type BoardSummary, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess, clampResourcePage, RESOURCE_LIST_PAGES_LABEL, RESOURCE_PAGE_SIZE, resourcePage } from './ui-state';
+import { type BoardIssue } from './model';
+import {BOARD_VIEWS, DEFAULT_BOARD_URL_STATE, DEFAULT_COMMENT_PAGE, DEFAULT_FEED_PAGE, DEFAULT_ISSUE_PAGE, ISSUE_FILTERS, boardHomeState, boardHref, boardUrlFor, issueHref, issueUrlState, parseBoardUrl, tabHref, type BoardUrlState, type BoardView, writeBoardUrl} from './board-url';
+import { clampCommentPage, clampIssuePage, COMMENT_PAGE_SIZE, COMMENT_PAGES_LABEL, commentPageRange, hasCommentPages, lastCommentPage, FIRST_COMMENT_PAGE, ISSUE_PAGE_NEXT, ISSUE_PAGE_PREVIOUS, COMMENT_PAGE_NEWER, COMMENT_PAGE_OLDER, ISSUE_PAGE_SIZE, hasIssuePages, issuePage, issuePageCount, issuePageRange, COMPOSER_READ_ONLY_CALLOUT, COMPOSER_SUBMIT_HINT, ISSUE_LIST_PAGES_LABEL, accessCallout, boardAccess, boardDeleted, boardLoadFailed, boardLoaded, canMoveInQueue, DELETED_COPY, emptyIssueList, FEED_COUNT_LABEL, FEED_EMPTY, FEED_HINT, FEED_KIND_LABEL, FEED_TRUNCATED_COPY, FEED_UNTRACKED_COPY, feedEntrySummary, filterLabel, formatUpdatedAt, ISSUE_FORM_HINT, ISSUE_FORM_SUBMIT_HINT, firstRunOutcome, issueCounts, moveQueueEarlier, moveQueueIssue, moveQueueLater, moveQueueTo, openQueueOrder, overviewLoaded, priorityLabel, queuePosition, queueMoveToLabel, queueSlots, readFeedPage, clampFeedPage, hasFeedPages, feedPageRange, trustRequired, unplacedIssueIds, visibleIssues, QUEUE_DRAG_TYPE, QUEUE_HINT, QUEUE_MOVE_LABELS, QUEUE_REORDERED_NOTICE, QUEUE_REORDER_FAILED, WRITE_ACCESS_SUMMARY, REJECTED_CREDENTIAL_COPY, FIRST_RUN_COPY, BOARD_KEY_COPY, FEED_PAGES_LABEL, FEED_PAGE_SIZE, type AccessCallout, type BoardAccess, type BoardLoad, type BoardRead, type BoardSummary, type FeedRead, type FirstRunOutcome, type IssueFilter, type QueueDirection, type ReadOnlyAccess, clampResourcePage, RESOURCE_LIST_PAGES_LABEL, RESOURCE_PAGE_SIZE } from './ui-state';
 
 const DISPLAY_NAME_KEY = 'antonina:display-name';
 const REFRESH_INTERVAL = 30_000;
 type View = BoardView;
 const TABS: readonly View[] = BOARD_VIEWS;
-const TAB_TITLE: { readonly [V in View]: string } = { issues: 'Issues', resources: 'Resources', feed: 'Feed' };
+const TAB_TITLE: { readonly [V in View]: string } = { issues: 'Issues', feed: 'Feed' };
 const TAB_PANE_LABEL: { readonly [V in View]: string } = {
   issues: 'Shared issue list',
-  resources: 'Registered resources',
   feed: 'Board activity feed',
 };
 /** The tab's own sentence, so no view has to spell its case out inline. */
 const TAB_HINT: { readonly [V in View]: string } = {
   issues: QUEUE_HINT,
-  resources: 'Registered paths are protected while at least one dependent Antonina issue remains open.',
   feed: FEED_HINT,
 };
 
@@ -43,7 +41,7 @@ export default function App() {
   // default, and nothing outside `BOARD_URL_KEYS` is ever read or written, so a
   // stale URL cannot blank the board and no credential can ride along.
   const [location, setLocation] = useState<BoardUrlState>(() => parseBoardUrl(window.location.search));
-  const { view, selectedId, filter, settingsOpen, page, commentPage, feedPage, resourcePage } = location;
+  const { view, selectedId, filter, settingsOpen, page, commentPage, feedPage } = location;
   // The open issue's conversation is held as the ONE bounded page the core read
   // returned, not as a hydrated issue: `IssueCommentPage` carries the issue's own
   // fields (with an empty `messages` array) plus this page's messages and the
@@ -82,7 +80,7 @@ export default function App() {
         // and the tab's own href have to land on the same screen. The feed's page
         // and the Resources page are two of them: arriving at a tab means page 1,
         // not whatever page of it this reader left open earlier.
-        : { view: next, selectedId: undefined, page: DEFAULT_ISSUE_PAGE, feedPage: DEFAULT_FEED_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE },
+        : { view: next, selectedId: undefined, page: DEFAULT_ISSUE_PAGE, feedPage: DEFAULT_FEED_PAGE: DEFAULT_RESOURCE_PAGE },
       current,
     ));
   }, []);
@@ -139,12 +137,6 @@ export default function App() {
   // survives a reload, a shared link and Back, which is what makes `?view=feed`
   // with a page a link a reader can send someone.
   const setFeedPageIndex = useCallback((next: number) => { navigate({ feedPage: next }); }, [navigate]);
-  // The Resources page number, out of the same address and written back through
-  // the same `navigate`, for the same reason: a page number the URL does not
-  // know about does not survive a reload, a shared link or Back. It is a
-  // separate field from `page` because it pages a different screen.
-  const setResourcePageIndex = useCallback((next: number) => { navigate({ resourcePage: next }); }, [navigate]);
-
   const refresh = useCallback(async () => {
     try {
       const overview = await session.readOverview();
@@ -201,11 +193,6 @@ export default function App() {
   // address, so the address and the rows cannot drift apart in either direction.
   const pageIndex = clampIssuePage(page, visible.length);
   const paged = useMemo(() => issuePage(visible, pageIndex), [visible, pageIndex]);
-  // The Resources view's page is the same shape of thing as the Issues list's:
-  // one number out of the address, clamped onto a page that exists, and a slice
-  // of the board's own resource order. `ResourcesView` is handed the slice and
-  // the controls, so it draws one page and never the whole collection.
-  const resourceIndex = clampResourcePage(resourcePage, board?.resources.length ?? 0);
   const counts = issueCounts(board?.issues ?? []);
   const hasWriteAccess = access === 'editable';
   const empty = emptyIssueList(filter, hasWriteAccess);
@@ -412,9 +399,7 @@ export default function App() {
           <nav className="filters" aria-label="Filter issues">{(ISSUE_FILTERS as readonly IssueFilter[]).map((value) => <a key={value} role="button" className={filter === value ? 'active' : ''} aria-pressed={filter === value} href={boardHref(boardUrlFor({ filter: value }, location), window.location.pathname)} onClick={(event) => { event.preventDefault(); setFilter(value); }}>{filterLabel(value)}<span>{counts[value]}</span></a>)}</nav>
           <div className="issue-list" aria-label="Issues"><IssueQueue issues={visible} page={paged} queue={load.queue} hasWriteAccess={hasWriteAccess} selectedId={selectedId} onSelect={setSelectedId} onReorder={reorderQueue} empty={empty} /></div>
           <IssuePagination total={visible.length} page={pageIndex} onPage={setIssuePageIndex} />
-        </>           : view === 'resources'
-          ? <ResourcesView resources={board!.resources} issues={board!.issues} access={access} page={resourceIndex} onPage={setResourcePageIndex} onOpenIssue={openIssue} onAdd={(host, path, id) => run(() => api.addResourceDependency(host, path, id), 'Resource dependency added')} onRemove={(resource, id) => run(() => api.removeResourceDependency(resource.host, resource.path, id), resource.issueNumbers.length === 1 ? 'Dependency removed; resource unregistered' : 'Resource dependency removed')} onEnableEditing={() => setSettingsOpen(true)} hrefForIssue={issueHrefHere} />
-          : <FeedView readFeed={session.readFeed} issues={board!.issues} generation={feedGeneration} page={feedPage} onPage={setFeedPageIndex} onOpenIssue={openIssue} hrefForIssue={issueHrefHere} />}
+        </>          : <FeedView readFeed={session.readFeed} issues={board!.issues} generation={feedGeneration} page={feedPage} onPage={setFeedPageIndex} onOpenIssue={openIssue} hrefForIssue={issueHrefHere} />}
       </aside>
       {view === 'issues' ? selected ? <Thread conversation={selected} page={threadIndex} onPage={setCommentPageIndex} access={access} displayName={displayName} setDisplayName={setDisplayName} saveDisplayName={saveDisplayName} openSettings={() => setSettingsOpen(true)} comment={postComment} editBody={(body) => run(() => api.editIssueBody(selected.issue.number, body), 'Description updated')} close={() => void run(() => api.close(selected.issue.number), 'Issue closed')} reopen={() => void run(() => api.reopen(selected.issue.number), 'Issue reopened')} back={() => setSelectedId(undefined)} />
         : selectedId !== undefined
@@ -772,36 +757,6 @@ function AccessNotice({ access, readOnly, className, onAction }: { access: ReadO
   const callout = accessCallout(access, readOnly);
   return <div className={className}><div><strong>{callout.title}</strong><p>{callout.body}</p></div><button onClick={onAction}>{callout.action}</button></div>;
 }
-
-/**
- * The Resources tab.
- *
- * Paging changed what is drawn, not what a resource is. The view is handed the
- * board's resources and the page number, takes that page of them, and groups
- * exactly what it was handed: `groupResources` is the same call over the same
- * `BoardResource` values, so hosts are still sorted by name and paths by path,
- * and a dependency chip, its state label, its remove control and its
- * add-dependency form are the same controls over the same issues as before.
- * The register form, the access notice and the empty state are untouched.
- */
-function ResourcesView({ resources, issues, access, page, onPage, onOpenIssue, onAdd, onRemove, onEnableEditing, hrefForIssue }: { resources: BoardResource[]; issues: IssueReference[]; access: BoardAccess; page: number; onPage: (page: number) => void; onOpenIssue: (id: string) => void; hrefForIssue?: (id: string) => string; onAdd: (host: string, path: string, id: string) => Promise<unknown>; onRemove: (resource: BoardResource, id: string) => Promise<unknown>; onEnableEditing: () => void }) {
-  // The page is a slice of the board's own resource order, and the total the
-  // controls clamp against is the whole collection rather than the slice — so
-  // the position line and the disabled boundaries describe the board, not the
-  // window. Grouping happens after the slice, so a page may hold several hosts.
-  const paged = resourcePage(resources, page);
-  const grouped = groupResources(paged);
-  async function add(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await onAdd(String(data.get('host')), String(data.get('path')), String(data.get('issue'))); if (result) form.reset(); }
-  return <div className="resources-view">
-    {access === 'editable' && <form className="resource-form" onSubmit={add}><h2>Register a resource</h2><p>Add a host and path, protected by at least one open issue.</p><label htmlFor="resource-host">Lubko host</label><input id="resource-host" name="host" placeholder="lubko://server-name" required /><label htmlFor="resource-path">Absolute path</label><input id="resource-path" name="path" placeholder="/registered/path" required /><label htmlFor="resource-issue">Open issue</label><select id="resource-issue" name="issue" required><option value="">Choose an issue</option>{issues.filter((issue) => issue.state === 'open').map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add dependency</button></form>}
-    {access !== 'editable' && <AccessNotice access={access} className="access-callout" onAction={onEnableEditing} />}
-
-    {grouped.map(([host, entries]) => <section className="resource-host" key={host}><h2>{host}</h2>{entries.map((resource) => <article className="resource-card" key={resource.path}><header><code>{resource.path}</code><span className={`resource-state ${resourceState(resource, issues)}`}>{resourceState(resource, issues)}</span></header><div className="dependency-chips">{resource.issueNumbers.map((number) => { const issue = issues.find((entry) => entry.number === number)!; const id = issue.number; return <span className="dependency-chip" key={number}><a role="button" href={hrefForIssue?.(id)} onClick={issueLinkClick(onOpenIssue, id)}>#{id} {issue.title}</a><span className={`state-label ${issue.state}`}>{issue.state}</span>{access === 'editable' && <button aria-label={`Remove issue ${id}`} onClick={() => void onRemove(resource, id)}>×</button>}</span>; })}</div>{access === 'editable' && <AddDependency resource={resource} issues={issues} add={onAdd} />}</article>)}</section>)}
-    {!resources.length && <div className="empty-state"><h2>No resources registered</h2><p>Registered paths appear here grouped by Lubko host.</p></div>}
-    <IssuePagination total={resources.length} page={page} pageSize={RESOURCE_PAGE_SIZE} onPage={onPage} label={RESOURCE_LIST_PAGES_LABEL} />
-  </div>;
-}
-function AddDependency({ resource, issues, add }: { resource: BoardResource; issues: IssueReference[]; add: (host: string, path: string, id: string) => Promise<unknown> }) { const options = issues.filter((issue) => issue.state === 'open' && !resource.issueNumbers.includes(issue.number)); if (!options.length) return null; return <form className="dependency-add" onSubmit={async (event) => { event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const result = await add(resource.host, resource.path, String(data.get('issue'))); if (result) form.reset(); }}><select name="issue" required defaultValue=""><option value="" disabled>Add open issue dependency…</option>{options.map((issue) => <option key={issue.number} value={issue.number}>#{issue.number} {issue.title}</option>)}</select><button type="submit">Add</button></form>; }
 
 /**
  * The feed tab's container. It owns nothing but the ONE numbered page it last

@@ -36,7 +36,7 @@ function rejected(board) {
 test('current boards contain issues and resources but no centralized execution catalog', () => {
   const board = emptyBoard();
   assert.equal(board.schemaVersion, BOARD_SCHEMA_VERSION);
-  assert.deepEqual(Object.keys(board).sort(), ['issues', 'nextIssueNumber', 'resources', 'schemaVersion']);
+  assert.deepEqual(Object.keys(board).sort(), ['issues', 'nextIssueNumber', 'schemaVersion']);
   assert.deepEqual(parseBoard(board), board);
   assert.equal(rejected({ ...board, targets: [] }).defect.kind, 'key-set');
   assert.equal(rejected({ ...board, dispatches: [] }).defect.kind, 'key-set');

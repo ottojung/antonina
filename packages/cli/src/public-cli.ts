@@ -135,15 +135,15 @@ const BOARD_SPECS: readonly CommandSpec[] = [
   ...(['acquire', 'renew', 'release'] as const).map((action): CommandSpec => withJson({
     path: ['lease', action],
     summary: 'Atomically ' + action + ' a temporary shared scheduler work claim.',
-    values: ['--issue', '--agent', '--host', '--token', '--ttl'],
-    required: ['--issue', '--agent', '--host', '--token'],
+    values: ['--issue', '--agent', '--token', '--ttl'],
+    required: ['--issue', '--agent', '--token'],
     normalize: (p) => ['lease', action,
-      ...valueArgs(p, ['--issue', '--agent', '--host', '--token', '--ttl']),
+      ...valueArgs(p, ['--issue', '--agent', '--token', '--ttl']),
       ...jsonArg(p)],
   })),
   withJson({
     path: ['lease', 'list'],
-    summary: 'List current shared scheduler claims across hosts.',
+    summary: 'List current shared scheduler work claims.',
     normalize: (p) => ['lease', 'list', ...jsonArg(p)],
   }),
   withJson({

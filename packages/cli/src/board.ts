@@ -1,6 +1,7 @@
 import {
   AntoninaApiError,
   BoardApi,
+  type SchedulerLease,
   BoardDeletedError,
   BoardMissingError,
   BoardStorageRejectedError,
@@ -145,6 +146,8 @@ export interface BoardCommandContext {
 }
 
 type CommandValue =
+  | SchedulerLease
+  | SchedulerLease[]
   | BoardIssue
   | BoardIssue[]
   | IssueListSummary[]
@@ -415,6 +418,31 @@ async function execute(
         return { mode: 'queue', value: await client.reorderQueue(args.map((arg) => requireIssueId(arg, 'ISSUE'))) };
       }
       throw new AntoninaApiError('queue requires list or reorder');
+    }
+    case 'lease': {
+      const [action, ...args] = parsed.args;
+      if (action === 'list') {
+        if (args.length !== 0) throw new AntoninaApiError('lease list takes no arguments');
+        return { mode: 'lease-list', value: await raw.schedulerLeases() };
+      }
+      if (action !== 'acquire' && action !== 'renew' && action !== 'release') {
+        throw new AntoninaApiError('lease requires acquire, renew, release, or list');
+      }
+      const issue = option(args, '--issue');
+      const agent = option(issue.rest, '--agent');
+      const host = option(agent.rest, '--host');
+      const token = option(host.rest, '--token');
+      const ttl = option(token.rest, '--ttl');
+      if (ttl.rest.length !== 0) throw new AntoninaApiError('Unexpected lease arguments');
+      const ttlValue = ttl.value === undefined ? 1800 : parsePositiveInteger(ttl.value, '--ttl');
+      return {
+        mode: 'lease',
+        value: await raw.schedulerLease(
+          requireIssueId(requireArg(issue.value, '--issue'), '--issue'),
+          action, requireArg(token.value, '--token'), requireArg(agent.value, '--agent'),
+          requireArg(host.value, '--host'), ttlValue,
+        ),
+      };
     }
     case 'feed': {
       const limitOption = option(parsed.args, '--limit');
@@ -799,6 +827,17 @@ function humanLines(result: CommandResult): string[] {
     ];
   }
 
+  if (result.mode === 'lease') {
+    const lease = result.value as SchedulerLease | null;
+    return [lease === null ? 'Scheduler lease released'
+      : 'Scheduler lease ' + lease.issueId + ' held by ' + lease.agentId
+        + ' on ' + lease.host + ' until ' + lease.expiresAt];
+  }
+  if (result.mode === 'lease-list') {
+    return (result.value as SchedulerLease[]).map((lease) =>
+      'Scheduler lease ' + lease.issueId + ' held by ' + lease.agentId
+      + ' on ' + lease.host + ' until ' + lease.expiresAt);
+  }
   if (result.mode === 'review') {
     const review = result.value as BoardReview;
     return [

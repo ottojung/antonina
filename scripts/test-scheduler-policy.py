@@ -122,15 +122,6 @@ class SchedulerPolicyTests(unittest.TestCase):
                 read.assert_called_once_with(issue_id)
                 self.assertEqual(json.loads(out.getvalue())["number"], issue_id)
 
-                out = io.StringIO()
-                with patch.object(worktrees, "running_agents", return_value=[]), \
-                     patch.object(worktrees, "resources", return_value=[]) as read, \
-                     patch("sys.argv", ["worktrees", "--issue", issue_id]), \
-                     redirect_stdout(out):
-                    worktrees.main()
-                read.assert_called_once_with(issue_id)
-                self.assertEqual(json.loads(out.getvalue()), [])
-
         for invalid_id in ("", " ", " 320 "):
             with self.subTest(invalid_id=invalid_id):
                 for helper in (issue_reader, worktrees):

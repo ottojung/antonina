@@ -37,17 +37,12 @@ import {
 } from './feed.js';
 import {
   MAX_SAFE_INTEGER,
-  canonicalHost,
-  canonicalPath,
   emptyBoard,
-  resourceViews,
   type Board,
   type BoardIssue,
-  type BoardResource,
   type BoardReview,
   type ReviewVerdict,
   type IssueState,
-  type ResourceView,
 } from './model.js';
 import {
   daemonHostViews,
@@ -619,46 +614,6 @@ export class BoardApi {
     return clone(review);
   }
 
-  async listResources(host?: string, issueNumber?: string): Promise<ResourceView[]> {
-    return resourceViews(await this.loadBoard(), host, issueNumber);
-  }
-
-  async addResourceDependency(host: string, path: string, issueNumber: string): Promise<BoardResource> {
-    let cleanHost: string;
-    let cleanPath: string;
-    try {
-      cleanHost = canonicalHost(host);
-      cleanPath = canonicalPath(path);
-    } catch (error) {
-      throw new AntoninaApiError(error instanceof Error ? error.message : 'Invalid resource');
-    }
-    const committed = await this.append(
-      'resource.add',
-      { number: issueNumber, host: cleanHost, path: cleanPath },
-    );
-    const resource = committed.state.board.resources.find(
-      (entry) => entry.host === cleanHost && entry.path === cleanPath,
-    );
-    if (!resource) throw new AntoninaApiError('Antonina resource disappeared after mutation');
-    return clone(resource);
-  }
-
-  async removeResourceDependency(host: string, path: string, issueNumber: string): Promise<BoardResource[]> {
-    let cleanHost: string;
-    let cleanPath: string;
-    try {
-      cleanHost = canonicalHost(host);
-      cleanPath = canonicalPath(path);
-    } catch (error) {
-      throw new AntoninaApiError(error instanceof Error ? error.message : 'Invalid resource');
-    }
-    const committed = await this.append(
-      'resource.remove',
-      { number: issueNumber, host: cleanHost, path: cleanPath },
-    );
-    return clone(committed.state.board.resources);
-  }
-
   async daemonHosts(
     reports: readonly DaemonHostReport[],
     options: { nowMs: number; staleAfterMs?: number },
@@ -913,7 +868,7 @@ export {
   recheckCollectionClaim,
   unverifiedCollectionSnapshot,
 } from './collection.js';
-export type { Board, BoardIssue, BoardResource, IssueState, ResourceView } from './model.js';
+export type { Board, BoardIssue, IssueState } from './model.js';
 export type {
   AuthorizedCollection,
   CandidateFactsGatherer,

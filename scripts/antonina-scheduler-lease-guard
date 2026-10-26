@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Guard a temporary shared scheduler claim while its local worker is active.
+
+The lease is cooperative, not durable host placement. Failure to renew fences
+the worker by stopping it; crashes allow the temporary claim to expire.
+"""
+import argparse
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+ANTONINA = os.environ.get("ANTONINA_BIN", os.path.expanduser("~/.local/bin/antonina"))
+POLL_SECONDS = 15
+RENEW_SECONDS = 120
+TTL_SECONDS = 600
+
+def call(*args):
+    return subprocess.run([ANTONINA, *args], text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, timeout=90, check=False)
+
+def lease(action, issue, agent, token):
+    return call("board", "lease", action, "--issue", issue,
+                "--agent", agent, "--host", socket.gethostname(),
+                "--token", token, "--ttl", str(TTL_SECONDS), "--json")
+
+def state(agent):
+    r = call("agent", "status", "--id", agent, "--json")
+    if r.returncode:
+        raise RuntimeError(r.stderr or r.stdout)
+    record = json.loads(r.stdout)
+    if not isinstance(record, dict) or not isinstance(record.get("state"), str):
+        raise RuntimeError("Invalid agent status")
+    return record["state"]
+
+def stop(agent):
+    r = call("agent", "stop", "--id", agent)
+    if r.returncode:
+        print("Unable to stop worker:", r.stderr, file=sys.stderr, flush=True)
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--issue", required=True)
+    parser.add_argument("--agent", required=True)
+    parser.add_argument("--token", required=True)
+    a = parser.parse_args()
+    next_renew = time.monotonic() + RENEW_SECONDS
+    startup_deadline = time.monotonic() + 45
+    seen_running = False
+    failures = 0
+    while True:
+        try:
+            current = state(a.agent)
+        except Exception as error:
+            failures += 1
+            print("Agent status unavailable:", error, file=sys.stderr, flush=True)
+            if failures >= 3:
+                stop(a.agent)
+                return 1
+            time.sleep(POLL_SECONDS)
+            continue
+        failures = 0
+        if current in ("running", "starting"):
+            seen_running = True
+        elif not seen_running and current == "idle" and time.monotonic() < startup_deadline:
+            # The detached worker can briefly be idle before its runner starts.
+            # Releasing here would permit another host to start the same front.
+            time.sleep(POLL_SECONDS)
+            continue
+        else:
+            r = lease("release", a.issue, a.agent, a.token)
+            if r.returncode:
+                print("Claim release refused:", r.stderr, file=sys.stderr, flush=True)
+            return 0
+        if time.monotonic() >= next_renew:
+            try:
+                renewed = lease("renew", a.issue, a.agent, a.token)
+            except Exception as error:
+                print("Renewal unavailable:", error, file=sys.stderr, flush=True)
+                stop(a.agent)
+                return 1
+            if renewed.returncode:
+                print("Renewal refused:", renewed.stderr, file=sys.stderr, flush=True)
+                stop(a.agent)
+                return 1
+            next_renew = time.monotonic() + RENEW_SECONDS
+        time.sleep(POLL_SECONDS)
+
+if __name__ == "__main__":
+    sys.exit(main())

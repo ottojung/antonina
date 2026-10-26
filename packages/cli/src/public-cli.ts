@@ -34,6 +34,9 @@ interface CommandSpec {
 }
 
 const OPTION_HELP: Readonly<Record<string, string>> = {
+  '--agent': 'Scheduler worker ID.',
+  '--token': 'Random scheduler lease token.',
+  '--ttl': 'Scheduler lease lifetime in seconds.',
   '--author': 'Message author.',
   '--body': 'Text body.',
   '--confirm': 'Confirm the destructive operation.',
@@ -128,6 +131,20 @@ const BOARD_SPECS: readonly CommandSpec[] = [
     repeated: ['--id'],
     requireRepeated: ['--id'],
     normalize: (p) => ['queue', 'reorder', ...(p.repeated.get('--id') ?? []), ...jsonArg(p)],
+  }),
+  ...(['acquire', 'renew', 'release'] as const).map((action): CommandSpec => withJson({
+    path: ['lease', action],
+    summary: 'Atomically ' + action + ' a temporary shared scheduler work claim.',
+    values: ['--issue', '--agent', '--host', '--token', '--ttl'],
+    required: ['--issue', '--agent', '--host', '--token'],
+    normalize: (p) => ['lease', action,
+      ...valueArgs(p, ['--issue', '--agent', '--host', '--token', '--ttl']),
+      ...jsonArg(p)],
+  })),
+  withJson({
+    path: ['lease', 'list'],
+    summary: 'List current shared scheduler claims across hosts.',
+    normalize: (p) => ['lease', 'list', ...jsonArg(p)],
   }),
   withJson({
     path: ['feed'],
@@ -392,7 +409,7 @@ const SPECS: Readonly<Record<PublicNamespace, readonly CommandSpec[]>> = {
 
 const GROUPS: Readonly<Record<PublicNamespace, readonly string[]>> = {
   agent: ['model'],
-  board: ['credential', 'queue', 'resource', 'collect'],
+  board: ['credential', 'queue', 'resource', 'collect', 'lease'],
   daemon: [],
 };
 

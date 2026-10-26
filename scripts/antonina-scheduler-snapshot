@@ -78,6 +78,15 @@ def compact_terminal_hints(hints, relevant_issues):
             "incomplete": bool(hints.get("incomplete", False))}
 
 
+# Claims from every participating host, not just the local worker inventory.
+# If the shared board cannot be read, ownership is unknown, not empty.
+leases = cli_json("board", "lease", "list", "--json")
+if not isinstance(leases, list):
+    raise RuntimeError("Shared scheduler-lease inventory is malformed")
+for lease in leases:
+    if not isinstance(lease, dict) or not isinstance(lease.get("issueId"), str):
+        raise RuntimeError("Shared scheduler-lease record is malformed")
+
 running = running_agents()
 terminal_hints = recent_terminal_agents()
 
@@ -103,6 +112,7 @@ live_issue_ids = {
     for issue_id in [issue_id_from_agent_title(a.get("title"))]
     if issue_id is not None
 }
+live_issue_ids.update(lease["issueId"] for lease in leases)
 
 # The board is already in its canonical priority order. Keep EVERY actionable
 # distinct issue in that order, without a six-per-project truncation.
@@ -115,6 +125,7 @@ context = {
     "orphan_agents": orphan_agents,
     "open_issue_count": len(issue_headers),
     "live_issue_ids": sorted(live_issue_ids, key=str),
+    "active_board_leases": leases,
 }
 context["open_issues"] = issue_headers
 context["recent_terminal_agents"] = compact_terminal_hints(terminal_hints, open_ids)

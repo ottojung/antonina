@@ -124,6 +124,53 @@ export class BoardStorageRejectedError extends AntoninaApiError {
   }
 }
 
+export interface SchedulerLease {
+  issueId: string;
+  token: string;
+  agentId: string;
+  host: string;
+  expiresAt: string;
+}
+
+/**
+ * Short-lived claims about live *work*, never permanent project/host ownership.
+ * Each decision is evaluated in the same CAS-retried board transaction that
+ * appends its evidence, so two schedulers cannot simultaneously acquire a front.
+ */
+const LEASE_PREFIX = '[antonina-scheduler-lease-v1]\n';
+const LEASE_AUTHOR = 'antonina-scheduler';
+
+function latestSchedulerLease(issue: BoardIssue): SchedulerLease | null {
+  for (let index = issue.messages.length - 1; index >= 0; index -= 1) {
+    const message = issue.messages[index]!;
+    if (message.author !== LEASE_AUTHOR || !message.body.startsWith(LEASE_PREFIX)) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(message.body.slice(LEASE_PREFIX.length));
+    } catch {
+      throw new AntoninaApiError('Malformed scheduler lease event on issue ' + issue.number);
+    }
+    if (parsed === null || typeof parsed !== 'object') {
+      throw new AntoninaApiError('Malformed scheduler lease event on issue ' + issue.number);
+    }
+    const e = parsed as Record<string, unknown>;
+    if (e.issueId !== issue.number || typeof e.token !== 'string'
+        || typeof e.agentId !== 'string' || typeof e.host !== 'string'
+        || typeof e.expiresAt !== 'string' || !Number.isFinite(Date.parse(e.expiresAt))) {
+      throw new AntoninaApiError('Invalid scheduler lease event on issue ' + issue.number);
+    }
+    if (e.action === 'release') return null;
+    if (e.action !== 'acquire' && e.action !== 'renew') {
+      throw new AntoninaApiError('Invalid scheduler lease action on issue ' + issue.number);
+    }
+    return {
+      issueId: issue.number, token: e.token,
+      agentId: e.agentId, host: e.host, expiresAt: e.expiresAt,
+    };
+  }
+  return null;
+}
+
 export interface BoardApiOptions extends SignedBoardStoreOptions {
   credential?: BoardCredential | null;
   trustAnchor?: BoardTrustAnchor | null;
@@ -618,6 +665,56 @@ export class BoardApi {
     return clone(daemonHostViews(reports, options));
   }
 
+  async schedulerLeases(): Promise<SchedulerLease[]> {
+    const board = await this.loadBoard();
+    const now = Date.now();
+    return board.issues.flatMap((issue) => {
+      if (issue.state !== 'open') return [];
+      const lease = latestSchedulerLease(issue);
+      return lease !== null && Date.parse(lease.expiresAt) > now ? [lease] : [];
+    });
+  }
+
+  async schedulerLease(
+    issueId: string, action: 'acquire' | 'renew' | 'release',
+    token: string, agentId: string, host: string, ttlSeconds = 1800,
+  ): Promise<SchedulerLease | null> {
+    if (!/^[a-f0-9]{32,128}$/.test(token) || !agentId.trim() || !host.trim()) {
+      throw new AntoninaApiError('A scheduler lease needs a random token, agent ID and host');
+    }
+    if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds < 120 || ttlSeconds > 3600) {
+      throw new AntoninaApiError('Scheduler lease TTL must be 120..3600 seconds');
+    }
+    const expiry = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    let emitted: SchedulerLease | null = null;
+    // Full hydration: appendFast's summary-only threads are not sufficient
+    // to validate prior claims. The callback runs anew on every pointer CAS retry.
+    await this.append('issue.comment', (state) => {
+      const issue = state.board.issues.find((entry) => entry.number === issueId);
+      if (!issue || issue.state !== 'open') {
+        throw new AntoninaApiError('Scheduler cannot lease missing or closed issue ' + issueId);
+      }
+      const current = latestSchedulerLease(issue);
+      const active = current !== null && Date.parse(current.expiresAt) > Date.now();
+      if (action === 'acquire') {
+        if (active) throw new AntoninaApiError(
+          'Issue ' + issueId + ' is already leased by ' + current!.agentId + ' on ' + current!.host);
+      } else if (current?.token !== token || (action === 'renew' && !active)) {
+        throw new AntoninaApiError('Scheduler lease was lost or expired for issue ' + issueId);
+      }
+      emitted = action === 'release' ? null
+        : { issueId, token, agentId, host, expiresAt: expiry };
+      return {
+        number: issueId, author: LEASE_AUTHOR,
+        body: LEASE_PREFIX + JSON.stringify({
+          action, issueId, token, agentId, host,
+          expiresAt: action === 'release' ? (current?.expiresAt ?? expiry) : expiry,
+        }),
+      };
+    }, true);
+    return emitted;
+  }
+
   async comment(number: string, author: string, body: string): Promise<BoardIssue> {
     const cleanAuthor = author.trim();
     const cleanBody = body.trim();
@@ -739,14 +836,15 @@ export class BoardApi {
   private async append(
     kind: Exclude<BoardOperationKind, 'board.initialize'>,
     payload: BoardOperationPayload | ((state: VerifiedBoardState) => BoardOperationPayload),
+    fullBoard = false,
   ): Promise<StoredSignedBoard> {
     const credential = await this.requireUsableCredential();
     try {
-      const stored = await this.store.appendFast(
-        credential,
-        { kind, payload },
-        this.rememberedHead,
-      );
+      const stored = await (fullBoard ? this.store.append(
+        credential, { kind, payload }, this.rememberedHead,
+      ) : this.store.appendFast(
+        credential, { kind, payload }, this.rememberedHead,
+      ));
       await this.acceptStored(stored, kind === 'board.delete');
       this.storageRejected = false;
       return stored;

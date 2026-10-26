@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import re
+import secrets
+import socket
 import socket
 import subprocess
 import sys
@@ -20,42 +22,9 @@ def run(args, check=True):
 
 
 
-def declared_execution_host(body):
-    """A host instruction is plain issue prose, never a label or board field.
-
-    Only the leading 'Execution host:' declaration is machine-interpreted.
-    Other language in the body remains available to the orchestrator itself.
-    """
-    first_line = (body or "").lstrip().split("\n", 1)[0].strip()
-    if not re.match(r"^(?:\*\*)?Execution host\s*:", first_line, re.I):
-        return None
-    match = re.match(
-        r"^(?:\*\*)?Execution host\s*:\s*([a-z0-9][a-z0-9._-]*)\b",
-        first_line,
-        re.I,
-    )
-    if not match:
-        raise SystemExit("issue has a malformed Execution host instruction")
-    return match.group(1).lower()
-
-
-def ensure_local_execution_host(record):
-    required = declared_execution_host(record.get("body"))
-    local = socket.gethostname().strip().lower()
-    if not local:
-        raise SystemExit("cannot determine local hostname; refusing issue launch")
-    if required is not None and local != required:
-        raise SystemExit(
-            f"issue #{record.get('number')} requires execution on {required}, "
-            f"not this host ({local})"
-        )
-
-
-
 def require_open_issue(issue):
     result = run([ANTONINA, "board", "show", "--id", str(issue), "--page", "1", "--json"])
     record = json.loads(result.stdout)
-    ensure_local_execution_host(record)
     if record.get("state") != "open":
         raise SystemExit(f"refusing launch on non-open board issue #{issue}: {record.get('state')}")
     return record
@@ -157,6 +126,31 @@ def agent_prompt(issue, prompt, agent_id):
     )
 
 
+def lease_command(action, issue, agent_id, token):
+    return [ANTONINA, "board", "lease", action, "--issue", str(issue),
+            "--agent", agent_id, "--host", socket.gethostname(),
+            "--token", token, "--ttl", "600", "--json"]
+
+
+def release_claim(issue, agent_id, token):
+    return run(lease_command("release", issue, agent_id, token), check=False)
+
+
+def start_lease_guard(issue, agent_id, token):
+    command = [os.path.expanduser("~/.local/bin/antonina-scheduler-lease-guard"),
+               "--issue", str(issue), "--agent", agent_id, "--token", token]
+    log_path = os.path.join("/tmp", "antonina-lease-guard-" + token[:16] + ".log")
+    with open(log_path, "a", encoding="utf-8") as log:
+        child = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+            start_new_session=True, close_fds=True,
+        )
+    time.sleep(0.1)
+    if child.poll() is not None:
+        raise RuntimeError("Lease guard failed to start: " + log_path)
+    return child.pid
+
+
 def new_agent(title):
     return run([ANTONINA, "agent", "new",
                 "--cwd", START_DIR, "--title", title, "--json"], check=False)
@@ -186,6 +180,14 @@ def main():
         raise SystemExit(proc.returncode or 1)
     agent_id = json.loads(proc.stdout)["id"]
 
+    # A single atomic board commit excludes concurrent hosts before starting work.
+    token = secrets.token_hex(24)
+    acquired = run(lease_command("acquire", args.issue, agent_id, token), check=False)
+    if acquired.returncode != 0:
+        cleanup_idle(agent_id)
+        sys.stderr.write(acquired.stderr or acquired.stdout)
+        raise SystemExit(acquired.returncode or 1)
+
     # Both rechecks guard against stale queue and agent-state snapshots.
     try:
         current_issue = require_open_issue(args.issue)
@@ -193,6 +195,7 @@ def main():
         if owners:
             raise SystemExit(f"issue #{args.issue} acquired another live owner: {', '.join(owners)}")
     except SystemExit:
+        release_claim(args.issue, agent_id, token)
         cleanup_idle(agent_id)
         raise
 
@@ -202,9 +205,19 @@ def main():
         "--detach", "--json",
     ], check=False)
     if started.returncode != 0:
+        release_claim(args.issue, agent_id, token)
         cleanup_idle(agent_id)
         sys.stderr.write(started.stderr or started.stdout)
         raise SystemExit(started.returncode or 1)
+
+    # A detached guard renews the temporary shared claim, releases it on
+    # termination and stops the worker if its lease is lost.
+    try:
+        guard_pid = start_lease_guard(args.issue, agent_id, token)
+    except Exception as error:
+        run([ANTONINA, "agent", "stop", "--id", agent_id], check=False)
+        sys.stderr.write("Unable to supervise shared lease: " + str(error) + "\n")
+        raise SystemExit(1)
 
     try:
         require_open_issue(args.issue)
@@ -247,7 +260,8 @@ def main():
     print(json.dumps({
         "id": agent_id,
         "run": json.loads(started.stdout) if started.stdout.strip() else None,
-        "comment_recorded": comment.returncode == 0
+        "comment_recorded": comment.returncode == 0,
+        "guard_pid": guard_pid
     }, separators=(",", ":")))
     if comment.returncode != 0:
         sys.stderr.write("worker started but board comment failed\n")

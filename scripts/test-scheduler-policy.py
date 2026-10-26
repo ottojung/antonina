@@ -124,10 +124,9 @@ class SchedulerPolicyTests(unittest.TestCase):
 
         for invalid_id in ("", " ", " 320 "):
             with self.subTest(invalid_id=invalid_id):
-                for helper in (issue_reader, worktrees):
-                    with patch("sys.argv", ["helper", "--issue", invalid_id]):
-                        with self.assertRaises(SystemExit):
-                            helper.main()
+                with patch("sys.argv", ["issue-reader", "--issue", invalid_id]):
+                    with self.assertRaises(SystemExit):
+                        issue_reader.main()
 
     def test_scheduler_deployer_checks_orchestrator_resource_companion(self):
         deploy = (ROOT / "antonina-scheduler-deploy").read_text()

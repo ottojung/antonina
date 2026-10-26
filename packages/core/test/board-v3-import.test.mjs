@@ -62,7 +62,7 @@ function legacyServer() {
 async function withLegacyBoard(run) {
   const { server, store } = legacyServer();
   const bootstrap = await store.initialize({
-    schemaVersion: 4,
+    schemaVersion: 5,
     nextIssueNumber: 2,
     issues: [{
       number: 1,
@@ -73,7 +73,6 @@ async function withLegacyBoard(run) {
       updatedAt: '2026-09-20T09:00:00.000Z',
       messages: [],
     }],
-    resources: [],
   });
   const credential = bootstrap.credential;
   const fixture = buildLegacyBoard(credential.storageCapability, {

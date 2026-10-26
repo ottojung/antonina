@@ -922,13 +922,7 @@ test('a migrated board accepts writes, and those writes survive a reopen', async
   assert.equal(issue.title, 'Written after migration');
   assert.equal(issue.state, 'open');
   assert.deepEqual(issue.messages.map((message) => message.body), ['comment on a migrated board']);
-  assert.deepEqual(
-    reread.state.board.resources.map((resource) => [resource.host, resource.path, resource.issueNumbers]),
-    [
-      ['lubko://gpu-01', '/srv/work', ['1', '3', '5']],
-      ['lubko://gpu-02', '/srv/after', ['7']],
-    ],
-  );
+  assert.equal(Object.hasOwn(reread.state.board, 'resources'), false);
 
   // The first write migrates the board, and every state after it reports the
   // board at the current version through no versions: the board is materialized

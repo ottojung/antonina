@@ -650,7 +650,6 @@ const board = (overrides: Record<string, unknown> = {}) => ({
   schemaVersion: BOARD_SCHEMA_VERSION,
   nextIssueNumber: 2,
   issues: [{ number: '1', title: 'Issue 1', body: '', state: 'open', createdAt: timestamp, updatedAt: timestamp, messages: [] }],
-  resources: [],
   ...overrides,
 });
 

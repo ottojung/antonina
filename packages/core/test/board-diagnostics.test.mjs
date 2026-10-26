@@ -69,7 +69,7 @@ test('v2 and v3 historical formats remain readable but project into the v4 shape
   assert.deepEqual(parsePersistedBoard(v3), v3);
   for (const legacy of [v2, v3]) {
     const projection = migratePersistedBoard(legacy).board;
-    assert.deepEqual(projection, { ...v2, schemaVersion: BOARD_SCHEMA_VERSION });
+    assert.deepEqual(projection, { schemaVersion: BOARD_SCHEMA_VERSION, nextIssueNumber: v2.nextIssueNumber, issues: v2.issues });
     assert.equal(Object.hasOwn(projection, 'targets'), false);
     assert.equal(Object.hasOwn(projection, 'dispatches'), false);
   }

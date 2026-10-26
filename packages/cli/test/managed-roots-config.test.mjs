@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { describeRootsDefect } from '../dist/packages/cli/src/collection.js';
+import { describeRootsDefect } from '../dist/packages/agent-runtime/src/managed-roots-config.js';
 import {
   MANAGED_ROOTS_ENV,
   loadManagedRoots,

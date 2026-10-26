@@ -128,7 +128,6 @@ export interface SchedulerLease {
   issueId: string;
   token: string;
   agentId: string;
-  host: string;
   expiresAt: string;
 }
 
@@ -153,9 +152,11 @@ function latestSchedulerLease(issue: BoardIssue): SchedulerLease | null {
     if (parsed === null || typeof parsed !== 'object') {
       throw new AntoninaApiError('Malformed scheduler lease event on issue ' + issue.number);
     }
+    // Earlier events may contain additional free-form metadata. Ignore it:
+    // scheduling interprets only generic claim identity, token and expiry.
     const e = parsed as Record<string, unknown>;
     if (e.issueId !== issue.number || typeof e.token !== 'string'
-        || typeof e.agentId !== 'string' || typeof e.host !== 'string'
+        || typeof e.agentId !== 'string'
         || typeof e.expiresAt !== 'string' || !Number.isFinite(Date.parse(e.expiresAt))) {
       throw new AntoninaApiError('Invalid scheduler lease event on issue ' + issue.number);
     }
@@ -165,7 +166,7 @@ function latestSchedulerLease(issue: BoardIssue): SchedulerLease | null {
     }
     return {
       issueId: issue.number, token: e.token,
-      agentId: e.agentId, host: e.host, expiresAt: e.expiresAt,
+      agentId: e.agentId, expiresAt: e.expiresAt,
     };
   }
   return null;
@@ -677,10 +678,10 @@ export class BoardApi {
 
   async schedulerLease(
     issueId: string, action: 'acquire' | 'renew' | 'release',
-    token: string, agentId: string, host: string, ttlSeconds = 1800,
+    token: string, agentId: string, ttlSeconds = 1800,
   ): Promise<SchedulerLease | null> {
-    if (!/^[a-f0-9]{32,128}$/.test(token) || !agentId.trim() || !host.trim()) {
-      throw new AntoninaApiError('A scheduler lease needs a random token, agent ID and host');
+    if (!/^[a-f0-9]{32,128}$/.test(token) || !agentId.trim()) {
+      throw new AntoninaApiError('A scheduler lease needs a random token and agent ID');
     }
     if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds < 120 || ttlSeconds > 3600) {
       throw new AntoninaApiError('Scheduler lease TTL must be 120..3600 seconds');
@@ -698,16 +699,16 @@ export class BoardApi {
       const active = current !== null && Date.parse(current.expiresAt) > Date.now();
       if (action === 'acquire') {
         if (active) throw new AntoninaApiError(
-          'Issue ' + issueId + ' is already leased by ' + current!.agentId + ' on ' + current!.host);
+          'Issue ' + issueId + ' is already leased by ' + current!.agentId);
       } else if (current?.token !== token || (action === 'renew' && !active)) {
         throw new AntoninaApiError('Scheduler lease was lost or expired for issue ' + issueId);
       }
       emitted = action === 'release' ? null
-        : { issueId, token, agentId, host, expiresAt: expiry };
+        : { issueId, token, agentId, expiresAt: expiry };
       return {
         number: issueId, author: LEASE_AUTHOR,
         body: LEASE_PREFIX + JSON.stringify({
-          action, issueId, token, agentId, host,
+          action, issueId, token, agentId,
           expiresAt: action === 'release' ? (current?.expiresAt ?? expiry) : expiry,
         }),
       };

@@ -13,9 +13,9 @@ import sys
 import time
 
 ANTONINA = os.environ.get("ANTONINA_BIN", os.path.expanduser("~/.local/bin/antonina"))
-POLL_SECONDS = 25
-RENEW_SECONDS = 300
-TTL_SECONDS = 1800
+POLL_SECONDS = 15
+RENEW_SECONDS = 120
+TTL_SECONDS = 600
 
 def call(*args):
     return subprocess.run([ANTONINA, *args], text=True, stdout=subprocess.PIPE,
@@ -47,6 +47,8 @@ def main():
     parser.add_argument("--token", required=True)
     a = parser.parse_args()
     next_renew = time.monotonic() + RENEW_SECONDS
+    startup_deadline = time.monotonic() + 45
+    seen_running = False
     failures = 0
     while True:
         try:
@@ -60,7 +62,14 @@ def main():
             time.sleep(POLL_SECONDS)
             continue
         failures = 0
-        if current not in ("running", "starting"):
+        if current in ("running", "starting"):
+            seen_running = True
+        elif not seen_running and current == "idle" and time.monotonic() < startup_deadline:
+            # The detached worker can briefly be idle before its runner starts.
+            # Releasing here would permit another host to start the same front.
+            time.sleep(POLL_SECONDS)
+            continue
+        else:
             r = lease("release", a.issue, a.agent, a.token)
             if r.returncode:
                 print("Claim release refused:", r.stderr, file=sys.stderr, flush=True)

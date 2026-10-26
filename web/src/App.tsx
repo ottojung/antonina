@@ -80,7 +80,7 @@ export default function App() {
         // and the tab's own href have to land on the same screen. The feed's page
         // and the Resources page are two of them: arriving at a tab means page 1,
         // not whatever page of it this reader left open earlier.
-        : { view: next, selectedId: undefined, page: DEFAULT_ISSUE_PAGE, feedPage: DEFAULT_FEED_PAGE: DEFAULT_RESOURCE_PAGE },
+        : { view: next, selectedId: undefined, page: DEFAULT_ISSUE_PAGE, feedPage: DEFAULT_FEED_PAGE },
       current,
     ));
   }, []);

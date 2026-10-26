@@ -21,9 +21,9 @@ import type { IssueFilter } from './ui-state';
  * it. See `board-url.test.ts`.
  */
 
-export type BoardView = 'issues' | 'resources' | 'feed';
+export type BoardView = 'issues' | 'feed';
 
-export const BOARD_VIEWS: readonly BoardView[] = ['issues', 'resources', 'feed'];
+export const BOARD_VIEWS: readonly BoardView[] = ['issues', 'feed'];
 
 export const ISSUE_FILTERS: readonly IssueFilter[] = ['open', 'closed', 'all'];
 
@@ -54,13 +54,6 @@ export const DEFAULT_COMMENT_PAGE = 1;
  */
 export const DEFAULT_FEED_PAGE = 1;
 
-/**
- * The first page of the Resources list, for the same reason as the two above: a
- * screen with pagination needs a default page, and page 1 is the page before
- * pagination exists.
- */
-export const DEFAULT_RESOURCE_PAGE = 1;
-
 export interface BoardUrlState {
   view: BoardView;
   /**
@@ -87,13 +80,7 @@ export interface BoardUrlState {
    * renumber the Issues list a reader came back to.
    */
   feedPage: number;
-  /**
-   * The Resources-list page number, one-based. Independent of `page` and
-   * `commentPage` for the same reason: it pages a different screen, so paging
-   * Resources must not renumber the Issues list behind it and paging Issues must
-   * not renumber Resources.
-   */
-  resourcePage: number;
+
 }
 
 /** The board as it opens with no URL parameters at all. */
@@ -105,7 +92,6 @@ export const DEFAULT_BOARD_URL_STATE: BoardUrlState = {
   page: DEFAULT_ISSUE_PAGE,
   commentPage: DEFAULT_COMMENT_PAGE,
   feedPage: DEFAULT_FEED_PAGE,
-  resourcePage: DEFAULT_RESOURCE_PAGE,
 };
 
 /**
@@ -116,7 +102,7 @@ export const DEFAULT_BOARD_URL_STATE: BoardUrlState = {
  * board secret reaches the URL is enforced by those two functions naming their
  * own fields, not by this list.
  */
-export const BOARD_URL_KEYS = ['view', 'issue', 'filter', 'page', 'thread', 'entries', 'resources', 'settings'] as const;
+export const BOARD_URL_KEYS = ['view', 'issue', 'filter', 'page', 'thread', 'entries', 'settings'] as const;
 
 function isBoardView(value: string): value is BoardView {
   return (BOARD_VIEWS as readonly string[]).includes(value);
@@ -154,7 +140,7 @@ function issueId(value: string | null): string | undefined {
  *
  * Every field degrades rather than fails. An unknown or missing `view` is the
  * Issues tab; an unknown `filter` is `open`; a `page`, a `thread`, an `entries`
- * or a `resources` that is not a positive integer is page 1; an `issue` that is
+ * that is not a positive integer is page 1; an `issue` that is
  * not an issue id selects nothing.
  * So a stale link, a truncated paste and a hand-edited URL all land on a usable
  * board view instead of a blank screen, and unknown parameters are ignored
@@ -173,7 +159,6 @@ export function parseBoardUrl(search: string): BoardUrlState {
     page: positiveInteger(params.get('page')) ?? DEFAULT_ISSUE_PAGE,
     commentPage: positiveInteger(params.get('thread')) ?? DEFAULT_COMMENT_PAGE,
     feedPage: positiveInteger(params.get('entries')) ?? DEFAULT_FEED_PAGE,
-    resourcePage: positiveInteger(params.get('resources')) ?? DEFAULT_RESOURCE_PAGE,
   };
 }
 
@@ -193,7 +178,6 @@ export function boardSearch(state: BoardUrlState): string {
   if (state.page !== DEFAULT_ISSUE_PAGE) params.set('page', String(state.page));
   if (state.commentPage !== DEFAULT_COMMENT_PAGE) params.set('thread', String(state.commentPage));
   if (state.feedPage !== DEFAULT_FEED_PAGE) params.set('entries', String(state.feedPage));
-  if (state.resourcePage !== DEFAULT_RESOURCE_PAGE) params.set('resources', String(state.resourcePage));
   if (state.settingsOpen) params.set('settings', '1');
   const query = params.toString();
   return query === '' ? '' : `?${query}`;
@@ -228,7 +212,6 @@ export function boardUrlFor(changes: Partial<BoardUrlState>, from: BoardUrlState
     page: next.page,
     commentPage: next.commentPage ?? DEFAULT_COMMENT_PAGE,
     feedPage: next.feedPage ?? DEFAULT_FEED_PAGE,
-    resourcePage: next.resourcePage ?? DEFAULT_RESOURCE_PAGE,
   };
 }
 
@@ -245,13 +228,12 @@ export function sameBoardUrl(left: BoardUrlState, right: BoardUrlState): boolean
     && left.settingsOpen === right.settingsOpen
     && left.page === right.page
     && left.commentPage === right.commentPage
-    && left.feedPage === right.feedPage
-    && left.resourcePage === right.resourcePage;
+    && left.feedPage === right.feedPage;
 }
 
 /** The Issues tab: a tab link clears the selected issue, because the list is the screen. */
 export function tabUrlState(view: BoardView, from: BoardUrlState): BoardUrlState {
-  return boardUrlFor({ view, selectedId: undefined, page: DEFAULT_ISSUE_PAGE, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE, resourcePage: DEFAULT_RESOURCE_PAGE }, from);
+  return boardUrlFor({ view, selectedId: undefined, page: DEFAULT_ISSUE_PAGE, commentPage: DEFAULT_COMMENT_PAGE, feedPage: DEFAULT_FEED_PAGE }, from);
 }
 
 /** An issue thread: opening one from any tab lands on the Issues tab with the issue selected. */
@@ -277,7 +259,6 @@ export function boardHomeState(from: BoardUrlState): BoardUrlState {
     page: DEFAULT_ISSUE_PAGE,
     commentPage: DEFAULT_COMMENT_PAGE,
     feedPage: DEFAULT_FEED_PAGE,
-    resourcePage: DEFAULT_RESOURCE_PAGE,
   }, from);
 }
 

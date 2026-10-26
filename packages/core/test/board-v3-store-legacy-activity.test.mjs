@@ -173,7 +173,7 @@ function legacyBoard() {
       }] : [],
     };
   });
-  return { schemaVersion: 4, nextIssueNumber: 52, issues, resources: [] };
+  return { schemaVersion: 5, nextIssueNumber: 52, issues };
 }
 
 test('a board written before lastActivityAt existed keeps its recorded activity through a write', async () => {

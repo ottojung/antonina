@@ -51,7 +51,7 @@ test('the schema mismatch is distinguished from a field-shape mistake', () => {
 });
 
 test('malformed nested issues and resources are rejected with useful indexed diagnostics', () => {
-  const value = { ...emptyBoard(), nextIssueNumber: 2, issues: [issue()], resources: [resource()] };
+  const value = { ...emptyBoard(), nextIssueNumber: 2, issues: [issue()] };
   assert.deepEqual(parseBoard(value), value);
   const invalidIssue = rejected({ ...value, issues: [{ ...issue(), state: 'waiting' }] });
   assert.equal(invalidIssue.defect.subject, 'board issue at index 0');

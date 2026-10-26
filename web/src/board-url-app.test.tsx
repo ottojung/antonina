@@ -108,7 +108,7 @@ function overview(issues: BoardIssue[]): BoardOverview {
       lastActivityAt: newestCommentAt(each.messages),
       hasBody: each.body.length > 0,
     })),
-    resources: [],
+
   };
 }
 

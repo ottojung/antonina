@@ -11,7 +11,7 @@ case "$mode" in
 esac
 scripts=(antonina-orchestrator-loop antonina-orchestrator-restart
          antonina-orchestrator-turn antonina-orchestrator-model antonina-scheduler-issue
-         antonina-scheduler-launch antonina-scheduler-snapshot)
+         antonina-scheduler-launch antonina-scheduler-lease-guard antonina-scheduler-snapshot)
 skills=(antonina-orchestrator antonina-scheduler)
 install_atomic() {
   local source="$1" target="$2" perm="$3" tmp

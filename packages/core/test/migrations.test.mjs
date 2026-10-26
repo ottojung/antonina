@@ -756,9 +756,7 @@ test('the migrated board reads through the public model, and reads deterministic
   assert.deepEqual(second, first);
 
   const board = first.board;
-  assert.deepEqual(model.resourceViews(board).map((view) => [view.host, view.path, view.protected]), [
-    ['lubko://gpu-01', '/srv/work', true],
-  ]);
+  assert.equal(Object.hasOwn(board, 'resources'), false);
   assert.equal(Object.hasOwn(board, 'targets'), false);
   assert.equal(Object.hasOwn(board, 'dispatches'), false);
   assert.deepEqual(board.issues.map((issue) => issue.number), ['1', '2', '3', '4', '5', '6']);

@@ -124,7 +124,6 @@ function boardTimestampFloor(board: Board): string | undefined {
     timestamps.push(issue.createdAt, issue.updatedAt);
     for (const message of issue.messages) timestamps.push(message.createdAt);
   }
-  for (const resource of board.resources) timestamps.push(resource.createdAt, resource.updatedAt);
   if (timestamps.length === 0) return undefined;
   const millis = timestamps.map((timestamp) => Date.parse(timestamp));
   if (millis.some((value) => !Number.isFinite(value))) {

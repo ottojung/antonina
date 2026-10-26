@@ -361,7 +361,7 @@ function overview(): BoardOverview {
     deleted: false,
     queue: board.filter((each) => each.state === 'open').map((each) => each.number),
     issues: board.map(boardIssueOfSummary),
-    resources: [],
+
   };
 }
 

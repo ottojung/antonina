@@ -111,7 +111,6 @@ class SchedulerPolicyTests(unittest.TestCase):
         from contextlib import redirect_stdout
 
         issue_reader = load_helper("antonina-scheduler-issue")
-        worktrees = load_helper("antonina-scheduler-worktrees")
         ids = ("320", "7Ka9mQ2xP4vT8nB3cR5dH1-otter", "arbitrary_ID.v2")
         for issue_id in ids:
             with self.subTest(issue_id=issue_id):

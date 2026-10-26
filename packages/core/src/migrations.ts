@@ -10,9 +10,9 @@
  * ## The trust-preserving mechanism, chosen once and explicitly
  *
  * Legacy signed snapshots are verified before being projected into the current
- * model. Migration never changes signed bytes. V2 lifts to V3, then V3 lifts to
- * V4 by discarding only the obsolete target catalog and dispatch assignments.
- * Issues and resources are carried forward unchanged, including in read-only opens.
+ * model. Migration never changes signed bytes. V2 lifts to V3, V3 to V4, and V4 to V5. Historical resource metadata
+ * remains in verified signed bytes but is intentionally omitted from the
+ * current projection. Only issue content and coordination history remain live.
  */
 import {
   BOARD_SCHEMA_VERSION,

@@ -115,7 +115,8 @@ const PERSISTED_BOARD_MIGRATIONS: { [V in SupersededPersistedBoardVersion]: Pers
         resources: legacy.resources,
       };
     },
-  },  [RETIRED_BOARD_SCHEMA_VERSION]: {
+  },
+  [RETIRED_BOARD_SCHEMA_VERSION]: {
     from: RETIRED_BOARD_SCHEMA_VERSION,
     to: BOARD_SCHEMA_VERSION,
     summary: 'retires machine-addressed resource state from the canonical board',

@@ -23,7 +23,6 @@ import {
   type Board,
   type BoardIssue,
   type BoardMessage,
-  type BoardResource,
   type BoardReview,
   REVIEW_VERDICTS,
   isReviewCommitId,
@@ -571,7 +570,6 @@ export interface BoardOverview {
   deleted: boolean;
   queue: string[];
   issues: IssueListSummary[];
-  resources: BoardResource[];
 }
 
 interface QueueSnapshot {
@@ -583,7 +581,7 @@ interface QueueSnapshot {
 interface CatalogSnapshot {
   schemaVersion: typeof SHARDED_BOARD_SCHEMA_VERSION;
   boardId: string;
-  resources: BoardResource[];
+  legacy: boolean;
 }
 
 /**
@@ -950,7 +948,6 @@ function latestBoardTimestamp(board: Board, fallback: string): string {
     timestamps.push(issue.createdAt, issue.updatedAt);
     for (const message of issue.messages) timestamps.push(message.createdAt);
   }
-  for (const resource of board.resources) timestamps.push(resource.createdAt, resource.updatedAt);
   return new Date(Math.max(...timestamps.map((value) => Date.parse(value)))).toISOString();
 }
 
@@ -1916,25 +1913,21 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     return (value.numbers as Array<string | number>).map(String);
   }
 
+  // Pre-v5 catalogs can contain signed-era machine-addressed records.
+  // Verify the wrapper but never expose or interpret the archived fields.
   private async readCatalog(credential: BoardCredential, meta: ShardedBoardMeta): Promise<CatalogSnapshot> {
     const stored = await this.requireJson<unknown>(credential.storageCapability, meta.catalogRef);
     const value = stored.value;
     if (!isRecord(value)
         || value.schemaVersion !== SHARDED_BOARD_SCHEMA_VERSION
         || value.boardId !== meta.boardId
-        || !Array.isArray(value.resources)) {
+        || (value.resources !== undefined && !Array.isArray(value.resources))) {
       throw new ShardedBoardStoreError('Antonina catalog snapshot is malformed');
     }
     return {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId: meta.boardId,
-      resources: (value.resources as Array<Record<string, unknown>>).map((resource) => {
-        if (!isRecord(resource) || !Array.isArray(resource.issueNumbers)
-            || !resource.issueNumbers.every(validStoredId)) {
-          throw new ShardedBoardStoreError('Antonina catalog resource dependencies are malformed');
-        }
-        return { ...clone(resource), issueNumbers: resource.issueNumbers.map(String) } as BoardResource;
-      }),
+      legacy: Object.hasOwn(value, 'resources'),
     };
   }
 
@@ -1976,7 +1969,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       schemaVersion: BOARD_SCHEMA_VERSION,
       nextIssueNumber: meta.nextIssueNumber,
       issues,
-      resources: catalog.resources,
+
     };
     return {
       meta,
@@ -2041,7 +2034,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
           schemaVersion: BOARD_SCHEMA_VERSION,
           nextIssueNumber: meta.nextIssueNumber,
           issues,
-          resources: catalog.resources,
+
                 },
         queue,
         authorities: [],
@@ -2248,15 +2241,10 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     return this.writeShard(credential.storageCapability, value);
   }
 
-  private async writeCatalogSnapshot(
-    credential: BoardCredential,
-    boardId: string,
-    board: Board,
-  ): Promise<string> {
-    const value: CatalogSnapshot = {
+  private async writeCatalogSnapshot(credential: BoardCredential, boardId: string): Promise<string> {
+    const value = {
       schemaVersion: SHARDED_BOARD_SCHEMA_VERSION,
       boardId,
-      resources: clone(board.resources),
     };
     return this.writeShard(credential.storageCapability, value);
   }
@@ -2704,13 +2692,6 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         schemaVersion: BOARD_SCHEMA_VERSION,
         nextIssueNumber,
         issues,
-        resources: catalogValue.resources.map((entry) => {
-          if (!isRecord(entry) || !Array.isArray(entry.issueNumbers)
-              || !entry.issueNumbers.every(validStoredId)) {
-            throw new ShardedBoardStoreError('Antonina pre-cutover resource dependencies are malformed');
-          }
-          return { ...clone(entry), issueNumbers: entry.issueNumbers.map(String) } as BoardResource;
-        }),
       },
       queue: (queueValue.numbers as Array<string | number>).map(String),
       feed,
@@ -2809,7 +2790,6 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         messages: issue.messages,
       })) as unknown as CanonicalValue,
       queue: logical.queue,
-      resources: logical.board.resources as unknown as CanonicalValue,
       feedCount: logical.feed.length,
     }));
 
@@ -2998,7 +2978,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       comments: logical.board.issues.reduce((total, issue) => total + issue.messages.length, 0),
       feedEntries: logical.feed.length,
       queueLength: logical.queue.length,
-      resources: logical.board.resources.length,
+      resources: 0,
       checks,
       equivalent,
       legacyStore: {
@@ -3104,7 +3084,6 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       })),
     );
     same('queue', intended.queue, bundle.state.queue);
-    same('resources', intended.board.resources, bundle.state.board.resources);
     // The feed is *served* newest-first, which is the order a reader pages in,
     // and *stored* in position order. Compared in position order, and the served
     // order is checked separately below so neither is left unasserted.
@@ -3179,7 +3158,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
       comments: bundle.state.board.issues.reduce((total, issue) => total + issue.messages.length, 0),
       feedEntries: meta.feedCount,
       queueLength: bundle.state.queue.length,
-      resources: bundle.state.board.resources.length,
+      resources: 0,
       checks: [],
       equivalent: true,
       legacyStore: {
@@ -3451,17 +3430,13 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         : bundle.meta.queueRef;
       if (queueChanged) superseded.push(bundle.meta.queueRef);
 
-      const beforeCatalog = {
-        resources: bundle.state.board.resources,
-      };
-      const afterCatalog = {
-        resources: candidate.board.resources,
-      };
-      const catalogChanged = !jsonSame(beforeCatalog, afterCatalog);
-      const catalogRef = catalogChanged
-        ? await this.writeCatalogSnapshot(credential, pointer.boardId, candidate.board)
+      // Exactly once per pre-v5 catalog: retire its structured archived
+      // machine metadata. Future writes reuse the host-free catalog shard.
+      const archivedCatalog = await this.readCatalog(credential, bundle.meta);
+      const catalogRef = archivedCatalog.legacy
+        ? await this.writeCatalogSnapshot(credential, pointer.boardId)
         : bundle.meta.catalogRef;
-      if (catalogChanged) superseded.push(bundle.meta.catalogRef);
+      if (archivedCatalog.legacy) superseded.push(bundle.meta.catalogRef);
 
       const open = await this.writeIssueListPages(
         credential,
@@ -3922,7 +3897,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
         ...openPages.flatMap((page) => page.entries),
         ...closedPages.flatMap((page) => page.entries),
       ],
-      resources: catalog.resources,
+
     };
   }
 

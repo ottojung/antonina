@@ -2460,7 +2460,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     }
 
     const queueRef = await this.writeQueueSnapshot(credential, anchor.boardId, stored.state.queue);
-    const catalogRef = await this.writeCatalogSnapshot(credential, anchor.boardId, stored.state.board);
+    const catalogRef = await this.writeCatalogSnapshot(credential, anchor.boardId);
 
     const { refs: openPageRefs } = await this.writeIssueListPages(
       credential,
@@ -2836,7 +2836,7 @@ const pages = await Promise.all(snapshot.commentRefs.map(async (_commentRef, ind
     }
 
     const queueRef = await this.writeQueueSnapshot(credential, logical.boardId, logical.queue);
-    const catalogRef = await this.writeCatalogSnapshot(credential, logical.boardId, logical.board);
+    const catalogRef = await this.writeCatalogSnapshot(credential, logical.boardId);
 
     const state: VerifiedBoardState = {
       board: logical.board,

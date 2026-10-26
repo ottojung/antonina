@@ -1096,7 +1096,9 @@ export function resourceState(
     : 'collectible';
 }
 
-export function resourceViews(board: LegacyBoardV4, host?: string, issueNumber?: string): ResourceView[] {
+/** Retained only for decoding historical readers; v5 has no resource inventory. */
+export function resourceViews(board: Board | LegacyBoardV4, host?: string, issueNumber?: string): ResourceView[] {
+  if (!('resources' in board)) return [];
   const issues = new Map(board.issues.map((issue) => [issue.number, issue] as const));
   return board.resources
     .filter((resource) => host === undefined || resource.host === host)

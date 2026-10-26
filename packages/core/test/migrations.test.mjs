@@ -496,6 +496,7 @@ test('a board at a supported version is readable, including at the next version 
   const boards = new Map([
     [migrations.CURRENT_PERSISTED_BOARD_VERSION, model.emptyBoard()],
     [model.PREVIOUS_BOARD_SCHEMA_VERSION, { schemaVersion: model.PREVIOUS_BOARD_SCHEMA_VERSION, nextIssueNumber: 1, issues: [], resources: [], targets: [], dispatches: [] }],
+    [model.RETIRED_BOARD_SCHEMA_VERSION, { schemaVersion: model.RETIRED_BOARD_SCHEMA_VERSION, nextIssueNumber: 1, issues: [], resources: [] }],
     [model.LEGACY_BOARD_SCHEMA_VERSION, storedLog().operations[0].payload.board],
   ]);
   for (const version of model.PERSISTED_BOARD_VERSIONS) {

@@ -21,7 +21,7 @@ antonina --version                      # what commands will actually execute
 # In Bash, type -a antonina lists every matching executable on PATH.
 ```
 
-If these resolve to different commits, make the intended bin directory take precedence in the process supervisor's environment or retire the stale installation; **do not** mark the host verified based solely on `npm install`. The scheduler uses an explicit `~/.local/bin/antonina` path, so also run `scripts/antonina-scheduler-deploy --check` from the matching clean source checkout. Never change or discard unrelated dirty developer worktrees to fix PATH precedence.
+If these resolve to different commits, make the intended bin directory take precedence in the process supervisor's environment or retire the stale installation; **do not** mark the host verified based solely on `npm install`. Never change or discard unrelated dirty developer worktrees to fix PATH precedence.
 
 
 ## Identifying what is running

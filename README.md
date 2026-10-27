@@ -8,7 +8,7 @@ An Antonina host is a provisioned execution environment that can access the boar
 
 ## Current implementation
 
-Antonina uses TypeScript/Node.js for its CLI, managed-agent runtime, shared board core, and web application. The repository currently includes a local managed-agent runtime built around OpenCode. The orchestrator independently maintains six-hour model cooldowns and retries transient backend failures twice, without probing OpenCode's catalog; managed agents select the first non-cooled-down model per agent from the ordered, host-local `~/.config/antonina/config.json` `models` array. Each `{ "model": "provider/id", "comment": "..." }` entry may be reordered and annotated by orchestrators as reliability evidence changes. Comments should record dated successes, error modes, counts or duration where known, evidence sources, and uncertainty rather than just a preference label. There is no compiled-in model or fallback when configuration is missing; `antonina agent model list` shows preferences and `antonina agent model select` prints the first configured model without probing availability. Managed-agent quota exhaustion, rate limiting and model unavailability trigger six-hour per-agent model cooldowns; transient endpoint/server failures retry twice first. A cooldown expires opportunistically at the next invocation boundary. Unknown, authentication, billing and tool failures do not cause blind retries. Fresh OpenCode invocations emit structured JSONL so Antonina can durably checkpoint their native session IDs as soon as the backend announces them; recovery resumes that session, not a guessed or untracked fresh invocation. The OpenCode variant remains `low`. That runtime is an implementation available to hosts, not the product boundary of Antonina. The authoritative constraint is `docs/intent-records/agent.md`.
+Antonina uses TypeScript/Node.js for its CLI, managed-agent runtime, shared board core, and web application. The repository currently includes a local managed-agent runtime built around OpenCode. Managed agents select the first non-cooled-down model per agent from the ordered, host-local `~/.config/antonina/config.json` `models` array. Each `{ "model": "provider/id", "comment": "..." }` entry may be reordered and annotated by orchestrators as reliability evidence changes. Comments should record dated successes, error modes, counts or duration where known, evidence sources, and uncertainty rather than just a preference label. There is no compiled-in model or fallback when configuration is missing; `antonina agent model list` shows preferences and `antonina agent model select` prints the first configured model without probing availability. Managed-agent quota exhaustion, rate limiting and model unavailability trigger six-hour per-agent model cooldowns; transient endpoint/server failures retry twice first. A cooldown expires opportunistically at the next invocation boundary. Unknown, authentication, billing and tool failures do not cause blind retries. Fresh OpenCode invocations emit structured JSONL so Antonina can durably checkpoint their native session IDs as soon as the backend announces them; recovery resumes that session, not a guessed or untracked fresh invocation. The OpenCode variant remains `low`. That runtime is an implementation available to hosts, not the product boundary of Antonina. The authoritative constraint is `docs/intent-records/agent.md`.
 
 ## Requirements
 
@@ -29,18 +29,6 @@ npm install -g ./antonina-cli-*.tgz
 ```
 
 This installs the `antonina` executable. Release artifacts should ship the already-built package, so execution hosts do not compile TypeScript. **Verify the executable you will actually run**, not just the package that was installed: `command -v antonina` and `antonina --version` must identify the intended release commit. On hosts with multiple Node/npm prefixes, an older `antonina` may be earlier on `PATH`. For a host-local install, use `npm install --global --prefix "$HOME/.local" ./antonina-cli-*.tgz` and verify `"$HOME/.local/bin/antonina" --version`; make that directory take precedence on `PATH`. See [build identity and rollback](docs/build-identity-and-rollback.md) for a worked example.
-
-### OpenClaw orchestrator skill
-
-The OpenClaw skill used by Antonina hosts is versioned in this repository at `skills/antonina-orchestrator/`. Deploy that directory as a unit so the skill and its companion work-continuity instructions stay on the same revision as the CLI:
-
-```sh
-mkdir -p "$HOME/.openclaw/skills"
-rm -rf "$HOME/.openclaw/skills/antonina-orchestrator"
-cp -a skills/antonina-orchestrator "$HOME/.openclaw/skills/"
-```
-
-The versioned skill is mechanically checked against `docs/skills/orchestrator.md` and `docs/skills/resources.md` in CI so the human-readable documentation and installed OpenClaw skill cannot silently drift.
 
 ## Board
 

@@ -17,5 +17,5 @@ test('the Antonina board and public CLI have no scheduler lease interface', asyn
     createClient() { return {}; },
   });
   assert.equal(code, 1);
-  assert.match(errors.join('\n'), /unknown board command/);
+  assert.match(errors.join('\n'), /unsupported antonina board command: lease/);
 });

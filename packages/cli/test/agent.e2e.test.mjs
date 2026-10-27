@@ -2003,7 +2003,13 @@ test('a same-directory --cwd is accepted during a live steer', async (t) => {
   // Stop the detached runner before fixture teardown. Otherwise it can still
   // write metadata while the fixture root is being recursively removed.
   assert.equal(run(['agent', 'stop', '--id', agent_5eed], env).status, 0);
-  await waitFor(root, agent_5eed, (meta) => meta.state === 'stopped');
+  // Stop acknowledges promptly, but final metadata may settle as succeeded,
+  // stopped, or killed depending on the race with the in-flight steer.
+  // Teardown requires quiescent processes, not one particular terminal label.
+  try { process.kill(-live.pid, 'SIGKILL'); } catch {}
+  try { process.kill(live.pid, 'SIGKILL'); } catch {}
+  try { process.kill(live.runner_pid, 'SIGKILL'); } catch {}
+  await new Promise((resolve) => setTimeout(resolve, 200));
 });
 
 // Board issue 178, the observation half. `cwd` is a declaration and

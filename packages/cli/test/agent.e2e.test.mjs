@@ -2000,6 +2000,10 @@ test('a same-directory --cwd is accepted during a live steer', async (t) => {
   assert.equal(after.cwd, work);
   assert.ok(JSON.stringify(after).includes('same-directory') || after.prompt_count > live.prompt_count,
     'the same-directory steer must accept the prompt, not just return success');
+  // Stop the detached runner before fixture teardown. Otherwise it can still
+  // write metadata while the fixture root is being recursively removed.
+  assert.equal(run(['agent', 'stop', '--id', agent_5eed], env).status, 0);
+  await waitFor(root, agent_5eed, (meta) => meta.state === 'stopped');
 });
 
 // Board issue 178, the observation half. `cwd` is a declaration and

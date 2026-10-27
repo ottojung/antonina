@@ -62,7 +62,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--state': 'Issue state filter.',
   '--steer': 'Preempt current work and steer the agent.',
   '--stopped': 'Show stopped agents only.',
-  '--succeeded': 'Show succeeded agents only.',
+  '--clearexit': 'Show agents whose backend exited with code zero.',
   '--timeout': 'Timeout in seconds.',
   '--title': 'Title text.',
   '--trust-anchor': 'Print only the initialized trust anchor.',
@@ -239,12 +239,12 @@ const AGENT_SPECS: readonly CommandSpec[] = [
     path: ['list'],
     summary: 'List one page of managed agents.',
     values: ['--limit', '--page'],
-    flags: ['--json', '--running', '--finished', '--succeeded', '--failed', '--stopped', '--killed'],
+    flags: ['--json', '--running', '--finished', '--clearexit', '--failed', '--stopped', '--killed'],
     required: ['--page'],
     normalize: (p) => [
       'list',
       ...valueArgs(p, ['--limit', '--page']),
-      ...flagArgs(p, ['--json', '--running', '--finished', '--succeeded', '--failed', '--stopped', '--killed']),
+      ...flagArgs(p, ['--json', '--running', '--finished', '--clearexit', '--failed', '--stopped', '--killed']),
     ],
   },
   {

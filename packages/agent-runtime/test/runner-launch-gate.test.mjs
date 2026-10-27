@@ -306,7 +306,7 @@ test('the same launch with the capability intact still spawns in the declared di
   const invocations = backendRuns(marker).filter((line) => line.split(' ')[1] === cwd);
   assert.equal(invocations.length, 1, `exactly one invocation must have run in ${cwd}; saw ${JSON.stringify(backendRuns(marker))}`);
   const after = readMeta(id, options);
-  assert.equal(after.state, 'succeeded');
+  assert.equal(after.state, 'clearexit');
   assert.equal(after.invocation_cwd, cwd);
   assert.equal(after.active_runner, false);
   assert.equal(after.runner_reservation, null);
@@ -410,7 +410,7 @@ test('a reservation whose owner is gone needs the owner token minted for that re
     env: { ...options.env, ANTONINA_RUNNER_OWNER_TOKEN: token },
   });
   const accepted = readMeta(launched.id, options);
-  assert.equal(accepted.state, 'succeeded', 'the legitimate detached shape must still run its invocation');
+  assert.equal(accepted.state, 'clearexit', 'the legitimate detached shape must still run its invocation');
   assert.equal(accepted.invocation_cwd, launched.cwd);
 
   // A record whose token is present but whose runner was handed a different one
@@ -531,7 +531,7 @@ exit 0
     [],
     `every backend process must run without the token; saw ${JSON.stringify(runs)}`,
   );
-  assert.equal(readMeta(id, options).state, 'succeeded', 'the claim itself is unaffected by what the backend inherits');
+  assert.equal(readMeta(id, options).state, 'clearexit', 'the claim itself is unaffected by what the backend inherits');
 });
 
 test('an invocation that finishes before its identity can be captured still records where it ran', async (t) => {
@@ -572,7 +572,7 @@ test('an invocation that finishes before its identity can be captured still reco
   assert.equal(after.invocation_cwd, cwd, 'the observation of where this front ran must survive an unrecorded identity');
   // No partial identity is invented for a process that is already gone.
   assert.equal(after.start_time, null);
-  assert.equal(after.state, 'succeeded');
+  assert.equal(after.state, 'clearexit');
   assert.equal(after.active_runner, false);
   assert.equal(after.runner_reservation, null);
 });
@@ -631,7 +631,7 @@ test('the launcher-shaped reservation is claimed against this process own start 
     1,
     'the real start time must still be accepted, or the case above proves nothing',
   );
-  assert.equal(readMeta(id, options).state, 'succeeded');
+  assert.equal(readMeta(id, options).state, 'clearexit');
 });
 
 test('a metadata write cannot establish its own ownership, on board 197 residual R2', async (t) => {
@@ -734,7 +734,7 @@ test('a metadata write cannot establish its own ownership, on board 197 residual
     1,
     'the launcher holding its own token must still be able to claim its own reservation',
   );
-  assert.equal(readMeta(id, options).state, 'succeeded');
+  assert.equal(readMeta(id, options).state, 'clearexit');
 });
 
 test('a runner that cannot name itself in /proc refuses the launch, with the capability intact', async (t) => {

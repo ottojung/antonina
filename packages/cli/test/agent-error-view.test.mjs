@@ -134,7 +134,7 @@ test('the display does not decide freshness by looking at the state', () => {
   // holds that decision: the function reads `error` and `backend_error` and
   // nothing else, so it must return the same value whatever the state says.
   const note = 'runner/model process disappeared without a captured exit status';
-  for (const state of ['succeeded', 'failed', 'stopped', 'killed', 'running']) {
+  for (const state of ['clearexit', 'failed', 'stopped', 'killed', 'running']) {
     assert.equal(
       displayableAgentError({ ...metaWith(note), state }),
       note,

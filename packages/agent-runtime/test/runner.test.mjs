@@ -373,7 +373,7 @@ test('the owning generation does claim the reservation and its prompt', async (t
   assert.equal(after.active_runner, false);
   assert.equal(after.pending_prompt, null);
   assert.equal(after.prompt_count, 0);
-  assert.equal(after.state, 'succeeded');
+  assert.equal(after.state, 'clearexit');
   assert.equal(after.exit_code, 0);
   assert.equal(after.runner_reservation, null);
 });
@@ -411,7 +411,7 @@ test('a. a completely full host still launches, because launch is not host-capac
   await runManagedRunner(id, 'new', 7, { ...options, capacity: { readText: cgroup(30) } });
 
   const after = readMeta(id, options);
-  assert.equal(after.state, 'succeeded', 'a full host must not block a valid launch');
+  assert.equal(after.state, 'clearexit', 'a full host must not block a valid launch');
   assert.equal(after.exit_code, 0);
   assert.equal(after.error, null);
   assert.equal(after.pending_prompt, null, 'the accepted prompt was delivered, not refused');
@@ -599,7 +599,7 @@ test('a. a queued steer is delivered on a full host rather than dropped', async 
   await runManagedRunner(id, 'new', 7, { ...options, capacity: { readText: cgroup(30) } });
 
   const after = readMeta(id, options);
-  assert.equal(after.state, 'succeeded');
+  assert.equal(after.state, 'clearexit');
   assert.equal(after.steer_queue.length, 0, 'the queued steer was delivered, not dropped');
   assert.ok(after.prompt_count >= 1, 'the steer was delivered to the backend');
   assert.equal(after.error, null);
@@ -621,7 +621,7 @@ test('a. the runner spawns and succeeds on a host with headroom', async (t) => {
   await runManagedRunner(id, 'new', 7, { ...options, capacity: { readText: cgroup(10) } });
 
   const after = readMeta(id, options);
-  assert.equal(after.state, 'succeeded');
+  assert.equal(after.state, 'clearexit');
   assert.equal(after.exit_code, 0);
   assert.equal(after.error, null);
 });
@@ -645,7 +645,7 @@ test('c. the runner proceeds, with a stated reason, when no cgroup limit can be 
   });
 
   const after = readMeta(id, options);
-  assert.equal(after.state, 'succeeded');
+  assert.equal(after.state, 'clearexit');
   assert.equal(after.error, null);
 });
 
@@ -1254,7 +1254,7 @@ test('a spawn rejected by a stop between the runner read and its write leaves th
     capacity: { readText: cgroup(1) },
   });
   const rerun = readMeta(id, options);
-  assert.equal(rerun.state, 'succeeded', 'a stop that rejected a spawn does not block the next run');
+  assert.equal(rerun.state, 'clearexit', 'a stop that rejected a spawn does not block the next run');
   assert.equal(rerun.active_runner, false);
   assert.equal(rerun.runner_reservation, null);
 });
@@ -1280,7 +1280,7 @@ test('verified silence after finished tool calls recovers on the same model when
     capacity:{readText:cgroup(1)},
   });
   const after=readMeta(id,options);
-  assert.equal(after.state,'succeeded', 'verified model silence is recoverable without a different model');
+  assert.equal(after.state,'clearexit', 'verified model silence is recoverable without a different model');
   assert.equal(after.native_session_id,'ses_hung');
   assert.equal(after.active_runner,false);
   assert.equal(after.backend_error,null);
@@ -1304,7 +1304,7 @@ test('a running tool remains untouched by the model-silence watchdog', {timeout:
     capacity:{readText:cgroup(1)},
   });
   const after=readMeta(id,options);
-  assert.equal(after.state,'succeeded');
+  assert.equal(after.state,'clearexit');
   assert.equal(after.exit_signal,null);
 });
 
@@ -1333,7 +1333,7 @@ test('unreported long-running compiler subprocess is not interrupted after step_
     capacity:{readText:cgroup(1)},
   });
   const after=readMeta(id,options);
-  assert.equal(after.state,'succeeded',JSON.stringify({
+  assert.equal(after.state,'clearexit',JSON.stringify({
     state:after.state, error:after.error, backend_error:after.backend_error,
   }));
   assert.equal(after.exit_signal,null);

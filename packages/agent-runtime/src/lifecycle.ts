@@ -80,7 +80,7 @@ export function deriveState(meta: AgentMetadata | null, now = Date.now() / 1000)
 
 export function exitCodeFor(meta: AgentMetadata | null): number {
   const state = deriveState(meta);
-  if (state === 'succeeded') return 0;
+  if (state === 'clearexit') return 0;
   if (state === 'failed') {
     const value = meta?.exit_code;
     return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : 1;
@@ -146,7 +146,7 @@ export function beginInvocation(
 
 export function finalizeTerminal(
   meta: AgentMetadata,
-  state: 'succeeded' | 'failed' | 'stopped' | 'killed',
+  state: 'clearexit' | 'failed' | 'stopped' | 'killed',
   now: number,
   exitCode: number | null,
   exitSignal: number | null,

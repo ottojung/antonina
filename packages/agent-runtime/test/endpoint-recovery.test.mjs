@@ -85,7 +85,7 @@ test('endpoint outage automatically retries, tolerates duplicate tool effects, r
   const after = await run(t, f);
   assert.equal(after?.id, '311311');
   assert.equal(after?.cwd, f.cwd);
-  assert.equal(after?.state, 'succeeded');
+  assert.equal(after?.state, 'clearexit');
   assert.equal(readFileSync(f.counter, 'utf8').trim(), '3');
   assert.equal(readFileSync(f.effects, 'utf8').trim().split('\n').length, 3);
 });
@@ -96,7 +96,7 @@ test('orphaned tool process from failed invocation is killed before next attempt
   const unrelated = spawn('sleep', ['15'], { stdio: 'ignore' });
   t.after(() => { try { unrelated.kill('SIGKILL'); } catch {} });
   const after = await run(t, f);
-  assert.equal(after?.state, 'succeeded');
+  assert.equal(after?.state, 'clearexit');
   assert.ok(existsSync(f.orphanPid));
   assert.equal(procStartTicks(Number(readFileSync(f.orphanPid, 'utf8'))), null,
     'old tool process must be dead before recovery completes');

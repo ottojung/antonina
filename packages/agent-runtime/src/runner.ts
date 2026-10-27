@@ -435,7 +435,7 @@ function childResult(
  * supplies the token to the claimant, which means supplying that claimant's
  * environment -- a strictly larger capability than writing metadata, and one
  * such a writer does not need this function to obtain, since it could write
- * `state: succeeded` outright. This runtime has no trust anchor outside its own
+ * `state: clearexit` outright. This runtime has no trust anchor outside its own
  * state directory to compare a token against, so that limit is not closable
  * here, and `AGENTS.md` puts the durable state directory in the user's own
  * hands by design. What closes the *board 197* defect regardless is the launch
@@ -694,11 +694,11 @@ async function finalizeInvocation(
     // operator stop. childResult only sets livenessTriggered when the verified
     // invocation was actually signalled. Preserve its model-stall evidence.
     const externalSignalDeath = signal !== null && !operatorSignalDelivered && !result.livenessTriggered;
-    let state: 'succeeded' | 'failed' | 'stopped' | 'killed';
+    let state: 'clearexit' | 'failed' | 'stopped' | 'killed';
     if (intent.value === 'stop') state = 'stopped';
     else if (intent.value === 'kill') state = 'killed';
     else if (signal !== null) state = operatorSignalDelivered ? 'stopped' : 'failed';
-    else state = code === 0 ? 'succeeded' : 'failed';
+    else state = code === 0 ? 'clearexit' : 'failed';
     // The pending steer is left recorded even when the invocation died without
     // it taking effect: the operator did ask for it, and `error` below names the
     // death that actually ended the invocation.
@@ -811,7 +811,7 @@ interface LaunchAuthorization {
  * launched after it was withdrawn, and the backend ran in a directory whose
  * invocation-cwd capability no backend had answered for. Reproduced on this head:
  * with `ANTONINA_TEST_BACKEND_NO_INVOCATION_CWD=1` and a hand-written
- * reservation, `_runner` exited 0 and recorded `state succeeded` with
+ * reservation, `_runner` exited 0 and recorded `state clearexit` with
  * `invocation_cwd` set.
  *
  * So the acceptance-time answer is not trusted to survive: it is re-decided

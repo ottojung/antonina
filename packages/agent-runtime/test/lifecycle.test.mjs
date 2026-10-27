@@ -92,8 +92,8 @@ test('idle/running/terminal state derivation keeps startup grace', () => {
   beginInvocation(idle, 'work', 101, 1);
   assert.equal(deriveState(idle, 120), 'running');
   assert.equal(deriveState(idle, 200), 'unknown');
-  finalizeTerminal(idle, 'succeeded', 201, 0, null);
-  assert.equal(deriveState(idle, 202), 'succeeded');
+  finalizeTerminal(idle, 'clearexit', 201, 0, null);
+  assert.equal(deriveState(idle, 202), 'clearexit');
   assert.equal(exitCodeFor(idle), 0);
 });
 
@@ -634,7 +634,7 @@ test('a malformed intent survives finalization for forensics but a well-formed o
   const wellFormed = idleMeta(AGENT_ID, '/tmp', null, 1);
   beginInvocation(wellFormed, 'work', 10, 1);
   wellFormed.intent = 'steer';
-  finalizeTerminal(wellFormed, 'succeeded', 20, 0, null);
+  finalizeTerminal(wellFormed, 'clearexit', 20, 0, null);
   assert.equal(wellFormed.intent, null);
   assert.equal(wellFormed.finished_at, 20);
   assert.equal(wellFormed.last_activity_at, 20);

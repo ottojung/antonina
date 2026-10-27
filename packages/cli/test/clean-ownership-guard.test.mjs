@@ -59,7 +59,7 @@ function ageAndArmOwnership(t) {
   const path = metaPath(handle.root, handle.id);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   Object.assign(meta, {
-    state: 'succeeded',
+    state: 'clearexit',
     // created_at is aged alongside finished_at (board issue 129). The retention
     // anchor is the LATER of the two, so an agent that was created seconds ago
     // and claims to have finished in 1970 is a record no writer in this
@@ -106,7 +106,7 @@ test('clean selects an agent that owns an accepted prompt and reserved runner', 
   const dry = run(['agent', 'clean', '--days', '1', '--dry-run'], env);
   assert.equal(dry.status, 0, dry.stderr);
   assert.ok(dry.stdout.includes(id), 'the candidate filter must still select this agent');
-  assert.equal(JSON.parse(readFileSync(path, 'utf8')).state, 'succeeded', 'dry-run must not mutate');
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).state, 'clearexit', 'dry-run must not mutate');
 });
 
 test('clean refuses to remove an agent holding an accepted prompt and reserved runner', (t) => {
@@ -166,7 +166,7 @@ test('clean refuses an agent whose only ownership is a live marked invocation', 
   const path = metaPath(root, id);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   Object.assign(meta, {
-    state: 'succeeded',
+    state: 'clearexit',
     finished_at: 1,
     active_runner: false,
     runner_reservation: null,

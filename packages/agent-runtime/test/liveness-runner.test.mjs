@@ -126,7 +126,7 @@ async function exercise(t, fixture) {
     assert.deepEqual(called, [LUNA]);
     assert.equal(finished.model_failover.cooldowns.length, 0);
   } else {
-    assert.equal(finished.state, 'succeeded', JSON.stringify({ state: finished.state, error: finished.error }));
+    assert.equal(finished.state, 'clearexit', JSON.stringify({ state: finished.state, error: finished.error }));
     assert.equal(finished.model_failover.selected_model, BEAM);
     assert.equal(finished.model_failover.cooldowns[0].reason,
       fixture === 'error-quota' ? 'quota_exhausted' : 'transient_backend');

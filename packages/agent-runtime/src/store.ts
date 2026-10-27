@@ -383,6 +383,11 @@ export function readMeta(agentId: string, options: StatePathsOptions = {}): Agen
     throw new MetadataReadError(`managed-agent metadata for ${agentId} is malformed`);
   }
   const meta = value as AgentMetadata;
+  // Older records used the misleading name "succeeded" for exit code zero.
+  // Normalize in memory before closed-schema validation. Reads never rewrite
+  // files, while the next ordinary state mutation persists the new name.
+  // The alias is intentionally restricted to this one exact historical state.
+  if (meta.state === 'succeeded') meta.state = 'clearexit';
   try {
     validateAgentMetadata(meta);
   } catch (error) {

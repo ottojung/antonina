@@ -269,7 +269,7 @@ test('the same agent launches normally once the directory exists again', async (
   await runManagedRunner(agentId, 'new', 3, { env });
 
   const after = readMeta(agentId, { env });
-  assert.equal(after.state, 'succeeded', 'a directory that still exists launches as before');
+  assert.equal(after.state, 'clearexit', 'a directory that still exists launches as before');
   assert.equal(after.error, null);
   assert.equal(after.invocation_cwd, work, 'the observation is recorded only once a child existed');
   assert.ok(existsSync(invoked), 'the backend really was executed on this path');

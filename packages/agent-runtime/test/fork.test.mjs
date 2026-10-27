@@ -439,7 +439,7 @@ test('the clone takes its own lifecycle state from a source in every state', (t)
   // One assertion per persisted source state, because a clone must be coherent
   // whichever state its source was in, not merely in the running case.
   let index = 0;
-  for (const state of ['idle', 'running', 'succeeded', 'failed', 'stopped', 'killed']) {
+  for (const state of ['idle', 'running', 'clearexit', 'failed', 'stopped', 'killed']) {
     index += 1;
     const sourceId = `a${index}`;
     const cloneId = `b${index}`;

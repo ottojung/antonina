@@ -55,9 +55,10 @@ test('present authority accepts only canonical scalar values', () => {
     assert.equal(deletePendingFlag({ delete_pending: bad }), null);
   }
 
-  for (const state of ['idle', 'running', 'succeeded', 'failed', 'stopped', 'killed']) {
+  for (const state of ['idle', 'running', 'clearexit', 'failed', 'stopped', 'killed']) {
     assert.equal(persistedLifecycleState({ state }), state);
   }
+  assert.equal(persistedLifecycleState({ state: 'succeeded' }), null, 'old spelling is not a canonical new record');
   for (const bad of ['', 'bogus', true, 1, [], {}]) assert.equal(persistedLifecycleState({ state: bad }), null);
 
   assert.deepEqual(persistedControlField({ intent: null }, 'intent'), { value: null, malformed: false });

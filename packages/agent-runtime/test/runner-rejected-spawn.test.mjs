@@ -333,7 +333,7 @@ test('a spawn rejected by a stop between the runner read and its write leaves th
     env: { ...options.env, ANTONINA_OPENCODE_BIN: resumeBackend },
   });
   const rerun = readMeta(id, options);
-  assert.equal(rerun.state, 'succeeded', 'a stop that rejected a spawn does not block the next run');
+  assert.equal(rerun.state, 'clearexit', 'a stop that rejected a spawn does not block the next run');
   assert.equal(rerun.active_runner, false);
   assert.equal(rerun.runner_reservation, null);
 });

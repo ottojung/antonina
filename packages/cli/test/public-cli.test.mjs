@@ -90,6 +90,14 @@ test('model is a nested agent command group, with no separate namespace', () => 
   assert.throws(() => preparePublicCommand('agent', ['model', 'select', 'extra']), PublicCliUsageError);
 });
 
+test('terminal filter describes code-zero exits without claiming success', () => {
+  assert.deepEqual(run('agent', ['list', '--page', '1', '--clearexit']), ['list', '--page', '1', '--clearexit']);
+  assert.throws(() => preparePublicCommand('agent', ['list', '--page', '1', '--succeeded']), PublicCliUsageError);
+  const help = preparePublicCommand('agent', ['list', '--help']);
+  assert.match(help.text, /--clearexit/);
+  assert.doesNotMatch(help.text, /--succeeded/);
+});
+
 test('every public leaf command has both long and short help', () => {
   for (const namespace of ['agent', 'board', 'daemon']) {
     for (const path of publicCommandPaths(namespace)) {

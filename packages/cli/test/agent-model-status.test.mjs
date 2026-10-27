@@ -44,7 +44,7 @@ test('status reports witnessed models, never configuration or speculative select
   assert.match(human.stdout, /models used:\s+example\.test\/first, example\.test\/actual/);
   // Human-facing timestamps are local calendar time with version-style age,
   // but structured JSON keeps seconds since the epoch for automation.
-  assert.match(human.stdout, /^created:    \\d{4}\\/\\d{2}\\/\\d{2} \\d{2}:\\d{2} \\(.+ ago\\)$/m);
+  assert.match(human.stdout, /^created:    \d{4}\/\d{2}\/\d{2} \d{2}:\d{2} \(.+ ago\)$/m);
   assert.match(human.stdout, /^started:    -$/m);
   assert.match(human.stdout, /^finished:   -$/m);
   assert.equal(typeof status().created_at, 'number');
@@ -56,7 +56,7 @@ test('status reports witnessed models, never configuration or speculative select
   const terminal = run();
   assert.equal(terminal.status, 0, terminal.stderr);
   assert.match(terminal.stdout, /^state: {6}clearexit$/m);
-  assert.match(terminal.stdout, /^started:    \\d{4}\\/\\d{2}\\/\\d{2} \\d{2}:\\d{2} \\(.+ ago\\)$/m);
-  assert.match(terminal.stdout, /^finished:   \\d{4}\\/\\d{2}\\/\\d{2} \\d{2}:\\d{2} \\(.+ ago\\)$/m);
+  assert.match(terminal.stdout, /^started:    \d{4}\/\d{2}\/\d{2} \d{2}:\d{2} \(.+ ago\)$/m);
+  assert.match(terminal.stdout, /^finished:   \d{4}\/\d{2}\/\d{2} \d{2}:\d{2} \(.+ ago\)$/m);
   assert.equal(typeof status().finished_at, 'number');
 });

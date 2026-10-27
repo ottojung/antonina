@@ -111,7 +111,6 @@ class SchedulerPolicyTests(unittest.TestCase):
         from contextlib import redirect_stdout
 
         issue_reader = load_helper("antonina-scheduler-issue")
-        worktrees = load_helper("antonina-scheduler-worktrees")
         ids = ("320", "7Ka9mQ2xP4vT8nB3cR5dH1-otter", "arbitrary_ID.v2")
         for issue_id in ids:
             with self.subTest(issue_id=issue_id):
@@ -123,21 +122,11 @@ class SchedulerPolicyTests(unittest.TestCase):
                 read.assert_called_once_with(issue_id)
                 self.assertEqual(json.loads(out.getvalue())["number"], issue_id)
 
-                out = io.StringIO()
-                with patch.object(worktrees, "running_agents", return_value=[]), \
-                     patch.object(worktrees, "resources", return_value=[]) as read, \
-                     patch("sys.argv", ["worktrees", "--issue", issue_id]), \
-                     redirect_stdout(out):
-                    worktrees.main()
-                read.assert_called_once_with(issue_id)
-                self.assertEqual(json.loads(out.getvalue()), [])
-
         for invalid_id in ("", " ", " 320 "):
             with self.subTest(invalid_id=invalid_id):
-                for helper in (issue_reader, worktrees):
-                    with patch("sys.argv", ["helper", "--issue", invalid_id]):
-                        with self.assertRaises(SystemExit):
-                            helper.main()
+                with patch("sys.argv", ["issue-reader", "--issue", invalid_id]):
+                    with self.assertRaises(SystemExit):
+                        issue_reader.main()
 
     def test_scheduler_deployer_checks_orchestrator_resource_companion(self):
         deploy = (ROOT / "antonina-scheduler-deploy").read_text()

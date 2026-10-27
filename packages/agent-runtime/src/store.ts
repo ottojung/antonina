@@ -325,16 +325,29 @@ export function opencodeDbKeysInUse(
  * than traded for a longer unstated one, the same standard hosts.md applies to
  * the stale-lock reclaim window.
  */
-export function removeOpencodeDatabase(key: string, options: StatePathsOptions = {}): void {
-  if (persistedAgentId(key) !== key) return;
+/** Delete orphaned per-agent databases with one complete inventory, not one scan per key. */
+export function removeOrphanedOpencodeDatabases(
+  keys: ReadonlySet<string>,
+  options: StatePathsOptions = {},
+): void {
+  if (keys.size === 0) return;
+  // An unreadable record might still refer to any key: retain every database
+  // unless the entire remaining agent inventory was readable.
   const inventory = opencodeDbKeysInUse('', options);
-  if (!inventory.complete || inventory.keys.has(key)) return;
-  const path = opencodeDbPath(key, options);
-  for (const suffix of ['', '-wal', '-shm']) {
-    try {
-      nodeFs.rmSync(`${path}${suffix}`, { force: true, maxRetries: 5, retryDelay: 20 });
-    } catch {}
+  if (!inventory.complete) return;
+  for (const key of keys) {
+    if (persistedAgentId(key) !== key || inventory.keys.has(key)) continue;
+    const path = opencodeDbPath(key, options);
+    for (const suffix of ['', '-wal', '-shm']) {
+      try {
+        nodeFs.rmSync(`${path}${suffix}`, { force: true, maxRetries: 5, retryDelay: 20 });
+      } catch {}
+    }
   }
+}
+
+export function removeOpencodeDatabase(key: string, options: StatePathsOptions = {}): void {
+  removeOrphanedOpencodeDatabases(new Set([key]), options);
 }
 
 /**
@@ -768,7 +781,11 @@ export function createAgentDirectory(agentId: string, options: StatePathsOptions
   }
 }
 
-export function removeAgentDirectory(agentId: string, options: StatePathsOptions = {}): void {
+export function removeAgentDirectory(
+  agentId: string,
+  options: StatePathsOptions = {},
+  deferDatabaseRemoval?: Set<string>,
+): void {
   const fs = filesystem(options);
   // Read the record BEFORE the removal below: once the directory is gone the key
   // is undiscoverable, so reading after would answer `null` and silently leave
@@ -812,8 +829,12 @@ export function removeAgentDirectory(agentId: string, options: StatePathsOptions
   // docs/intent-records/agent.md. Separately, this is best effort: a leftover
   // file is inert, and an operator's `delete` must not fail over it.
   if (doomedKey !== null) {
-    try {
-      removeOpencodeDatabase(doomedKey, options);
-    } catch {}
+    if (deferDatabaseRemoval !== undefined) {
+      deferDatabaseRemoval.add(doomedKey);
+    } else {
+      try {
+        removeOpencodeDatabase(doomedKey, options);
+      } catch {}
+    }
   }
 }

@@ -88,7 +88,7 @@ function finishedSource(t, finishedAt) {
   const path = metaPath(handle.root, sourceId);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
   Object.assign(meta, {
-    state: 'succeeded',
+    state: 'clearexit',
     started_at: finishedAt,
     finished_at: finishedAt,
     exit_code: 0,

@@ -88,14 +88,14 @@ async function exercise(t, kind) {
   if (kind==='all-transient') {
     // The old implementation stranded an agent after all configured models
     // returned temporary failures. Exhaustion of a SOFT pool is recoverable.
-    assert.equal(result.state, 'succeeded');
+    assert.equal(result.state, 'clearexit');
     const attempts=readFileSync(trace,'utf8').trim().split('\n');
     assert.equal(attempts.length, 7);
     assert.ok(attempts.includes(LUNA) && attempts.includes(BEAM));
     assert.ok(result.model_failover.cooldowns.every(x=>x.reason==='transient_backend'));
     return;
   }
-  assert.equal(result.state,'succeeded',JSON.stringify({state:result.state,error:result.error,backend_error:result.backend_error}));
+  assert.equal(result.state,'clearexit',JSON.stringify({state:result.state,error:result.error,backend_error:result.backend_error}));
   assert.equal(result.exit_code,0);
   assert.equal(result.model_failover.selected_model,BEAM);
   if (kind==='fresh-quota') assert.equal(result.native_session_id,'ses_checkpoint_demo');

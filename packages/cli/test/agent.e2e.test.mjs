@@ -316,13 +316,13 @@ test('built CLI runs a fresh prompt then continues the discovered OpenCode sessi
 
   const first = run(['agent', 'run', '--id', agent_a11d, '--detach', '--prompt', 'hello'], env);
   assert.equal(first.status, 0, first.stderr);
-  const firstDone = await waitFor(root, agent_a11d, (meta) => meta.state === 'succeeded' && meta.active_runner === false);
+  const firstDone = await waitFor(root, agent_a11d, (meta) => meta.state === 'clearexit' && meta.active_runner === false);
   assert.equal(firstDone.native_session_id, 'ses_fake');
   assert.equal(firstDone.prompt_count, 1);
 
   const second = run(['agent', 'run', '--id', agent_a11d, '--detach', '--prompt', 'again'], env);
   assert.equal(second.status, 0, second.stderr);
-  const secondDone = await waitFor(root, agent_a11d, (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false);
+  const secondDone = await waitFor(root, agent_a11d, (meta) => meta.state === 'clearexit' && meta.prompt_count === 2 && meta.active_runner === false);
   assert.equal(secondDone.native_session_id, 'ses_fake');
   const log = readFileSync(join(root, 'state', 'antonina', 'agents', agent_a11d, 'output.log'), 'utf8');
   assert.match(log, /FAKE:hello/);
@@ -340,7 +340,7 @@ test('hard steer interrupts the running process group and drains redirect FIFO',
 
   const steer = run(['agent', 'run', '--id', agent_beef, '--steer', '--detach', '--prompt', 'redirect'], env);
   assert.equal(steer.status, 0, steer.stderr);
-  const done = await waitFor(root, agent_beef, (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false, 12_000);
+  const done = await waitFor(root, agent_beef, (meta) => meta.state === 'clearexit' && meta.prompt_count === 2 && meta.active_runner === false, 12_000);
   assert.equal(done.native_session_id, 'ses_fake');
   const log = readFileSync(join(root, 'state', 'antonina', 'agents', agent_beef, 'output.log'), 'utf8');
   assert.match(log, /slow-start/);
@@ -391,7 +391,7 @@ test('stale reserved work is recovered without overwriting the accepted prompt',
   const recovery = run(['agent', 'run', '--id', agent_d00d, '--detach', '--prompt', 'replacement'], env);
   assert.equal(recovery.status, 1);
   assert.match(recovery.stderr, /recovering an already accepted prompt/);
-  const done = await waitFor(root, agent_d00d, (value) => value.state === 'succeeded' && value.active_runner === false);
+  const done = await waitFor(root, agent_d00d, (value) => value.state === 'clearexit' && value.active_runner === false);
   assert.equal(done.prompt_count, 1);
   const log = readFileSync(join(root, 'state', 'antonina', 'agents', agent_d00d, 'output.log'), 'utf8');
   assert.match(log, /FAKE:accepted/);
@@ -469,7 +469,7 @@ test('detach ack carries the claiming runner pid', async (t) => {
   assert.equal(typeof ack.runner_pid, 'number', 'the ack must name the runner that claimed ownership');
   const meta = JSON.parse(readFileSync(metaPath(root, agent_e208), 'utf8'));
   assert.equal(meta.runner_pid, ack.runner_pid);
-  await waitFor(root, agent_e208, (value) => value.state === 'succeeded' && value.active_runner === false);
+  await waitFor(root, agent_e208, (value) => value.state === 'clearexit' && value.active_runner === false);
 });
 
 test('status reconciles abandoned running metadata to an explicit failure', (t) => {
@@ -515,13 +515,13 @@ test('clean dry-run observes and clean removes old terminal agents', (t) => {
   // created_at is aged alongside finished_at: since board issue 129 the retention
   // anchor is the LATER of the two, so an agent created seconds ago that claims
   // to have finished in 1970 is a record no writer here can produce.
-  Object.assign(meta, { state: 'succeeded', created_at: 1, finished_at: 1, active_runner: false });
+  Object.assign(meta, { state: 'clearexit', created_at: 1, finished_at: 1, active_runner: false });
   writeFileSync(path, JSON.stringify(meta));
 
   const dry = run(['agent', 'clean', '--days', '1', '--dry-run'], env);
   assert.equal(dry.status, 0, dry.stderr);
   assert.ok(dry.stdout.includes(agent_f00d), dry.stdout);
-  assert.equal(JSON.parse(readFileSync(path, 'utf8')).state, 'succeeded');
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).state, 'clearexit');
 
   const clean = run(['agent', 'clean', '--days', '1'], env);
   assert.equal(clean.status, 0, clean.stderr);
@@ -827,12 +827,12 @@ test('transient backend 5xx recovers without replaying the original prompt', asy
   const { root, work, env } = handle;
   const agent_bad1 = newAgent(env, ['--cwd', work]);
   assert.equal(run(['agent', 'run', '--id', agent_bad1, '--detach', '--prompt', 'server-error'], env).status, 0);
-  await waitFor(root, agent_bad1, (meta) => meta.state === 'succeeded' && meta.active_runner === false);
+  await waitFor(root, agent_bad1, (meta) => meta.state === 'clearexit' && meta.active_runner === false);
 
   const status = run(['agent', 'status', '--id', agent_bad1, '--json'], env);
   assert.equal(status.status, 0, status.stderr);
   const body = JSON.parse(status.stdout);
-  assert.equal(body.state, 'succeeded');
+  assert.equal(body.state, 'clearexit');
   assert.equal(body.backend_error, null, 'a recovered provider failure is not terminal');
   assert.equal(body.prompts, 1, 'the one accepted user turn has one successful result');
   const calls = readFileSync(env.ANTONINA_TEST_CALLS, 'utf8').split('\n').filter(Boolean);
@@ -857,7 +857,7 @@ test('prompt recovers an existing OpenCode session when durable session id was l
   // so the test names the title the fixture should advertise.
   env.ANTONINA_FIXTURE_SESSION_AGENT = agent_a11d;
   assert.equal(run(['agent', 'run', '--id', agent_a11d, '--detach', '--prompt', 'first'], env).status, 0);
-  await waitFor(root, agent_a11d, (meta) => meta.state === 'succeeded' && meta.active_runner === false);
+  await waitFor(root, agent_a11d, (meta) => meta.state === 'clearexit' && meta.active_runner === false);
 
   const path = metaPath(root, agent_a11d);
   const meta = JSON.parse(readFileSync(path, 'utf8'));
@@ -868,7 +868,7 @@ test('prompt recovers an existing OpenCode session when durable session id was l
   const done = await waitFor(
     root,
     agent_a11d,
-    (value) => value.state === 'succeeded' && value.prompt_count === 2 && value.active_runner === false,
+    (value) => value.state === 'clearexit' && value.prompt_count === 2 && value.active_runner === false,
   );
   assert.equal(done.native_session_id, 'ses_fake');
 
@@ -1084,7 +1084,7 @@ test('run scope survives a steer: neither the steer nor the next run replays ear
     `a steer run did not reach a lifecycle outcome: ${steer.status} ${steer.stderr}`,
   );
   assert.doesNotMatch(steer.stdout, /slow-start/, 'a steer run replayed the interrupted invocation');
-  await waitFor(root, agent_a11d, (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false, 12_000);
+  await waitFor(root, agent_a11d, (meta) => meta.state === 'clearexit' && meta.prompt_count === 2 && meta.active_runner === false, 12_000);
 
   // Non-vacuity: the interrupted invocation and the drained continuation both
   // really did write, so the markers excluded below really do exist.
@@ -1643,8 +1643,8 @@ test('a/d. a full host still launches, because launch is not host-capacity polic
   const launched = run(['agent', 'run', '--id', agent_ca91, '--detach', '--prompt', 'work'], impossible);
   assert.equal(launched.status, 0, launched.stderr);
 
-  const done = await waitFor(root, agent_ca91, (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
-  assert.equal(done.state, 'succeeded');
+  const done = await waitFor(root, agent_ca91, (meta) => meta.state === 'clearexit' && meta.active_runner === false, 30_000);
+  assert.equal(done.state, 'clearexit');
   // The prompt was really delivered, so this is a launch and not a no-op that
   // merely avoided refusing.
   assert.equal(done.pending_prompt, null);
@@ -1735,7 +1735,7 @@ test('e. a signal-killed agent is reported as an external kill through status', 
   const agent_ca96 = newAgent(env, ['--cwd', work]);
   const clean = run(['agent', 'run', '--id', agent_ca96, '--detach', '--prompt', 'ok'], env);
   assert.equal(clean.status, 0, clean.stderr);
-  await waitFor(root, agent_ca96, (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
+  await waitFor(root, agent_ca96, (meta) => meta.state === 'clearexit' && meta.active_runner === false, 30_000);
   const cleanHuman = run(['agent', 'status', '--id', agent_ca96], env);
   assert.equal(cleanHuman.status, 0, cleanHuman.stderr);
   assert.doesNotMatch(cleanHuman.stdout, /^last error:/m);
@@ -1787,7 +1787,7 @@ test('a note from an earlier failed run is never presented as this run\'s error'
   // nothing on the runtime's side clears the first run's.
   const succeeded = run(['agent', 'run', '--id', agent_ca97, '--detach', '--prompt', 'ok'], env);
   assert.equal(succeeded.status, 0, succeeded.stderr);
-  await waitFor(root, agent_ca97, (meta) => meta.state === 'succeeded' && meta.active_runner === false, 30_000);
+  await waitFor(root, agent_ca97, (meta) => meta.state === 'clearexit' && meta.active_runner === false, 30_000);
 
   // The record itself is unchanged by the second run: the note is still there.
   // Asserted so the assertions below cannot be satisfied by something that
@@ -1800,7 +1800,7 @@ test('a note from an earlier failed run is never presented as this run\'s error'
   const second = run(['agent', 'status', '--id', agent_ca97, '--json'], env);
   assert.equal(second.status, 0, second.stderr);
   const body = JSON.parse(second.stdout);
-  assert.equal(body.state, 'succeeded');
+  assert.equal(body.state, 'clearexit');
   assert.equal(body.exit_code, 0);
   assert.equal(body.exit_signal, null);
   // ...so nothing on the surface may present the earlier note as this run's
@@ -1821,7 +1821,7 @@ test('a note from an earlier failed run is never presented as this run\'s error'
   // fields it prints are the successful ones.
   const human = run(['agent', 'status', '--id', agent_ca97], env);
   assert.equal(human.status, 0, human.stderr);
-  assert.match(human.stdout, /^state: {6}succeeded$/m);
+  assert.match(human.stdout, /^state: {6}clearexit$/m);
   assert.match(human.stdout, /^exit code: {2}0$/m);
   assert.doesNotMatch(human.stdout, /^error:/m, 'the earlier note was labelled as this run\'s error');
   assert.doesNotMatch(human.stdout, /^last error: killed by SIGKILL/m);
@@ -1857,10 +1857,10 @@ test('a front runs in, and reports, the directory declared by --cwd on run', asy
   const done = await waitFor(
     root,
     agent_c0de,
-    (meta) => meta.state === 'succeeded' && meta.active_runner === false,
+    (meta) => meta.state === 'clearexit' && meta.active_runner === false,
     20_000,
   );
-  assert.equal(done.state, 'succeeded');
+  assert.equal(done.state, 'clearexit');
   assert.equal(done.prompt_count, 1, 'the prompt must really have been delivered');
 
   // What the front says about itself, read from its own log. This is the
@@ -2054,7 +2054,7 @@ test('the observation names the directory the backend actually ran in', async (t
   const ran = await waitFor(
     root,
     agent_0b5f,
-    (meta) => meta.state === 'succeeded' && meta.active_runner === false,
+    (meta) => meta.state === 'clearexit' && meta.active_runner === false,
     20_000,
   );
   assert.equal(ran.prompt_count, 1, 'the prompt must really have been delivered');
@@ -2075,7 +2075,7 @@ test('the observation names the directory the backend actually ran in', async (t
   const moved = await waitFor(
     root,
     agent_0b5f,
-    (meta) => meta.state === 'succeeded' && meta.prompt_count === 2 && meta.active_runner === false,
+    (meta) => meta.state === 'clearexit' && meta.prompt_count === 2 && meta.active_runner === false,
     20_000,
   );
   assert.equal(moved.cwd, second);
@@ -2146,7 +2146,7 @@ test('run refuses a launch into a directory the backend cannot honour', async (t
   const launched = await waitFor(
     root,
     agent_8a7e,
-    (meta) => meta.state === 'succeeded' && meta.active_runner === false,
+    (meta) => meta.state === 'clearexit' && meta.active_runner === false,
     20_000,
   );
   assert.equal(launched.invocation_cwd, work);

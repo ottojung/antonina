@@ -154,6 +154,27 @@ test('read and write boundaries reject old incomplete or extended schemas', (t) 
   assert.throws(() => readMeta('a12', options), /metadata fields are not canonical/);
 });
 
+test('pre-rename clean-exit records remain readable and normalize on write', (t) => {
+  const options = root(t);
+  createAgentDirectory('oldexit', options);
+  const meta = idleMeta('oldexit', '/tmp', null, 10);
+  meta.state = 'clearexit';
+  meta.started_at = 11;
+  meta.finished_at = 12;
+  meta.exit_code = 0;
+  writeMeta('oldexit', meta, options);
+  const path = join(agentDir('oldexit', options), 'meta.json');
+  const legacy = JSON.parse(nodeFs.readFileSync(path, 'utf8'));
+  legacy.state = 'succeeded';
+  nodeFs.writeFileSync(path, JSON.stringify(legacy));
+  const read = readMeta('oldexit', options);
+  assert.equal(read.state, 'clearexit');
+  assert.equal(JSON.parse(nodeFs.readFileSync(path, 'utf8')).state, 'succeeded', 'read must not rewrite durable state');
+  writeMeta('oldexit', read, options);
+  assert.equal(JSON.parse(nodeFs.readFileSync(path, 'utf8')).state, 'clearexit');
+  assert.throws(() => writeMeta('oldexit', legacy, options), /malformed/, 'new writes never publish the old spelling');
+});
+
 test('missing metadata is absence only when the agent directory is gone', (t) => {
   const options = root(t);
   assert.equal(readMeta('a11d', options), null);

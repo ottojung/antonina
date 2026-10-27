@@ -7,6 +7,7 @@ import {
   statSync,
 } from 'node:fs';
 import { resolve } from 'node:path';
+import { agentStatusTimestamp } from './time-display.js';
 
 import { newEntityId } from '../../core/src/ids.js';
 import {
@@ -612,7 +613,7 @@ async function cmdFork(
 }
 
 async function cmdList(args: string[], context: AgentCommandContext): Promise<number> {
-  const parsed = parse(args, ['--json', '--running', '--finished', '--succeeded', '--failed', '--stopped', '--killed']);
+  const parsed = parse(args, ['--json', '--running', '--finished', '--clearexit', '--failed', '--stopped', '--killed']);
   if (parsed.positionals.length !== 0) throw new UsageError('list: unexpected positional arguments');
   const pageSize = parsed.values.has('--limit')
     ? positiveInteger(parsed.values.get('--limit'), '--limit')
@@ -908,9 +909,9 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
     // value: an agent with a declared directory that has never been launched in
     // it is not the same agent as one that was, and one line cannot say both.
     context.io.stdout(`ran in:     ${shown(status.invocation_cwd, 'never ran')}`);
-    context.io.stdout(`created:    ${shown(status.created_at)}`);
-    context.io.stdout(`started:    ${shown(status.started_at)}`);
-    context.io.stdout(`finished:   ${shown(status.finished_at)}`);
+    context.io.stdout(`created:    ${agentStatusTimestamp(status.created_at as number)}`);
+    context.io.stdout(`started:    ${agentStatusTimestamp(status.started_at as number | null)}`);
+    context.io.stdout(`finished:   ${agentStatusTimestamp(status.finished_at as number | null)}`);
     context.io.stdout(`exit code:  ${shown(status.exit_code)}`);
     // The note the runtime last recorded, next to the exit code. Only printed
     // when there is one, so a run that never recorded a note is unchanged, and

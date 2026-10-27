@@ -539,7 +539,7 @@ test('the runner spawns the backend in the record database, and reaps it', { tim
   assert.equal(spawns[0].db, expected, 'the spawned backend was not given the record database');
   // And nothing was left running: the fixture exits 0 and the runner awaited it.
   const after = readMeta(one.id, one.options);
-  assert.equal(after.state, 'succeeded');
+  assert.equal(after.state, 'clearexit');
   assert.equal(after.active_runner, false);
   assert.equal(after.runner_reservation, null);
   assert.throws(() => process.kill(after.pid, 0), /ESRCH/, 'a backend process was left running');

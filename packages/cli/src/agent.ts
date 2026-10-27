@@ -78,6 +78,7 @@ import {
   readMeta,
   recoverInterruptedInitialMeta,
   removeAgentDirectory,
+  removeOrphanedOpencodeDatabases,
   updateMeta,
   writeMeta,
   type StatePathsOptions,
@@ -1713,8 +1714,13 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
     const anchor = retentionAnchor(meta);
     return anchor !== null && anchor < cutoff;
   });
-  for (const agentId of candidates) {
-    if (parsed.flags.has('--dry-run')) {
+  // A database may be shared by forked agents. Accumulate candidate keys and
+  // check the surviving registry once after the sweep, instead of rescanning
+  // every agent for every deletion (quadratic on large registries).
+  const deferredDatabaseKeys = new Set<string>();
+  try {
+    for (const agentId of candidates) {
+      if (parsed.flags.has('--dry-run')) {
       context.io.stdout(agentId);
       continue;
     }
@@ -1741,8 +1747,11 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
       removable = true;
     }, paths(context));
     if (!removable) continue;
-    removeAgentDirectory(agentId, paths(context));
+    removeAgentDirectory(agentId, paths(context), deferredDatabaseKeys);
     context.io.stdout(`deleted agent ${agentId}`);
+    }
+  } finally {
+    removeOrphanedOpencodeDatabases(deferredDatabaseKeys, paths(context));
   }
   reportUnreadableAgents(unreadable, context, 'was retained');
   return EXIT_OK;

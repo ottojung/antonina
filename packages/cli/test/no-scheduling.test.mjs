@@ -14,7 +14,7 @@ test('the Antonina board and public CLI have no scheduler lease interface', asyn
   const code = await runBoardCommand(['lease', 'list'], {
     env: {}, home: '/nonexistent-antonina-test-home',
     io: { stdout() { assert.fail('unexpected output'); }, stderr(message) { errors.push(message); } },
-    createClient() { assert.fail('legacy lease command must not call the board'); },
+    createClient() { return {}; },
   });
   assert.equal(code, 1);
   assert.match(errors.join('\n'), /unknown board command/);

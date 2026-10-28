@@ -873,7 +873,7 @@ test('prompt recovers an existing OpenCode session when durable session id was l
   assert.equal(done.native_session_id, 'ses_fake');
 
   const calls = readFileSync(env.ANTONINA_TEST_CALLS, 'utf8');
-  assert.match(calls, /run --auto --format json --session ses_fake .* recovered/);
+  assert.match(calls, /run --standalone --auto --format json --session ses_fake .* recovered/);
   assertFixtureInvoked(handle, 'recovered');
 });
 
@@ -1879,7 +1879,7 @@ test('a front runs in, and reports, the directory declared by --cwd on run', asy
   assert.equal(entry.cwd, declared);
   // The backend was told the same directory, so the record and the invocation
   // cannot disagree about where the front is.
-  assert.match(readFileSync(env.ANTONINA_TEST_CALLS, 'utf8'), new RegExp(`--dir ${declared} `));
+  assert.doesNotMatch(readFileSync(env.ANTONINA_TEST_CALLS, 'utf8'), /--dir\b|--variant\b/, 'V2 has no legacy directory or variant flags');
   assertFixtureInvoked(handle, 'declared');
 });
 
@@ -2089,10 +2089,7 @@ test('the observation names the directory the backend actually ran in', async (t
   );
   // Every launch of this front was handed the same directory the backend ran in.
   for (const call of fixtureInvocations(env)) {
-    assert.ok(
-      call.includes(`--dir ${first} `) || call.includes(`--dir ${second} `),
-      `a launch named a directory the front did not declare: ${JSON.stringify(call)}`,
-    );
+    assert.doesNotMatch(call, /--dir\b|--variant\b/, 'V2 backend uses its process cwd and model variant');
   }
   assertFixtureInvoked(handle, 'two');
 });
@@ -2129,7 +2126,7 @@ test('run refuses a launch into a directory the backend cannot honour', async (t
 
   // And the same launch of a directory declared *earlier*, in durable state,
 // with no `--cwd` on this command at all. This is the case a flag-shaped gate
-  // misses: the backend is handed `--dir <declared>` by a CLI that has just been
+  // misses: the backend is spawned in the declared cwd by a CLI that has just been
   // told it cannot run an invocation in a named directory.
   const inherited = run(
     ['agent', 'run', '--id', agent_8a7e, '--detach', '--prompt', 'no'],

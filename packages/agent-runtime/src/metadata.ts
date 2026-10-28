@@ -4,7 +4,7 @@ import { isAbsolute } from 'node:path';
 
 import { persistedAgentId, persistedInvocationId, persistedProcessInteger } from './process.js';
 
-export const AGENT_META_VERSION = 4;
+export const AGENT_META_VERSION = 5;
 export const DEFAULT_VARIANT = 'low';
 export const TERMINAL_STATES = ['clearexit', 'failed', 'stopped', 'killed'] as const;
 export const PERSISTED_AGENT_STATES = ['idle', 'running', ...TERMINAL_STATES] as const;
@@ -51,6 +51,7 @@ const TOP_LEVEL_FIELDS = [
   'last_prompt',
   'error',
   'agent_version',
+  'opencode_db',
 ] as const;
 
 const BACKEND_ERROR_FIELDS = [
@@ -137,7 +138,6 @@ const OPENCODE_DB_FIELD = 'opencode_db';
 export const OPTIONAL_TOP_LEVEL_FIELDS = [
   'invocation_cwd',
   RUN_LOG_CURSOR_FIELD,
-  OPENCODE_DB_FIELD,
   'model_failover',
   'observed_models',
 ] as const;
@@ -417,15 +417,15 @@ export function validateAgentMetadata(meta: AgentMetadata): void {
   if (persistedRunLogOffset(meta) === null && meta[RUN_LOG_CURSOR_FIELD] !== null && meta[RUN_LOG_CURSOR_FIELD] !== undefined) {
     throw new MalformedAgentMetadataError('managed-agent run_log_offset is malformed');
   }
-  if (persistedOpencodeDbKey(meta) === null && meta[OPENCODE_DB_FIELD] !== null && meta[OPENCODE_DB_FIELD] !== undefined) {
+  if (persistedOpencodeDbKey(meta) === null) {
     throw new MalformedAgentMetadataError('managed-agent opencode_db is malformed');
   }
 }
 
 /**
  * The key of the dedicated OpenCode database this agent's invocations are confined
- * to, or `null` for "no dedicated database" (field absent, explicitly null, or not
- * a canonical key). `null` is the pre-isolation behaviour, not an error.
+ * to, or `null` if the record is malformed. V2 requires a dedicated database
+ * for every canonical agent; absent and null keys are unsupported.
  */
 export function persistedOpencodeDbKey(meta: AgentMetadata): string | null {
   if (!hasOwn(meta, OPENCODE_DB_FIELD)) return null;
@@ -565,7 +565,7 @@ export function persistedAgentCwd(meta: AgentMetadata): string | null {
 /**
  * The same field for the paths that must launch a backend: a null cwd is not
  * silently replaced by anything, it refuses the launch, because the backend is
- * invoked with `--dir` and there is no honest value to give it.
+ * launched with its own cwd and PWD; an undeclared directory is invalid.
  */
 export function requiredAgentCwd(meta: AgentMetadata): string {
   const value = persistedAgentCwd(meta);

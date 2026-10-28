@@ -85,7 +85,7 @@ function agentsPath(root) {
 /**
  * A deletion-eligible record: stopped long ago, no active runner, no pending
  * prompt, so `clean` really would remove it if the sweep ran. Written by hand
- * as a version-4 record, the shape this build writes.
+ * as a version-5 record, the shape this build writes.
  */
 function writeExpired(root, id) {
   const dir = join(agentsPath(root), id);
@@ -122,7 +122,8 @@ function writeExpired(root, id) {
     pending_prompt: null,
     last_prompt: null,
     error: null,
-    agent_version: 4,
+    agent_version: 5,
+    opencode_db: id,
   }, null, 2)}\n`);
 }
 

@@ -60,7 +60,7 @@ import {
 } from '../dist/packages/agent-runtime/src/backend.js';
 import { forkMetaSnapshot } from '../dist/packages/agent-runtime/src/fork.js';
 import { beginInvocation } from '../dist/packages/agent-runtime/src/lifecycle.js';
-import { idleMeta, mintRunnerReservationOwnerToken } from '../dist/packages/agent-runtime/src/metadata.js';
+import { idleMeta, mintRunnerReservationOwnerToken, validateAgentMetadata } from '../dist/packages/agent-runtime/src/metadata.js';
 import {
   envHasAgentMarker,
   envHasInvocationMarker,
@@ -209,32 +209,16 @@ test('the recorded key, not the agent directory layout, decides the database', (
   );
 });
 
-test('a record with no opencode_db resolves to no override at all', (t) => {
+test('V2 rejects missing and null database keys without using a shared database', (t) => {
   const env = scratch(t);
   const cwd = mkdtempSync(join(tmpdir(), 'antonina-b186-cwd-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
-  createAgentDirectory('b18605', { env });
-  // The pre-isolation shape: an optional field that simply is not there. Its
-  // sessions already live in the shared database, so moving it onto a fresh
-  // empty one would strand its recorded native_session_id.
   const absent = idleMeta('b18605', cwd, null, 1);
   delete absent.opencode_db;
-  writeMeta('b18605', absent, { env });
-
-  const fromAbsent = opencodeBackendEnv(absent, { env });
-  const fromNull = opencodeBackendEnv({ ...absent, opencode_db: null }, { env });
-
-  // Explicitly `undefined`, not `{}`: `undefined` is what removes the variable
-  // from the child's environment, so an operator's ambient OPENCODE_DB cannot
-  // decide which database this front writes to.
-  assert.equal('OPENCODE_DB' in fromAbsent, true, 'an unkeyed record produced no env entry to remove');
-  assert.equal(fromAbsent.OPENCODE_DB, undefined);
-  assert.equal(fromNull.OPENCODE_DB, undefined);
-
-  // And the durable record round-trips as canonical rather than malformed: an
-  // absent field is an answer, not corruption.
-  assert.equal(readMeta('b18605', { env }) !== null, true);
-  assert.equal(persistedKeyOf(readMeta('b18605', { env })), null);
+  assert.throws(() => validateAgentMetadata(absent), /fields are not canonical/);
+  assert.throws(() => opencodeBackendEnv(absent, { env }), /requires a dedicated per-agent database/);
+  assert.throws(() => validateAgentMetadata({ ...absent, opencode_db: null }), /opencode_db is malformed/);
+  assert.throws(() => opencodeBackendEnv({ ...absent, opencode_db: null }, { env }), /requires a dedicated per-agent database/);
 });
 
 function persistedKeyOf(meta) {
@@ -269,7 +253,7 @@ test('an ambient OPENCODE_DB in the runner environment does not decide the datab
     return result.stdout;
   };
   assert.equal(seen(opencodeBackendEnv(one.meta, { env })), resolved);
-  assert.equal(seen(opencodeBackendEnv({ ...one.meta, opencode_db: null }, { env })), 'undefined');
+  assert.throws(() => opencodeBackendEnv({ ...one.meta, opencode_db: null }, { env }), /requires a dedicated per-agent database/);
 });
 
 test('the database directory exists before OpenCode is told to open the file', (t) => {
@@ -306,7 +290,7 @@ test('the probe path and the spawn path are given the same database', (t) => {
   const command = buildAgentCommand(readMeta('b18608', { env }), 'work', true, backendEnv);
   assert.ok(command !== null, 'continue mode built no command');
   assert.ok(command.includes('ses_b18608'));
-  assert.ok(command.includes('example.test/mock'));
+  assert.ok(command.includes('example.test/mock#low'));
   assert.equal(command.at(-1), 'work');
 
   assert.equal(discoverSessionId('b18608', backendEnv), 'ses_b18608');

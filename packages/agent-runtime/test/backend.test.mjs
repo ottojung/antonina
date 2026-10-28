@@ -259,7 +259,7 @@ test('model selection never invokes OpenCode, even if the backend would fail', (
   installModelConfig(config);
   const env = { [OPENCODE_BIN_ENV]: bin, XDG_CONFIG_HOME: config };
   const meta = idleMeta('a11d', root, null, 1);
-  assert.equal(buildAgentCommand(meta, 'work', false, env).includes(FIXTURE_MODEL), true);
+  assert.equal(buildAgentCommand(meta, 'work', false, env).includes(`${FIXTURE_MODEL}#low`), true);
   assert.equal(existsSync(calls), false, 'no OpenCode subprocess may run during model selection');
 });
 
@@ -283,6 +283,10 @@ test('backend executable resolves to an exact configured path, not a PATH lookup
   const meta = idleMeta('a11d', root, null, 1);
   const fresh = buildAgentCommand(meta, 'work', false, { [OPENCODE_BIN_ENV]: bin, XDG_CONFIG_HOME: config });
   assert.equal(fresh[0], bin, 'buildAgentCommand must not fall back to a bare backend name');
+  assert.deepEqual(fresh.slice(0, 4), [bin, 'run', '--standalone', '--auto']);
+  assert.equal(fresh.includes('--dir'), false, 'V2 has no --dir flag; the runner owns process cwd');
+  assert.equal(fresh.includes('--variant'), false, 'V2 variants are part of the model reference');
+
   assert.throws(() => buildAgentCommand(meta, 'work', false, { XDG_CONFIG_HOME: join(root, 'unconfigured') }), /models are not configured/);
 });
 
@@ -417,7 +421,7 @@ test('continuation command uses the persisted session', (t) => {
   const command = buildAgentCommand(meta, 'continue work', true, { [OPENCODE_BIN_ENV]: bin, XDG_CONFIG_HOME: config });
   assert.ok(command !== null);
   assert.ok(command.includes('ses_123'));
-  assert.ok(command.includes(FIXTURE_MODEL));
+  assert.ok(command.includes(`${FIXTURE_MODEL}#low`));
   assert.equal(command.at(-1), 'continue work');
 });
 
@@ -512,6 +516,21 @@ test('e. a negative counter delta is clamped rather than persisted as a nonsense
   assert.equal(death.oom_delta, 0);
   assert.equal(death.oom_kill_delta, 0);
   assert.equal(death.lifetime_seconds, 0);
+});
+
+test('OpenCode V2 provider.no-route fails over instead of becoming an unknown backend error', (t) => {
+  const root = fixture(t);
+  const log = join(root, 'opencode-v2.jsonl');
+  writeFileSync(log, JSON.stringify({
+    type: 'error',
+    timestamp: 1793157283159,
+    sessionID: 'ses_v2fixture',
+    error: { type: 'provider.no-route', message: 'Model unavailable: opencode-go/obsolete' },
+  }) + '\n');
+  const failure = classifyBackendFailure(log, 0, 1);
+  assert.equal(failure.classification, 'model_unavailable');
+  assert.equal(failure.transient, false);
+  assert.equal(failure.automatic_retry_safe, false);
 });
 
 test('e. a backend failure stays distinguishable from a signal death', (t) => {

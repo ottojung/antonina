@@ -141,8 +141,12 @@ function nextModelRecheckMs(meta: AgentMetadata, env: Record<string, string | un
 function commandModel(command: string[]): string {
   const flag = command.indexOf('--model');
   const model = flag < 0 ? undefined : command[flag + 1];
-  if (typeof model !== 'string') throw new Error('Antonina backend command omitted its configured model');
-  return model;
+  // OpenCode V2 accepts a variant as `provider/model#variant`. Antonina's
+  // model cooldowns and observations are keyed by the canonical model alone.
+  if (typeof model !== 'string' || !model.endsWith('#' + DEFAULT_VARIANT)) {
+    throw new Error('Antonina backend command omitted its canonical V2 model variant');
+  }
+  return model.slice(0, -(DEFAULT_VARIANT.length + 1));
 }
 
 /** Reap verified descendants of the previous invocation before replaying work.
@@ -576,9 +580,7 @@ async function recordSpawned(
   let accepted = false;
   await updateMeta(agentId, (meta) => {
     if (deletePendingFlag(meta) !== false || stopLikeOrMalformed(meta)) return;
-    // The command builder always launches the current Antonina variant. Once
-    // the child exists, make durable status name the variant that actually ran;
-    // this also upgrades legacy records that still carried `low`.
+    // Record the canonical V2 model variant that the child actually ran.
     meta.variant = DEFAULT_VARIANT;
     recordObservedAgentModel(meta, model);
     // Board issue 178: the observation is written here, in the same durable
@@ -857,7 +859,7 @@ async function runInvocation(
   if (meta === null) return false;
   let command: string[] | null;
   // Resolved once, from this one snapshot of the record, and then used for both
-  // `--dir` and `spawn({cwd})` and for the observation written below. It is the
+  // `spawn({cwd})`, `PWD`, and the observation written below. It is the
   // declaration (`cwd`) and never the observation (`invocation_cwd`): a value is
   // recorded only once a child exists, so launching from the declaration is what
   // keeps the observation an observation.
@@ -968,6 +970,10 @@ async function runInvocation(
     // anything running as this user. Deleting the key rather than blanking it
     // means an inherited copy cannot be reintroduced by a later spread.
     delete env[RUNNER_OWNER_TOKEN_ENV];
+    // V2's noninteractive CLI resolves the project from inherited PWD before
+    // process.cwd(). A spawned child's cwd alone is not sufficient: a stale PWD
+    // would silently write the session into the orchestrator's project.
+    env.PWD = launchCwd;
     let child: ChildProcess;
     try {
       child = spawn(command[0]!, command.slice(1), {

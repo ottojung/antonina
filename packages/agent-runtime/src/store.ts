@@ -170,7 +170,7 @@ export function opencodeBackendEnv(
   options: StatePathsOptions = {},
 ): Record<string, string | undefined> {
   const key = persistedOpencodeDbKey(meta);
-  if (key === null) return { OPENCODE_DB: undefined };
+  if (key === null) throw new MetadataReadError('OpenCode V2 requires a dedicated per-agent database');
   ensureOpencodeDbDir(options);
   return { OPENCODE_DB: opencodeDbPath(key, options) };
 }

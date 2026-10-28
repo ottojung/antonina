@@ -95,10 +95,10 @@ test('scalar continuation authority rejects coercion and non-finite time', () =>
   assert.throws(() => persistedNativeSessionId({ native_session_id: '' }), /malformed/);
 });
 
-test('idle metadata is a complete authoritative version-4 record', () => {
+test('idle metadata is a complete authoritative version-5 record', () => {
   const meta = idleMeta('a11d', '/tmp/work', null, 100.5);
-  assert.equal(AGENT_META_VERSION, 4);
-  assert.equal(meta.agent_version, 4);
+  assert.equal(AGENT_META_VERSION, 5);
+  assert.equal(meta.agent_version, 5);
   assert.equal(meta.id, 'a11d');
   assert.equal(meta.state, 'idle');
   assert.equal(meta.pending_prompt, null);
@@ -112,7 +112,7 @@ test('idle metadata is a complete authoritative version-4 record', () => {
   assert.doesNotThrow(() => validateAgentMetadata(meta));
 });
 
-test('schema v4 rejects old versions, missing fields and unknown fields', () => {
+test('schema v5 rejects old versions, missing fields and unknown fields', () => {
   const base = idleMeta('a11d', '/tmp/work', null, 100.5);
 
   const old = { ...base, agent_version: 3 };
@@ -207,16 +207,17 @@ test('a record may omit run_log_offset, but a present one must be a byte cursor'
   }
 });
 
-test('a record may omit opencode_db, but a present one must be an agent-id-shaped key', () => {
+test('V2 requires an agent-id-shaped database key in every canonical record', () => {
   const base = idleMeta('a11d', '/tmp/work', null, 100.5);
   // A new record names its own database from birth.
   assert.equal(persistedOpencodeDbKey(base), 'a11d');
 
   const absent = { ...base };
   delete absent.opencode_db;
-  assert.doesNotThrow(() => validateAgentMetadata(absent));
+  assert.throws(() => validateAgentMetadata(absent), /fields are not canonical/);
   assert.equal(persistedOpencodeDbKey(absent), null);
   assert.equal(persistedOpencodeDbKey({ ...base, opencode_db: null }), null);
+  assert.throws(() => validateAgentMetadata({ ...base, opencode_db: null }), /opencode_db is malformed/);
 
   for (const malformed of [42, 'not an id', 'bad.path', '', {}, []]) {
     assert.equal(persistedOpencodeDbKey({ ...base, opencode_db: malformed }), null);
@@ -228,7 +229,7 @@ test('a record may omit opencode_db, but a present one must be an agent-id-shape
   }
 });
 
-test('schema v4 rejects partial process identities and malformed structured authority', () => {
+test('schema v5 rejects partial process identities and malformed structured authority', () => {
   const base = idleMeta('a11d', '/tmp/work', null, 100.5);
 
   assert.throws(

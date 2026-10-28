@@ -310,6 +310,17 @@ function structuredBackendFailureRule(text: string): BackendFailureRule | undefi
     const event = parsed as Record<string, unknown>;
     if (event.type !== 'error' || typeof event.error !== 'object' || event.error === null || Array.isArray(event.error)) continue;
     const error = event.error as Record<string, unknown>;
+    // OpenCode V2 emits provider errors as typed top-level error events,
+    // including provider.no-route for a configured but unavailable model.
+    if (error.type === 'provider.no-route') {
+      return {
+        marker: 'OpenCode V2 provider.no-route',
+        classification: 'model_unavailable',
+        provider: null,
+        transient: false,
+        automaticRetrySafe: false,
+      };
+    }
     if (error.name !== 'APIError' || typeof error.data !== 'object' || error.data === null || Array.isArray(error.data)) continue;
     const data = error.data as Record<string, unknown>;
     const statusCode = data.statusCode;
@@ -499,9 +510,10 @@ export function discoverSessionId(
   cwd: string = process.cwd(),
 ): string | null {
   const childEnv = probeEnv(env);
+  childEnv.PWD = cwd;
   const result = spawnSync(
     resolveOpencode(childEnv),
-    ['session', 'list', '--format', 'json', '--max-count', String(SESSION_LIST_MAX_COUNT)],
+    ['session', 'list', '--standalone', '--format', 'json', '--max-count', String(SESSION_LIST_MAX_COUNT)],
     {
       encoding: 'utf8',
       timeout: SESSION_LIST_TIMEOUT_MS,
@@ -553,10 +565,9 @@ export function buildAgentCommand(
 ): string[] | null {
   const agentId = requiredPersistedAgentId(meta);
   const cwd = requiredAgentCwd(meta);
-  // The durable field is still validated so malformed or old records fail closed,
-  // but Antonina's backend variant is a product-level setting rather than a
-  // per-agent override. Legacy records may still say `low`; every invocation
-  // launched by this build uses the current Antonina default.
+  // OpenCode V2 uses the process cwd (set by the runner) instead of a --dir flag.
+  // Canonical V2 records have a product-level variant; it is not an
+  // override supplied by an obsolete OpenCode CLI flag.
   persistedVariant(meta);
   const variant = DEFAULT_VARIANT;
   const executable = resolveOpencode(env);
@@ -566,24 +577,20 @@ export function buildAgentCommand(
     const sessionId = recorded ?? discoverSessionId(agentId, env, cwd);
     if (sessionId === null) return null;
     return [
-      executable, 'run', '--auto',
+      executable, 'run', '--standalone', '--auto',
       '--format', 'json',
       '--session', sessionId,
-      '--model', model,
-      '--variant', variant,
+      '--model', `${model}#${variant}`,
       '--thinking',
-      '--dir', cwd,
       prompt,
     ];
   }
   return [
-    executable, 'run', '--auto',
+    executable, 'run', '--standalone', '--auto',
     '--format', 'json',
     '--title', `${OPENCODE_TITLE_PREFIX}${agentId}`,
-    '--model', model,
-    '--variant', variant,
+    '--model', `${model}#${variant}`,
     '--thinking',
-    '--dir', cwd,
     prompt,
   ];
 }
@@ -593,8 +600,8 @@ export interface BackendCapabilities {
   /**
    * Whether this backend can launch an invocation in a directory the operator
    * named. OpenCode can: every invocation is a fresh process, `buildAgentCommand`
-   * tells it `--dir` and the runner spawns it with `spawn({cwd})` on the same
-   * value. A backend that cannot must refuse a declaration *by name*, before
+   * the runner sets both `spawn({cwd})` and `PWD` to the declared
+   * directory. A backend that cannot must refuse a declaration *by name*, before
    * any write, rather than running the invocation somewhere else and reporting
    * the declared directory as if it had honoured it.
    */

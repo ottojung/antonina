@@ -59,6 +59,7 @@ async function exercise(t, fixture) {
     '  if [ "$prev" = "--format" ]; then format="$x"; fi',
     '  prev="$x"',
     'done',
+    'model="${model%%#*}"',
     '[ "$format" = "json" ] || exit 48',
     'echo "$model" >> "$ANTONINA_LIVENESS_CALLS"',
     'if [ "$model" = "example.test/luna" ]; then',

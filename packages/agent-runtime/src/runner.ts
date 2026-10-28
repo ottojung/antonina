@@ -6,6 +6,8 @@ import { constants } from 'node:os';
 import {
   backendCapabilities,
   buildAgentCommand,
+  interruptBackendSession,
+  ensureHostV2Service,
   classifyBackendFailure,
   quotaResetDelaySeconds,
   classifySignalDeath,
@@ -868,7 +870,7 @@ async function runInvocation(
     launchCwd = requiredAgentCwd(meta);
     // The same database the invocation will be spawned with, because
     // `buildAgentCommand` may itself probe for the session to continue.
-    command = buildAgentCommand(meta, prompt, isContinue, { ...options.env, ...opencodeBackendEnv(meta, options) });
+    command = buildAgentCommand(meta, prompt, isContinue, { ...options.env, ...opencodeBackendEnv(meta, options) }, new Set(), options.env);
   } catch (error) {
     // A durable record the backend cannot be launched from -- an undeclared
     // working directory, a malformed one -- is a failed invocation with a
@@ -942,6 +944,24 @@ async function runInvocation(
       if (current.state !== 'running') return;
       recordAgentModel(current, activeModel);
     }, options);
+    // Initialize the shared service using UNMARKED environment.
+    // The marked CLI connects to this already-running background server.
+    try {
+      // Automatic service discovery carries the V2 service's local password.
+      // Explicit --server would require OPENCODE_PASSWORD, so rely on the
+      // already-running, independently initialized host service.
+      ensureHostV2Service(
+        command[0]!,
+        { ...options.env, ...opencodeBackendEnv(meta, options) },
+        launchCwd,
+      );
+    } catch (error) {
+      await updateMeta(agentId, (current) => {
+        finalizeTerminal(current, 'failed', Date.now() / 1000, 127, null, String(error));
+        setActiveRunner(current, false);
+      }, options);
+      return false;
+    }
     const invocationId = randomBytes(16).toString('hex');
     const logFile = logPath(agentId, options);
     const fd = openSync(logFile, 'a', 0o600);
@@ -954,12 +974,8 @@ async function runInvocation(
       ANTONINA_INVOCATION_ID: invocationId,
       ANTONINA_PROMPT: prompt,
       NO_COLOR: '1',
-      // Board 186. Spread last, so which database this front's session and
-      // message writes go to is decided by this record and not inherited from
-      // the runner's own environment. This is the whole fix for the
-      // cross-front lock contention: OpenCode hardcodes `busy_timeout = 5000`
-      // and turns a `database is locked` timeout into a fatal
-      // `Failed to execute statement`, so the databases must not be shared.
+      // Pin every agent client to Antonina's one host-level V2 service and
+      // database, regardless of the runner's inherited OpenCode environment.
       ...opencodeBackendEnv(meta, options),
     };
     // Board 197: the owner token authorises *this runner's claim on this
@@ -1167,6 +1183,15 @@ async function runInvocation(
     await checkpointWrite;
     if (checkpointFailure !== null) throw checkpointFailure;
 
+    // A dead CLI front does NOT imply a dead V2 server-side agent loop.
+    // Abort only this session before retrying, reconciling or finalizing.
+    if (result.signal !== null || result.operatorSignalled || result.livenessTriggered) {
+      const latest = readMeta(agentId, options);
+      if (latest !== null) interruptBackendSession(
+        latest, { ...options.env, ...opencodeBackendEnv(latest, options) },
+      );
+    }
+
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);
     const stalled = result.livenessTriggered && !result.operatorSignalled
@@ -1244,13 +1269,13 @@ async function runInvocation(
         try {
           nextCommand = buildAgentCommand(
             latest, reconciliationPrompt(prompt, existingSession),
-            existingSession, backendEnv, failedModelsThisRun,
+            existingSession, backendEnv, failedModelsThisRun, options.env,
           );
           nextIsContinue = existingSession && nextCommand !== null;
           if (nextCommand === null) {
             nextCommand = buildAgentCommand(
               latest, reconciliationPrompt(prompt, false), false,
-              backendEnv, failedModelsThisRun,
+              backendEnv, failedModelsThisRun, options.env,
             );
             nextIsContinue = false;
           }

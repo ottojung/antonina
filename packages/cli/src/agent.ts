@@ -15,6 +15,8 @@ import {
   selectConfiguredModel,
   describeSignalDeath,
   discoverSessionId,
+  forkBackendSession,
+  interruptBackendSession,
   honoursInvocationCwd,
   sanitizeBackendError,
 } from '../../agent-runtime/src/backend.js';
@@ -543,9 +545,9 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
  *
  * The clone's id is generated, exactly as a non-forking `new` generates its
  * own, and it is printed on default stdout as the bare id and a newline. The
- * disclosure that the clone shares the source's backend session is written to
+ * disclosure that the clone receives an independent native child session is written to
  * stderr, so the machine-readable stdout stays a single id while the operator
- * still learns that running both agents drives one conversation.
+ * learns that the clone can run independently.
  */
 async function cmdFork(
   raw: string,
@@ -573,10 +575,15 @@ async function cmdFork(
   if (source !== null && persistedAgentCwd(source) !== null) {
     requireInvocationCwdCapability('new --fork', context.env);
   }
+  // Fork the OpenCode conversation before publishing the clone; a failed V2
+  // operation must not create a record that controls the parent's session.
+  const nativeChild = source === null ? null : forkBackendSession(
+    source, { ...context.env, ...opencodeBackendEnv(source, paths(context)) },
+  );
   let meta: AgentMetadata | null = null;
   for (let attempt = 0; attempt < MAX_AGENT_ID_ATTEMPTS && meta === null; attempt += 1) {
     try {
-      meta = forkAgent(sourceId, newEntityId(), paths(context));
+      meta = forkAgent(sourceId, newEntityId(), paths(context), Date.now() / 1000, nativeChild);
     } catch (error) {
       // A source that does not exist is a lookup failure, not a crash, and gets
       // the same exit code every other unknown-id path in this file returns.
@@ -604,8 +611,8 @@ async function cmdFork(
     const cwd = persistedAgentCwd(meta);
     context.io.stderr(
       `Forked agent ${sourceId} into ${agentId} (state ${String(persistedLifecycleState(meta))}, ${String(meta.prompt_count)} prompts, ${cwd === null ? 'no declared working directory' : cwd}). `
-      + `The clone inherits the source's backend session, and apart from that session the two records are independent: neither is ever read in order to update the other. `
-      + `They share one backend session, so running both will drive the same conversation. `
+      + `The clone inherits context in a separate native V2 child session, and the two records are independent: neither is ever read in order to update the other. `
+      + `The fork has a separate V2 session, so running either agent cannot steer the other. `
       + `Start work with \`antonina agent run --id ${agentId} --prompt 'task'\`.`,
     );
   }
@@ -1551,6 +1558,8 @@ async function stopLike(
   }, paths(context));
   if (started === null) throw new NotFoundError(`unknown agent: ${agentId}`);
   meta = started;
+  // Interrupt the one server-side session; never kill the shared service.
+  interruptBackendSession(meta, { ...context.env, ...opencodeBackendEnv(meta, paths(context)) });
   signalInvocation(meta, command === 'stop' ? 'SIGTERM' : 'SIGKILL');
   let gone = await waitForInvocationGone(meta, command === 'stop' ? 10_000 : 5_000);
   if (!gone && command === 'stop') {

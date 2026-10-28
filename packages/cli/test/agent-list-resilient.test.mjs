@@ -66,7 +66,7 @@ function metaPath(root, id) {
 }
 
 /**
- * A version-5 record as a *previous* line wrote it: no `invocation_cwd`, which
+ * A version-6 record as a *previous* line wrote it: no `invocation_cwd`, which
  * is a canonical record here and a refusal on a binary that predates board 178.
  */
 function record(id, overrides = {}) {
@@ -102,8 +102,7 @@ function record(id, overrides = {}) {
     pending_prompt: null,
     last_prompt: null,
     error: null,
-    agent_version: 5,
-    opencode_db: id,
+    agent_version: 6,
     ...overrides,
   };
 }

@@ -13,7 +13,6 @@ import {
   persistedInvocationCwd,
   persistedLifecycleState,
   persistedNativeSessionId,
-  persistedOpencodeDbKey,
   persistedRunLogOffset,
   persistedTimestamp,
   runnerGeneration,
@@ -95,10 +94,10 @@ test('scalar continuation authority rejects coercion and non-finite time', () =>
   assert.throws(() => persistedNativeSessionId({ native_session_id: '' }), /malformed/);
 });
 
-test('idle metadata is a complete authoritative version-5 record', () => {
+test('idle metadata is a complete authoritative version-6 record', () => {
   const meta = idleMeta('a11d', '/tmp/work', null, 100.5);
-  assert.equal(AGENT_META_VERSION, 5);
-  assert.equal(meta.agent_version, 5);
+  assert.equal(AGENT_META_VERSION, 6);
+  assert.equal(meta.agent_version, 6);
   assert.equal(meta.id, 'a11d');
   assert.equal(meta.state, 'idle');
   assert.equal(meta.pending_prompt, null);
@@ -112,26 +111,15 @@ test('idle metadata is a complete authoritative version-5 record', () => {
   assert.doesNotThrow(() => validateAgentMetadata(meta));
 });
 
-test('schema v5 rejects old versions, missing fields and unknown fields', () => {
+test('schema v6 rejects old versions, missing fields and unknown fields', () => {
   const base = idleMeta('a11d', '/tmp/work', null, 100.5);
 
   const old = { ...base, agent_version: 3 };
   assert.throws(() => validateAgentMetadata(old), /unsupported managed-agent metadata version/);
 
   for (const key of Object.keys(base)) {
-    // `invocation_cwd` (board issue 178), `run_log_offset` (board issue 177) and
-    // `opencode_db` (board issue 186) are the fields a record is allowed to
-    // omit, for the same reason: each was added after records already existed
-    // on disk, and a record written before it existed must still be canonical
-    // rather than rejected. For `opencode_db` absence additionally carries a
-    // meaning -- "predates isolation, keeps using the shared OpenCode
-    // database" -- so it is not merely tolerated but load-bearing.
-    //
-    // The exemptions are read from the schema rather than restated here: a
-    // closed-schema check that grows one hard-coded skip per feature is how a
-    // schema stops being closed, and restating them here would let the test and
-    // the schema disagree about what is exempt without either noticing.
-    // `invocation_cwd`'s shapes are asserted separately, below.
+    // The schema lists optional observational fields; deprecated
+    // per-agent database keys and old version fallbacks are rejected.
     if (OPTIONAL_TOP_LEVEL_FIELDS.includes(key)) continue;
     const missing = { ...base };
     delete missing[key];
@@ -149,7 +137,7 @@ test('schema v5 rejects old versions, missing fields and unknown fields', () => 
 });
 
 // Board issue 178: the observation. Optional for the same reason as
-// `run_log_offset` and `opencode_db` below -- records existed before it did --
+// run_log_offset below -- records existed before it did --
 // and held to the same rule: a present-but-wrong value is a rejection, and
 // absence reads as "nothing observed" rather than as a value synthesised from the
 // declaration.
@@ -207,29 +195,16 @@ test('a record may omit run_log_offset, but a present one must be a byte cursor'
   }
 });
 
-test('V2 requires an agent-id-shaped database key in every canonical record', () => {
+test('a V2 agent record rejects the obsolete per-agent database key', () => {
   const base = idleMeta('a11d', '/tmp/work', null, 100.5);
-  // A new record names its own database from birth.
-  assert.equal(persistedOpencodeDbKey(base), 'a11d');
-
-  const absent = { ...base };
-  delete absent.opencode_db;
-  assert.throws(() => validateAgentMetadata(absent), /fields are not canonical/);
-  assert.equal(persistedOpencodeDbKey(absent), null);
-  assert.equal(persistedOpencodeDbKey({ ...base, opencode_db: null }), null);
-  assert.throws(() => validateAgentMetadata({ ...base, opencode_db: null }), /opencode_db is malformed/);
-
-  for (const malformed of [42, 'not an id', 'bad.path', '', {}, []]) {
-    assert.equal(persistedOpencodeDbKey({ ...base, opencode_db: malformed }), null);
-    assert.throws(
-      () => validateAgentMetadata({ ...base, opencode_db: malformed }),
-      /opencode_db is malformed/,
-      `malformed opencode_db unexpectedly accepted: ${JSON.stringify(malformed)}`,
-    );
-  }
+  assert.ok(!Object.hasOwn(base, 'opencode_db'));
+  assert.throws(
+    () => validateAgentMetadata({ ...base, opencode_db: 'a11d' }),
+    /fields are not canonical/,
+  );
 });
 
-test('schema v5 rejects partial process identities and malformed structured authority', () => {
+test('schema v6 rejects partial process identities and malformed structured authority', () => {
   const base = idleMeta('a11d', '/tmp/work', null, 100.5);
 
   assert.throws(

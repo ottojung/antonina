@@ -289,9 +289,51 @@ test('the help text advertises the fork option and no longer offers --id', (t) =
   // backend-free check of the same claim is the session contract pair in
   // packages/agent-runtime/test/fork.test.mjs.
   assert.match(help.stdout, /--fork <value>\s+Create the new agent as a snapshot of this existing agent id\./);
-  assert.match(help.stdout, /If the source has a backend session, the clone continues it: running both drives one conversation\./);
-  assert.match(help.stdout, /There is no per-fork opt-out\./);
+  assert.match(help.stdout, /OpenCode V2 forks a distinct child session so both agents can run independently/);
+  assert.doesNotMatch(help.stdout, /running both drives one conversation/);
   // The id is generated and printed; it is not an input.
   assert.doesNotMatch(help.stdout, /--id/);
   assert.match(help.stdout, /generated id/i);
+});
+
+test('CLI forks a distinct V2 child session and never reuses the parent', (t) => {
+  const { root, env, work } = world(t);
+  const { id: sourceId } = seed(root, env, work);
+  const original = readMeta(root, sourceId);
+  original.native_session_id = 'ses_source123';
+  writeFileSync(metaPath(root, sourceId), JSON.stringify(original));
+  const binary = join(root, 'fake-v2');
+  const trace = join(root, 'native-api-calls.log');
+  writeFileSync(binary, [
+    '#!/bin/sh',
+    'echo "$*" >> ' + JSON.stringify(trace),
+    'if [ "$1" = "api" ] && [ "$2" = "session.fork" ]; then',
+    '  echo ' + JSON.stringify('{"data":{"id":"ses_independent123"}}'),
+    '  exit 0',
+    'fi',
+    'exit 17',
+  ].join('\n') + '\n', { mode: 0o755 });
+  env.ANTONINA_OPENCODE_BIN = binary;
+
+  const forked = run(['agent', 'new', '--fork', sourceId, '--json'], env);
+  assert.equal(forked.status, EXIT_OK, forked.stderr);
+  const clone = readMeta(root, JSON.parse(forked.stdout).id);
+  assert.equal(clone.native_session_id, 'ses_independent123');
+  assert.equal(readMeta(root, sourceId).native_session_id, 'ses_source123');
+  assert.match(readFileSync(trace, 'utf8'), /session\.fork --param sessionID=ses_source123/);
+});
+
+test('failed V2 native session fork cannot create a clone', (t) => {
+  const { root, env, work } = world(t);
+  const { id: sourceId } = seed(root, env, work);
+  const original = readMeta(root, sourceId);
+  original.native_session_id = 'ses_source123';
+  writeFileSync(metaPath(root, sourceId), JSON.stringify(original));
+  const binary = join(root, 'fake-broken-v2');
+  writeFileSync(binary, '#!/bin/sh\nexit 17\n', { mode: 0o755 });
+  env.ANTONINA_OPENCODE_BIN = binary;
+  const result = run(['agent', 'new', '--fork', sourceId], env);
+  assert.equal(result.status, EXIT_ERROR);
+  assert.match(result.stderr, /could not fork its native session/);
+  assert.deepEqual(agentIds(root), [sourceId]);
 });

@@ -47,7 +47,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--finished': 'Show terminal agents only.',
   '--follow': 'Follow output until the agent stops.',
   '--force': 'Force the requested operation.',
-  '--fork': 'Create the new agent as a snapshot of this existing agent id. If the source has a backend session, the clone continues it: running both drives one conversation. There is no per-fork opt-out.',
+  '--fork': 'Create the new agent as a snapshot of this existing agent id. If the source has a backend session, OpenCode V2 forks a distinct child session so both agents can run independently.',
   '--host': 'Host identifier/address.',
   '--id': 'Identifier for the selected command.',
   '--issue': 'Board issue ID.',

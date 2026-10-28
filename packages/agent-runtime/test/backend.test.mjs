@@ -283,7 +283,7 @@ test('backend executable resolves to an exact configured path, not a PATH lookup
   const meta = idleMeta('a11d', root, null, 1);
   const fresh = buildAgentCommand(meta, 'work', false, { [OPENCODE_BIN_ENV]: bin, XDG_CONFIG_HOME: config });
   assert.equal(fresh[0], bin, 'buildAgentCommand must not fall back to a bare backend name');
-  assert.deepEqual(fresh.slice(0, 4), [bin, 'run', '--standalone', '--auto']);
+  assert.deepEqual(fresh.slice(0, 3), [bin, 'run', '--auto']);
   assert.equal(fresh.includes('--dir'), false, 'V2 has no --dir flag; the runner owns process cwd');
   assert.equal(fresh.includes('--variant'), false, 'V2 variants are part of the model reference');
 

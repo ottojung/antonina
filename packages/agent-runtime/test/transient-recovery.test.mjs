@@ -85,7 +85,7 @@ test('four consecutive transient 5xx failures retain the same session and ultima
   assert.equal(meta.prompt_count, 0, 'direct runner fixture, not the CLI acceptor, owns prompt count');
   assert.equal(meta.backend_error, null);
   assert.equal(meta.native_session_id, 'ses_recovery');
-  const calls = readFileSync(f.calls, 'utf8').trim().split('\n').filter((line) => line.startsWith('run --standalone --auto'));
+  const calls = readFileSync(f.calls, 'utf8').trim().split('\n').filter((line) => line.startsWith('run --auto'));
   assert.equal(calls.length, 4);
   assert.match(calls[0], /ORIGINAL_SIDE_EFFECTING_INSTRUCTION/);
   for (const call of calls.slice(1)) {
@@ -102,7 +102,7 @@ test('without a native session, transient errors use a fresh reconciliation task
   await runManagedRunner(f.id, 'new', 7, f.options);
   const meta = readMeta(f.id, f.options);
   assert.equal(meta.state, 'clearexit');
-  const calls = readFileSync(f.calls, 'utf8').trim().split('\n').filter((line) => line.startsWith('run --standalone --auto'));
+  const calls = readFileSync(f.calls, 'utf8').trim().split('\n').filter((line) => line.startsWith('run --auto'));
   assert.equal(calls.length, 2);
   assert.match(calls[0], /ORIGINAL_SIDE_EFFECTING_INSTRUCTION$/);
   assert.match(readFileSync(f.calls, 'utf8'), /CONTEXT/);

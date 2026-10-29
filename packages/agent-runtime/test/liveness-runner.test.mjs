@@ -34,7 +34,7 @@ async function exercise(t, fixture) {
     eventCommand = jsonShell({ type: 'step_finish', sessionID: 'ses_liveness', part: { reason: 'tool-calls' } });
   } else if (fixture === 'no-session') {
     eventCommand = 'echo "unstructured backend output"';
-  } else if (fixture === 'startup-no-session' || fixture === 'startup-resume') {
+  } else if (fixture === 'startup-no-session' || fixture === 'startup-resume' || fixture === 'startup-db') {
     eventCommand = ':';
   } else if (fixture.startsWith('error-')) {
     const code = fixture === 'error-quota' ? 429 : fixture === 'error-503' ? 503 : 401;
@@ -48,7 +48,12 @@ async function exercise(t, fixture) {
   }
   const script = [
     '#!/bin/sh',
-    'if [ "$1" = "session" ]; then echo "[]"; exit 0; fi',
+    'if [ "$1" = "session" ]; then',
+    '  if [ "$ANTONINA_LIVENESS_FIXTURE" = "startup-db" ]; then',
+    '    echo \'[{"id":"ses_liveness","title":"antonina-liveness-startup-db","created":1}]\'',
+    '  else echo "[]"; fi',
+    '  exit 0',
+    'fi',
     'model=""',
     'session=""',
     'format=""',
@@ -77,6 +82,7 @@ async function exercise(t, fixture) {
     XDG_STATE_HOME: join(root, 'state'),
     ANTONINA_OPENCODE_BIN: bin,
     ANTONINA_LIVENESS_CALLS: calls,
+    ANTONINA_LIVENESS_FIXTURE: fixture,
     ANTONINA_RUNNER_OWNER_TOKEN: mintRunnerReservationOwnerToken(),
   };
   mkdirSync(env.XDG_STATE_HOME, { recursive: true });
@@ -145,3 +151,5 @@ test('pending tool never triggers model failover', { timeout: 45000 }, t => exer
 test('unstructured output never authorizes a model restart', { timeout: 45000 }, t => exercise(t, 'no-session'));
 test('silent fresh startup without a native session is not replayed', { timeout: 45000 }, t => exercise(t, 'startup-no-session'));
 test('HTTP 401 authentication errors are never switched as model failures', { timeout: 45000 }, t => exercise(t, 'error-auth'));
+
+test('silent initial request discovers persisted session and fails over', { timeout: 45000 }, t => exercise(t, 'startup-db'));

@@ -231,3 +231,8 @@ test('both status surfaces read the note through this one rule', () => {
     `agent.ts must read meta.error only inside displayableAgentError; found ${directReads.length} reads`,
   );
 });
+test('safe startup diagnosis displays while arbitrary suffix remains withheld', () => {
+  const note='watchdog: startup_silent; no durable OpenCode session available for safe recovery';
+  assert.equal(displayableAgentError(metaWith(note)),note);
+  assert.equal(displayableAgentError(metaWith(note+' private=/home/operator')),AGENT_ERROR_WITHHELD);
+});

@@ -742,6 +742,7 @@ async function cmdList(args: string[], context: AgentCommandContext): Promise<nu
  * conservatism is deliberate and is recorded on the issue.
  */
 const DISPLAYABLE_AGENT_ERRORS: readonly string[] = [
+  'watchdog: startup_silent; no durable OpenCode session available for safe recovery',
   // runner.ts: the spawn identity could not be persisted, so the process was
   // killed and never recorded.
   'could not persist the spawned OpenCode process identity; the process was killed and never recorded',
@@ -911,6 +912,7 @@ async function cmdStatus(args: string[], context: AgentCommandContext): Promise<
     context.io.stdout(`ran in:     ${shown(status.invocation_cwd, 'never ran')}`);
     context.io.stdout(`created:    ${agentStatusTimestamp(status.created_at as number)}`);
     context.io.stdout(`started:    ${agentStatusTimestamp(status.started_at as number | null)}`);
+    context.io.stdout(`last activity:    ${agentStatusTimestamp(status.last_activity_at as number)}`);
     context.io.stdout(`finished:   ${agentStatusTimestamp(status.finished_at as number | null)}`);
     context.io.stdout(`exit code:  ${shown(status.exit_code)}`);
     // The note the runtime last recorded, next to the exit code. Only printed

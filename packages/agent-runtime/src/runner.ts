@@ -1016,6 +1016,7 @@ async function runInvocation(
     const activity = new InvocationActivity(logFile, invocationLogStart);
     const livenessState: { observation: LivenessObservation | null } = { observation: null };
     let reportedUnsafeSilence = false;
+    let lastSessionProbeAt = 0;
     const stallCandidate = (current: AgentMetadata): boolean => {
       if (startTicks === null || current.pid !== pid || current.start_time !== startTicks
         || current.invocation_id !== invocationId || current.state !== 'running') return false;
@@ -1029,6 +1030,24 @@ async function runInvocation(
         || observation.diagnosis === 'step_finished_silent'
         || observation.diagnosis === 'backend_error_silent';
       const checkpointed = persistedNativeSessionId(current) !== null;
+      // A first request can create a private OpenCode SQLite session without
+      // emitting a JSONL event. Recover the session, not the original prompt.
+      if (verified && !checkpointed && Date.now() - lastSessionProbeAt >= 30_000) {
+        lastSessionProbeAt = Date.now();
+        let recovered: string | null = null;
+        try {
+          recovered = discoverSessionId(agentId,
+            { ...process.env, ...options.env, ...opencodeBackendEnv(current, options) },
+            requiredAgentCwd(current));
+        } catch { /* A failed probe never authorizes replay. */ }
+        if (recovered !== null) {
+          const session = recovered;
+          void updateMeta(agentId, (record) => {
+            if (record.state === 'running' && record.invocation_id === invocationId
+                && record.native_session_id === null) record.native_session_id = session;
+          }, options).catch(() => undefined);
+        }
+      }
       // A provider credential/billing rejection is not evidence that another
       // model under the same provider can work. Fail over only to a separately
       // eligible provider, never on authentication/billing failure alone.

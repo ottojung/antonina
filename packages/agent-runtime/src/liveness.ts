@@ -11,6 +11,7 @@ import { readProcStat, type ProcStat } from './process.js';
  * a short grace to exit by itself before recovering its existing session.
  */
 export const MODEL_STEP_SILENCE_MS = 15 * 60 * 1000;
+export const STARTUP_SILENCE_MS = 90 * 1000;
 export const BACKEND_ERROR_GRACE_MS = 30_000;
 export const LIVENESS_POLL_MS = 5_000;
 const READ_CHUNK_BYTES = 16 * 1024;
@@ -254,6 +255,7 @@ export class InvocationActivity {
     }
     if (this.partial.length > 0) return observation('progressing_or_uncertain');
     if (this.phase === 'backend_error' && silentMs >= errorGraceMs) return observation('backend_error_silent');
+    if (this.phase === 'startup' && silentMs >= Math.min(quietMs, STARTUP_SILENCE_MS)) return observation('startup_silent');
     if (silentMs >= quietMs) {
       if (this.phase === 'model_step') return observation('model_step_silent');
       if (this.phase === 'startup') return observation('startup_silent');

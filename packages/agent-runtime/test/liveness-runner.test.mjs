@@ -50,7 +50,7 @@ async function exercise(t, fixture) {
     '#!/bin/sh',
     'if [ "$1" = "session" ]; then',
     '  if [ "$ANTONINA_LIVENESS_FIXTURE" = "startup-db" ]; then',
-    '    echo \'[{"id":"ses_liveness","title":"antonina-liveness-startup-db","created":1}]\'',
+    '    ' + jsonShell([{ id: 'ses_liveness', title: 'antonina-liveness-startup-db', created: 1, directory: join(root, 'work') }]),
     '  else echo "[]"; fi',
     '  exit 0',
     'fi',

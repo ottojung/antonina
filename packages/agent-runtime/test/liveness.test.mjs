@@ -228,3 +228,13 @@ test('incomplete frames and unknown errors are reported as unverifiable rather t
     assert.equal(monitor.observe(pid,ticks,1100,100).diagnosis,'model_step_silent');
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
+
+test('silent startup is checked sooner than in-flight model work', () => {
+  const dir=mkdtempSync(join(tmpdir(),'antonina-startup-timeout-'));
+  try {
+    const file=join(dir,'log');writeFileSync(file,'');
+    const monitor=new InvocationActivity(file,0,0,()=>({...readProcStat(pid),state:'S'}));
+    assert.equal(monitor.observe(pid,ticks,89_000).diagnosis,'progressing_or_uncertain');
+    assert.equal(monitor.observe(pid,ticks,90_000).diagnosis,'startup_silent');
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});

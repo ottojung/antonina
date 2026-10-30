@@ -306,6 +306,7 @@ test('CLI forks a distinct V2 child session and never reuses the parent', (t) =>
   const trace = join(root, 'native-api-calls.log');
   writeFileSync(binary, [
     '#!/bin/sh',
+    'if [ -n "$ANTONINA_AGENT_ID" ] || [ -n "$ANTONINA_INVOCATION_ID" ] || [ -n "$ANTONINA_PROMPT" ]; then exit 29; fi',
     'echo "$*" >> ' + JSON.stringify(trace),
     'if [ "$1" = "api" ] && [ "$2" = "session.fork" ]; then',
     '  echo ' + JSON.stringify('{"data":{"id":"ses_independent123"}}'),
@@ -314,6 +315,9 @@ test('CLI forks a distinct V2 child session and never reuses the parent', (t) =>
     'exit 17',
   ].join('\n') + '\n', { mode: 0o755 });
   env.ANTONINA_OPENCODE_BIN = binary;
+  env.ANTONINA_AGENT_ID = 'caller-agent';
+  env.ANTONINA_INVOCATION_ID = 'caller-invocation';
+  env.ANTONINA_PROMPT = 'do not inherit';
 
   const forked = run(['agent', 'new', '--fork', sourceId, '--json'], env);
   assert.equal(forked.status, EXIT_OK, forked.stderr);

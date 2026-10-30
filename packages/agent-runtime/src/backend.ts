@@ -598,6 +598,22 @@ export function buildAgentCommand(
 
 
 /**
+ * Service administration must never inherit an agent's invocation markers:
+ * these markers identify processes eligible for per-agent orphan cleanup.
+ * The shared background service is not an agent subprocess.
+ */
+function serviceAdministrationEnv(
+  env: Record<string, string | undefined>,
+  cwd: string,
+): NodeJS.ProcessEnv {
+  const sanitized: NodeJS.ProcessEnv = { ...process.env, ...env, PWD: cwd };
+  for (const marker of ['ANTONINA_AGENT_ID', 'ANTONINA_INVOCATION_ID', 'ANTONINA_PROMPT', RUNNER_OWNER_TOKEN_ENV]) {
+    delete sanitized[marker];
+  }
+  return sanitized;
+}
+
+/**
  * Copy a V2 session into a distinct child before publishing a forked agent.
  * Shared-server agents must never write the same native session concurrently.
  */
@@ -608,10 +624,12 @@ export function forkBackendSession(
   const parent = persistedNativeSessionId(source);
   if (parent === null) return null;
   const cwd = requiredAgentCwd(source);
+  const executable = resolveOpencode(env);
+  ensureHostV2Service(executable, env, cwd);
   const result = spawnSync(
-    resolveOpencode(env),
+    executable,
     ['api', 'session.fork', '--param', 'sessionID=' + parent, '--data', '{}'],
-    { cwd, env: { ...process.env, ...env, PWD: cwd }, encoding: 'utf8', timeout: 15_000 },
+    { cwd, env: serviceAdministrationEnv(env, cwd), encoding: 'utf8', timeout: 15_000 },
   );
   if (result.error || result.status !== 0) {
     throw new Error('OpenCode V2 could not fork its native session: ' + (result.stderr || result.error?.message || 'server unavailable').slice(0, 300));
@@ -638,7 +656,7 @@ export function interruptBackendSession(
   const session = persistedNativeSessionId(meta);
   if (session === null) return false;
   const cwd = requiredAgentCwd(meta);
-  const childEnv = { ...process.env, ...env, PWD: cwd };
+  const childEnv = serviceAdministrationEnv(env, cwd);
   const executable = resolveOpencode(env);
   const service = spawnSync(executable, ['service', 'status'], {
     cwd, env: childEnv, encoding: 'utf8', timeout: 2_500,
@@ -692,10 +710,7 @@ export function ensureHostV2Service(
   cwd: string,
 ): string | null {
   if (!isNativeOpenCodeExecutable(executable, env)) return null;
-  const cleanEnv: NodeJS.ProcessEnv = { ...process.env, ...env, PWD: cwd };
-  for (const marker of ['ANTONINA_AGENT_ID', 'ANTONINA_INVOCATION_ID', 'ANTONINA_PROMPT', RUNNER_OWNER_TOKEN_ENV]) {
-    delete cleanEnv[marker];
-  }
+  const cleanEnv = serviceAdministrationEnv(env, cwd);
   const localUrl = (output: string): string | null => {
     const value = output.trim();
     return /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):[0-9]+\/?$/.test(value)

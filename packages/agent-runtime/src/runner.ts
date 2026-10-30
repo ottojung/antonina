@@ -249,6 +249,8 @@ export interface RunnerOptions extends StatePathsOptions {
   modelStepSilenceMs?: number;
   /** Test seam only: production samples liveness every five seconds. */
   livenessPollMs?: number;
+  /** Test seam only: widen the operator control poll to model external-signal races deterministically. */
+  controlPollMs?: number;
   /** Test seam only: production allows OpenCode 30 seconds to exit after a provider error. */
   backendErrorGraceMs?: number;
   /**
@@ -366,7 +368,7 @@ function childResult(
         livenessTriggered = true;
         livenessSignalledAt = Date.now();
       }
-    }, CONTROL_POLL_MS);
+    }, options.controlPollMs ?? CONTROL_POLL_MS);
     child.once('close', (code, signal) => {
       clearInterval(timer);
       resolve({ code, signal, operatorSignalled, operatorSignalDelivered, livenessTriggered });

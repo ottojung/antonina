@@ -843,6 +843,11 @@ test('e. a kill intent does not excuse a host kill that beat the control poll', 
   await runManagedRunner(id, 'new', 7, {
     ...run,
     capacity: { readText: cgroupWithOomDrift(1, marker) },
+    // The fixture sets a kill intent and self-SIGKILLs immediately. Under
+    // parallel CI load, the runner's 200ms poll sometimes wins that race and
+    // actually delivers the operator's kill, invalidating this test's premise.
+    // Delay only this test's control poll; production keeps its 200ms interval.
+    controlPollMs: 5000,
   });
 
   const after = readMeta(id, run);

@@ -134,6 +134,12 @@ case "$1" in
     fi
     last=""
     for arg in "$@"; do last="$arg"; done
+    if [ "$last" = "slow-with-session" ]; then
+      echo '{"type":"step_start","sessionID":"ses_fake","part":{"type":"step-start"}}'
+      echo "slow-start"
+      sleep 30
+      exit 0
+    fi
     if [ "$last" = "slow" ]; then
       echo "slow-start"
       sleep 30
@@ -1984,9 +1990,9 @@ test('live steer without a backend session is refused without losing original wo
 test('a same-directory --cwd is accepted during a live steer', async (t) => {
   const { root, work, env } = fixture(t);
   const agent_5eed = newAgent(env, ['--cwd', work]);
-  assert.equal(run(['agent', 'run', '--id', agent_5eed, '--detach', '--prompt', 'slow'], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', agent_5eed, '--detach', '--prompt', 'slow-with-session'], env).status, 0);
   const live = await waitFor(root, agent_5eed, (meta) =>
-    meta.state === 'running' && typeof meta.pid === 'number' && typeof meta.runner_pid === 'number');
+    meta.state === 'running' && typeof meta.pid === 'number' && typeof meta.runner_pid === 'number' && typeof meta.native_session_id === 'string');
   t.after(() => {
     try { process.kill(-live.pid, 'SIGKILL'); } catch {}
     try { process.kill(live.pid, 'SIGKILL'); } catch {}

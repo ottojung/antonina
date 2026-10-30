@@ -125,7 +125,7 @@ case "$1" in
     fi
     session_agent="$ANTONINA_FIXTURE_SESSION_AGENT"
     if [ -z "$session_agent" ]; then session_agent="$ANTONINA_AGENT_ID"; fi
-    printf '[{"id":"ses_fake","title":"antonina-%s","created":100}]\n' "$session_agent"
+    printf '[{"id":"ses_fake","title":"antonina-%s","created":100,\"directory\":\"%s\"}]\n' "$session_agent" "$(pwd -P)"
     exit 0
     ;;
   run)

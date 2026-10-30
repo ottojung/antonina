@@ -431,6 +431,7 @@ interface SessionRow {
   id: string;
   title: string;
   created: number;
+  directory: string;
 }
 
 /**
@@ -480,10 +481,12 @@ function parseSessionRows(value: unknown): SessionRow[] | null {
       typeof record.id !== 'string'
       || record.id.length === 0
       || typeof record.title !== 'string'
+      || typeof record.directory !== 'string'
+      || !isAbsolute(record.directory)
       || typeof record.created !== 'number'
       || !Number.isFinite(record.created)
     ) return null;
-    rows.push({ id: record.id, title: record.title, created: record.created });
+    rows.push({ id: record.id, title: record.title, created: record.created, directory: record.directory });
   }
   return rows;
 }
@@ -532,7 +535,8 @@ export function discoverSessionId(
   const rows = parseSessionRows(value);
   if (rows === null) return null;
   const title = `${OPENCODE_TITLE_PREFIX}${agentId}`;
-  const matches = rows.filter((row) => row.title === title);
+  // Shared V2 databases span projects; the title alone is not directory authority.
+  const matches = rows.filter((row) => row.title === title && row.directory === cwd);
   matches.sort((left, right) => right.created - left.created || right.id.localeCompare(left.id));
   return matches[0]?.id ?? null;
 }

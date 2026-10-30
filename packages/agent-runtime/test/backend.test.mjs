@@ -395,9 +395,10 @@ printf '%s\\n' '${JSON.stringify(rows)}'
   // agent `a1`'s `antonina-a1`, and is the more recently created row: a prefix
   // match would hand `a1` the other agent's session and continue-mode would
   // then attach the wrong conversation.
-  const longer = { id: 'ses_longer', title: 'antonina-a1b', created: 20 };
-  const exact = { id: 'ses_exact', title: 'antonina-a1', created: 10 };
-  answer([longer, exact]);
+  const longer = { id: 'ses_longer', title: 'antonina-a1b', created: 20, directory: process.cwd() };
+  const exact = { id: 'ses_exact', title: 'antonina-a1', created: 10, directory: process.cwd() };
+  const sameTitleWrongDirectory = { ...exact, id: 'ses_other_directory', directory: '/other-project', created: 999 };
+  answer([longer, sameTitleWrongDirectory, exact]);
   assert.equal(discoverSessionId('a1', env), 'ses_exact');
   assert.equal(discoverSessionId('a1b', env), 'ses_longer');
 

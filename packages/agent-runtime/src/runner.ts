@@ -1052,7 +1052,7 @@ async function runInvocation(
         || observation.diagnosis === 'step_finished_silent'
         || observation.diagnosis === 'backend_error_silent';
       const checkpointed = persistedNativeSessionId(current) !== null;
-      // A first request can create a private OpenCode SQLite session without
+      // A first request can create a session in the shared OpenCode V2 database without
       // emitting a JSONL event. Recover the session, not the original prompt.
       if (verified && !checkpointed && Date.now() - lastSessionProbeAt >= 30_000) {
         lastSessionProbeAt = Date.now();

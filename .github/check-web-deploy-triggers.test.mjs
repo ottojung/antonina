@@ -112,7 +112,10 @@ test('the traced make target comes from a run step, not from a comment', (t) => 
   // this revision is 44, after retiring two Targets UI files. Measured, not assumed: the checker reports
   // 44 here. Do not resolve a later drift by widening the assertion to a range;
   // move the literal and attribute the change.
-  assert.match(result.stdout, /traced bundle inputs: 44/);
+  // Recounted on pristine main 4781323 on 2026-11-03: the actual traced set
+  // is 43 at this revision (the historical 44 above is no longer current).
+  // Preserve the exact-count assertion so future graph drift remains visible.
+  assert.match(result.stdout, /traced bundle inputs: 43/);
 });
 
 test('a bare filename include is traced as the file it names', (t) => {

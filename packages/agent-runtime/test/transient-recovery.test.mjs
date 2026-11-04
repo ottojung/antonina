@@ -71,6 +71,9 @@ test('recovery prompt explicitly distinguishes continuing from re-playing', () =
   assert.equal(recoverableModelFailure({ classification: 'transient_backend_server_error', transient: true }),
     'transient_backend');
   assert.equal(recoverableModelFailure({ classification: 'new_5xx', transient: true }), 'transient_backend');
+  assert.equal(recoverableModelFailure({
+    classification: 'unrecognized_backend_failure', transient: false, automatic_retry_safe: false,
+  }), 'transient_backend', 'unknown backend errors require a new reconciliation turn on another model');
   assert.equal(recoverableModelFailure({ classification: 'backend_statement_execution_error', transient: false }), null);
   assert.equal(recoveryDelayMs(1000, 0), 30_000);
 });

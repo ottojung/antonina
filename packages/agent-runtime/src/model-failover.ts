@@ -104,14 +104,16 @@ export function eligibleAgentModel(
   now: number = Date.now() / 1000,
   choose: (count: number) => number = randomInt,
   exclude: ReadonlySet<string> = new Set(),
+  sharedUnreliable: ReadonlySet<string> = new Set(),
 ): string | null {
   const state = agentModelFailover(meta);
   const unreliable: string[] = [];
   for (const preference of preferences) {
     if (exclude.has(preference.model)) continue;
     const cooldown = state.cooldowns.find((entry) => entry.model === preference.model && entry.until > now);
-    if (cooldown === undefined) return preference.model;
-    if (cooldown.reason === 'transient_backend') unreliable.push(preference.model);
+    if (cooldown === undefined && !sharedUnreliable.has(preference.model)) return preference.model;
+    if ((cooldown === undefined && sharedUnreliable.has(preference.model))
+      || cooldown?.reason === 'transient_backend') unreliable.push(preference.model);
   }
   if (unreliable.length === 0) return null;
   const index = choose(unreliable.length);

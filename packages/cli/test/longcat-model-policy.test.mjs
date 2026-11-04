@@ -7,7 +7,8 @@ const source = (path) => readFileSync(fileURLToPath(new URL(path, import.meta.ur
 
 test('managed agent model configuration is authoritative and no provider is hardcoded', () => {
   const intent = source('../../../docs/intent-records/agent.md');
-  assert.match(intent, /^\$id-20261022-no-host-headroom-in-agent-status/);
+  assert.match(intent, /^\$id-20261103-unknown-backend-model-failover/);
+  assert.match(intent, /\$id-20261022-no-host-headroom-in-agent-status/);
   assert.match(intent, /\$id-20261022-reclaim-aware-headroom-diagnostics/);
   assert.match(intent, /\$id-20261022-failure-scoped-soft-model-selection/);
   assert.match(intent, /\$id-20261022-managed-agent-model-step-stall/);

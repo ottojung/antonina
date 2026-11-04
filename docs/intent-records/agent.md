@@ -1,3 +1,30 @@
+$id-20261103-unknown-backend-model-failover
+title: Unknown backend errors must advance to other models, preserving safe reconciliation
+date: 2026/11/03
+source: @ottojung
+kind: constraint
+
+An Antonina managed agent must not freeze or terminate solely because a backend
+error is unknown or unrecognized. On a genuine unrecognized backend invocation
+failure, retain the diagnostic and try another eligible operator-configured
+model in the same managed agent. Never equate an unrecognized error with proof
+that no recovery is possible. An unknown model/backend error calls for
+temporary model unreliability, not a permanent blacklist or repeated immediate
+selection of the same broken default. Repeated independent unknown errors may
+temporarily demote that model for newly created agents as well, using bounded
+evidence and automatic expiry so a single failure cannot disable a provider
+forever. Preserve the prior session and process-ownership guarantees. Another
+model is not permission to blindly replay potentially side-effecting tools;
+use a separate reconciliation turn, continue only verified unfinished work,
+and surface unresolved uncertainty. Remain interruptible by stop/kill/steer.
+If all configured models fail, use observable, bounded backoff and recheck
+eligibility rather than spin or strand the agent. Do not misclassify host
+failures, operator intervention, known configuration errors or tool errors as
+unknown model incompatibilities. Implement generic recovery in Antonina itself,
+not a per-project recovery script. This supersedes prior instructions to
+terminate on unrecognized backend errors; it does not authorize modifying
+model configuration, adding paid models, or unsafe literal prompt replay.
+
 $id-20261022-no-host-headroom-in-agent-status
 title: Agent status is agent-specific; remove cgroup headroom observations
 date: 2026/10/22

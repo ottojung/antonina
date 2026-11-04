@@ -242,22 +242,19 @@ test('a backend that reports Failed to execute statement records a named failure
   assert.match(after.error, /Failed to execute statement/, 'the reason quotes what the backend said');
 });
 
-test('a recognised-but-unmodelled backend failure still gets a classification and a reason', async (t) => {
-  if (!requireProc(t)) return;
-  const backend = fakeBackend(t, '#!/bin/sh\nprintf \'%s\\n\' "Error: the widget sprocket failed"\nexit 3\n');
-  if (backend === null) return;
-  const options = scratch(t, backend);
-  const id = agent(t, options);
-  const after = await runToCompletion(t, id, options);
-
-  assert.equal(after.state, 'failed');
-  assert.equal(after.exit_code, 3);
-  // Red on e54359d9: both were null.
-  assert.ok(after.backend_error !== null, 'an unmodelled non-zero exit is still a backend failure');
-  assert.equal(after.backend_error.classification, UNRECOGNIZED_BACKEND_FAILURE);
-  assert.ok(typeof after.error === 'string' && after.error.length > 0, 'a reason is recorded');
-  assert.match(after.error, /does not recognise/, 'the record says the failure is not modelled here');
-  assert.match(after.error, /the widget sprocket failed/, 'the last line the backend wrote is quoted');
+test('an unrecognized backend exit retains a diagnostic while the runner may try another model', t => {
+  // Classification remains evidence of the failed backend invocation, not
+  // permission to strand a long-lived agent (model-failover-runner tests that).
+  const root = mkdtempSync(join(tmpdir(), 'antonina-b159-unknown-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const log = join(root, 'output.log');
+  writeFileSync(log, 'Error: the widget sprocket failed\\n');
+  const error = backendModule.classifyBackendFailure(log, 0, 3);
+  assert.ok(error !== null, 'an unmodelled non-zero exit is still diagnosed');
+  assert.equal(error.classification, UNRECOGNIZED_BACKEND_FAILURE);
+  assert.equal(error.automatic_retry_safe, false, 'unknown tool side effects cannot authorize literal replay');
+  assert.match(describeBackendDeath(error, backendModule.lastLogLineExcerpt(log, 0)), /does not recognise/);
+  assert.match(describeBackendDeath(error, backendModule.lastLogLineExcerpt(log, 0)), /the widget sprocket failed/);
 });
 
 test('the recorded reason distinguishes the backend dying from the runtime losing it', async (t) => {

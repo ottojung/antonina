@@ -61,6 +61,7 @@ import {
   type ModelFailureReason,
 } from './model-failover.js';
 import { configuredModels } from './model-config.js';
+import { recordUnrecognizedBackendFailure, sharedUnreliableModels } from './model-health.js';
 import { SessionCheckpointReader } from './session-checkpoint.js';
 import {
   InvocationActivity, BACKEND_ERROR_GRACE_MS, LIVENESS_POLL_MS,
@@ -95,7 +96,8 @@ export function recoverableModelFailure(error: BackendError | null): ModelFailur
     case 'backend_authentication_failed': return 'provider_authentication_failed';
     case 'backend_billing_required': return 'provider_billing_required';
     case 'upstream_endpoint_unavailable':
-    case 'transient_backend_server_error': return 'transient_backend';
+    case 'transient_backend_server_error':
+    case 'unrecognized_backend_failure': return 'transient_backend';
     default: return error.transient === true ? 'transient_backend' : null;
   }
 }
@@ -872,7 +874,9 @@ async function runInvocation(
     launchCwd = requiredAgentCwd(meta);
     // The same database the invocation will be spawned with, because
     // `buildAgentCommand` may itself probe for the session to continue.
-    command = buildAgentCommand(meta, prompt, isContinue, { ...options.env, ...opencodeBackendEnv(meta, options) }, new Set(), options.env);
+    command = buildAgentCommand(meta, prompt, isContinue,
+      { ...options.env, ...opencodeBackendEnv(meta, options) },
+      new Set(), options.env, sharedUnreliableModels(options));
   } catch (error) {
     // A durable record the backend cannot be launched from -- an undeclared
     // working directory, a malformed one -- is a failed invocation with a
@@ -1278,6 +1282,14 @@ async function runInvocation(
           + '; reconciling uncertain effects, failed attempts=' + (attempt + 1);
         current.last_activity_at = Date.now() / 1000;
       }, options);
+      if (backendError?.classification === 'unrecognized_backend_failure') {
+        try {
+          recordUnrecognizedBackendFailure(agentId, activeModel, options);
+        } catch (error) {
+          // Fleet-wide observation is advisory; the per-agent switch remains safe.
+          console.error('Antonina could not persist shared model-health evidence:', error);
+        }
+      }
       await settlePreviousInvocation(agentId, invocationId);
       const effectiveEnv = { ...process.env, ...options.env };
       let nextCommand: string[] | null = null;
@@ -1290,13 +1302,13 @@ async function runInvocation(
         try {
           nextCommand = buildAgentCommand(
             latest, reconciliationPrompt(prompt, existingSession),
-            existingSession, backendEnv, failedModelsThisRun, options.env,
+            existingSession, backendEnv, failedModelsThisRun, options.env, sharedUnreliableModels(options),
           );
           nextIsContinue = existingSession && nextCommand !== null;
           if (nextCommand === null) {
             nextCommand = buildAgentCommand(
               latest, reconciliationPrompt(prompt, false), false,
-              backendEnv, failedModelsThisRun, options.env,
+              backendEnv, failedModelsThisRun, options.env, sharedUnreliableModels(options),
             );
             nextIsContinue = false;
           }

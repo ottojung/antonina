@@ -9,8 +9,10 @@ agent.
 ## Recovery policy
 
 1. Classify explicit 5xx, endpoint outages, rate limits and quota exhaustion
-   separately from provider authentication, billing, missing models, external
-   signals and unrecognized non-transient errors.
+   separately from provider authentication, billing, missing models and external
+   signals. **An unrecognized backend error is a reason to switch models and
+   investigate**, not proof that an agent must die: it receives a soft failure
+   penalty even when the backend cannot identify the error as transient.
 2. On a recoverable failure, terminate any verified surviving invocation
    descendants and checkpoint the native OpenCode session ID where possible.
    The next model receives a **new reconciliation instruction**, not the
@@ -21,17 +23,22 @@ agent.
    resend the original user prompt as an executable command. Do not claim
    exactly-once execution: truly ambiguous external side effects require
    inspection or explicit review.
-4. Prefer eligible configured models; a model encountering transient errors
-   gets a short soft penalty. If every nonexcluded model has failed, make a
-   fresh randomized pass through that soft pool. Transient errors never turn
-   into an unconditional per-invocation exhaustion halt. Retry delay grows
+4. Prefer eligible configured models; a model encountering transient **or
+   unrecognized backend** errors gets a short soft penalty, and another model
+   is tried before the broken one. Two *distinct* managed agents reporting
+   unrecognized failures on the same model within ten minutes also demote it
+   for new agents, using immutable private evidence files under the Antonina
+   state root. This is advisory and expires automatically: one failing agent
+   cannot blacklist a provider, and an all-unreliable pool is probed rather
+   than permanently blocked. If every nonexcluded model has failed, make a
+   fresh randomized pass through that soft pool. Retry delay grows
    exponentially but is capped at 30 seconds plus bounded jitter.
 5. A verified silent model step with a durable native session and no active tool subprocess is also recoverable on its **original model** when alternatives are unavailable. Silence with unresolved tools or an unverifiable process tree is not proof of safe interruption.
 6. Quota/rate-limit cooldowns are respected; when *only* timed exclusions
    remain, await expiry while periodically checking for changed configuration,
    stop and steer. Genuine unsupported models, authentication failures and
    billing exclusions are not retried with the same invalid credentials.
-6. Every backoff remains under the existing runner ownership and stop/steer
+7. Every backoff remains under the existing runner ownership and stop/steer
    checks. Recovery is observable as running status with a backend-error record
    and explicit `recovering from ...` diagnostic, rather than a failed dead
    appointment. Success clears the transient diagnostic.
@@ -39,11 +46,15 @@ agent.
 **Limitations:** A model-generated reconciliation cannot prove exactly-once
 external effects. The native backend must durably record session state for
 precise continuity. If it cannot, the new task is deliberately conservative.
-Permanent/configuration errors stay visible, and host signal deaths are not
-misclassified as server outages.
+Known permanent/configuration errors stay visible, and host signal deaths
+are not misclassified as server outages. Unknown backend exits still retain
+the full original diagnostic for review; switching models is not permission
+to blindly repeat potentially side-effecting tools.
 
-Regression coverage: multiple consecutive server errors (including after the
-whole soft model pool is exhausted), continuing the same native session,
-missing-session recovery, operator stop during backoff, permanent backend
-errors and attached CLI exit semantics. No OpenCode model catalog discovery
+Regression coverage: the exact structured OpenCode unknown `Type validation
+failed` response, immediate alternate-model continuation with preservation of
+the native session, independent-agent temporary fleet demotion and expiry,
+multiple consecutive server errors (including after the whole soft model pool
+is exhausted), missing-session recovery, operator stop during backoff, known
+permanent backend errors and attached CLI exit semantics. No OpenCode model catalog discovery
 is introduced and no change to model-preference priority is made.

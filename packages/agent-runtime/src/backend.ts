@@ -554,8 +554,9 @@ export function selectConfiguredAgentModel(
   env: Record<string, string | undefined> = process.env,
   now: number = Date.now() / 1000,
   excludedModels: ReadonlySet<string> = new Set(),
+  sharedUnreliable: ReadonlySet<string> = new Set(),
 ): string {
-  const chosen = eligibleAgentModel(meta, configuredModels(env), now, undefined, excludedModels);
+  const chosen = eligibleAgentModel(meta, configuredModels(env), now, undefined, excludedModels, sharedUnreliable);
   if (chosen === null) throw new Error('No eligible configured model: all candidates have an active quota, rate limit, hard exclusion, or were tried this invocation');
   return chosen;
 }
@@ -567,6 +568,7 @@ export function buildAgentCommand(
   env: Record<string, string | undefined> = process.env,
   excludedModels: ReadonlySet<string> = new Set(),
   modelEnv: Record<string, string | undefined> = env,
+  sharedUnreliable: ReadonlySet<string> = new Set(),
 ): string[] | null {
   const agentId = requiredPersistedAgentId(meta);
   const cwd = requiredAgentCwd(meta);
@@ -576,7 +578,7 @@ export function buildAgentCommand(
   persistedVariant(meta);
   const variant = DEFAULT_VARIANT;
   const executable = resolveOpencode(env);
-  const model = selectConfiguredAgentModel(meta, modelEnv, Date.now() / 1000, excludedModels);
+  const model = selectConfiguredAgentModel(meta, modelEnv, Date.now() / 1000, excludedModels, sharedUnreliable);
   if (isContinue) {
     const recorded = persistedNativeSessionId(meta);
     const sessionId = recorded ?? discoverSessionId(agentId, env, cwd);

@@ -136,6 +136,7 @@ test('fresh agents learn from two independent unknown-backend failures without a
     'if [ "$1" = session ]; then echo "[]"; exit 0; fi',
     'model=""; prev=""',
     'for arg in "$@"; do if [ "$prev" = "--model" ]; then model="$arg"; fi; prev="$arg"; done',
+    'model="${model%%#*}"',
     'printf "%s %s\\n" "$ANTONINA_AGENT_ID" "$model" >> "$ANTONINA_TEST_TRACE"',
     'sleep 0.15',
     'if [ "$model" = "example.test/luna" ]; then',

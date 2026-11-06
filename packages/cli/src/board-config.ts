@@ -23,6 +23,7 @@ import { AntoninaApiError } from '../../core/src/api.js';
  */
 export const BOARD_TRUST_FILE = 'trust.json';
 export const BOARD_CREDENTIAL_FILE = 'credential.json';
+const HOST_XDG_CONFIG_HOME_ENV = 'ANTONINA_HOST_XDG_CONFIG_HOME';
 
 /**
  * The filesystem surface this loader needs, injected exactly as
@@ -109,7 +110,7 @@ export function configuredValue<T>(entry: BoardConfigEntry<T>): T | null {
 /** The resolved `$XDG_CONFIG_HOME/antonina` (or `$HOME/.config/antonina`). */
 export function boardConfigDir(options: BoardConfigOptions): string {
   const home = options.home ?? options.env.HOME ?? homedir();
-  const base = options.env.XDG_CONFIG_HOME || join(home, '.config');
+  const base = options.env[HOST_XDG_CONFIG_HOME_ENV] || options.env.XDG_CONFIG_HOME || join(home, '.config');
   return join(base, 'antonina');
 }
 

@@ -8,8 +8,10 @@ export interface ModelPreference {
   comment: string;
 }
 
+const HOST_XDG_CONFIG_HOME_ENV = 'ANTONINA_HOST_XDG_CONFIG_HOME';
+
 export function modelConfigPath(env: Record<string, string | undefined> = process.env): string {
-  const base = env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config');
+  const base = env[HOST_XDG_CONFIG_HOME_ENV] || env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config');
   return join(base, 'antonina', 'config.json');
 }
 

@@ -188,7 +188,7 @@ export interface DaemonStatePathsOptions {
 export function daemonStateRoot(options: DaemonStatePathsOptions = {}): string {
   const env = options.env ?? process.env;
   const home = options.home ?? homedir();
-  const base = env.XDG_STATE_HOME || join(home, '.local', 'state');
+  const base = env.ANTONINA_HOST_XDG_STATE_HOME || env.XDG_STATE_HOME || join(home, '.local', 'state');
   return join(base, 'antonina');
 }
 

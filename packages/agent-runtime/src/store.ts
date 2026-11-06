@@ -45,6 +45,10 @@ export class MetadataReadError extends Error {}
 export class MetadataLockError extends Error {}
 export class MetadataWriteError extends Error {}
 
+/** Original host XDG roots carried through OpenCode's private service environment. */
+export const HOST_XDG_CONFIG_HOME_ENV = 'ANTONINA_HOST_XDG_CONFIG_HOME';
+export const HOST_XDG_STATE_HOME_ENV = 'ANTONINA_HOST_XDG_STATE_HOME';
+
 function filesystem(options: StatePathsOptions): StoreFs {
   return options.fs ?? DEFAULT_FS;
 }
@@ -86,7 +90,9 @@ function sleep(milliseconds: number): Promise<void> {
 export function stateRoot(options: StatePathsOptions = {}): string {
   const env = options.env ?? process.env;
   const home = options.home ?? homedir();
-  const base = env.XDG_STATE_HOME || join(home, '.local', 'state');
+  // Managed OpenCode children inherit private XDG roots. Antonina subprocesses
+  // launched from those children must still find the host's one agent registry.
+  const base = env[HOST_XDG_STATE_HOME_ENV] || env.XDG_STATE_HOME || join(home, '.local', 'state');
   return join(base, 'antonina');
 }
 
@@ -118,6 +124,10 @@ export function opencodeBackendEnv(
   _meta: AgentMetadata,
   options: StatePathsOptions = {},
 ): Record<string, string> {
+  const env = options.env ?? process.env;
+  const home = options.home ?? homedir();
+  const hostStateHome = env[HOST_XDG_STATE_HOME_ENV] || env.XDG_STATE_HOME || join(home, '.local', 'state');
+  const hostConfigHome = env[HOST_XDG_CONFIG_HOME_ENV] || env.XDG_CONFIG_HOME || join(home, '.config');
   const root = join(stateRoot(options), 'opencode-service');
   for (const part of ['config', 'state', 'data', 'cache']) {
     nodeFs.mkdirSync(join(root, part), { recursive: true, mode: 0o700 });
@@ -128,6 +138,8 @@ export function opencodeBackendEnv(
     XDG_STATE_HOME: join(root, 'state'),
     XDG_DATA_HOME: join(root, 'data'),
     XDG_CACHE_HOME: join(root, 'cache'),
+    [HOST_XDG_CONFIG_HOME_ENV]: hostConfigHome,
+    [HOST_XDG_STATE_HOME_ENV]: hostStateHome,
   };
 }
 

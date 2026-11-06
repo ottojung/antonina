@@ -5,7 +5,11 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { idleMeta, validateAgentMetadata } from '../dist/packages/agent-runtime/src/metadata.js';
-import { opencodeBackendEnv, createAgentDirectory, removeAgentDirectory } from '../dist/packages/agent-runtime/src/store.js';
+import { opencodeBackendEnv, createAgentDirectory, removeAgentDirectory, stateRoot } from '../dist/packages/agent-runtime/src/store.js';
+import { modelConfigPath } from '../dist/packages/agent-runtime/src/model-config.js';
+import { boardConfigDir } from '../../cli/dist/packages/cli/src/board-config.js';
+import { daemonConfigDir } from '../../host-daemon/dist/packages/host-daemon/src/config.js';
+import { daemonStateRoot } from '../../host-daemon/dist/packages/host-daemon/src/identity.js';
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'antonina-host-service-test-'));
@@ -36,6 +40,25 @@ test('different Antonina host state roots do not share a service or credentials'
   const two = opencodeBackendEnv(a, { env: { ...env, XDG_STATE_HOME: join(root, 'another-state') } });
   assert.notEqual(one.OPENCODE_DB, two.OPENCODE_DB);
   assert.notEqual(one.XDG_STATE_HOME, two.XDG_STATE_HOME);
+});
+
+test('nested Antonina invocations keep the host registry and credentials roots', (t) => {
+  const { env, root } = fixture(t);
+  env.XDG_CONFIG_HOME = join(root, 'config');
+  const meta = idleMeta('nested-child', '/tmp/child', null, 1);
+  const hostState = stateRoot({ env, home: root });
+  const hostConfig = join(env.XDG_CONFIG_HOME, 'antonina');
+
+  const first = opencodeBackendEnv(meta, { env, home: root });
+  const inheritedByManagedChild = { ...env, ...first };
+  const second = opencodeBackendEnv(meta, { env: inheritedByManagedChild, home: root });
+
+  assert.deepEqual(second, first, 're-entering from the service environment must be idempotent');
+  assert.equal(stateRoot({ env: inheritedByManagedChild, home: root }), hostState);
+  assert.equal(daemonStateRoot({ env: inheritedByManagedChild, home: root }), hostState);
+  assert.equal(boardConfigDir({ env: inheritedByManagedChild, home: root }), hostConfig);
+  assert.equal(modelConfigPath(inheritedByManagedChild), join(hostConfig, 'config.json'));
+  assert.equal(daemonConfigDir({ env: inheritedByManagedChild, home: root }), hostConfig);
 });
 
 test('canonical agent records carry no per-agent database field', () => {

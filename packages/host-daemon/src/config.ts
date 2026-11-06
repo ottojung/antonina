@@ -148,7 +148,7 @@ export interface DaemonConfigOptions {
 /** The resolved `$XDG_CONFIG_HOME/antonina` (or `$HOME/.config/antonina`). */
 export function daemonConfigDir(options: DaemonConfigOptions): string {
   const home = options.home ?? options.env.HOME ?? homedir();
-  const base = options.env.XDG_CONFIG_HOME || join(home, '.config');
+  const base = options.env.ANTONINA_HOST_XDG_CONFIG_HOME || options.env.XDG_CONFIG_HOME || join(home, '.config');
   return join(base, 'antonina');
 }
 

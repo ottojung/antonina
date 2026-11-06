@@ -9,9 +9,14 @@ export interface ModelPreference {
 }
 
 const HOST_XDG_CONFIG_HOME_ENV = 'ANTONINA_HOST_XDG_CONFIG_HOME';
+const OPENCODE_XDG_CONFIG_HOME_ENV = 'ANTONINA_OPENCODE_XDG_CONFIG_HOME';
 
 export function modelConfigPath(env: Record<string, string | undefined> = process.env): string {
-  const base = env[HOST_XDG_CONFIG_HOME_ENV] || env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config');
+  const inheritedServiceHome = Boolean(env[OPENCODE_XDG_CONFIG_HOME_ENV])
+    && env.XDG_CONFIG_HOME === env[OPENCODE_XDG_CONFIG_HOME_ENV];
+  const base = inheritedServiceHome && env[HOST_XDG_CONFIG_HOME_ENV]
+    ? env[HOST_XDG_CONFIG_HOME_ENV]
+    : env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config');
   return join(base, 'antonina', 'config.json');
 }
 

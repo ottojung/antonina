@@ -52,13 +52,42 @@ test('nested Antonina invocations keep the host registry and credentials roots',
   const first = opencodeBackendEnv(meta, { env, home: root });
   const inheritedByManagedChild = { ...env, ...first };
   const second = opencodeBackendEnv(meta, { env: inheritedByManagedChild, home: root });
-
   assert.deepEqual(second, first, 're-entering from the service environment must be idempotent');
   assert.equal(stateRoot({ env: inheritedByManagedChild, home: root }), hostState);
   assert.equal(daemonStateRoot({ env: inheritedByManagedChild, home: root }), hostState);
   assert.equal(boardConfigDir({ env: inheritedByManagedChild, home: root }), hostConfig);
   assert.equal(modelConfigPath(inheritedByManagedChild), join(hostConfig, 'config.json'));
   assert.equal(daemonConfigDir({ env: inheritedByManagedChild, home: root }), hostConfig);
+  const explicitState = join(root, 'explicit-state');
+  const explicitConfig = join(root, 'explicit-config');
+  const callerOverride = { ...inheritedByManagedChild, XDG_STATE_HOME: explicitState, XDG_CONFIG_HOME: explicitConfig };
+  assert.equal(stateRoot({ env: callerOverride, home: root }), join(explicitState, 'antonina'));
+  assert.equal(daemonStateRoot({ env: callerOverride, home: root }), join(explicitState, 'antonina'));
+  assert.equal(boardConfigDir({ env: callerOverride, home: root }), join(explicitConfig, 'antonina'));
+  assert.equal(modelConfigPath(callerOverride), join(explicitConfig, 'antonina', 'config.json'));
+  assert.equal(modelConfigPath({ ...inheritedByManagedChild, XDG_CONFIG_HOME: explicitConfig }), join(explicitConfig, 'antonina', 'config.json'));
+  assert.equal(daemonConfigDir({ env: callerOverride, home: root }), join(explicitConfig, 'antonina'));
+});
+
+test('unset and empty host XDG roots use the established home fallbacks', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'antonina-host-service-fallback-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const env of [{ HOME: root }, { HOME: root, XDG_STATE_HOME: '', XDG_CONFIG_HOME: '' }]) {
+    const result = opencodeBackendEnv(idleMeta('fallback', '/tmp/fallback', null, 1), { env, home: root });
+    assert.equal(result.ANTONINA_HOST_XDG_STATE_HOME, join(root, '.local', 'state'));
+    assert.equal(result.ANTONINA_HOST_XDG_CONFIG_HOME, join(root, '.config'));
+  }
+
+  const markersWithoutServiceRoots = {
+    HOME: root,
+    ANTONINA_HOST_XDG_STATE_HOME: join(root, 'marked-state'),
+    ANTONINA_HOST_XDG_CONFIG_HOME: join(root, 'marked-config'),
+  };
+  assert.equal(stateRoot({ env: markersWithoutServiceRoots, home: root }), join(root, '.local', 'state', 'antonina'));
+  assert.equal(daemonStateRoot({ env: markersWithoutServiceRoots, home: root }), join(root, '.local', 'state', 'antonina'));
+  assert.equal(boardConfigDir({ env: markersWithoutServiceRoots, home: root }), join(root, '.config', 'antonina'));
+  assert.equal(modelConfigPath(markersWithoutServiceRoots), join(root, '.config', 'antonina', 'config.json'));
+  assert.equal(daemonConfigDir({ env: markersWithoutServiceRoots, home: root }), join(root, '.config', 'antonina'));
 });
 
 test('canonical agent records carry no per-agent database field', () => {

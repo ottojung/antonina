@@ -48,6 +48,24 @@ export class MetadataWriteError extends Error {}
 /** Original host XDG roots carried through OpenCode's private service environment. */
 export const HOST_XDG_CONFIG_HOME_ENV = 'ANTONINA_HOST_XDG_CONFIG_HOME';
 export const HOST_XDG_STATE_HOME_ENV = 'ANTONINA_HOST_XDG_STATE_HOME';
+const OPENCODE_XDG_CONFIG_HOME_ENV = 'ANTONINA_OPENCODE_XDG_CONFIG_HOME';
+const OPENCODE_XDG_STATE_HOME_ENV = 'ANTONINA_OPENCODE_XDG_STATE_HOME';
+
+function hostXdgStateHome(env: Record<string, string | undefined>, home: string): string {
+  const serviceHome = env[OPENCODE_XDG_STATE_HOME_ENV];
+  if (serviceHome && env.XDG_STATE_HOME === serviceHome && env[HOST_XDG_STATE_HOME_ENV]) {
+    return env[HOST_XDG_STATE_HOME_ENV]!;
+  }
+  return env.XDG_STATE_HOME || join(home, '.local', 'state');
+}
+
+function hostXdgConfigHome(env: Record<string, string | undefined>, home: string): string {
+  const serviceHome = env[OPENCODE_XDG_CONFIG_HOME_ENV];
+  if (serviceHome && env.XDG_CONFIG_HOME === serviceHome && env[HOST_XDG_CONFIG_HOME_ENV]) {
+    return env[HOST_XDG_CONFIG_HOME_ENV]!;
+  }
+  return env.XDG_CONFIG_HOME || join(home, '.config');
+}
 
 function filesystem(options: StatePathsOptions): StoreFs {
   return options.fs ?? DEFAULT_FS;
@@ -92,7 +110,8 @@ export function stateRoot(options: StatePathsOptions = {}): string {
   const home = options.home ?? homedir();
   // Managed OpenCode children inherit private XDG roots. Antonina subprocesses
   // launched from those children must still find the host's one agent registry.
-  const base = env[HOST_XDG_STATE_HOME_ENV] || env.XDG_STATE_HOME || join(home, '.local', 'state');
+  // A different current XDG value is an explicit caller override and wins.
+  const base = hostXdgStateHome(env, home);
   return join(base, 'antonina');
 }
 
@@ -126,8 +145,8 @@ export function opencodeBackendEnv(
 ): Record<string, string> {
   const env = options.env ?? process.env;
   const home = options.home ?? homedir();
-  const hostStateHome = env[HOST_XDG_STATE_HOME_ENV] || env.XDG_STATE_HOME || join(home, '.local', 'state');
-  const hostConfigHome = env[HOST_XDG_CONFIG_HOME_ENV] || env.XDG_CONFIG_HOME || join(home, '.config');
+  const hostStateHome = hostXdgStateHome(env, home);
+  const hostConfigHome = hostXdgConfigHome(env, home);
   const root = join(stateRoot(options), 'opencode-service');
   for (const part of ['config', 'state', 'data', 'cache']) {
     nodeFs.mkdirSync(join(root, part), { recursive: true, mode: 0o700 });
@@ -140,6 +159,8 @@ export function opencodeBackendEnv(
     XDG_CACHE_HOME: join(root, 'cache'),
     [HOST_XDG_CONFIG_HOME_ENV]: hostConfigHome,
     [HOST_XDG_STATE_HOME_ENV]: hostStateHome,
+    [OPENCODE_XDG_CONFIG_HOME_ENV]: join(root, 'config'),
+    [OPENCODE_XDG_STATE_HOME_ENV]: join(root, 'state'),
   };
 }
 

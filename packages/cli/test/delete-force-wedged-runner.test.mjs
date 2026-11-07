@@ -175,3 +175,42 @@ test('delete --force SIGKILLs a runner that the invocation group signal cannot r
 //   * What remains is a process the kernel refuses to kill (uninterruptible
 //     sleep). That is precisely the fail-closed condition the throw exists for,
 //     and it is not reproducible from a test without wedging kernel I/O.
+
+for (const command of ['stop', 'kill']) {
+  test(`${command} reaps a detached runner after its invocation has disappeared`, async (t) => {
+    const { env, work, agentId, metaPath } = harness(t);
+    const runner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      env: { ...env, ANTONINA_AGENT_ID: agentId },
+      detached: true,
+      stdio: 'ignore',
+    });
+    runner.unref();
+    t.after(async () => {
+      try { process.kill(runner.pid, 'SIGKILL'); } catch {}
+      await waitForGone(runner.pid);
+    });
+    const ticks = await waitForIdentity(t, runner.pid);
+    if (ticks === null) return;
+    const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
+    Object.assign(meta, {
+      state: 'running',
+      active_runner: true,
+      runner_pid: runner.pid,
+      runner_start_time: ticks,
+      pid: null,
+      pgid: null,
+      start_time: null,
+      invocation_id: null,
+      pending_prompt: 'previous invocation has disappeared',
+      runner_reservation: null,
+      cwd: work,
+    });
+    writeFileSync(metaPath, JSON.stringify(meta));
+    const outcome = run(['agent', command, '--id', agentId], env);
+    assert.equal(outcome.status, 0, outcome.stderr);
+    assert.equal(await waitForGone(runner.pid), true, command + ' left its detached runner alive');
+    const retained = JSON.parse(readFileSync(metaPath, 'utf8'));
+    assert.equal(retained.state, command === 'stop' ? 'stopped' : 'killed');
+    assert.equal(retained.active_runner, false);
+  });
+}

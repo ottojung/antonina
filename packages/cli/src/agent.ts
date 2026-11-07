@@ -1551,6 +1551,10 @@ async function stopLike(
       finalizeTerminal(current, command === 'stop' ? 'stopped' : 'killed', Date.now() / 1000, null, null);
       current.stop_reason = command;
     }, paths(context));
+    // The invocation may already be gone while its detached runner is still
+    // alive. Recording cancellation without reaping that owner leaks processes
+    // and allows a later command to reuse its worktree prematurely.
+    await reapRunnerBeforeReturn(agentId, command, context);
     context.io.stdout(`${command === 'stop' ? 'stopped' : 'killed'} agent ${agentId} (cancelled reserved runner work)`);
     return EXIT_OK;
   }

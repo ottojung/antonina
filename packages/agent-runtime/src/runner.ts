@@ -6,6 +6,8 @@ import { constants } from 'node:os';
 import {
   backendCapabilities,
   buildAgentCommand,
+  interruptBackendSession,
+  ensureHostV2Service,
   classifyBackendFailure,
   quotaResetDelaySeconds,
   classifySignalDeath,
@@ -143,8 +145,12 @@ function nextModelRecheckMs(meta: AgentMetadata, env: Record<string, string | un
 function commandModel(command: string[]): string {
   const flag = command.indexOf('--model');
   const model = flag < 0 ? undefined : command[flag + 1];
-  if (typeof model !== 'string') throw new Error('Antonina backend command omitted its configured model');
-  return model;
+  // OpenCode V2 accepts a variant as `provider/model#variant`. Antonina's
+  // model cooldowns and observations are keyed by the canonical model alone.
+  if (typeof model !== 'string' || !model.endsWith('#' + DEFAULT_VARIANT)) {
+    throw new Error('Antonina backend command omitted its canonical V2 model variant');
+  }
+  return model.slice(0, -(DEFAULT_VARIANT.length + 1));
 }
 
 /** Reap verified descendants of the previous invocation before replaying work.
@@ -245,6 +251,8 @@ export interface RunnerOptions extends StatePathsOptions {
   modelStepSilenceMs?: number;
   /** Test seam only: production samples liveness every five seconds. */
   livenessPollMs?: number;
+  /** Test seam only: widen the operator control poll to model external-signal races deterministically. */
+  controlPollMs?: number;
   /** Test seam only: production allows OpenCode 30 seconds to exit after a provider error. */
   backendErrorGraceMs?: number;
   /**
@@ -362,7 +370,7 @@ function childResult(
         livenessTriggered = true;
         livenessSignalledAt = Date.now();
       }
-    }, CONTROL_POLL_MS);
+    }, options.controlPollMs ?? CONTROL_POLL_MS);
     child.once('close', (code, signal) => {
       clearInterval(timer);
       resolve({ code, signal, operatorSignalled, operatorSignalDelivered, livenessTriggered });
@@ -578,9 +586,7 @@ async function recordSpawned(
   let accepted = false;
   await updateMeta(agentId, (meta) => {
     if (deletePendingFlag(meta) !== false || stopLikeOrMalformed(meta)) return;
-    // The command builder always launches the current Antonina variant. Once
-    // the child exists, make durable status name the variant that actually ran;
-    // this also upgrades legacy records that still carried `low`.
+    // Record the canonical V2 model variant that the child actually ran.
     meta.variant = DEFAULT_VARIANT;
     recordObservedAgentModel(meta, model);
     // Board issue 178: the observation is written here, in the same durable
@@ -859,7 +865,7 @@ async function runInvocation(
   if (meta === null) return false;
   let command: string[] | null;
   // Resolved once, from this one snapshot of the record, and then used for both
-  // `--dir` and `spawn({cwd})` and for the observation written below. It is the
+  // `spawn({cwd})`, `PWD`, and the observation written below. It is the
   // declaration (`cwd`) and never the observation (`invocation_cwd`): a value is
   // recorded only once a child exists, so launching from the declaration is what
   // keeps the observation an observation.
@@ -870,7 +876,7 @@ async function runInvocation(
     // `buildAgentCommand` may itself probe for the session to continue.
     command = buildAgentCommand(meta, prompt, isContinue,
       { ...options.env, ...opencodeBackendEnv(meta, options) },
-      new Set(), sharedUnreliableModels(options));
+      new Set(), options.env, sharedUnreliableModels(options));
   } catch (error) {
     // A durable record the backend cannot be launched from -- an undeclared
     // working directory, a malformed one -- is a failed invocation with a
@@ -944,6 +950,24 @@ async function runInvocation(
       if (current.state !== 'running') return;
       recordAgentModel(current, activeModel);
     }, options);
+    // Initialize the shared service using UNMARKED environment.
+    // The marked CLI connects to this already-running background server.
+    try {
+      // Automatic service discovery carries the V2 service's local password.
+      // Explicit --server would require OPENCODE_PASSWORD, so rely on the
+      // already-running, independently initialized host service.
+      ensureHostV2Service(
+        command[0]!,
+        { ...options.env, ...opencodeBackendEnv(meta, options) },
+        launchCwd,
+      );
+    } catch (error) {
+      await updateMeta(agentId, (current) => {
+        finalizeTerminal(current, 'failed', Date.now() / 1000, 127, null, String(error));
+        setActiveRunner(current, false);
+      }, options);
+      return false;
+    }
     const invocationId = randomBytes(16).toString('hex');
     const logFile = logPath(agentId, options);
     const fd = openSync(logFile, 'a', 0o600);
@@ -956,12 +980,8 @@ async function runInvocation(
       ANTONINA_INVOCATION_ID: invocationId,
       ANTONINA_PROMPT: prompt,
       NO_COLOR: '1',
-      // Board 186. Spread last, so which database this front's session and
-      // message writes go to is decided by this record and not inherited from
-      // the runner's own environment. This is the whole fix for the
-      // cross-front lock contention: OpenCode hardcodes `busy_timeout = 5000`
-      // and turns a `database is locked` timeout into a fatal
-      // `Failed to execute statement`, so the databases must not be shared.
+      // Pin every agent client to Antonina's one host-level V2 service and
+      // database, regardless of the runner's inherited OpenCode environment.
       ...opencodeBackendEnv(meta, options),
     };
     // Board 197: the owner token authorises *this runner's claim on this
@@ -972,6 +992,10 @@ async function runInvocation(
     // anything running as this user. Deleting the key rather than blanking it
     // means an inherited copy cannot be reintroduced by a later spread.
     delete env[RUNNER_OWNER_TOKEN_ENV];
+    // V2's noninteractive CLI resolves the project from inherited PWD before
+    // process.cwd(). A spawned child's cwd alone is not sufficient: a stale PWD
+    // would silently write the session into the orchestrator's project.
+    env.PWD = launchCwd;
     let child: ChildProcess;
     try {
       child = spawn(command[0]!, command.slice(1), {
@@ -1034,7 +1058,7 @@ async function runInvocation(
         || observation.diagnosis === 'step_finished_silent'
         || observation.diagnosis === 'backend_error_silent';
       const checkpointed = persistedNativeSessionId(current) !== null;
-      // A first request can create a private OpenCode SQLite session without
+      // A first request can create a session in the shared OpenCode V2 database without
       // emitting a JSONL event. Recover the session, not the original prompt.
       if (verified && !checkpointed && Date.now() - lastSessionProbeAt >= 30_000) {
         lastSessionProbeAt = Date.now();
@@ -1184,6 +1208,15 @@ async function runInvocation(
     await checkpointWrite;
     if (checkpointFailure !== null) throw checkpointFailure;
 
+    // A dead CLI front does NOT imply a dead V2 server-side agent loop.
+    // Abort only this session before retrying, reconciling or finalizing.
+    if (result.signal !== null || result.operatorSignalled || result.livenessTriggered) {
+      const latest = readMeta(agentId, options);
+      if (latest !== null) interruptBackendSession(
+        latest, { ...options.env, ...opencodeBackendEnv(latest, options) },
+      );
+    }
+
     const signal = signalNumber(result.signal);
     const code = result.code ?? (signal === null ? 1 : -signal);
     const stalled = result.livenessTriggered && !result.operatorSignalled
@@ -1269,15 +1302,13 @@ async function runInvocation(
         try {
           nextCommand = buildAgentCommand(
             latest, reconciliationPrompt(prompt, existingSession),
-            existingSession, backendEnv, failedModelsThisRun,
-            sharedUnreliableModels(options),
+            existingSession, backendEnv, failedModelsThisRun, options.env, sharedUnreliableModels(options),
           );
           nextIsContinue = existingSession && nextCommand !== null;
           if (nextCommand === null) {
             nextCommand = buildAgentCommand(
               latest, reconciliationPrompt(prompt, false), false,
-              backendEnv, failedModelsThisRun,
-              sharedUnreliableModels(options),
+              backendEnv, failedModelsThisRun, options.env, sharedUnreliableModels(options),
             );
             nextIsContinue = false;
           }

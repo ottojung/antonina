@@ -13,7 +13,7 @@ test('session discovery uses the agent worktree, not the caller directory', () =
     const worktree = join(root, 'agent-worktree');
     mkdirSync(worktree);
     const executable = join(root, 'fake-opencode');
-    const rows = JSON.stringify([{id:'ses_verified', title:'antonina-cd123', created:14}]);
+    const rows = JSON.stringify([{id:'ses_verified', title:'antonina-cd123', created:14, directory:worktree}]);
     writeFileSync(executable, withModelProbe('#!/bin/sh\nif [ "$(pwd -P)" = ' + JSON.stringify(worktree) + ' ]; then printf "%s\\n" ' + JSON.stringify(rows) + '; fi\n'), {mode:0o755});
     const configHome = join(root, 'config');
     installModelFixture(configHome);

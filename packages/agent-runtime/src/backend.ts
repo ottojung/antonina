@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { constants } from 'node:os';
-import { isAbsolute } from 'node:path';
+import { delimiter, isAbsolute, join } from 'node:path';
 
 import {
   DEFAULT_VARIANT,
@@ -310,6 +310,17 @@ function structuredBackendFailureRule(text: string): BackendFailureRule | undefi
     const event = parsed as Record<string, unknown>;
     if (event.type !== 'error' || typeof event.error !== 'object' || event.error === null || Array.isArray(event.error)) continue;
     const error = event.error as Record<string, unknown>;
+    // OpenCode V2 emits provider errors as typed top-level error events,
+    // including provider.no-route for a configured but unavailable model.
+    if (error.type === 'provider.no-route') {
+      return {
+        marker: 'OpenCode V2 provider.no-route',
+        classification: 'model_unavailable',
+        provider: null,
+        transient: false,
+        automaticRetrySafe: false,
+      };
+    }
     if (error.name !== 'APIError' || typeof error.data !== 'object' || error.data === null || Array.isArray(error.data)) continue;
     const data = error.data as Record<string, unknown>;
     const statusCode = data.statusCode;
@@ -420,6 +431,7 @@ interface SessionRow {
   id: string;
   title: string;
   created: number;
+  directory: string;
 }
 
 /**
@@ -469,10 +481,12 @@ function parseSessionRows(value: unknown): SessionRow[] | null {
       typeof record.id !== 'string'
       || record.id.length === 0
       || typeof record.title !== 'string'
+      || typeof record.directory !== 'string'
+      || !isAbsolute(record.directory)
       || typeof record.created !== 'number'
       || !Number.isFinite(record.created)
     ) return null;
-    rows.push({ id: record.id, title: record.title, created: record.created });
+    rows.push({ id: record.id, title: record.title, created: record.created, directory: record.directory });
   }
   return rows;
 }
@@ -499,6 +513,7 @@ export function discoverSessionId(
   cwd: string = process.cwd(),
 ): string | null {
   const childEnv = probeEnv(env);
+  childEnv.PWD = cwd;
   const result = spawnSync(
     resolveOpencode(childEnv),
     ['session', 'list', '--format', 'json', '--max-count', String(SESSION_LIST_MAX_COUNT)],
@@ -520,7 +535,8 @@ export function discoverSessionId(
   const rows = parseSessionRows(value);
   if (rows === null) return null;
   const title = `${OPENCODE_TITLE_PREFIX}${agentId}`;
-  const matches = rows.filter((row) => row.title === title);
+  // Shared V2 databases span projects; the title alone is not directory authority.
+  const matches = rows.filter((row) => row.title === title && row.directory === cwd);
   matches.sort((left, right) => right.created - left.created || right.id.localeCompare(left.id));
   return matches[0]?.id ?? null;
 }
@@ -551,18 +567,18 @@ export function buildAgentCommand(
   isContinue: boolean,
   env: Record<string, string | undefined> = process.env,
   excludedModels: ReadonlySet<string> = new Set(),
+  modelEnv: Record<string, string | undefined> = env,
   sharedUnreliable: ReadonlySet<string> = new Set(),
 ): string[] | null {
   const agentId = requiredPersistedAgentId(meta);
   const cwd = requiredAgentCwd(meta);
-  // The durable field is still validated so malformed or old records fail closed,
-  // but Antonina's backend variant is a product-level setting rather than a
-  // per-agent override. Legacy records may still say `low`; every invocation
-  // launched by this build uses the current Antonina default.
+  // OpenCode V2 uses the process cwd (set by the runner) instead of a --dir flag.
+  // Canonical V2 records have a product-level variant; it is not an
+  // override supplied by an obsolete OpenCode CLI flag.
   persistedVariant(meta);
   const variant = DEFAULT_VARIANT;
   const executable = resolveOpencode(env);
-  const model = selectConfiguredAgentModel(meta, env, Date.now() / 1000, excludedModels, sharedUnreliable);
+  const model = selectConfiguredAgentModel(meta, modelEnv, Date.now() / 1000, excludedModels, sharedUnreliable);
   if (isContinue) {
     const recorded = persistedNativeSessionId(meta);
     const sessionId = recorded ?? discoverSessionId(agentId, env, cwd);
@@ -571,10 +587,8 @@ export function buildAgentCommand(
       executable, 'run', '--auto',
       '--format', 'json',
       '--session', sessionId,
-      '--model', model,
-      '--variant', variant,
+      '--model', `${model}#${variant}`,
       '--thinking',
-      '--dir', cwd,
       prompt,
     ];
   }
@@ -582,21 +596,155 @@ export function buildAgentCommand(
     executable, 'run', '--auto',
     '--format', 'json',
     '--title', `${OPENCODE_TITLE_PREFIX}${agentId}`,
-    '--model', model,
-    '--variant', variant,
+    '--model', `${model}#${variant}`,
     '--thinking',
-    '--dir', cwd,
     prompt,
   ];
 }
 
 
+/**
+ * Service administration must never inherit an agent's invocation markers:
+ * these markers identify processes eligible for per-agent orphan cleanup.
+ * The shared background service is not an agent subprocess.
+ */
+function serviceAdministrationEnv(
+  env: Record<string, string | undefined>,
+  cwd: string,
+): NodeJS.ProcessEnv {
+  const sanitized: NodeJS.ProcessEnv = { ...process.env, ...env, PWD: cwd };
+  for (const marker of ['ANTONINA_AGENT_ID', 'ANTONINA_INVOCATION_ID', 'ANTONINA_PROMPT', RUNNER_OWNER_TOKEN_ENV]) {
+    delete sanitized[marker];
+  }
+  return sanitized;
+}
+
+/**
+ * Copy a V2 session into a distinct child before publishing a forked agent.
+ * Shared-server agents must never write the same native session concurrently.
+ */
+export function forkBackendSession(
+  source: AgentMetadata,
+  env: Record<string, string | undefined>,
+): string | null {
+  const parent = persistedNativeSessionId(source);
+  if (parent === null) return null;
+  const cwd = requiredAgentCwd(source);
+  const executable = resolveOpencode(env);
+  ensureHostV2Service(executable, env, cwd);
+  const result = spawnSync(
+    executable,
+    ['api', 'session.fork', '--param', 'sessionID=' + parent, '--data', '{}'],
+    { cwd, env: serviceAdministrationEnv(env, cwd), encoding: 'utf8', timeout: 15_000 },
+  );
+  if (result.error || result.status !== 0) {
+    throw new Error('OpenCode V2 could not fork its native session: ' + (result.stderr || result.error?.message || 'server unavailable').slice(0, 300));
+  }
+  let decoded: unknown;
+  try { decoded = JSON.parse(result.stdout); }
+  catch { throw new Error('OpenCode V2 returned invalid fork session JSON'); }
+  const response = decoded as { data?: { id?: unknown }; id?: unknown };
+  const id = response?.data?.id ?? response?.id;
+  if (typeof id !== 'string' || !/^ses_[A-Za-z0-9_]+$/.test(id) || id === parent) {
+    throw new Error('OpenCode V2 did not return a distinct child session ID');
+  }
+  return id;
+}
+
+/**
+ * Stop server-side work for precisely one native session. Never kill/restart the
+ * shared server and never start a new service merely to interrupt a dead one.
+ */
+export function interruptBackendSession(
+  meta: AgentMetadata,
+  env: Record<string, string | undefined>,
+): boolean {
+  const session = persistedNativeSessionId(meta);
+  if (session === null) return false;
+  const cwd = requiredAgentCwd(meta);
+  const childEnv = serviceAdministrationEnv(env, cwd);
+  const executable = resolveOpencode(env);
+  const service = spawnSync(executable, ['service', 'status'], {
+    cwd, env: childEnv, encoding: 'utf8', timeout: 2_500,
+  });
+  if (service.error || service.status !== 0) return false;
+  // Only a real bound V2 service URL may authorize a remote interrupt.
+  // A fake or malformed service-status result is not authority to issue API calls.
+  if (!/^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):[0-9]+\/?$/.test(service.stdout.trim())) return false;
+  const result = spawnSync(executable, [
+    'api', 'session.interrupt', '--param', 'sessionID=' + session,
+    '--param', 'resume=false',
+  ], { cwd, env: childEnv, encoding: 'utf8', timeout: 5_000 });
+  return !result.error && result.status === 0;
+}
+
+/**
+ * Identify the official native V2 CLI (ELF, Mach-O or PE).
+ * Script-only fake backends in protocol unit tests do not manage services.
+ */
+function isNativeOpenCodeExecutable(executable: string, env: Record<string, string | undefined>): boolean {
+  const candidates = executable.includes('/')
+    ? [executable]
+    : (env.PATH ?? process.env.PATH ?? '').split(delimiter).map((part) => join(part || '.', executable));
+  for (const candidate of candidates) {
+    let fd: number;
+    try { fd = openSync(candidate, 'r'); } catch { continue; }
+    const header = Buffer.alloc(4);
+    let bytes = 0;
+    try { bytes = readSync(fd, header, 0, 4, 0); }
+    finally { closeSync(fd); }
+    if (bytes < 4) return false;
+    if (header[0] === 0x7f && header.subarray(1).toString('ascii') === 'ELF') return true;
+    if (header[0] === 0x4d && header[1] === 0x5a) return true;
+    const magic = header.readUInt32BE(0);
+    return magic === 0xfeedface || magic === 0xfeedfacf
+      || magic === 0xcefaedfe || magic === 0xcffaedfe;
+  }
+  return false;
+}
+
+/**
+ * Start/discover the dedicated host service BEFORE spawning a marked invocation.
+ * The V2 service inherits invocation markers if started by the CLI client, so
+ * orphan cleanup for that one agent could otherwise kill all agents' service.
+ * The service starts with no agent markers. Automatic V2 service discovery
+ * also supplies the locally generated password (explicit --server does not).
+ */
+export function ensureHostV2Service(
+  executable: string,
+  env: Record<string, string | undefined>,
+  cwd: string,
+): string | null {
+  if (!isNativeOpenCodeExecutable(executable, env)) return null;
+  const cleanEnv = serviceAdministrationEnv(env, cwd);
+  const localUrl = (output: string): string | null => {
+    const value = output.trim();
+    return /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):[0-9]+\/?$/.test(value)
+      ? value : null;
+  };
+  const status = spawnSync(executable, ['service', 'status'], {
+    cwd, env: cleanEnv, encoding: 'utf8', timeout: 8_000,
+  });
+  if (!status.error && status.status === 0) {
+    const present = localUrl(status.stdout);
+    if (present !== null) return present;
+  }
+  const started = spawnSync(executable, ['service', 'start'], {
+    cwd, env: cleanEnv, encoding: 'utf8', timeout: 20_000,
+  });
+  const url = started.error || started.status !== 0 ? null : localUrl(started.stdout);
+  if (url === null) {
+    throw new Error('OpenCode V2 host service unavailable: ' + (started.stderr || started.error?.message || 'missing loopback endpoint').slice(0, 250));
+  }
+  return url;
+}
+
 export interface BackendCapabilities {
   /**
    * Whether this backend can launch an invocation in a directory the operator
    * named. OpenCode can: every invocation is a fresh process, `buildAgentCommand`
-   * tells it `--dir` and the runner spawns it with `spawn({cwd})` on the same
-   * value. A backend that cannot must refuse a declaration *by name*, before
+   * the runner sets both `spawn({cwd})` and `PWD` to the declared
+   * directory. A backend that cannot must refuse a declaration *by name*, before
    * any write, rather than running the invocation somewhere else and reporting
    * the declared directory as if it had honoured it.
    */

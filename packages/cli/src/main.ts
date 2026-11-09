@@ -123,5 +123,13 @@ function isMainModule(): boolean {
 }
 
 if (isMainModule()) {
-  void main().then((code) => { process.exitCode = code; });
+  const isDetachedRunner = process.argv[2] === '_runner';
+  void main().then((code) => {
+    // The private runner has finished its durable metadata writes when main()
+    // resolves. Backend clients can leave sockets/timers open even after that,
+    // so exit the dedicated process rather than retaining an unowned Node
+    // runtime indefinitely. Public CLI commands still drain their own I/O.
+    if (isDetachedRunner) process.exit(code);
+    process.exitCode = code;
+  });
 }

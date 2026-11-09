@@ -1,71 +1,7 @@
 /**
- * Board issue 126 introduced forks; the current syntax is `antonina agent new --fork <SOURCE_ID>`.
- * The clone receives a newly generated opaque ID, printed on stdout (or in `--json`).
- *
- * What a managed agent's durable state actually IS, as this package owns it:
- * exactly one canonical JSON record at `<state>/antonina/agents/<id>/meta.json`,
- * validated field-for-field by `validateAgentMetadata` (metadata.ts) and read
- * and written only under the per-agent lock in store.ts. There is no other
- * durable per-agent object that carries meaning: `output.log` is an append-only
- * transcript of a run, `.lock` is an ephemeral lock record, and everything else
- * about an agent (its process, its runner, its prompts) is encoded as fields
- * inside that one record. So a fork is the making of a second record.
- *
- * Two rules make that a snapshot rather than a link.
- *
- * 1. Independence. The clone is written into its own directory by
- *    `createAgentDirectory` + `writeMeta`, and the record is built by
- *    `structuredClone`, so the two records share no object, nested or top-level,
- *    in memory or on disk. There is no parent field, no link, no shared path,
- *    and no code path that ever reads one record in order to update the other.
- *    Mutating either agent afterwards writes only that agent's own `meta.json`.
- *
- * 2. Process ownership is never inherited. A pid/pgid/start-time triple, a
- *    runner identity, or a runner reservation is a claim on ONE live process.
- *    Copying it would make two agent records name the same process, which is
- *    precisely the state the repository's rules forbid and which `stop`, `kill`
- *    and `delete` would then both act on. So the snapshot clears every one of
- *    those fields on the clone, whatever the source was doing.
- *
- * A source that is *live* is therefore not a reason to refuse. The clone names
- * no process, so no control command can reach the source through it, and the
- * issue's stated purpose -- forking an in-flight session so it can continue from
- * the same point -- is exactly the live case. The snapshot is what makes that
- * safe, not a gate. The one refusal that remains is a source whose durable
- * authority is being revoked; see `forkBlocker`.
- *
- * The clone is not a verbatim byte copy either. It keeps the source's work
- * identity -- declared cwd, title, variant, `native_session_id` (so `run`
- * continues the same backend conversation), prompt history, and the terminal
- * outcome with its timestamps and exit status -- and it gets a fresh identity of
- * its own: new id, new creation time, its own lifecycle state, and no process,
- * runner, reservation, accepted prompt or queued steer, because none of those
- * are state a second agent may own.
- *
- * A fork SHARES the source's backend session: `native_session_id` is carried
- * deliberately, because that is what "continue from the same point" means. The
- * two agent *records* are independent, and the two agents are separately
- * runnable, so if both are run they will both drive that one backend
- * conversation. This is a known, accepted overlap, not an oversight: dropping
- * the session id would make the clone a fresh conversation and defeat the
- * feature.
- *
- * There is currently no way to give a clone its own backend session, and that
- * is a known gap rather than a hidden one. `native_session_id` is terminal once
- * set: `cmdRun` selects `mode: 'continue'` from the recorded session and never
- * re-consults session discovery, and the only two writers of an existing
- * record's field (`rememberFreshSession` and the `cmdRun` session-recovery
- * branch) both write only when it is null. So a clone of a source that has a
- * recorded session can never be given a different one, and no command exists
- * to start one. A clone of a source that has no recorded session yet does
- * start its own, because `agent new` records a null session. So forking a
- * source that has not been run yet is the only way to get two separate
- * conversations: the clone inherits the source's recorded
- * `native_session_id`, and every later run of either agent takes
- * `mode: 'continue'` against that one session id, so the two agents are two
- * turns of the same conversation and not two. Running them at different times
- * does not change that; it only serialises the turns. The board owes an
- * opt-out.
+ * Fork a managed agent by copying a distinct OpenCode V2 child session.
+ * A clone shares history, not an executable session identity. This prevents
+ * one agent from steering or interrupting another on the shared V2 server.
  */
 import {
   AGENT_META_VERSION,
@@ -154,11 +90,23 @@ export function forkMetaSnapshot(
   source: AgentMetadata,
   newAgentId: string,
   now: number,
+  childNativeSessionId: string | null = null,
 ): AgentMetadata {
   if (persistedAgentId(newAgentId) !== newAgentId) {
     throw new Error('fork: managed-agent id is malformed');
   }
   const clone = structuredClone(source) as AgentMetadata;
+  const parent = source.native_session_id;
+  if (parent !== null) {
+    if (typeof childNativeSessionId !== 'string'
+        || !/^ses_[A-Za-z0-9_]+$/.test(childNativeSessionId)
+        || childNativeSessionId === parent) {
+      throw new Error('fork: distinct V2 child session is required');
+    }
+  } else if (childNativeSessionId !== null) {
+    throw new Error('fork: cannot clone a nonexistent source session');
+  }
+  clone.native_session_id = childNativeSessionId;
   clone.id = newAgentId;
   clone.created_at = now;
   clone.last_activity_at = now;
@@ -252,6 +200,7 @@ export function forkAgent(
   newAgentId: string,
   options: StatePathsOptions = {},
   now = Date.now() / 1000,
+  childNativeSessionId: string | null = null,
 ): AgentMetadata {
   const source = readMeta(sourceAgentId, options);
   if (source === null) throw new AgentForkSourceMissingError(sourceAgentId);
@@ -262,7 +211,7 @@ export function forkAgent(
     // Built inside the protected region, not before it: this is the step that
     // validates the id it was handed and the record it is about to publish, so
     // a failure here is as much a failed fork as a failure to write it.
-    const meta = forkMetaSnapshot(source, newAgentId, now);
+    const meta = forkMetaSnapshot(source, newAgentId, now, childNativeSessionId);
     writeMeta(newAgentId, meta, options);
     return meta;
   } catch (error) {

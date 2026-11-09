@@ -103,7 +103,7 @@ function sourceState() {
 function finishedMeta(agentId, overrides = {}) {
   const meta = {
     ...idleMeta(agentId, '/srv/work', 'original title', 1_000),
-    native_session_id: 'sess-abcdef0123456789',
+    native_session_id: 'ses_parentabcdef0123456789',
     state: 'failed',
     prompt_count: 3,
     last_prompt: 'third prompt',
@@ -153,11 +153,11 @@ test('a fork carries the source work identity and takes a new identity of its ow
   withIsolatedXdg(t);
   seed('a1', finishedMeta('a1', { backend_error: backendError('model-one') }));
 
-  const clone = forkAgent('a1', 'b2', { env: process.env });
+  const clone = forkAgent('a1', 'b2', { env: process.env }, Date.now() / 1000, 'ses_b2child');
 
   assert.equal(clone.id, 'b2');
   // The session identity is what lets `run` continue the same conversation.
-  assert.equal(clone.native_session_id, 'sess-abcdef0123456789');
+  assert.equal(clone.native_session_id, 'ses_b2child');
   assert.equal(clone.cwd, '/srv/work');
   assert.equal(clone.title, 'original title');
   assert.equal(clone.prompt_count, 3);
@@ -213,7 +213,7 @@ test('the snapshot shares no mutable object with the source, at any depth', (t) 
   seed('a1', source);
   const sourceBytes = bytes('a1');
 
-  const clone = forkMetaSnapshot(source, 'b2', 2_000);
+  const clone = forkMetaSnapshot(source, 'b2', 2_000, 'ses_b2child');
 
   // Object identity, at the nested record the copy is most likely to alias.
   assert.notEqual(clone.backend_error, source.backend_error);
@@ -234,7 +234,7 @@ test('the snapshot shares no mutable object with the source, at any depth', (t) 
 test('mutating the clone leaves the source byte-identical, and the converse', async (t) => {
   withIsolatedXdg(t);
   seed('a1', finishedMeta('a1', { backend_error: backendError('model-one') }));
-  forkAgent('a1', 'b2', { env: process.env });
+  forkAgent('a1', 'b2', { env: process.env }, Date.now() / 1000, 'ses_b2child');
   const sourceBefore = bytes('a1');
   const cloneBefore = bytes('b2');
 
@@ -279,18 +279,19 @@ test('a fork does not modify the source', (t) => {
   const before = bytes('a1');
   const beforeStat = statSync(metaPath('a1', { env: process.env }));
 
-  forkAgent('a1', 'b2', { env: process.env }, 2_000);
-  forkAgent('a1', 'c3', { env: process.env }, 2_000);
+  forkAgent('a1', 'b2', { env: process.env }, 2_000, 'ses_b2child');
+  forkAgent('a1', 'c3', { env: process.env }, 2_000, 'ses_c3child');
 
   assert.equal(bytes('a1'), before);
   assert.equal(statSync(metaPath('a1', { env: process.env })).mtimeMs, beforeStat.mtimeMs);
   // Two forks of the same source are the same snapshot, in separate storage.
   const left = readMeta('b2', { env: process.env });
   const right = readMeta('c3', { env: process.env });
-  assert.equal(JSON.stringify({ ...left, id: 'X' }), JSON.stringify({ ...right, id: 'X' }));
+  assert.notEqual(left.native_session_id, right.native_session_id);
+  assert.equal(JSON.stringify({ ...left, id: 'X', native_session_id: null }), JSON.stringify({ ...right, id: 'X', native_session_id: null }));
 });
 
-test('a fork inherits the source backend session and leaves the source record unmodified, in both directions', async (t) => {
+test('a fork owns a distinct child backend session and leaves the source record unmodified, in both directions', async (t) => {
   withIsolatedXdg(t);
 
   // Direction one, session present: the clone takes the source's recorded
@@ -300,16 +301,17 @@ test('a fork inherits the source backend session and leaves the source record un
   // the per-fork opt-out the product does not have.
   seed('a1', finishedMeta('a1'));
   const sourceBefore = bytes('a1');
-  const withSession = forkAgent('a1', 'b2', { env: process.env }, 2_000);
+  const withSession = forkAgent('a1', 'b2', { env: process.env }, 2_000, 'ses_b2child');
   const sourceOnDisk = readMeta('a1', { env: process.env });
-  assert.equal(sourceOnDisk.native_session_id, 'sess-abcdef0123456789');
-  assert.equal(withSession.native_session_id, sourceOnDisk.native_session_id);
-  assert.equal(readMeta('b2', { env: process.env }).native_session_id, sourceOnDisk.native_session_id);
+  assert.equal(sourceOnDisk.native_session_id, 'ses_parentabcdef0123456789');
+  assert.equal(withSession.native_session_id, 'ses_b2child');
+  assert.notEqual(withSession.native_session_id, sourceOnDisk.native_session_id);
+  assert.equal(readMeta('b2', { env: process.env }).native_session_id, 'ses_b2child');
   // The converse: the source's session is left exactly as it was found. A fork
   // that cleared, replaced or normalised the field would break the continuation
   // it is built to serve.
   assert.equal(bytes('a1'), sourceBefore);
-  assert.equal(sourceOnDisk.native_session_id, 'sess-abcdef0123456789');
+  assert.equal(sourceOnDisk.native_session_id, 'ses_parentabcdef0123456789');
 
   // Direction two, session absent: an unrun source has recorded null, so the
   // clone inherits null and `run` takes mode: 'new' for it. The pair is what
@@ -327,7 +329,7 @@ test('a fork inherits the source backend session and leaves the source record un
   // And the field is terminal on the clone too: running the clone cannot
   // rewrite the source's session, because the two records share nothing.
   await updateMeta('b2', (meta) => { meta.prompt_count = 1; }, { env: process.env });
-  assert.equal(readMeta('a1', { env: process.env }).native_session_id, 'sess-abcdef0123456789');
+  assert.equal(readMeta('a1', { env: process.env }).native_session_id, 'ses_parentabcdef0123456789');
 });
 
 test('a fork of an unknown source id fails and creates nothing', (t) => {
@@ -402,7 +404,7 @@ test('a genuinely live source forks, and the clone owns nothing the source owns'
   // The product's own predicates say the source is live. That is the case the
   // issue is written for, and it forks.
   assert.equal(invocationAlive(live, probe), true);
-  const clone = forkAgent('a1', 'b2', { env: process.env }, 2_000);
+  const clone = forkAgent('a1', 'b2', { env: process.env }, 2_000, 'ses_b2child');
 
   // The clone claims no process, no invocation and no runner, so no control
   // command can reach the source's process through it.
@@ -453,7 +455,7 @@ test('the clone takes its own lifecycle state from a source in every state', (t)
       start_time: state === 'running' ? procStartTicks(process.pid) : null,
       invocation_id: state === 'running' ? INVOCATION_ID : null,
     });
-    const clone = forkAgent(sourceId, cloneId, { env: process.env }, 2_000);
+    const clone = forkAgent(sourceId, cloneId, { env: process.env }, 2_000, 'ses_' + cloneId + 'child');
     assert.equal(clone.state, 'idle', `clone of a ${state} source must be idle`);
     assert.notEqual(deriveState(clone, 2_000), 'running');
     assert.notEqual(deriveState(clone, 2_000), 'unknown');
@@ -481,7 +483,7 @@ test('forkBlocker refuses only a source whose authority is being revoked', (t) =
   seed('a1', { ...terminal, delete_pending: true });
   const before = bytes('a1');
   assert.throws(
-    () => forkAgent('a1', 'b2', { env: process.env }, 2_000),
+    () => forkAgent('a1', 'b2', { env: process.env }, 2_000, 'ses_b2child'),
     (error) => {
       assert.ok(error instanceof AgentForkSourceBusyError);
       assert.match(error.message, /being deleted/);
@@ -506,7 +508,7 @@ test('a failed metadata write leaves no half-created agent', (t) => {
   const options = { env: process.env, fs };
 
   assert.throws(
-    () => forkAgent('a1', 'b2', options, 2_000),
+    () => forkAgent('a1', 'b2', options, 2_000, 'ses_b2child'),
     /failed to persist metadata for agent b2/,
   );
 
@@ -550,7 +552,7 @@ test('a failed meta snapshot leaves no half-created agent', (t) => {
   const before = bytes('a1');
 
   assert.throws(
-    () => forkAgent('a1', 'B.2', { env: process.env }, 2_000),
+    () => forkAgent('a1', 'B.2', { env: process.env }, 2_000, 'ses_B2child'),
     /managed-agent id is malformed/,
   );
 
@@ -574,14 +576,14 @@ test('a fork keeps the record canonical even at a field boundary', (t) => {
   // rather than deep-cloning it, this is the shape that would notice.
   const source = finishedMeta('a1', { backend_error: backendError('model-one') });
   assert.equal(Object.keys(source.backend_error).length, BACKEND_ERROR_FIELDS);
-  const clone = forkMetaSnapshot(source, 'b2', 2_000);
+  const clone = forkMetaSnapshot(source, 'b2', 2_000, 'ses_b2child');
   assert.equal(Object.keys(clone.backend_error).length, BACKEND_ERROR_FIELDS);
   assert.throws(() => validateAgentMetadata({ ...clone, id: 'B.2' }), /id is malformed/);
 });
 
 test('fork resets model observations inherited from its source', () => {
   const source = finishedMeta('a1', { observed_models: ['example.test/one', 'example.test/two'] });
-  const clone = forkMetaSnapshot(source, 'a2', 2000);
+  const clone = forkMetaSnapshot(source, 'a2', 2000, 'ses_a2child');
   assert.deepEqual(source.observed_models, ['example.test/one', 'example.test/two']);
   assert.deepEqual(clone.observed_models, []);
   validateAgentMetadata(clone);

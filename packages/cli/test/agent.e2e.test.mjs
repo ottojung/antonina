@@ -125,7 +125,7 @@ case "$1" in
     fi
     session_agent="$ANTONINA_FIXTURE_SESSION_AGENT"
     if [ -z "$session_agent" ]; then session_agent="$ANTONINA_AGENT_ID"; fi
-    printf '[{"id":"ses_fake","title":"antonina-%s","created":100}]\n' "$session_agent"
+    printf '[{"id":"ses_fake","title":"antonina-%s","created":100,\"directory\":\"%s\"}]\n' "$session_agent" "$(pwd -P)"
     exit 0
     ;;
   run)
@@ -134,6 +134,12 @@ case "$1" in
     fi
     last=""
     for arg in "$@"; do last="$arg"; done
+    if [ "$last" = "slow-with-session" ]; then
+      echo '{"type":"step_start","sessionID":"ses_fake","part":{"type":"step-start"}}'
+      echo "slow-start"
+      sleep 30
+      exit 0
+    fi
     if [ "$last" = "slow" ]; then
       echo "slow-start"
       sleep 30
@@ -1879,7 +1885,7 @@ test('a front runs in, and reports, the directory declared by --cwd on run', asy
   assert.equal(entry.cwd, declared);
   // The backend was told the same directory, so the record and the invocation
   // cannot disagree about where the front is.
-  assert.match(readFileSync(env.ANTONINA_TEST_CALLS, 'utf8'), new RegExp(`--dir ${declared} `));
+  assert.doesNotMatch(readFileSync(env.ANTONINA_TEST_CALLS, 'utf8'), /--dir\b|--variant\b/, 'V2 has no legacy directory or variant flags');
   assertFixtureInvoked(handle, 'declared');
 });
 
@@ -1984,9 +1990,9 @@ test('live steer without a backend session is refused without losing original wo
 test('a same-directory --cwd is accepted during a live steer', async (t) => {
   const { root, work, env } = fixture(t);
   const agent_5eed = newAgent(env, ['--cwd', work]);
-  assert.equal(run(['agent', 'run', '--id', agent_5eed, '--detach', '--prompt', 'slow'], env).status, 0);
+  assert.equal(run(['agent', 'run', '--id', agent_5eed, '--detach', '--prompt', 'slow-with-session'], env).status, 0);
   const live = await waitFor(root, agent_5eed, (meta) =>
-    meta.state === 'running' && typeof meta.pid === 'number' && typeof meta.runner_pid === 'number');
+    meta.state === 'running' && typeof meta.pid === 'number' && typeof meta.runner_pid === 'number' && typeof meta.native_session_id === 'string');
   t.after(() => {
     try { process.kill(-live.pid, 'SIGKILL'); } catch {}
     try { process.kill(live.pid, 'SIGKILL'); } catch {}
@@ -2089,10 +2095,7 @@ test('the observation names the directory the backend actually ran in', async (t
   );
   // Every launch of this front was handed the same directory the backend ran in.
   for (const call of fixtureInvocations(env)) {
-    assert.ok(
-      call.includes(`--dir ${first} `) || call.includes(`--dir ${second} `),
-      `a launch named a directory the front did not declare: ${JSON.stringify(call)}`,
-    );
+    assert.doesNotMatch(call, /--dir\b|--variant\b/, 'V2 backend uses its process cwd and model variant');
   }
   assertFixtureInvoked(handle, 'two');
 });
@@ -2129,7 +2132,7 @@ test('run refuses a launch into a directory the backend cannot honour', async (t
 
   // And the same launch of a directory declared *earlier*, in durable state,
 // with no `--cwd` on this command at all. This is the case a flag-shaped gate
-  // misses: the backend is handed `--dir <declared>` by a CLI that has just been
+  // misses: the backend is spawned in the declared cwd by a CLI that has just been
   // told it cannot run an invocation in a named directory.
   const inherited = run(
     ['agent', 'run', '--id', agent_8a7e, '--detach', '--prompt', 'no'],

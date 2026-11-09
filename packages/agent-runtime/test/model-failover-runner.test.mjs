@@ -26,6 +26,7 @@ async function exercise(t, kind) {
     + 'if [ "$1" = "models" ]; then printf "example.test/luna\\nexample.test/beam\\n"; exit 0; fi\n'
     + 'if [ "$1" = "session" ]; then echo "[]"; exit 0; fi\n'
     + 'model=""\nsession=""\nformat=""\nprev=""\nfor a in "$@"; do if [ "$prev" = "--model" ]; then model="$a"; fi; if [ "$prev" = "--session" ]; then session="$a"; fi; if [ "$prev" = "--format" ]; then format="$a"; fi; prev="$a"; done\n'
+    + 'model="${model%%#*}"\n'
     + 'printf "%s\\n" "$model" >> "$ANTONINA_TEST_TRACE"\n'
     + 'sleep 0.12\n'
     + (kind==='all-transient'
@@ -135,6 +136,7 @@ test('fresh agents learn from two independent unknown-backend failures without a
     'if [ "$1" = session ]; then echo "[]"; exit 0; fi',
     'model=""; prev=""',
     'for arg in "$@"; do if [ "$prev" = "--model" ]; then model="$arg"; fi; prev="$arg"; done',
+    'model="${model%%#*}"',
     'printf "%s %s\\n" "$ANTONINA_AGENT_ID" "$model" >> "$ANTONINA_TEST_TRACE"',
     'sleep 0.15',
     'if [ "$model" = "example.test/luna" ]; then',

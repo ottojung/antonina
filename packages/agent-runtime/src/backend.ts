@@ -260,7 +260,7 @@ const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
   {
     marker: 'Endpoint is unavailable',
     classification: 'upstream_endpoint_unavailable',
-    provider: 'opencode-go',
+    provider: 'opencode',
     transient: true,
     automaticRetrySafe: true,
   },
@@ -271,7 +271,7 @@ const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
   {
     marker: 'Rate limit exceeded. Please try again later.',
     classification: 'upstream_rate_limited',
-    provider: 'opencode-go',
+    provider: 'opencode',
     transient: true,
     automaticRetrySafe: false,
   },

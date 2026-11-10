@@ -12,7 +12,7 @@ import {
   sharedUnreliableModels,
 } from '../dist/packages/agent-runtime/src/model-health.js';
 
-const ICEMAN = 'opencode-go/iceman-contributor-free';
+const ICEMAN = 'opencode/iceman-contributor-free';
 const GLM = 'opencode/glm-5.3-flash-free';
 const MODELS = [ICEMAN, GLM].map(model => ({ model, comment: 'fixture' }));
 const NOW = 1793749500;

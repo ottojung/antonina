@@ -290,7 +290,7 @@ test('backend executable resolves to an exact configured path, not a PATH lookup
   assert.throws(() => buildAgentCommand(meta, 'work', false, { XDG_CONFIG_HOME: join(root, 'unconfigured') }), /models are not configured/);
 });
 
-test('free OpenCode Go and contributor models do not get forced unsupported variants', (t) => {
+test('free OpenCode and contributor models do not get forced unsupported variants', (t) => {
   const root = fixture(t);
   const config = join(root, 'cfg');
   const bin = join(root, 'opencode');
@@ -298,9 +298,9 @@ test('free OpenCode Go and contributor models do not get forced unsupported vari
   const meta = idleMeta('a11d', root, null, 1);
   const env = { [OPENCODE_BIN_ENV]: bin, XDG_CONFIG_HOME: config };
   for (const model of [
-    'opencode-go/longcat-2.5-free',
-    'opencode-go/iceman-contributor-free',
-    'opencode-go/muse-spark-1.3-contributor',
+    'opencode/longcat-2.5-free',
+    'opencode/iceman-contributor-free',
+    'opencode/muse-spark-1.3-contributor',
   ]) {
     installModelConfig(config, model);
     const fresh = buildAgentCommand(meta, 'test', false, env);

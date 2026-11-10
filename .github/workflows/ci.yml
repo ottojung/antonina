@@ -46,7 +46,7 @@ jobs:
           export XDG_CONFIG_HOME=/tmp/antonina-model-test-config
           mkdir -p "$XDG_CONFIG_HOME/antonina"
           # The packaged CLI must exercise explicit operator configuration, not a built-in fallback.
-          printf '%s\n' '{"models":[{"model":"opencode-go/longcat-2.5-preview-free","comment":"isolated CI fixture, not a production preference"}]}' >"$XDG_CONFIG_HOME/antonina/config.json"
+          printf '%s\n' '{"models":[{"model":"opencode/longcat-2.5-preview-free","comment":"isolated CI fixture, not a production preference"}]}' >"$XDG_CONFIG_HOME/antonina/config.json"
           mkdir -p "$XDG_STATE_HOME/antonina/agents"
           output="$("$antonina" agent list --page 1 --json)"
           test "$output" = '{"agents":[],"unreadable":[]}'
@@ -55,7 +55,7 @@ jobs:
           #!/bin/sh
           case "$1" in
             models)
-              echo "opencode-go/longcat-2.5-preview-free"
+              echo "opencode/longcat-2.5-preview-free"
               ;;
             session)
               echo "[{\"id\":\"ses_pkg\",\"title\":\"antonina-${ANTONINA_SMOKE_ID}\",\"created\":100}]"

@@ -189,6 +189,8 @@ kind: constraint
 
 Every managed OpenCode invocation launched by `antonina agent` uses `--variant high`. The OpenClaw scheduler also uses `--variant high`. The variant is an Antonina runtime setting, not a caller-selectable per-agent tuning knob. Legacy durable agent records that still contain `variant: low` remain readable for compatibility, but they do not downgrade a newly launched invocation; once that child is published, the durable record is updated to `high` so status reflects what actually ran.
 
+**Historical record (OpenCode V1 era).** The V2 runtime passes no `--variant` CLI flag: `buildAgentCommand` builds `opencode run` without `--variant`/`--dir`/`--standalone`, and a variant survives only as an optional `#suffix` inside an operator-configured model identifier. Retained for provenance only; see `packages/agent-runtime/src/backend.ts`.
+
 $id-8612645784701677
 title: Agent IDs are case-insensitive and use --id uniformly
 date: 2026/09/15

@@ -722,6 +722,15 @@ function isNativeOpenCodeExecutable(executable: string, env: Record<string, stri
  * orphan cleanup for that one agent could otherwise kill all agents' service.
  * The service starts with no agent markers. Automatic V2 service discovery
  * also supplies the locally generated password (explicit --server does not).
+ *
+ * Deliberately not `run --standalone`: probed against opencode v2.2.0 in
+ * isolated state, a standalone invocation still auto-starts the managed
+ * background service when it is down, and its sessions persist in the same
+ * OPENCODE_DB where they stay continuable and forkable through the shared
+ * service. A per-invocation private server therefore adds a second server per
+ * turn without removing the shared service; per-agent isolation stays where
+ * the rest of this runtime puts it, in distinct native sessions plus cwd
+ * plus one host database, never in server separation.
  */
 export function ensureHostV2Service(
   executable: string,

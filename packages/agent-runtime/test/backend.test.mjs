@@ -286,6 +286,7 @@ test('backend executable resolves to an exact configured path, not a PATH lookup
   assert.deepEqual(fresh.slice(0, 3), [bin, 'run', '--auto']);
   assert.equal(fresh.includes('--dir'), false, 'V2 has no --dir flag; the runner owns process cwd');
   assert.equal(fresh.includes('--variant'), false, 'V2 variants are part of the model reference');
+  assert.equal(fresh.includes('--standalone'), false, 'invocations share the host V2 service; see ensureHostV2Service');
 
   assert.throws(() => buildAgentCommand(meta, 'work', false, { XDG_CONFIG_HOME: join(root, 'unconfigured') }), /models are not configured/);
 });

@@ -145,12 +145,14 @@ function nextModelRecheckMs(meta: AgentMetadata, env: Record<string, string | un
 function commandModel(command: string[]): string {
   const flag = command.indexOf('--model');
   const model = flag < 0 ? undefined : command[flag + 1];
-  // OpenCode V2 accepts a variant as `provider/model#variant`. Antonina's
-  // model cooldowns and observations are keyed by the canonical model alone.
-  if (typeof model !== 'string' || !model.endsWith('#' + DEFAULT_VARIANT)) {
-    throw new Error('Antonina backend command omitted its canonical V2 model variant');
+  // A model may include an explicit #variant, but OpenCode V2 does not
+  // require one. Failover is keyed on the model regardless of variant.
+  if (typeof model !== 'string' || !model.includes('/') || model.startsWith('-')) {
+    throw new Error('Antonina backend command omitted its valid V2 model');
   }
-  return model.slice(0, -(DEFAULT_VARIANT.length + 1));
+  const canonicalModel = model.split('#')[0]!;
+  if (canonicalModel.length === 0) throw new Error('Antonina backend model is empty');
+  return canonicalModel;
 }
 
 /** Reap verified descendants of the previous invocation before replaying work.

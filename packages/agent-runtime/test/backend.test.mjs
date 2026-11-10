@@ -29,10 +29,10 @@ import { validateAgentMetadata } from '../dist/packages/agent-runtime/src/metada
 const REPO_FIXTURE_PARENT = resolve('.antonina-test-tmp');
 const PROBE_SENTINEL = 'ANTONINA-FIXTURE-EXEC-OK';
 const FIXTURE_MODEL = 'example.test/test-free';
-function installModelConfig(path) {
+function installModelConfig(path, model = FIXTURE_MODEL) {
   const configDir = join(path, 'antonina');
   mkdirSync(configDir, { recursive: true });
-  writeFileSync(join(configDir, 'config.json'), JSON.stringify({ models: [{ model: FIXTURE_MODEL, comment: 'test fixture' }] }));
+  writeFileSync(join(configDir, 'config.json'), JSON.stringify({ models: [{ model, comment: 'test fixture' }] }));
 }
 
 
@@ -259,7 +259,7 @@ test('model selection never invokes OpenCode, even if the backend would fail', (
   installModelConfig(config);
   const env = { [OPENCODE_BIN_ENV]: bin, XDG_CONFIG_HOME: config };
   const meta = idleMeta('a11d', root, null, 1);
-  assert.equal(buildAgentCommand(meta, 'work', false, env).includes(`${FIXTURE_MODEL}#low`), true);
+  assert.equal(buildAgentCommand(meta, 'work', false, env).includes(`${FIXTURE_MODEL}`), true);
   assert.equal(existsSync(calls), false, 'no OpenCode subprocess may run during model selection');
 });
 
@@ -288,6 +288,27 @@ test('backend executable resolves to an exact configured path, not a PATH lookup
   assert.equal(fresh.includes('--variant'), false, 'V2 variants are part of the model reference');
 
   assert.throws(() => buildAgentCommand(meta, 'work', false, { XDG_CONFIG_HOME: join(root, 'unconfigured') }), /models are not configured/);
+});
+
+test('free OpenCode Go and contributor models do not get forced unsupported variants', (t) => {
+  const root = fixture(t);
+  const config = join(root, 'cfg');
+  const bin = join(root, 'opencode');
+  writeFileSync(bin, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const meta = idleMeta('a11d', root, null, 1);
+  const env = { [OPENCODE_BIN_ENV]: bin, XDG_CONFIG_HOME: config };
+  for (const model of [
+    'opencode-go/longcat-2.5-free',
+    'opencode-go/iceman-contributor-free',
+    'opencode-go/muse-spark-1.3-contributor',
+  ]) {
+    installModelConfig(config, model);
+    const fresh = buildAgentCommand(meta, 'test', false, env);
+    assert.equal(fresh[fresh.indexOf('--model') + 1], model);
+    meta.native_session_id = 'ses_test';
+    const resumed = buildAgentCommand(meta, 'continue', true, env);
+    assert.equal(resumed[resumed.indexOf('--model') + 1], model);
+  }
 });
 
 test('a malformed backend override is rejected instead of silently ignored', () => {
@@ -422,7 +443,7 @@ test('continuation command uses the persisted session', (t) => {
   const command = buildAgentCommand(meta, 'continue work', true, { [OPENCODE_BIN_ENV]: bin, XDG_CONFIG_HOME: config });
   assert.ok(command !== null);
   assert.ok(command.includes('ses_123'));
-  assert.ok(command.includes(`${FIXTURE_MODEL}#low`));
+  assert.ok(command.includes(`${FIXTURE_MODEL}`));
   assert.equal(command.at(-1), 'continue work');
 });
 

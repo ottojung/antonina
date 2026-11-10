@@ -254,7 +254,7 @@ const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
     transient: false,
     automaticRetrySafe: false,
   },
-  // An OpenCode Go request may fail temporarily even after the previous
+  // An OpenCode V2 request may fail temporarily even after the previous
   // turn has performed tool actions. Classify the outage for operators and
   // the scheduler, and the operator explicitly accepts at-least-once tool effects on recovery.
   {
@@ -264,7 +264,7 @@ const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
     transient: true,
     automaticRetrySafe: true,
   },
-  // The OpenCode Go Step 5 free tier can reject requests across many sessions
+  // The OpenCode V2 free tier can reject requests across many sessions
   // simultaneously. Name the provider throttle instead of reporting an
   // unrecognized backend failure. Do not replay the turn automatically:
   // the API error alone cannot prove no earlier tool action was committed.

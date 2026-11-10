@@ -15,7 +15,7 @@ import {
   classifyBackendFailure, quotaResetDelaySeconds, buildAgentCommand,
 } from '../dist/packages/agent-runtime/src/backend.js';
 
-const prefs = ['openai/gpt-6-luna', 'opencode-go/beam-free', 'opencode-go/longcat-2.5-preview-free']
+const prefs = ['openai/gpt-6-luna', 'opencode/beam-free', 'opencode/longcat-2.5-preview-free']
   .map(model => ({model, comment: 'mock'}));
 const NOW = 1792600000;
 
@@ -172,13 +172,13 @@ test('hard model exclusion persists until changed, while adding a new model work
 
 test('provider authentication and billing failures exclude its models, not other providers', () => {
   const meta=testMeta();
-  const all=[{model:'openai/a',comment:''},{model:'openai/b',comment:''},{model:'opencode-go/c',comment:''}];
+  const all=[{model:'openai/a',comment:''},{model:'openai/b',comment:''},{model:'opencode/c',comment:''}];
   excludeAgentProvider(meta,'openai/a',all,'provider_authentication_failed',NOW);
   validateAgentMetadata(meta);
   assert.equal(eligibleAgentModel(meta,all,NOW+1),all[2].model);
   assert.equal(eligibleAgentModel(meta,all.slice(0,2),NOW+1),null);
   assert.deepEqual(agentModelFailover(meta).cooldowns.map(x=>x.reason),
     ['provider_authentication_failed','provider_authentication_failed']);
-  excludeAgentProvider(meta,'opencode-go/c',all,'provider_billing_required',NOW);
+  excludeAgentProvider(meta,'opencode/c',all,'provider_billing_required',NOW);
   assert.equal(eligibleAgentModel(meta,all,NOW+1),null);
 });

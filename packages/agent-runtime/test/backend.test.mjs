@@ -547,11 +547,27 @@ test('OpenCode V2 provider.no-route fails over instead of becoming an unknown ba
     type: 'error',
     timestamp: 1793157283159,
     sessionID: 'ses_v2fixture',
-    error: { type: 'provider.no-route', message: 'Model unavailable: opencode-go/obsolete' },
+    error: { type: 'provider.no-route', message: 'Model unavailable: opencode/obsolete' },
   }) + '\n');
   const failure = classifyBackendFailure(log, 0, 1);
   assert.equal(failure.classification, 'model_unavailable');
   assert.equal(failure.transient, false);
+  assert.equal(failure.automatic_retry_safe, false);
+});
+
+test('OpenCode V2 provider.free-limit is a rate limit, not an unknown backend error', (t) => {
+  const root = fixture(t);
+  const log = join(root, 'opencode-v2-free-limit.jsonl');
+  writeFileSync(log, JSON.stringify({
+    type: 'error',
+    timestamp: 1794283223919,
+    sessionID: 'ses_v2freelimit',
+    error: { type: 'provider.free-limit', message: 'Free usage limit reached.', status: 429 },
+  }) + '\n');
+  const failure = classifyBackendFailure(log, 0, 1);
+  assert.equal(failure.classification, 'upstream_rate_limited');
+  assert.equal(failure.provider, null);
+  assert.equal(failure.transient, true);
   assert.equal(failure.automatic_retry_safe, false);
 });
 

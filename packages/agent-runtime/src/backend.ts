@@ -4,7 +4,6 @@ import { constants } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
 
 import {
-  DEFAULT_VARIANT,
   RUNNER_OWNER_TOKEN_ENV,
   persistedNativeSessionId,
   persistedVariant,
@@ -572,13 +571,15 @@ export function buildAgentCommand(
 ): string[] | null {
   const agentId = requiredPersistedAgentId(meta);
   const cwd = requiredAgentCwd(meta);
-  // OpenCode V2 uses the process cwd (set by the runner) instead of a --dir flag.
-  // Canonical V2 records have a product-level variant; it is not an
-  // override supplied by an obsolete OpenCode CLI flag.
+  // OpenCode V2 uses process cwd (set by the runner) instead of --dir.
+  // A model variant is optional and model-specific. Forcing #low (or
+  // any other variant) makes usable free models fail with provider.no-route.
+  // Respect an explicit suffix in the configured model, but otherwise
+  // let OpenCode choose that model's supported default.
   persistedVariant(meta);
-  const variant = DEFAULT_VARIANT;
   const executable = resolveOpencode(env);
   const model = selectConfiguredAgentModel(meta, modelEnv, Date.now() / 1000, excludedModels, sharedUnreliable);
+  const modelReference = model;
   if (isContinue) {
     const recorded = persistedNativeSessionId(meta);
     const sessionId = recorded ?? discoverSessionId(agentId, env, cwd);
@@ -587,7 +588,7 @@ export function buildAgentCommand(
       executable, 'run', '--auto',
       '--format', 'json',
       '--session', sessionId,
-      '--model', `${model}#${variant}`,
+      '--model', modelReference,
       '--thinking',
       prompt,
     ];
@@ -596,7 +597,7 @@ export function buildAgentCommand(
     executable, 'run', '--auto',
     '--format', 'json',
     '--title', `${OPENCODE_TITLE_PREFIX}${agentId}`,
-    '--model', `${model}#${variant}`,
+    '--model', modelReference,
     '--thinking',
     prompt,
   ];

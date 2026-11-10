@@ -30,6 +30,18 @@ const env = {
   OPENCODE_DB: database,
   ANTONINA_OPENCODE_BIN: bin,
 };
+// On hosts with a live service on the default port, the isolated service
+// needs its own port: `service set port` is XDG-scoped, so this never
+// touches the operator's service configuration.
+const isolatedPort = process.env.ANTONINA_OPENCODE_V2_PORT;
+if (isolatedPort !== undefined) {
+  assert.match(isolatedPort, /^[0-9]+$/, 'ANTONINA_OPENCODE_V2_PORT must be numeric');
+  const setPort = spawnSync(bin, ['service', 'set', 'port', isolatedPort], {
+    cwd: workA, env: { ...env, PWD: workA }, encoding: 'utf8', timeout: 15_000,
+  });
+  assert.equal(setPort.error, undefined, 'V2 failed to set isolated port: ' + String(setPort.error));
+  assert.equal(setPort.status, 0, 'V2 port setup failed: ' + setPort.stderr.slice(0, 300));
+}
 // Deliberately supply invocation markers during bootstrap. The server MUST
 // still start with them removed, or orphan cleanup for agent A could kill
 // all agents' work in the shared service.

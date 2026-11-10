@@ -4,8 +4,7 @@ import { isAbsolute } from 'node:path';
 
 import { persistedAgentId, persistedInvocationId, persistedProcessInteger } from './process.js';
 
-export const AGENT_META_VERSION = 6;
-export const DEFAULT_VARIANT = 'low';
+export const AGENT_META_VERSION = 7;
 export const TERMINAL_STATES = ['clearexit', 'failed', 'stopped', 'killed'] as const;
 export const PERSISTED_AGENT_STATES = ['idle', 'running', ...TERMINAL_STATES] as const;
 export const CONTROL_REASONS = ['steer', 'stop', 'kill'] as const;
@@ -25,7 +24,6 @@ const TOP_LEVEL_FIELDS = [
   'state',
   'cwd',
   'title',
-  'variant',
   'native_session_id',
   'pid',
   'pgid',
@@ -321,7 +319,6 @@ export function validateAgentMetadata(meta: AgentMetadata): void {
   persistedAgentCwd(meta);
   persistedInvocationCwd(meta);
   if (!nullableString(meta.title, true)) throw new MalformedAgentMetadataError('managed-agent title is malformed');
-  persistedVariant(meta);
   persistedNativeSessionId(meta);
   if (meta.model_failover !== undefined && meta.model_failover !== null && !validModelFailover(meta.model_failover)) {
     throw new MalformedAgentMetadataError('managed-agent model_failover is malformed');
@@ -496,15 +493,6 @@ export function persistedNativeSessionId(meta: AgentMetadata): string | null {
   return value;
 }
 
-export function persistedVariant(meta: AgentMetadata): string {
-  if (!hasOwn(meta, 'variant')) throw new MalformedAgentMetadataError('managed-agent variant is missing');
-  const value = meta.variant;
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new MalformedAgentMetadataError('managed-agent variant is malformed');
-  }
-  return value;
-}
-
 /**
  * The working directory an operator declared for this front, or `null` when
  * none was ever declared. `null` is a real, canonical state and not a
@@ -594,7 +582,6 @@ export function idleMeta(agentId: string, cwd: string | null, title: string | nu
     invocation_cwd: null,
     observed_models: [],
     title,
-    variant: DEFAULT_VARIANT,
     native_session_id: null,
     pid: null,
     pgid: null,

@@ -6,7 +6,6 @@ import { delimiter, isAbsolute, join } from 'node:path';
 import {
   RUNNER_OWNER_TOKEN_ENV,
   persistedNativeSessionId,
-  persistedVariant,
   requiredAgentCwd,
   requiredPersistedAgentId,
   type AgentMetadata,
@@ -253,24 +252,24 @@ const BACKEND_FAILURE_RULES: readonly BackendFailureRule[] = [
     transient: false,
     automaticRetrySafe: false,
   },
-  // An OpenCode Go request may fail temporarily even after the previous
+  // An OpenCode V2 request may fail temporarily even after the previous
   // turn has performed tool actions. Classify the outage for operators and
   // the scheduler, and the operator explicitly accepts at-least-once tool effects on recovery.
   {
     marker: 'Endpoint is unavailable',
     classification: 'upstream_endpoint_unavailable',
-    provider: 'opencode-go',
+    provider: 'opencode',
     transient: true,
     automaticRetrySafe: true,
   },
-  // The OpenCode Go Step 5 free tier can reject requests across many sessions
+  // The OpenCode V2 free tier can reject requests across many sessions
   // simultaneously. Name the provider throttle instead of reporting an
   // unrecognized backend failure. Do not replay the turn automatically:
   // the API error alone cannot prove no earlier tool action was committed.
   {
     marker: 'Rate limit exceeded. Please try again later.',
     classification: 'upstream_rate_limited',
-    provider: 'opencode-go',
+    provider: 'opencode',
     transient: true,
     automaticRetrySafe: false,
   },
@@ -317,6 +316,18 @@ function structuredBackendFailureRule(text: string): BackendFailureRule | undefi
         classification: 'model_unavailable',
         provider: null,
         transient: false,
+        automaticRetrySafe: false,
+      };
+    }
+    // OpenCode V2 rate-limits free-tier models as typed provider.free-limit
+    // errors carrying HTTP 429 (not APIError with data.statusCode). Classify
+    // by V2 status/type, never by obsolete provider-name assumptions.
+    if (error.type === 'provider.free-limit' || error.status === 429) {
+      return {
+        marker: 'OpenCode V2 provider.free-limit',
+        classification: 'upstream_rate_limited',
+        provider: null,
+        transient: true,
         automaticRetrySafe: false,
       };
     }
@@ -576,7 +587,6 @@ export function buildAgentCommand(
   // any other variant) makes usable free models fail with provider.no-route.
   // Respect an explicit suffix in the configured model, but otherwise
   // let OpenCode choose that model's supported default.
-  persistedVariant(meta);
   const executable = resolveOpencode(env);
   const model = selectConfiguredAgentModel(meta, modelEnv, Date.now() / 1000, excludedModels, sharedUnreliable);
   const modelReference = model;
@@ -710,6 +720,15 @@ function isNativeOpenCodeExecutable(executable: string, env: Record<string, stri
  * orphan cleanup for that one agent could otherwise kill all agents' service.
  * The service starts with no agent markers. Automatic V2 service discovery
  * also supplies the locally generated password (explicit --server does not).
+ *
+ * Deliberately not `run --standalone`: probed against opencode v2.2.0 in
+ * isolated state, a standalone invocation still auto-starts the managed
+ * background service when it is down, and its sessions persist in the same
+ * OPENCODE_DB where they stay continuable and forkable through the shared
+ * service. A per-invocation private server therefore adds a second server per
+ * turn without removing the shared service; per-agent isolation stays where
+ * the rest of this runtime puts it, in distinct native sessions plus cwd
+ * plus one host database, never in server separation.
  */
 export function ensureHostV2Service(
   executable: string,

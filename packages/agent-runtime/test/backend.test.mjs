@@ -286,11 +286,12 @@ test('backend executable resolves to an exact configured path, not a PATH lookup
   assert.deepEqual(fresh.slice(0, 3), [bin, 'run', '--auto']);
   assert.equal(fresh.includes('--dir'), false, 'V2 has no --dir flag; the runner owns process cwd');
   assert.equal(fresh.includes('--variant'), false, 'V2 variants are part of the model reference');
+  assert.equal(fresh.includes('--standalone'), false, 'invocations share the host V2 service; see ensureHostV2Service');
 
   assert.throws(() => buildAgentCommand(meta, 'work', false, { XDG_CONFIG_HOME: join(root, 'unconfigured') }), /models are not configured/);
 });
 
-test('free OpenCode Go and contributor models do not get forced unsupported variants', (t) => {
+test('free OpenCode and contributor models do not get forced unsupported variants', (t) => {
   const root = fixture(t);
   const config = join(root, 'cfg');
   const bin = join(root, 'opencode');
@@ -298,9 +299,9 @@ test('free OpenCode Go and contributor models do not get forced unsupported vari
   const meta = idleMeta('a11d', root, null, 1);
   const env = { [OPENCODE_BIN_ENV]: bin, XDG_CONFIG_HOME: config };
   for (const model of [
-    'opencode-go/longcat-2.5-free',
-    'opencode-go/iceman-contributor-free',
-    'opencode-go/muse-spark-1.3-contributor',
+    'opencode/longcat-2.5-free',
+    'opencode/iceman-contributor-free',
+    'opencode/muse-spark-1.3-contributor',
   ]) {
     installModelConfig(config, model);
     const fresh = buildAgentCommand(meta, 'test', false, env);
@@ -547,11 +548,27 @@ test('OpenCode V2 provider.no-route fails over instead of becoming an unknown ba
     type: 'error',
     timestamp: 1793157283159,
     sessionID: 'ses_v2fixture',
-    error: { type: 'provider.no-route', message: 'Model unavailable: opencode-go/obsolete' },
+    error: { type: 'provider.no-route', message: 'Model unavailable: opencode/obsolete' },
   }) + '\n');
   const failure = classifyBackendFailure(log, 0, 1);
   assert.equal(failure.classification, 'model_unavailable');
   assert.equal(failure.transient, false);
+  assert.equal(failure.automatic_retry_safe, false);
+});
+
+test('OpenCode V2 provider.free-limit is a rate limit, not an unknown backend error', (t) => {
+  const root = fixture(t);
+  const log = join(root, 'opencode-v2-free-limit.jsonl');
+  writeFileSync(log, JSON.stringify({
+    type: 'error',
+    timestamp: 1794283223919,
+    sessionID: 'ses_v2freelimit',
+    error: { type: 'provider.free-limit', message: 'Free usage limit reached.', status: 429 },
+  }) + '\n');
+  const failure = classifyBackendFailure(log, 0, 1);
+  assert.equal(failure.classification, 'upstream_rate_limited');
+  assert.equal(failure.provider, null);
+  assert.equal(failure.transient, true);
   assert.equal(failure.automatic_retry_safe, false);
 });
 

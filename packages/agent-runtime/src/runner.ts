@@ -33,7 +33,6 @@ import {
   stopLikeOrMalformed,
 } from './lifecycle.js';
 import {
-  DEFAULT_VARIANT,
   LAUNCH_DIRECTORY_MISSING,
   RUNNER_OWNER_TOKEN_ENV,
   activeRunnerFlag,
@@ -588,8 +587,6 @@ async function recordSpawned(
   let accepted = false;
   await updateMeta(agentId, (meta) => {
     if (deletePendingFlag(meta) !== false || stopLikeOrMalformed(meta)) return;
-    // Record the canonical V2 model variant that the child actually ran.
-    meta.variant = DEFAULT_VARIANT;
     recordObservedAgentModel(meta, model);
     // Board issue 178: the observation is written here, in the same durable
     // write that publishes the spawned process identity, and nowhere earlier.

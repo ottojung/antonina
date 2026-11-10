@@ -6,7 +6,6 @@ import { delimiter, isAbsolute, join } from 'node:path';
 import {
   RUNNER_OWNER_TOKEN_ENV,
   persistedNativeSessionId,
-  persistedVariant,
   requiredAgentCwd,
   requiredPersistedAgentId,
   type AgentMetadata,
@@ -588,7 +587,6 @@ export function buildAgentCommand(
   // any other variant) makes usable free models fail with provider.no-route.
   // Respect an explicit suffix in the configured model, but otherwise
   // let OpenCode choose that model's supported default.
-  persistedVariant(meta);
   const executable = resolveOpencode(env);
   const model = selectConfiguredAgentModel(meta, modelEnv, Date.now() / 1000, excludedModels, sharedUnreliable);
   const modelReference = model;

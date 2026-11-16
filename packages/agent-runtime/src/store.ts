@@ -9,8 +9,24 @@ import { persistedAgentId, procStartTicks } from './process.js';
 const LOCK_RETRY_MS = 25;
 const LOCK_ATTEMPTS = 400;
 const LOCK_TOKEN = /^[0-9a-f]{32}$/;
+/**
+ * A lock file is created empty and its owner record is written immediately
+ * after, through the same descriptor. A process that dies in that window
+ * (killed, OOM, host restart) leaves an empty or partial lock that names no
+ * owner. Such a file used to be kept forever, because it cannot be told apart
+ * from a live owner's create-before-write window, and every later command on
+ * that agent then timed out (marceline-dev, agent N5DaA0FfkZvLLjAQoBgNIk, empty
+ * since 2026-11-10). A live owner holds its descriptor open from creation
+ * until release, so a malformed lock is reclaimed only when it is older than
+ * this grace AND no process on the host holds it open. Where /proc cannot be
+ * read to establish that, the longer grace applies instead.
+ */
+export const MALFORMED_LOCK_GRACE_MS = 60_000;
+export const MALFORMED_LOCK_GRACE_WITHOUT_PROC_MS = 10 * 60_000;
 
 export interface StoreFs {
+  /** Optional so existing injected filesystems keep working; defaults to node:fs. */
+  statSync?: typeof nodeFs.statSync;
   closeSync: typeof nodeFs.closeSync;
   fsyncSync: typeof nodeFs.fsyncSync;
   mkdirSync: typeof nodeFs.mkdirSync;
@@ -443,6 +459,61 @@ function lockOwnerAlive(owner: LockOwner): boolean {
   return procStartTicks(owner.pid) === owner.startTicks;
 }
 
+/**
+ * Whether any process on this host holds `path` open, by reading /proc/<pid>/fd.
+ * Null when /proc cannot be enumerated at all. Processes whose descriptors this
+ * user cannot read are skipped: agent state directories are private to the
+ * user, so another uid cannot be the lock's creator.
+ */
+export function fileOpenByAnyProcess(path: string): boolean | null {
+  let target: string;
+  try { target = nodeFs.realpathSync(path); } catch { return null; }
+  let pids: string[];
+  try { pids = nodeFs.readdirSync('/proc').filter((name) => /^[0-9]+$/.test(name)); } catch { return null; }
+  if (pids.length === 0) return null;
+  for (const pid of pids) {
+    let fds: string[];
+    try { fds = nodeFs.readdirSync(`/proc/${pid}/fd`); } catch { continue; }
+    for (const fd of fds) {
+      try {
+        if (nodeFs.readlinkSync(`/proc/${pid}/fd/${fd}`) === target) return true;
+      } catch { /* closed between listing and reading */ }
+    }
+  }
+  return false;
+}
+
+/**
+ * Remove an abandoned malformed lock (see MALFORMED_LOCK_GRACE_MS). Returns
+ * true when the caller should retry acquisition immediately: the file was
+ * removed, or is already gone. Identity is re-verified (same inode, size, mtime
+ * and content) before the unlink, so a lock re-created meanwhile is never
+ * removed.
+ */
+function reclaimAbandonedMalformedLock(path: string, fs: StoreFs, now = Date.now()): boolean {
+  const stat = fs.statSync ?? nodeFs.statSync;
+  let before: nodeFs.Stats;
+  try { before = stat(path); } catch (error) { return hasCode(error, 'ENOENT'); }
+  const age = now - before.mtimeMs;
+  if (age < MALFORMED_LOCK_GRACE_MS) return false;
+  const open = fileOpenByAnyProcess(path);
+  if (open === true) return false;
+  if (open === null && age < MALFORMED_LOCK_GRACE_WITHOUT_PROC_MS) return false;
+  const again = parseLockOwner(path, fs);
+  if (again.state === 'missing') return true;
+  if (again.state !== 'malformed') return false;
+  let after: nodeFs.Stats;
+  try { after = stat(path); } catch (error) { return hasCode(error, 'ENOENT'); }
+  if (after.ino !== before.ino || after.size !== before.size || after.mtimeMs !== before.mtimeMs) return false;
+  try {
+    fs.unlinkSync(path);
+  } catch (error) {
+    if (hasCode(error, 'ENOENT')) return true;
+    throw new MetadataLockError(`failed to reclaim abandoned metadata lock: ${path}`, { cause: error });
+  }
+  return true;
+}
+
 async function acquireLock(path: string, fs: StoreFs): Promise<{ fd: number; raw: string; owner: LockOwner }> {
   for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
     let fd: number;
@@ -458,6 +529,9 @@ async function acquireLock(path: string, fs: StoreFs): Promise<{ fd: number; raw
 
       const observed = parseLockOwner(path, fs);
       if (observed.state === 'missing') continue;
+      // The age test is one stat; the /proc scan behind it runs at most about
+      // once a second per waiter, never on every 25 ms retry.
+      if (observed.state === 'malformed' && attempt % 40 === 0 && reclaimAbandonedMalformedLock(path, fs)) continue;
       if (observed.state === 'valid' && !lockOwnerAlive(observed.owner)) {
         // Re-read before unlinking: between the observation and this point another
         // owner may have reclaimed the same stale lock and installed its own. Only
@@ -480,7 +554,8 @@ async function acquireLock(path: string, fs: StoreFs): Promise<{ fd: number; raw
         }
       }
       // A malformed lock can be the tiny create-before-write window of a live
-      // owner. Never steal it. If it stays malformed, time out explicitly.
+      // owner. Never steal it while it is young or held open; an abandoned one
+      // is reclaimed above. Otherwise time out explicitly.
       await sleep(LOCK_RETRY_MS);
       continue;
     }
@@ -496,16 +571,28 @@ async function acquireLock(path: string, fs: StoreFs): Promise<{ fd: number; raw
       fs.fsyncSync(fd);
       return { fd, raw, owner };
     } catch (error) {
+      // Our own create-before-write window failed (on marceline-dev, most
+      // likely ENOSPC on a full disk: eight agents were left with empty locks
+      // that blocked them for six days). The file at the path is ours to
+      // remove when it is still the very inode this acquisition created with
+      // O_EXCL, and holds nothing but a prefix of our own record. Another owner
+      // can only install a lock after the path is gone, which yields a
+      // different inode, so a live lock is never removed by this.
+      let ownPartial = false;
+      try {
+        const mine = nodeFs.fstatSync(fd);
+        const there = (fs.statSync ?? nodeFs.statSync)(path);
+        if (mine.dev === there.dev && mine.ino === there.ino) {
+          ownPartial = raw.startsWith(fs.readFileSync(path, 'utf8') as string);
+        }
+      } catch { /* cannot establish identity: fail closed */ }
       try { fs.closeSync(fd); } catch {}
-      // Only clean up while the path still holds the record this acquisition
-      // produced. A delete/re-create cycle during the failed write can leave
-      // another owner's live lock here, and a malformed file at the path may be
-      // a live owner's create-before-write window, which is indistinguishable
-      // from our own partial write. Fail closed on anything but our own
-      // acquisition's record; the leftover file is recoverable, a deleted live
-      // lock is not.
+      // Otherwise only clean up while the path still holds the record this
+      // acquisition produced. Anything else is left in place: a leftover file
+      // is recoverable (an abandoned one is reclaimed after
+      // MALFORMED_LOCK_GRACE_MS), a deleted live lock is not.
       const partial = parseLockOwner(path, fs);
-      if (partial.state === 'valid' && sameAcquisition(partial.owner, owner)) {
+      if (ownPartial || (partial.state === 'valid' && sameAcquisition(partial.owner, owner))) {
         try { fs.unlinkSync(path); } catch {}
       }
       throw new MetadataLockError(`failed to initialize metadata lock: ${path}`, { cause: error });

@@ -9,7 +9,9 @@ import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
 import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import {
   AgentStateMissingError,
+  MALFORMED_LOCK_GRACE_MS,
   MetadataLockError,
+  fileOpenByAnyProcess,
   MetadataReadError,
   MetadataWriteError,
   agentDir,
@@ -800,4 +802,107 @@ test('metadata is published by an exclusive, fsynced sequence that never recreat
     `fsync temp, then rename, then fsync directory, in that order: ${events.join(' -> ')}`,
   );
   assert.equal(readMeta(published, options)?.id, published);
+});
+
+// A process that dies between creating the lock and writing its owner record
+// leaves an empty lock. It used to block every later command on that agent
+// forever (marceline-dev, 2026-11-10..16).
+test('an abandoned empty lock is reclaimed once it is old and nobody holds it open', async (t) => {
+  if (fileOpenByAnyProcess(process.execPath) === null) {
+    t.skip('/proc/<pid>/fd is unreadable on this host');
+    return;
+  }
+  const options = root(t);
+  createAgentDirectory('d30', options);
+  writeMeta('d30', idleMeta('d30', '/tmp', null, 5), options);
+  const lockPath = join(agentDir('d30', options), '.lock');
+  nodeFs.writeFileSync(lockPath, '');
+  const old = (Date.now() - MALFORMED_LOCK_GRACE_MS - 5_000) / 1000;
+  nodeFs.utimesSync(lockPath, old, old);
+  const started = Date.now();
+  assert.equal(await withAgentLock('d30', () => 'ok', options), 'ok');
+  assert.ok(Date.now() - started < 2_000, 'reclaimed at once, not after the full acquisition timeout');
+  assert.equal(nodeFs.existsSync(lockPath), false);
+  // A partial record (killed mid-write) is the same case.
+  nodeFs.writeFileSync(lockPath, '{"pid":12');
+  nodeFs.utimesSync(lockPath, old, old);
+  assert.equal(await withAgentLock('d30', () => 'again', options), 'again');
+});
+
+test('an old malformed lock that a process still holds open is never reclaimed', { timeout: 30_000 }, async (t) => {
+  if (fileOpenByAnyProcess(process.execPath) === null) {
+    t.skip('/proc/<pid>/fd is unreadable on this host');
+    return;
+  }
+  const options = root(t);
+  createAgentDirectory('d31', options);
+  writeMeta('d31', idleMeta('d31', '/tmp', null, 5), options);
+  const lockPath = join(agentDir('d31', options), '.lock');
+  // A live owner stalled inside its create-before-write window keeps the
+  // descriptor it created the file with.
+  const fd = nodeFs.openSync(lockPath, 'wx', 0o600);
+  const old = (Date.now() - MALFORMED_LOCK_GRACE_MS - 5_000) / 1000;
+  nodeFs.utimesSync(lockPath, old, old);
+  assert.equal(fileOpenByAnyProcess(lockPath), true);
+  await assert.rejects(withAgentLock('d31', () => 'stolen', options), MetadataLockError);
+  assert.equal(nodeFs.existsSync(lockPath), true);
+  nodeFs.closeSync(fd);
+  assert.equal(fileOpenByAnyProcess(lockPath), false);
+  assert.equal(await withAgentLock('d31', () => 'ok', options), 'ok');
+});
+
+test('a young malformed lock is still treated as a live create-before-write window', { timeout: 30_000 }, async (t) => {
+  const options = root(t);
+  createAgentDirectory('d32', options);
+  writeMeta('d32', idleMeta('d32', '/tmp', null, 5), options);
+  const lockPath = join(agentDir('d32', options), '.lock');
+  nodeFs.writeFileSync(lockPath, '');
+  await assert.rejects(withAgentLock('d32', () => 'stolen', options), MetadataLockError);
+  assert.equal(nodeFs.readFileSync(lockPath, 'utf8'), '');
+  nodeFs.rmSync(lockPath, { force: true });
+});
+
+test('a failed write into our own new lock (e.g. ENOSPC) removes the empty lock it created', async (t) => {
+  const options = root(t);
+  createAgentDirectory('d33', options);
+  writeMeta('d33', idleMeta('d33', '/tmp', null, 5), options);
+  const lockPath = join(agentDir('d33', options), '.lock');
+  const full = {
+    ...options,
+    fs: storeFs({
+      writeFileSync: (target, data, encoding) => {
+        if (typeof target === 'number') throw ioError('ENOSPC', 'injected: no space left on device');
+        return nodeFs.writeFileSync(target, data, encoding);
+      },
+    }),
+  };
+  await assert.rejects(withAgentLock('d33', () => 'ok', full), MetadataLockError);
+  assert.equal(nodeFs.existsSync(lockPath), false, 'the empty lock must not outlive the failed acquisition');
+  // ...so the very next command is not blocked.
+  assert.equal(await withAgentLock('d33', () => 'ok', options), 'ok');
+});
+
+test('a failed write never removes a different lock installed at the path meanwhile', async (t) => {
+  const options = root(t);
+  createAgentDirectory('d34', options);
+  writeMeta('d34', idleMeta('d34', '/tmp', null, 5), options);
+  const lockPath = join(agentDir('d34', options), '.lock');
+  const foreign = JSON.stringify({ pid: process.pid, startTicks: procStartTicks(process.pid), token: 'f'.repeat(32) });
+  const racing = {
+    ...options,
+    fs: storeFs({
+      writeFileSync: (target, data, encoding) => {
+        if (typeof target === 'number') {
+          // Our file is removed and another owner installs its own (new inode).
+          nodeFs.unlinkSync(lockPath);
+          nodeFs.writeFileSync(lockPath, foreign, { flag: 'wx' });
+          throw ioError('ENOSPC', 'injected: no space left on device');
+        }
+        return nodeFs.writeFileSync(target, data, encoding);
+      },
+    }),
+  };
+  await assert.rejects(withAgentLock('d34', () => 'ok', racing), MetadataLockError);
+  assert.equal(nodeFs.readFileSync(lockPath, 'utf8'), foreign);
+  nodeFs.rmSync(lockPath, { force: true });
 });

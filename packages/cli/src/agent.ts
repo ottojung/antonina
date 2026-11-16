@@ -69,7 +69,9 @@ import {
   type AgentMetadata,
 } from '../../agent-runtime/src/metadata.js';
 import { normalizeAgentId } from '../../agent-runtime/src/process.js';
-import { observedAgentModels } from '../../agent-runtime/src/model-failover.js';
+import { PERMANENT_EXCLUSION_UNTIL, observedAgentModels } from '../../agent-runtime/src/model-failover.js';
+import { configuredModels } from '../../agent-runtime/src/model-config.js';
+import { modelAvailability, sharedModelCooldowns } from '../../agent-runtime/src/model-cooldowns.js';
 import {
   MetadataReadError,
   agentDir,
@@ -1183,7 +1185,7 @@ async function followAttached(
 }
 
 async function cmdRun(args: string[], context: AgentCommandContext): Promise<number> {
-  const parsed = parse(args, ['--steer', '--detach', '--json']);
+  const parsed = parse(args, ['--steer', '--detach', '--json', '--wait-for-model']);
   if (parsed.positionals.length !== 0) throw new UsageError('run: unexpected positional arguments');
   const agentId = requireAgentId(parsed.values.get('--id'), 'run');
   const prompt = parsed.values.get('--prompt');
@@ -1242,6 +1244,27 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   // Validate local model configuration without invoking OpenCode.
   // Real inference failures drive the per-agent failover ladder.
   selectConfiguredModel(context.env);
+  // Circuit breaker. When every configured model is under a provider-attested
+  // quota or rate limit (this agent's own, or one another agent on this host
+  // recorded), an accepted prompt could only sit in a `running` front that
+  // cannot run. Refuse before anything is written, and say when to come back,
+  // so a scheduler stops dispatching instead of stacking reservations.
+  if (!parsed.flags.has('--wait-for-model')) {
+    const now = Date.now() / 1000;
+    const availability = modelAvailability(
+      observed, configuredModels(context.env), sharedModelCooldowns(paths(context), now), now,
+    );
+    if (!availability.available) {
+      const detail = availability.excluded
+        .map((entry) => `${entry.model} ${entry.reason}${entry.until === PERMANENT_EXCLUSION_UNTIL
+          ? '' : ` until ${new Date(entry.until * 1000).toISOString()}`}`)
+        .join('; ');
+      const next = availability.earliestReturn === null
+        ? 'no configured model will return without operator action'
+        : `earliest model returns at ${new Date(availability.earliestReturn * 1000).toISOString()}`;
+      throw new Error(`run: no model available, nothing was dispatched: every configured model is cooling down or excluded (${detail}); ${next}. Pass --wait-for-model to queue the prompt anyway.`);
+    }
+  }
   const decision: {
     action?: 'busy' | 'unready' | 'spawn' | 'reuse';
     mode?: 'new' | 'continue';

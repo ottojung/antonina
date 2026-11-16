@@ -4,13 +4,23 @@ import { persistedNativeSessionId, type AgentMetadata } from './metadata.js';
 import { configuredModels } from './model-config.js';
 import { eligibleAgentModel } from './model-failover.js';
 import { readProcStat, type ProcStat } from './process.js';
+import { typedProviderFailure } from './provider-errors.js';
 
 /**
  * No-output startup and unfinished model steps receive the same conservative
  * timeout. A structured provider error is stronger evidence: allow OpenCode
  * a short grace to exit by itself before recovering its existing session.
+ *
+ * Eight minutes, measured on billy-dev over 70,859 completed model steps
+ * (2026-11-05..15): 99% produced their first event within 93 seconds and
+ * 99.9% within 429 seconds. The previous fifteen-minute window equalled
+ * OpenCode's own request timeout, so OpenCode re-issued a hung request (a new
+ * step_start for the same message) at the very moment this watchdog would
+ * have fired, and a rate-limited model was retried silently for hours. The
+ * step clock below therefore also ignores such re-issues: see
+ * `InvocationActivity.stepStartedAt`.
  */
-export const MODEL_STEP_SILENCE_MS = 15 * 60 * 1000;
+export const MODEL_STEP_SILENCE_MS = 8 * 60 * 1000;
 export const STARTUP_SILENCE_MS = 90 * 1000;
 export const BACKEND_ERROR_GRACE_MS = 30_000;
 export const LIVENESS_POLL_MS = 5_000;
@@ -55,6 +65,12 @@ export function recoverableOpenCodeError(event: Record<string, unknown>): Recove
   if (event.type !== 'error' || typeof event.error !== 'object' || event.error === null
     || Array.isArray(event.error)) return null;
   const error = event.error as Record<string, unknown>;
+  // OpenCode V2 typed provider errors (provider.quota, provider.rate-limit,
+  // provider.free-limit, ...). Without this a V2 quota event left the phase
+  // "unknown" and the invocation was never interrupted on its evidence.
+  if (typeof error.type === 'string' && error.type.startsWith('provider.')) {
+    return typedProviderFailure(error);
+  }
   if (error.name !== 'APIError' || typeof error.data !== 'object' || error.data === null
     || Array.isArray(error.data)) return null;
   const data = error.data as Record<string, unknown>;
@@ -102,6 +118,18 @@ export class InvocationActivity {
   private backendFailure: RecoverableBackendClassification | null = null;
   private partial = '';
   private observedSize: number;
+  /**
+   * When the model request now in flight was FIRST issued, or null outside a
+   * model step. OpenCode re-issues a request that timed out or was refused by
+   * writing another step_start for the same message with nothing in between.
+   * That line is output, so it resets `lastOutputAt`, but it is not progress:
+   * measuring silence from the latest re-issue let a provider that never
+   * answered hold an agent indefinitely. Any other event ends the step clock.
+   */
+  private stepStartedAt: number | null = null;
+  private stepMessageId: string | null = null;
+  /** The poll time being processed; acceptLine has no clock of its own. */
+  private pollNow: number;
 
   constructor(
     private readonly file: string,
@@ -112,6 +140,7 @@ export class InvocationActivity {
     this.offset = startOffset;
     this.observedSize = startOffset;
     this.lastOutputAt = now;
+    this.pollNow = now;
   }
 
   private acceptLine(line: string): void {
@@ -124,29 +153,50 @@ export class InvocationActivity {
     if (Buffer.byteLength(line) > MAX_JSONL_ROW_BYTES) {
       this.phase = 'unknown';
       this.backendFailure = null;
+      this.stepStartedAt = null;
       return;
     }
     let event: unknown;
     try { event = JSON.parse(line); } catch {
       this.phase = 'unknown';
       this.backendFailure = null;
+      this.stepStartedAt = null;
       return;
     }
     if (typeof event !== 'object' || event === null || Array.isArray(event)) {
       this.phase = 'unknown';
       this.backendFailure = null;
+      this.stepStartedAt = null;
       return;
     }
     const record = event as Record<string, unknown>;
     if (typeof record.sessionID !== 'string' || !SESSION_ID.test(record.sessionID)) {
       this.phase = 'unknown';
       this.backendFailure = null;
+      this.stepStartedAt = null;
       return;
     }
     if (record.type === 'step_start') {
+      const part = record.part;
+      const messageId = typeof part === 'object' && part !== null && !Array.isArray(part)
+        && typeof (part as Record<string, unknown>).messageID === 'string'
+        ? (part as Record<string, unknown>).messageID as string : null;
+      // A step_start directly after a step_start, for the same message (or
+      // with no message identity to tell them apart), is the backend
+      // re-issuing one request. Keep the original start time.
+      const reissued = this.phase === 'model_step' && this.stepStartedAt !== null
+        && (messageId === null || this.stepMessageId === null || messageId === this.stepMessageId);
+      if (!reissued) this.stepStartedAt = this.pollNow;
+      this.stepMessageId = messageId ?? this.stepMessageId;
       this.phase = 'model_step';
       this.backendFailure = null;
-    } else if (record.type === 'tool_use') {
+      return;
+    }
+    // Every other well-formed event shows the request was answered (or
+    // failed); the step clock no longer applies.
+    this.stepStartedAt = null;
+    this.stepMessageId = null;
+    if (record.type === 'tool_use') {
       // No automatic interruption while a tool might still be executing,
       // including after a single tool reports completion in a parallel batch.
       // Only the enclosing step_finish proves all tool calls have returned.
@@ -168,6 +218,7 @@ export class InvocationActivity {
   }
 
   private pollLog(now: number): void {
+    this.pollNow = now;
     const st = statSync(this.file, { throwIfNoEntry: false });
     if (st === undefined || !st.isFile()) {
       this.phase = 'unknown';
@@ -256,6 +307,11 @@ export class InvocationActivity {
     if (this.partial.length > 0) return observation('progressing_or_uncertain');
     if (this.phase === 'backend_error' && silentMs >= errorGraceMs) return observation('backend_error_silent');
     if (this.phase === 'startup' && silentMs >= Math.min(quietMs, STARTUP_SILENCE_MS)) return observation('startup_silent');
+    // Inside a model step, silence runs from the first issue of the request,
+    // not from the backend's latest re-issue of it.
+    if (this.phase === 'model_step' && this.stepStartedAt !== null && now - this.stepStartedAt >= quietMs) {
+      return { ...observation('model_step_silent'), silentMs: Math.max(silentMs, now - this.stepStartedAt) };
+    }
     if (silentMs >= quietMs) {
       if (this.phase === 'model_step') return observation('model_step_silent');
       if (this.phase === 'startup') return observation('startup_silent');

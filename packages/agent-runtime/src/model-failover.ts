@@ -15,6 +15,13 @@ export const MODEL_COOLDOWN_SECONDS = 6 * 60 * 60;
 export const TRANSIENT_MODEL_RETRIES = 2;
 export const TRANSIENT_UNRELIABLE_SECONDS = 2 * 60;
 export const RATE_LIMIT_BACKOFF_SECONDS = 90;
+/**
+ * A model that accepted a request and then said nothing for the whole
+ * model-step window. Still a soft penalty (it stays in the last-resort
+ * lottery), but two minutes was shorter than the stall it follows, so the
+ * same silent model was the next one chosen.
+ */
+export const STALLED_MODEL_COOLDOWN_SECONDS = 20 * 60;
 export const PERMANENT_EXCLUSION_UNTIL = Number.MAX_SAFE_INTEGER;
 export const MODEL_FAILURE_REASONS = [
   'quota_exhausted',

@@ -14,6 +14,7 @@ import {
 import type { OomCounters } from './host-capacity.js';
 import { configuredModels } from './model-config.js';
 import { eligibleAgentModel } from './model-failover.js';
+import { lastProviderErrorEvent, providerRetryAfterSeconds, typedProviderFailure } from './provider-errors.js';
 
 export const OPENCODE_TITLE_PREFIX = 'antonina-';
 export const DEFAULT_OPENCODE_BIN = 'opencode';
@@ -317,6 +318,20 @@ function structuredBackendFailureRule(text: string): BackendFailureRule | undefi
         classification: 'model_unavailable',
         provider: null,
         transient: false,
+        automaticRetrySafe: false,
+      };
+    }
+    // Every other OpenCode V2 typed provider error. Quota and rate limits used
+    // to fall through to `unrecognized_backend_failure`, a two-minute soft
+    // penalty, so an exhausted model was back in the pool almost at once.
+    const typed = typedProviderFailure(error);
+    if (typed !== null) {
+      const transient = typed === 'upstream_rate_limited' || typed === 'transient_backend_server_error';
+      return {
+        marker: `OpenCode V2 ${String(error.type)}`,
+        classification: typed,
+        provider: null,
+        transient,
         automaticRetrySafe: false,
       };
     }
@@ -815,6 +830,24 @@ export function quotaResetDelaySeconds(
   const resetAt = Number(matches.at(-1)?.[1]);
   if (!Number.isSafeInteger(resetAt) || resetAt <= now || resetAt > now + 6 * 3600) return null;
   return Math.min(6 * 3600, Math.max(60, Math.ceil(resetAt - now) + 120));
+}
+
+/**
+ * How long the provider said to stay away from the model, read from the last
+ * top-level error event of this invocation's log window. Null when it gave no
+ * hint; the caller then keeps its default cooldown.
+ */
+export function providerCooldownSeconds(path: string, start: number): number | null {
+  if (!Number.isSafeInteger(start) || start < 0) return null;
+  let text: string;
+  try {
+    const size = statSync(path).size;
+    const begin = Math.max(start, size - BACKEND_DIAGNOSTIC_MAX_BYTES);
+    text = readFileSync(path).subarray(begin, size).toString('utf8');
+  } catch {
+    return null;
+  }
+  return providerRetryAfterSeconds(lastProviderErrorEvent(text));
 }
 
 export function classifyBackendFailure(

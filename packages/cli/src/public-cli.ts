@@ -64,6 +64,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   '--stopped': 'Show stopped agents only.',
   '--clearexit': 'Show agents whose backend exited with code zero.',
   '--timeout': 'Timeout in seconds.',
+  '--wait-for-model': 'Accept the prompt even when every configured model is cooling down; the agent then waits for one to return. Without it, run refuses and reports when a model is next available.',
   '--title': 'Title text.',
   '--trust-anchor': 'Print only the initialized trust anchor.',
 };
@@ -259,7 +260,7 @@ const AGENT_SPECS: readonly CommandSpec[] = [
     path: ['run'],
     summary: 'Send work to a managed agent. --cwd names the directory this invocation runs in and is accepted on every run, including a --steer.',
     values: ['--id', '--prompt', '--cwd'],
-    flags: ['--steer', '--detach', '--json'],
+    flags: ['--steer', '--detach', '--json', '--wait-for-model'],
     required: ['--id', '--prompt'],
     normalize: (p) => [
       'run',
@@ -268,7 +269,7 @@ const AGENT_SPECS: readonly CommandSpec[] = [
       '--prompt',
       p.values.get('--prompt')!,
       ...valueArgs(p, ['--cwd']),
-      ...flagArgs(p, ['--steer', '--detach', '--json']),
+      ...flagArgs(p, ['--steer', '--detach', '--json', '--wait-for-model']),
     ],
   },
   {

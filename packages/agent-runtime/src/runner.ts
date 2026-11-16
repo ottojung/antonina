@@ -9,6 +9,7 @@ import {
   interruptBackendSession,
   ensureHostV2Service,
   classifyBackendFailure,
+  providerCooldownSeconds,
   quotaResetDelaySeconds,
   classifySignalDeath,
   describeBackendDeath,
@@ -50,6 +51,8 @@ import {
 } from './metadata.js';
 import {
   MODEL_COOLDOWN_SECONDS,
+  RATE_LIMIT_BACKOFF_SECONDS,
+  STALLED_MODEL_COOLDOWN_SECONDS,
   PERMANENT_EXCLUSION_UNTIL,
   agentModelFailover,
   coolDownAgentModel,
@@ -61,6 +64,7 @@ import {
   type ModelFailureReason,
 } from './model-failover.js';
 import { configuredModels } from './model-config.js';
+import { recordSharedModelCooldown, sharedModelCooldowns, withSharedModelCooldowns } from './model-cooldowns.js';
 import { recordUnrecognizedBackendFailure, sharedUnreliableModels } from './model-health.js';
 import { SessionCheckpointReader } from './session-checkpoint.js';
 import {
@@ -876,7 +880,9 @@ async function runInvocation(
     launchCwd = requiredAgentCwd(meta);
     // The same database the invocation will be spawned with, because
     // `buildAgentCommand` may itself probe for the session to continue.
-    command = buildAgentCommand(meta, prompt, isContinue,
+    // Limits other agents on this host have already hit apply to this one
+    // too: select against a view that includes the shared cooldowns.
+    command = buildAgentCommand(withSharedModelCooldowns(meta, sharedModelCooldowns(options)), prompt, isContinue,
       { ...options.env, ...opencodeBackendEnv(meta, options) },
       new Set(), options.env, sharedUnreliableModels(options));
   } catch (error) {
@@ -1263,11 +1269,29 @@ async function runInvocation(
           ? recoverableModelFailure(backendError) : null;
     if (failoverReason !== null) {
       const failedAt = Date.now() / 1000;
+      // The provider's own retry-after outranks every built-in default. A
+      // rate limit used to mean ninety seconds whatever the provider said.
+      const attestedSeconds = failoverReason === 'quota_exhausted' || failoverReason === 'rate_limited'
+        ? providerCooldownSeconds(logFile, invocationLogStart) : null;
+      const silentStall = stalled && livenessClassification === null;
       const cooldownSeconds = failoverReason === 'quota_exhausted'
-        ? quotaResetDelaySeconds(logFile, invocationLogStart, failedAt) ?? MODEL_COOLDOWN_SECONDS
-        : modelCooldownSeconds(failoverReason) +
-          (failoverReason === 'transient_backend' || failoverReason === 'rate_limited'
-            ? randomInt(0, 30) : 0);
+        ? attestedSeconds ?? quotaResetDelaySeconds(logFile, invocationLogStart, failedAt) ?? MODEL_COOLDOWN_SECONDS
+        : failoverReason === 'rate_limited' && attestedSeconds !== null
+          ? Math.max(attestedSeconds, RATE_LIMIT_BACKOFF_SECONDS)
+          : (silentStall && failoverReason === 'transient_backend'
+            ? STALLED_MODEL_COOLDOWN_SECONDS : modelCooldownSeconds(failoverReason)) +
+            (failoverReason === 'transient_backend' || failoverReason === 'rate_limited'
+              ? randomInt(0, 30) : 0);
+      // A quota or rate limit belongs to the account. Tell the rest of the
+      // host, so other agents do not each spend a request rediscovering it.
+      if (failoverReason === 'quota_exhausted' || (failoverReason === 'rate_limited' && attestedSeconds !== null)) {
+        try {
+          recordSharedModelCooldown(agentId, activeModel, failoverReason, failedAt + cooldownSeconds, options, failedAt);
+        } catch (error) {
+          // Advisory, like shared model health: the per-agent cooldown below stands.
+          console.error('Antonina could not persist a shared model cooldown:', error);
+        }
+      }
       failedModelsThisRun.add(activeModel);
       if (!retryAsContinue) await rememberFreshSession(agentId, options);
       await updateMeta(agentId, (current) => {
@@ -1301,15 +1325,16 @@ async function runInvocation(
         if (latest === null || latest.state !== 'running') return false;
         const backendEnv = { ...effectiveEnv, ...opencodeBackendEnv(latest, options) };
         const existingSession = retryAsContinue || persistedNativeSessionId(latest) !== null;
+        const selectable = withSharedModelCooldowns(latest, sharedModelCooldowns(options));
         try {
           nextCommand = buildAgentCommand(
-            latest, reconciliationPrompt(prompt, existingSession),
+            selectable, reconciliationPrompt(prompt, existingSession),
             existingSession, backendEnv, failedModelsThisRun, options.env, sharedUnreliableModels(options),
           );
           nextIsContinue = existingSession && nextCommand !== null;
           if (nextCommand === null) {
             nextCommand = buildAgentCommand(
-              latest, reconciliationPrompt(prompt, false), false,
+              selectable, reconciliationPrompt(prompt, false), false,
               backendEnv, failedModelsThisRun, options.env, sharedUnreliableModels(options),
             );
             nextIsContinue = false;
@@ -1338,7 +1363,7 @@ async function runInvocation(
           failedModelsThisRun.clear();
           continue;
         }
-        const delay = nextModelRecheckMs(latest, effectiveEnv);
+        const delay = nextModelRecheckMs(selectable, effectiveEnv);
         if (delay === null) break; // only hard exclusions remain
         await updateMeta(agentId, (current) => {
           if (current.state !== 'running') return;

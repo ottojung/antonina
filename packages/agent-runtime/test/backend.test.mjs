@@ -556,7 +556,7 @@ test('OpenCode V2 provider.no-route fails over instead of becoming an unknown ba
   assert.equal(failure.automatic_retry_safe, false);
 });
 
-test('OpenCode V2 provider.free-limit is a rate limit, not an unknown backend error', (t) => {
+test('OpenCode V2 provider.free-limit is a usage-limit quota exhaustion, not an unknown backend error', (t) => {
   const root = fixture(t);
   const log = join(root, 'opencode-v2-free-limit.jsonl');
   writeFileSync(log, JSON.stringify({
@@ -566,9 +566,9 @@ test('OpenCode V2 provider.free-limit is a rate limit, not an unknown backend er
     error: { type: 'provider.free-limit', message: 'Free usage limit reached.', status: 429 },
   }) + '\n');
   const failure = classifyBackendFailure(log, 0, 1);
-  assert.equal(failure.classification, 'upstream_rate_limited');
+  assert.equal(failure.classification, 'model_quota_exhausted');
   assert.equal(failure.provider, null);
-  assert.equal(failure.transient, true);
+  assert.equal(failure.transient, false);
   assert.equal(failure.automatic_retry_safe, false);
 });
 

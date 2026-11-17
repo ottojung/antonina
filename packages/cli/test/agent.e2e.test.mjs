@@ -427,7 +427,11 @@ while true; do
     if [ "\${args[2]}" = "_runner" ] && [ "\${args[3]}" = "$target" ]; then
       pid="\${entry#/proc/}"
       pid="\${pid%/cmdline}"
-      kill -9 "$pid" 2>/dev/null
+      # Freeze first so the runner cannot complete a claim after being found,
+      # then kill. SIGSTOP makes the "before it can claim ownership" teardown
+      # deterministic; a plain SIGKILL raced claimRunner's durable write.
+      kill -STOP "$pid" 2>/dev/null
+      kill -KILL "$pid" 2>/dev/null
       exit 0
     fi
   done

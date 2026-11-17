@@ -61,7 +61,6 @@ import {
   persistedNativeSessionId,
   persistedRunLogOffset,
   persistedTimestamp,
-  persistedVariant,
   requiredPersistedAgentId,
   runnerGeneration,
   runnerReservationMode,
@@ -527,7 +526,7 @@ async function cmdNew(args: string[], context: AgentCommandContext): Promise<num
  * `agent new --fork <OLD>`: a snapshot of an existing agent.
  *
  * The clone gets the source's persisted work identity -- declared cwd, title,
- * variant, native session, prompt history and terminal outcome -- and its own
+ * native session, prompt history and terminal outcome -- and its own
  * generated id, its own record and its own lifecycle state, with no process,
  * runner, reservation, accepted prompt or queued steer inherited. It is a
  * snapshot, not a link: nothing in the product reads the source in order to
@@ -887,7 +886,6 @@ function statusJson(
     // Only process launches observed for this agent; never guess from preferences or failover intentions.
     model: observedModels.at(-1) ?? null,
     models_used: observedModels,
-    variant: persistedVariant(meta),
     backend_error: sanitizeBackendError(meta.backend_error),
 
     log: '',
@@ -1195,7 +1193,6 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   // acquire runner or invocation authority.
   requiredPersistedAgentId(observed);
   const recordedCwd = persistedAgentCwd(observed);
-  persistedVariant(observed);
   persistedNativeSessionId(observed);
   if (
     deriveState(observed) === 'running'

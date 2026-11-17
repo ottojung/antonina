@@ -115,7 +115,7 @@ exit 70
 printf '%s %s\\n' "$0" "$*" >>'${invocations}'
 case "$1" in
   models)
-    echo "opencode-go/longcat-2.5-preview-free"
+    echo "opencode/longcat-2.5-preview-free"
     exit 0
     ;;
   session)
@@ -187,7 +187,7 @@ esac
   const modelDir = join(root, 'config', 'antonina');
   mkdirSync(modelDir, { recursive: true });
   writeFileSync(join(modelDir, 'config.json'), JSON.stringify({ models: [
-    { model: 'opencode-go/longcat-2.5-preview-free', comment: 'isolated fixture; not a product default' },
+    { model: 'opencode/longcat-2.5-preview-free', comment: 'isolated fixture; not a product default' },
   ] }));
   const env = {
     ...process.env,
@@ -211,7 +211,7 @@ esac
     0,
     `fake opencode fixture ${opencode} is not runnable here: ${direct.error?.code ?? direct.stderr}`,
   );
-  assert.match(direct.stdout, /opencode-go\/longcat-2.5-preview-free/);
+  assert.match(direct.stdout, /opencode\/longcat-2.5-preview-free/);
   // Negative control: a bare `opencode` lookup in this environment hits the
   // trap, so any PATH fall-through is recorded instead of reaching a real host
   // backend.
@@ -982,10 +982,10 @@ test('model commands are nested under agent and top-level model is rejected', (t
   const { env } = fixture(t);
   const list = run(['agent', 'model', 'list'], env);
   assert.equal(list.status, 0, list.stderr);
-  assert.equal(JSON.parse(list.stdout).models[0].model, 'opencode-go/longcat-2.5-preview-free');
+  assert.equal(JSON.parse(list.stdout).models[0].model, 'opencode/longcat-2.5-preview-free');
   const select = run(['agent', 'model', 'select'], env);
   assert.equal(select.status, 0, select.stderr);
-  assert.equal(select.stdout.trim(), 'opencode-go/longcat-2.5-preview-free');
+  assert.equal(select.stdout.trim(), 'opencode/longcat-2.5-preview-free');
   const old = run(['model', 'select'], env);
   assert.equal(old.status, 2);
   assert.match(old.stderr, /expected "agent", "board" or "daemon" command namespace/);
@@ -1223,7 +1223,7 @@ test('model selection reads local preferences without invoking OpenCode', (t) =>
   const { env, invocations } = fixture(t);
   const result = run(['agent', 'model', 'select'], env);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), 'opencode-go/longcat-2.5-preview-free');
+  assert.equal(result.stdout.trim(), 'opencode/longcat-2.5-preview-free');
   assert.equal(existsSync(invocations), false, 'model selection must not launch OpenCode');
 });
 

@@ -94,10 +94,10 @@ test('scalar continuation authority rejects coercion and non-finite time', () =>
   assert.throws(() => persistedNativeSessionId({ native_session_id: '' }), /malformed/);
 });
 
-test('idle metadata is a complete authoritative version-6 record', () => {
+test('idle metadata is a complete authoritative version-7 record', () => {
   const meta = idleMeta('a11d', '/tmp/work', null, 100.5);
-  assert.equal(AGENT_META_VERSION, 6);
-  assert.equal(meta.agent_version, 6);
+  assert.equal(AGENT_META_VERSION, 7);
+  assert.equal(meta.agent_version, 7);
   assert.equal(meta.id, 'a11d');
   assert.equal(meta.state, 'idle');
   assert.equal(meta.pending_prompt, null);
@@ -111,7 +111,7 @@ test('idle metadata is a complete authoritative version-6 record', () => {
   assert.doesNotThrow(() => validateAgentMetadata(meta));
 });
 
-test('schema v6 rejects old versions, missing fields and unknown fields', () => {
+test('schema v7 rejects old versions, missing fields and unknown fields', () => {
   const base = idleMeta('a11d', '/tmp/work', null, 100.5);
 
   const old = { ...base, agent_version: 3 };
@@ -133,6 +133,22 @@ test('schema v6 rejects old versions, missing fields and unknown fields', () => 
   assert.throws(
     () => validateAgentMetadata({ ...base, legacy_field: true }),
     /fields are not canonical/,
+  );
+});
+
+test('the OpenCode V1 variant field is not a canonical v7 field', () => {
+  const base = idleMeta('a11d', '/tmp/work', null, 100.5);
+  assert.ok(!('variant' in base), 'new records carry no variant field');
+  // V1-era records carrying `variant` are unsupported, not converted: the
+  // closed schema rejects the unknown field rather than reinterpreting it.
+  assert.throws(
+    () => validateAgentMetadata({ ...base, variant: 'low' }),
+    /fields are not canonical/,
+  );
+  const staleVersion = { ...base, agent_version: 6 };
+  assert.throws(
+    () => validateAgentMetadata(staleVersion),
+    /unsupported managed-agent metadata version/,
   );
 });
 

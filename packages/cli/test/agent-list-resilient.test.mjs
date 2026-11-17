@@ -77,7 +77,6 @@ function record(id, overrides = {}) {
     state: 'idle',
     cwd: null,
     title: null,
-    variant: 'low',
     native_session_id: null,
     pid: null,
     pgid: null,
@@ -102,7 +101,7 @@ function record(id, overrides = {}) {
     pending_prompt: null,
     last_prompt: null,
     error: null,
-    agent_version: 6,
+    agent_version: 7,
     ...overrides,
   };
 }

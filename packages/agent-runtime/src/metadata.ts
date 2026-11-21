@@ -117,7 +117,13 @@ export const OPTIONAL_TOP_LEVEL_FIELDS = [
   RUN_LOG_CURSOR_FIELD,
   'model_failover',
   'observed_models',
+  'prompt_transport',
 ] as const;
+
+/** Present only when a prompt was received from a file or stdin. */
+export function persistedPromptTransport(meta: AgentMetadata): 'stdin' | null {
+  return meta.prompt_transport === 'stdin' ? 'stdin' : null;
+}
 
 export class MalformedPendingPromptMetadataError extends Error {
   constructor() {
@@ -325,6 +331,9 @@ export function validateAgentMetadata(meta: AgentMetadata): void {
   persistedNativeSessionId(meta);
   if (meta.model_failover !== undefined && meta.model_failover !== null && !validModelFailover(meta.model_failover)) {
     throw new MalformedAgentMetadataError('managed-agent model_failover is malformed');
+  }
+  if (meta.prompt_transport !== undefined && meta.prompt_transport !== 'stdin') {
+    throw new MalformedAgentMetadataError('managed-agent prompt_transport is malformed');
   }
   try { observedAgentModels(meta); } catch {
     throw new MalformedAgentMetadataError('managed-agent observed_models is malformed');

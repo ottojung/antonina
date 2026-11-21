@@ -102,6 +102,8 @@ export interface BeginInvocationOptions {
    * what a caller that cannot observe the log must do rather than invent one.
    */
   logOffset?: number;
+  /** Set when the accepted prompt arrived from a private file or stdin. */
+  promptTransport?: 'stdin';
 }
 
 export function beginInvocation(
@@ -133,6 +135,8 @@ export function beginInvocation(
   meta.start_time = null;
   meta.invocation_id = null;
   meta.pending_prompt = prompt;
+  if (options.promptTransport === 'stdin') meta.prompt_transport = 'stdin';
+  else delete meta.prompt_transport;
   meta.last_prompt = prompt.slice(0, 500);
   meta.prompt_count = promptCount;
   // Run scope: the bytes before this cursor belong to earlier invocations. It is

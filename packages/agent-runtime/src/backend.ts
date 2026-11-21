@@ -583,6 +583,7 @@ export function buildAgentCommand(
   excludedModels: ReadonlySet<string> = new Set(),
   modelEnv: Record<string, string | undefined> = env,
   sharedUnreliable: ReadonlySet<string> = new Set(),
+  viaStdin = false,
 ): string[] | null {
   const agentId = requiredPersistedAgentId(meta);
   const cwd = requiredAgentCwd(meta);
@@ -605,7 +606,7 @@ export function buildAgentCommand(
       '--session', sessionId,
       '--model', modelReference,
       '--thinking',
-      prompt,
+      ...(viaStdin ? [] : [prompt]),
     ];
   }
   return [
@@ -614,7 +615,7 @@ export function buildAgentCommand(
     '--title', `${OPENCODE_TITLE_PREFIX}${agentId}`,
     '--model', modelReference,
     '--thinking',
-    prompt,
+    ...(viaStdin ? [] : [prompt]),
   ];
 }
 

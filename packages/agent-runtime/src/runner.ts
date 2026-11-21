@@ -43,6 +43,7 @@ import {
   pendingPrompt,
   persistedControlField,
   persistedNativeSessionId,
+  persistedPromptTransport,
   requiredAgentCwd,
   runnerGeneration,
   runnerReservationMode,
@@ -81,6 +82,9 @@ import {
   type StatePathsOptions,
 } from './store.js';
 
+// Above this size a prompt can no longer be handed to a child through a single
+// argv string or environment entry; OpenCode reads it from the piped stdin.
+const INLINE_PROMPT_LIMIT_BYTES = 32 * 1024;
 const CONTROL_POLL_MS = 200;
 const CONTROL_GRACE_MS = 10_000;
 const RETRY_CLEANUP_MAX_MS = 2_000;
@@ -869,6 +873,11 @@ async function runInvocation(
 ): Promise<boolean> {
   const meta = readMeta(agentId, options);
   if (meta === null) return false;
+  // A file/stdin prompt must never come back out through argv or the
+  // environment, whatever its size. Large inline prompts use the same pipe.
+  const viaStdin = persistedPromptTransport(meta) === 'stdin'
+    || Buffer.byteLength(prompt, 'utf8') > INLINE_PROMPT_LIMIT_BYTES;
+  let stdinPrompt = prompt;
   let command: string[] | null;
   // Resolved once, from this one snapshot of the record, and then used for both
   // `spawn({cwd})`, `PWD`, and the observation written below. It is the
@@ -884,7 +893,7 @@ async function runInvocation(
     // too: select against a view that includes the shared cooldowns.
     command = buildAgentCommand(withSharedModelCooldowns(meta, sharedModelCooldowns(options)), prompt, isContinue,
       { ...options.env, ...opencodeBackendEnv(meta, options) },
-      new Set(), options.env, sharedUnreliableModels(options));
+      new Set(), options.env, sharedUnreliableModels(options), viaStdin);
   } catch (error) {
     // A durable record the backend cannot be launched from -- an undeclared
     // working directory, a malformed one -- is a failed invocation with a
@@ -986,7 +995,7 @@ async function runInvocation(
       ...options.env,
       ANTONINA_AGENT_ID: agentId,
       ANTONINA_INVOCATION_ID: invocationId,
-      ANTONINA_PROMPT: prompt,
+      ...(viaStdin ? {} : { ANTONINA_PROMPT: prompt }),
       NO_COLOR: '1',
       // Pin every agent client to Antonina's one host-level V2 service and
       // database, regardless of the runner's inherited OpenCode environment.
@@ -1000,6 +1009,7 @@ async function runInvocation(
     // anything running as this user. Deleting the key rather than blanking it
     // means an inherited copy cannot be reintroduced by a later spread.
     delete env[RUNNER_OWNER_TOKEN_ENV];
+    if (viaStdin) delete env.ANTONINA_PROMPT;
     // V2's noninteractive CLI resolves the project from inherited PWD before
     // process.cwd(). A spawned child's cwd alone is not sufficient: a stale PWD
     // would silently write the session into the orchestrator's project.
@@ -1010,8 +1020,14 @@ async function runInvocation(
         cwd: launchCwd,
         env,
         detached: true,
-        stdio: ['ignore', fd, fd],
+        stdio: [viaStdin ? 'pipe' : 'ignore', fd, fd],
       });
+      if (viaStdin && child.stdin !== null) {
+        // A backend that exits before reading its input turns the pipe into
+        // EPIPE; that is its outcome to report, not a runner crash.
+        child.stdin.on('error', () => undefined);
+        child.stdin.end(stdinPrompt, 'utf8');
+      }
     } catch (error) {
       closeSync(fd);
       await updateMeta(agentId, (current) => {
@@ -1319,6 +1335,7 @@ async function runInvocation(
       await settlePreviousInvocation(agentId, invocationId);
       const effectiveEnv = { ...process.env, ...options.env };
       let nextCommand: string[] | null = null;
+      let nextPrompt = prompt;
       let nextIsContinue = false;
       while (true) {
         const latest = readMeta(agentId, options);
@@ -1327,15 +1344,17 @@ async function runInvocation(
         const existingSession = retryAsContinue || persistedNativeSessionId(latest) !== null;
         const selectable = withSharedModelCooldowns(latest, sharedModelCooldowns(options));
         try {
+          nextPrompt = reconciliationPrompt(prompt, existingSession);
           nextCommand = buildAgentCommand(
-            selectable, reconciliationPrompt(prompt, existingSession),
-            existingSession, backendEnv, failedModelsThisRun, options.env, sharedUnreliableModels(options),
+            selectable, nextPrompt, existingSession, backendEnv, failedModelsThisRun,
+            options.env, sharedUnreliableModels(options), viaStdin,
           );
           nextIsContinue = existingSession && nextCommand !== null;
           if (nextCommand === null) {
+            nextPrompt = reconciliationPrompt(prompt, false);
             nextCommand = buildAgentCommand(
-              selectable, reconciliationPrompt(prompt, false), false,
-              backendEnv, failedModelsThisRun, options.env, sharedUnreliableModels(options),
+              selectable, nextPrompt, false, backendEnv, failedModelsThisRun,
+              options.env, sharedUnreliableModels(options), viaStdin,
             );
             nextIsContinue = false;
           }
@@ -1391,6 +1410,7 @@ async function runInvocation(
         if (control === 'stop') return false;
         if (control === 'steer') return true;
         command = nextCommand;
+        stdinPrompt = nextPrompt;
         activeModel = commandModel(nextCommand);
         retryAsContinue = nextIsContinue;
         attempt += 1;

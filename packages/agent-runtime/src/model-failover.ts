@@ -92,7 +92,13 @@ export function agentModelFailover(meta: AgentMetadata): ModelFailoverState {
   const value: unknown = meta.model_failover;
   if (value === undefined || value === null) return { selected_model: null, cooldowns: [] };
   if (!validModelFailover(value)) throw new Error('managed-agent model_failover is malformed');
-  return value;
+  // Older versions represented unsupported models as permanent exclusions.
+  // Treat only those historical entries as eligible for a new probe. New
+  // failures receive a bounded cooldown. Never erase auth, billing or quota.
+  const cooldowns = value.cooldowns.filter((entry) =>
+    entry.reason !== 'model_unavailable' || entry.until !== PERMANENT_EXCLUSION_UNTIL);
+  return cooldowns.length === value.cooldowns.length
+    ? value : { selected_model: value.selected_model, cooldowns };
 }
 
 /**
@@ -137,8 +143,8 @@ export function modelCooldownSeconds(reason: ModelFailureReason): number {
   switch (reason) {
     case 'transient_backend': return TRANSIENT_UNRELIABLE_SECONDS;
     case 'rate_limited': return RATE_LIMIT_BACKOFF_SECONDS;
-    case 'quota_exhausted': return MODEL_COOLDOWN_SECONDS;
-    case 'model_unavailable':
+    case 'quota_exhausted':
+    case 'model_unavailable': return MODEL_COOLDOWN_SECONDS;
     case 'provider_authentication_failed':
     case 'provider_billing_required': return PERMANENT_EXCLUSION_UNTIL;
   }

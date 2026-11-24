@@ -1335,7 +1335,9 @@ async function runInvocation(
           + '; reconciling uncertain effects, failed attempts=' + (attempt + 1);
         current.last_activity_at = Date.now() / 1000;
       }, options);
-      if (backendError?.classification === 'unrecognized_backend_failure') {
+      const verifiedStall = stalled && livenessState.observation !== null
+        && livenessState.observation.diagnosis !== 'backend_error_silent';
+      if (backendError?.classification === 'unrecognized_backend_failure' || verifiedStall) {
         try {
           recordUnrecognizedBackendFailure(agentId, activeModel, options);
         } catch (error) {

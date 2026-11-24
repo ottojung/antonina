@@ -113,6 +113,14 @@ kind: constraint
 
 Antonina must never hardcode an OpenCode model identifier or install a built-in model default. Both orchestrator turns and managed-agent invocations choose the first model available in the ordered "models" array in $HOME/.config/antonina/config.json (XDG_CONFIG_HOME/antonina/config.json when set). Each entry has a model identifier and a free-form comment. Comments must be substantive, dated observational records: include the observed successful or failed operation, failure mode and frequency when known, source of evidence, and uncertainty. Do not present lack of evidence as proof of reliability. Orchestrators can atomically reorder entries, edit comments, and record observations such as historical availability and success/failure behavior; comments inform model choice but do not themselves execute as instructions. Missing, empty, malformed, duplicate, or unavailable configurations cause explicit immediate failures rather than unapproved substitutions. Installing/updating Antonina must not overwrite this host-local configuration. A user can initially place Beam Free first, but that is an operator preference, never a hardcoded Antonina default. This policy supersedes all earlier single-model instructions below; keep those as historical records only.
 
+$id-20261124-optional-per-model-variant
+title: Model variants are optional, model-specific launch references
+date: 2026/11/24
+source: @ottojung
+kind: constraint
+
+An ordered `models` entry may carry an optional `variant`: a single validated OpenCode variant token (for example `low`) separate from the canonical `model` identifier, which never contains '#'. The launch reference is `provider/model#variant` only when that entry configured a variant; an entry without one is launched with the bare canonical model so OpenCode selects that model's supported default. Forcing a variant such as `#low` on free models makes otherwise healthy ones fail with `provider.no-route`, so no global or inherited variant may be applied. Fresh and continuation invocations use the same rule. Failover, cooldowns, exclusions and observed-model history remain keyed on the canonical model, never on the suffixed reference. Persisted agent metadata records the variant actually launched and omits the field for a variant-less launch; an older record carrying the historical bookkeeping value `low` stays readable. A configured variant never overrides the operator's ordering: free models stay ahead of a paid/shared-service fallback.
+
 $id-20261015-longcat-free-verified
 title: LongCat 2.5 Preview Free is Antonina's sole authorized OpenCode model
 date: 2026/10/15

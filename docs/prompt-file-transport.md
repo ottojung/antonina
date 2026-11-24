@@ -22,7 +22,10 @@ prompts use the same pipe. Inline prompts keep their existing transport.
 installed**: it writes the full prompt (all ordered model comments and every
 open issue) to a 0600 file under `$XDG_STATE_HOME/antonina/scheduler-prompts`,
 passes `--prompt-file`, and removes the file on every exit path. The live
-hotfix and operator configuration are untouched.
+hotfix and operator configuration are untouched. Its model-configuration
+section documents the optional per-model `variant` field alongside `model`
+and `comment`, so an operator reordering the list does not mistake a variant
+for part of the canonical model ID.
 
 Coverage: `packages/cli/test/agent-prompt-file.test.mjs`,
 `packages/cli/test/scheduler-prompt-file.integration.test.mjs` (240 KiB model

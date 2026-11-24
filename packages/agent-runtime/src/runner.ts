@@ -34,7 +34,6 @@ import {
   stopLikeOrMalformed,
 } from './lifecycle.js';
 import {
-  DEFAULT_VARIANT,
   LAUNCH_DIRECTORY_MISSING,
   RUNNER_OWNER_TOKEN_ENV,
   activeRunnerFlag,
@@ -161,6 +160,15 @@ function commandModel(command: string[]): string {
   const canonicalModel = model.split('#')[0]!;
   if (canonicalModel.length === 0) throw new Error('Antonina backend model is empty');
   return canonicalModel;
+}
+
+/** The variant actually handed to the backend, or null for a variant-less model. */
+export function commandVariant(command: string[]): string | null {
+  const flag = command.indexOf('--model');
+  const reference = flag < 0 ? undefined : command[flag + 1];
+  if (typeof reference !== 'string') return null;
+  const hash = reference.indexOf('#');
+  return hash < 0 ? null : reference.slice(hash + 1) || null;
 }
 
 /** Reap verified descendants of the previous invocation before replaying work.
@@ -591,13 +599,16 @@ async function recordSpawned(
   invocationId: string,
   launchCwd: string,
   model: string,
+  variant: string | null,
   options: RunnerOptions,
 ): Promise<boolean> {
   let accepted = false;
   await updateMeta(agentId, (meta) => {
     if (deletePendingFlag(meta) !== false || stopLikeOrMalformed(meta)) return;
-    // Record the canonical V2 model variant that the child actually ran.
-    meta.variant = DEFAULT_VARIANT;
+    // Record only the variant this child actually ran. Variant-less models
+    // must not inherit a stale 'low' from an earlier launch of another model.
+    if (variant === null) delete meta.variant;
+    else meta.variant = variant;
     recordObservedAgentModel(meta, model);
     // Board issue 178: the observation is written here, in the same durable
     // write that publishes the spawned process identity, and nowhere earlier.
@@ -1201,7 +1212,7 @@ async function runInvocation(
     } else {
       let accepted: boolean;
       try {
-        accepted = await recordSpawned(agentId, pid, startTicks, invocationId, launchCwd, activeModel, options);
+        accepted = await recordSpawned(agentId, pid, startTicks, invocationId, launchCwd, activeModel, commandVariant(command), options);
       } catch (error) {
         try { process.kill(-pid, 'SIGKILL'); } catch {}
         await resultPromise.catch(() => undefined);

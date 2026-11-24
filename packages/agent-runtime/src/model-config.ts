@@ -6,6 +6,7 @@ import { join } from 'node:path';
 export interface ModelPreference {
   model: string;
   comment: string;
+  variant?: string;
 }
 
 const HOST_XDG_CONFIG_HOME_ENV = 'ANTONINA_HOST_XDG_CONFIG_HOME';
@@ -53,6 +54,10 @@ export function configuredModels(env: Record<string, string | undefined> = proce
     }
     if (seen.has(model)) throw new Error(`Duplicate model ${model} in ${path}`);
     seen.add(model);
-    return { model, comment: record.comment };
+    const variant = record.variant;
+    if (variant !== undefined && (typeof variant !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(variant))) {
+      throw new Error(`Invalid models[${index}].variant in ${path}: expected an OpenCode variant identifier`);
+    }
+    return variant === undefined ? { model, comment: record.comment } : { model, comment: record.comment, variant };
   });
 }

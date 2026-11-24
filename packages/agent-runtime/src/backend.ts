@@ -589,12 +589,13 @@ export function buildAgentCommand(
   // OpenCode V2 uses process cwd (set by the runner) instead of --dir.
   // A model variant is optional and model-specific. Forcing #low (or
   // any other variant) makes usable free models fail with provider.no-route.
-  // Respect an explicit suffix in the configured model, but otherwise
+  // Respect an explicit per-model variant preference, but otherwise
   // let OpenCode choose that model's supported default.
   persistedVariant(meta);
   const executable = resolveOpencode(env);
   const model = selectConfiguredAgentModel(meta, modelEnv, Date.now() / 1000, excludedModels, sharedUnreliable);
-  const modelReference = model;
+  const variant = configuredModels(modelEnv).find((entry) => entry.model === model)?.variant;
+  const modelReference = variant === undefined ? model : `${model}#${variant}`;
   if (isContinue) {
     const recorded = persistedNativeSessionId(meta);
     const sessionId = recorded ?? discoverSessionId(agentId, env, cwd);

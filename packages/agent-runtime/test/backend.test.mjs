@@ -695,3 +695,25 @@ test('an unknown or unrecognised invocation_cwd capability fails closed', () => 
     );
   }
 });
+
+test('configured per-model variant is sent on fresh and continued invocations without changing model identity', (t) => {
+  const root = fixture(t);
+  const config = join(root, 'cfg');
+  const bin = join(root, 'opencode');
+  const model = 'openai/gpt-6-luna';
+  installModelConfig(config, model);
+  writeFileSync(join(config, 'antonina', 'config.json'), JSON.stringify({models: [
+    {model, comment: 'operator preference', variant: 'low'},
+  ]}));
+  const meta = idleMeta('a11d', root, null, 1);
+  const env = { [OPENCODE_BIN_ENV]: bin, XDG_CONFIG_HOME: config };
+  const fresh = buildAgentCommand(meta, 'work', false, env);
+  assert.equal(fresh[fresh.indexOf('--model')+1], model+'#low');
+  meta.native_session_id = 'ses_test';
+  const resumed = buildAgentCommand(meta, 'continue', true, env);
+  assert.equal(resumed[resumed.indexOf('--model')+1], model+'#low');
+  writeFileSync(join(config, 'antonina', 'config.json'), JSON.stringify({models: [
+    {model, comment: 'bad preference', variant: 'low#high'},
+  ]}));
+  assert.throws(() => buildAgentCommand(meta, 'work', false, env), /variant/);
+});

@@ -359,6 +359,15 @@ test('the live-runner rung keeps a reservation in flight ahead of every reservat
   };
 
   assert.equal(runnerAlive(meta), true, 'the pinned pid + start ticks + marker triple must read as live');
+  // The same agent remains running after its invocation process has gone,
+  // even beyond the initial startup grace. This is the model recovery gap
+  // that external metering monitors must not mistake for a terminal exit.
+  assert.equal(deriveState(meta, 80), 'running');
+  meta.pid = 99999999;
+  meta.pgid = 99999999;
+  meta.start_time = 1;
+  meta.invocation_id = INVOCATION_ID;
+  assert.equal(deriveState(meta, 80), 'running');
   assert.equal(
     reservationInFlight(meta, 80),
     true,
@@ -395,6 +404,21 @@ test('a live pid is not a live runner when the start ticks or the agent marker d
   assert.equal(reconcileDeadMeta(recycled, 80), true, 'a recycled runner pid must still reconcile to failed');
   assert.equal(recycled.state, 'failed');
   assert.match(String(recycled.error), /disappeared/);
+
+  // A stale/recycled runner cannot make a running claim true outside grace,
+  // including when the metadata still claims active runner ownership.
+  const stale = idleMeta(AGENT_ID, '/tmp', null, 1);
+  beginInvocation(stale, 'work', 10, 1);
+  stale.active_runner = true;
+  stale.runner_pid = child.pid;
+  stale.runner_start_time = startTicks + 1;
+  assert.equal(deriveState(stale, 80), 'unknown');
+  stale.runner_start_time = startTicks;
+  stale.id = OTHER_AGENT_ID;
+  assert.equal(deriveState(stale, 80), 'unknown');
+  stale.id = AGENT_ID;
+  stale.active_runner = false;
+  assert.equal(deriveState(stale, 80), 'unknown');
 
   // 2. Right pid, right start ticks, wrong agent id: the pid is genuinely alive
   //    with the exact start time we recorded, but it belongs to a different

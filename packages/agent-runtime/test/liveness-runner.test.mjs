@@ -9,7 +9,7 @@ import { idleMeta, mintRunnerReservationOwnerToken } from '../dist/packages/agen
 import { procStartTicks } from '../dist/packages/agent-runtime/src/process.js';
 import { runManagedRunner } from '../dist/packages/agent-runtime/src/runner.js';
 import { createAgentDirectory, readMeta, updateMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
-import { sharedUnreliableModels } from '../dist/packages/agent-runtime/src/model-health.js';
+import { recordUnrecognizedBackendFailure, sharedUnreliableModels } from '../dist/packages/agent-runtime/src/model-health.js';
 
 const LUNA = 'example.test/luna';
 const BEAM = 'example.test/beam';
@@ -92,6 +92,11 @@ async function exercise(t, fixture) {
   const cwd = join(root, 'work');
   mkdirSync(cwd);
   const options = { env, modelStepSilenceMs: 700, backendErrorGraceMs: 700, livenessPollMs: 200 };
+  const early = fixture === 'early-first';
+  if (early) {
+    options.modelStepSilenceMs = 30_000;
+    options.firstStepSilenceMs = 700;
+  }
   assert.equal(createAgentDirectory(id, options), true);
   const meta = idleMeta(id, cwd, null);
   const mode = fixture === 'resume' || fixture === 'startup-resume' ? 'continue' : 'new';
@@ -113,6 +118,36 @@ async function exercise(t, fixture) {
   }
   try {
     const promise = runManagedRunner(id, mode, 1, options);
+    if (early) {
+      // Publish independent failures only after the initially selected model
+      // actually starts. Otherwise selection would correctly skip it.
+      let ready = false;
+      for (let i = 0; i < 150; i++) {
+        if (readMeta(id, options)?.native_session_id === 'ses_liveness') { ready = true; break; }
+        await sleep(100);
+      }
+      if (!ready) {
+        await updateMeta(id, m => { m.intent = 'stop'; }, options);
+        await promise;
+        assert.fail('mock invocation never established its native session');
+      }
+      recordUnrecognizedBackendFailure('independent-one', LUNA, options);
+      await sleep(1400);
+      assert.equal(readMeta(id, options).state, 'running', 'one reporter cannot trigger early recovery');
+      recordUnrecognizedBackendFailure('independent-two', LUNA, options);
+      // Fail the fixture rather than allowing the ordinary 30s watchdog to
+      // accidentally pass an end-to-end test of the 700ms early rule.
+      let recovered = false;
+      for (let i = 0; i < 100; i++) {
+        if (readMeta(id, options)?.model_failover?.selected_model === BEAM) { recovered = true; break; }
+        await sleep(100);
+      }
+      if (!recovered) {
+        await updateMeta(id, m => { m.intent = 'stop'; }, options);
+        await promise;
+        assert.fail('independent failure evidence did not trigger early recovery');
+      }
+    }
     if (nonRecoverable.has(fixture)) {
       await sleep(2300);
       const during = readMeta(id, options);
@@ -142,6 +177,8 @@ async function exercise(t, fixture) {
     assert.deepEqual(called, [LUNA, BEAM]);
   }
 }
+
+test('independent first-step failures trigger early same-session recovery', { timeout: 45000 }, t => exercise(t, 'early-first'));
 
 test('quiet model step switches to Beam and resumes the exact conversation', { timeout: 45000 }, t => exercise(t, 'fresh'));
 test('quiet resumed model step switches to Beam with the same native session', { timeout: 45000 }, t => exercise(t, 'resume'));

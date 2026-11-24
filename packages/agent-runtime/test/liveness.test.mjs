@@ -4,7 +4,7 @@ import { appendFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { InvocationActivity, recoverableOpenCodeError, safeAlternativeModel } from '../dist/packages/agent-runtime/src/liveness.js';
+import { InvocationActivity, recoverableOpenCodeError, safeAlternativeModel, healthyAlternativeForEarlyRecovery } from '../dist/packages/agent-runtime/src/liveness.js';
 import { procStartTicks, readProcStat } from '../dist/packages/agent-runtime/src/process.js';
 import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
 
@@ -237,4 +237,66 @@ test('silent startup is checked sooner than in-flight model work', () => {
     assert.equal(monitor.observe(pid,ticks,89_000).diagnosis,'progressing_or_uncertain');
     assert.equal(monitor.observe(pid,ticks,90_000).diagnosis,'startup_silent');
   }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('early first-step evidence requires a complete unanswered first request in the saved session', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'antonina-first-step-'));
+  try {
+    const log = join(dir, 'output.log');
+    const start = (messageID = 'msg_first') => event('step_start', {type:'step-start', messageID});
+    writeFileSync(log, start());
+    const fresh = () => new InvocationActivity(log, 0, 0, () => ({...readProcStat(pid), state:'S'}));
+    const monitor = fresh();
+    monitor.observe(pid, ticks, 0);
+    assert.equal(monitor.unansweredFirstStep('ses_live', 179999), false);
+    assert.equal(monitor.unansweredFirstStep('ses_other', 180000), false);
+    appendFileSync(log, start());
+    assert.equal(monitor.observe(pid, ticks, 180000).diagnosis, 'progressing_or_uncertain');
+    assert.equal(monitor.unansweredFirstStep('ses_live', 180000), true);
+    assert.equal(monitor.observe(pid, ticks, 480000).diagnosis, 'model_step_silent');
+    for (const intervening of [event('text'), event('reasoning'), event('tool_use'), event('step_finish'),
+      '{bad json}\n', start('msg_other'), '{"type":"text"']) {
+      writeFileSync(log, start());
+      const m = fresh();
+      m.observe(pid, ticks, 0);
+      appendFileSync(log, intervening);
+      m.observe(pid, ticks, 180000);
+      assert.equal(m.unansweredFirstStep('ses_live', 180000), false, intervening);
+      appendFileSync(log, '\n' + start('msg_later'));
+      m.observe(pid, ticks, 180001);
+      assert.equal(m.unansweredFirstStep('ses_live', 360001), false, intervening);
+    }
+  } finally { rmSync(dir, {recursive:true, force:true}); }
+});
+
+test('early recovery requires fleet evidence and an unpenalized alternative inside the configured model scope', () => {
+  const root = mkdtempSync(join(tmpdir(), 'antonina-first-step-models-'));
+  try {
+    mkdirSync(join(root, 'antonina'));
+    const path = join(root, 'antonina', 'config.json');
+    const env = {XDG_CONFIG_HOME:root};
+    const models = ['example/luna','example/beam'];
+    const configure = ids => writeFileSync(path, JSON.stringify({models:ids.map(model=>({model,comment:'fixture'}))}));
+    configure(models);
+    const meta = idleMeta('agent-first',root,null);
+    const now = 1000;
+    const check = (unreliable, tried = []) => healthyAlternativeForEarlyRecovery(meta,models[0],env,now,new Set(tried),new Set(unreliable));
+    assert.equal(check([models[0]]),false,'no checkpoint');
+    meta.native_session_id='ses_saved';
+    assert.equal(check([]),false,'no current fleet evidence');
+    assert.equal(check([models[0]]),true);
+    assert.equal(check(models),false,'all soft-unreliable');
+    assert.equal(check([models[0]],[models[1]]),false,'already tried');
+    for (const reason of ['quota_exhausted','rate_limited','model_unavailable','provider_authentication_failed','provider_billing_required','transient_backend']) {
+      meta.model_failover={selected_model:models[0],cooldowns:[{model:models[1],reason,until:now+1}]};
+      assert.equal(check([models[0]]),false,reason);
+      meta.model_failover.cooldowns[0].until=now-1;
+      assert.equal(check([models[0]]),true,reason+' expired');
+    }
+    configure([models[0]]);
+    assert.equal(check([models[0]]),false,'no eligible alternative in scoped config');
+    writeFileSync(path,'{broken');
+    assert.equal(check([models[0]]),false,'malformed config is advisory');
+  } finally { rmSync(root,{recursive:true,force:true}); }
 });

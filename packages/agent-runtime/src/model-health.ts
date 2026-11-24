@@ -17,10 +17,16 @@ const MODEL_ID = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/;
 const AGENT_ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const EVENT_FILENAME = /^(\d{13})-[a-f0-9]{16}\.json$/;
 
+export type ModelFailureObservation = {
+  trigger: 'early_first_step' | 'ordinary_watchdog' | 'unknown_backend_error';
+  silent_ms?: number;
+};
+
 type ModelFailureEvent = {
   agent_id: string;
   model: string;
   at: number;
+  observation?: ModelFailureObservation;
 };
 
 function healthDir(options: StatePathsOptions): string {
@@ -40,6 +46,7 @@ function eligibleEvent(value: unknown, now: number): value is ModelFailureEvent 
 /** One immutable, private observation per genuinely failed backend invocation. */
 export function recordUnrecognizedBackendFailure(
   agentId: string, model: string, options: StatePathsOptions = {}, now = Date.now() / 1000,
+  observation?: ModelFailureObservation,
 ): void {
   if (!AGENT_ID.test(agentId) || !MODEL_ID.test(model) || !Number.isFinite(now)) {
     throw new Error('Invalid Antonina model-health observation');
@@ -56,7 +63,7 @@ export function recordUnrecognizedBackendFailure(
     }
   }
   const file = `${Math.floor(now * 1000)}-${randomBytes(8).toString('hex')}.json`;
-  writeFileSync(join(dir, file), JSON.stringify({ agent_id: agentId, model, at: now }),
+  writeFileSync(join(dir, file), JSON.stringify({ agent_id: agentId, model, at: now, observation }),
     { encoding: 'utf8', mode: 0o600, flag: 'wx' });
 }
 

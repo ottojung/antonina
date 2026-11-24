@@ -1079,13 +1079,14 @@ async function runInvocation(
     }
     const startTicks = (options.childStartTicks ?? procStartTicks)(pid);
     const activity = new InvocationActivity(logFile, invocationLogStart);
-    const livenessState: { observation: LivenessObservation | null } = { observation: null };
+    const livenessState: { observation: LivenessObservation | null; early: boolean } = { observation: null, early: false };
     let reportedUnsafeSilence = false;
     let lastSessionProbeAt = 0;
     const stallCandidate = (current: AgentMetadata): boolean => {
       if (startTicks === null || current.pid !== pid || current.start_time !== startTicks
         || current.invocation_id !== invocationId || current.state !== 'running') return false;
       const now = Date.now();
+      let early = false;
       let observation = activity.observe(
         pid, startTicks, now,
         options.modelStepSilenceMs ?? MODEL_STEP_SILENCE_MS,
@@ -1105,6 +1106,7 @@ async function runInvocation(
             failedModelsThisRun, sharedUnreliableModels(options, now / 1000),
           ) && processTreeActivity(pid, startTicks) === 'clear') {
             observation = { ...observation, diagnosis: 'model_step_silent' };
+            early = true;
           }
         } catch { /* Optional fleet evidence must never break ordinary recovery. */ }
       }
@@ -1151,6 +1153,7 @@ async function runInvocation(
         // finalizes a visible failure without replaying unknown tool effects.
         // An uncheckpointed invocation must not be blindly replayed.
         livenessState.observation = observation;
+        livenessState.early = early;
         return true;
       }
       if ((verified || observation.diagnosis === 'unverifiable_silent'
@@ -1359,7 +1362,13 @@ async function runInvocation(
         && livenessState.observation.diagnosis !== 'backend_error_silent';
       if (backendError?.classification === 'unrecognized_backend_failure' || verifiedStall) {
         try {
-          recordUnrecognizedBackendFailure(agentId, activeModel, options);
+          recordUnrecognizedBackendFailure(agentId, activeModel, options, failedAt, {
+            trigger: verifiedStall
+              ? livenessState.early ? 'early_first_step' : 'ordinary_watchdog'
+              : 'unknown_backend_error',
+            ...(verifiedStall && livenessState.observation !== null
+              ? { silent_ms: livenessState.observation.silentMs } : {}),
+          });
         } catch (error) {
           // Fleet-wide observation is advisory; the per-agent switch remains safe.
           console.error('Antonina could not persist shared model-health evidence:', error);

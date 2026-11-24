@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -175,6 +175,15 @@ async function exercise(t, fixture) {
       fixture === 'error-quota' ? 'quota_exhausted' : 'transient_backend');
     assert.equal(finished.native_session_id, 'ses_liveness');
     assert.deepEqual(called, [LUNA, BEAM]);
+    if (early) {
+      const healthDir = join(env.XDG_STATE_HOME, 'antonina', 'model-health');
+      const event = readdirSync(healthDir).map(file => JSON.parse(readFileSync(join(healthDir, file), 'utf8')))
+        .find(value => value.agent_id === id);
+      assert.equal(event?.observation?.trigger, 'early_first_step');
+      assert.ok(event.observation.silent_ms >= 700);
+      assert.ok(event.observation.silent_ms < 30_000);
+    }
+
   }
 }
 

@@ -13,6 +13,7 @@ import {
   persistedProcessInteger,
   processIsZombie,
   processPgrp,
+  processTreeActivity,
   signalGroupChecked,
   signalIdentityChecked,
   signalMarkedInvocationProcesses,
@@ -297,4 +298,23 @@ test('invocation-marker sweep reaps detached descendants without touching other 
     { procRoot: root, signal: signal.send },
   ), 1);
   assert.deepEqual(signal.calls, [[5001, 'SIGKILL']]);
+});
+
+
+test('a live child of a nonleader thread prevents watchdog recovery', t => {
+  const root = withProc(t, {
+    4242: {stat:statLine({start:1234})},
+    4244: {stat:statLine({ppid:4242,start:1235})},
+  });
+  const task = join(root,'4242','task');
+  mkdirSync(join(task,'4242'),{recursive:true});
+  mkdirSync(join(task,'4243'),{recursive:true});
+  writeFileSync(join(task,'4242','children'),'');
+  writeFileSync(join(task,'4243','children'),'4244 ');
+  assert.equal(processTreeActivity(4242,1234,root),'active');
+  writeFileSync(join(task,'4243','children'),'');
+  assert.equal(processTreeActivity(4242,1234,root),'clear');
+  rmSync(join(task,'4243','children'));
+  assert.equal(processTreeActivity(4242,1234,root),'unverifiable');
+  assert.equal(processTreeActivity(4242,9999,root),'unverifiable');
 });

@@ -95,28 +95,37 @@ export function processTreeActivity(
   if (leader === null || leader.startTicks !== startTicks) return 'unverifiable';
   const queue = [pid];
   const seen = new Set<number>();
+  let scannedThreads = 0;
   while (queue.length > 0) {
     const parent = queue.shift()!;
     if (seen.has(parent) || seen.size >= 2048) return 'unverifiable';
     seen.add(parent);
-    let raw: string;
+    const taskDir = join(procRoot, String(parent), 'task');
     try {
-      raw = readFileSync(join(procRoot, String(parent), 'task', String(parent), 'children'), 'utf8');
-    } catch {
-      // Children can disappear during a scan; failing closed prevents
-      // mistaking an unobservable tool for an idle model.
-      return 'unverifiable';
-    }
-    for (const word of raw.trim().split(/\s+/).filter(Boolean)) {
-      const child = Number(word);
-      if (!Number.isSafeInteger(child) || child <= 0) return 'unverifiable';
-      const stat = readProcStat(child, procRoot);
-      if (stat === null) return 'unverifiable';
-      if (stat.ppid !== parent) return 'unverifiable';
-      if (stat.state !== 'Z' && stat.state !== 'X') return 'active';
-      queue.push(child);
-    }
+      // /proc/PID/task/TID/children describes children of that thread,
+      // NOT necessarily every child of the process. Tools can be started
+      // by a runtime's worker thread rather than the group leader.
+      const tids = readdirSync(taskDir).sort();
+      if (!tids.includes(String(parent)) || tids.some(tid => !/^[1-9][0-9]*$/.test(tid))) return 'unverifiable';
+      scannedThreads += tids.length;
+      if (scannedThreads > 2048) return 'unverifiable';
+      for (const tid of tids) {
+        const raw = readFileSync(join(taskDir, tid, 'children'), 'utf8');
+        for (const word of raw.trim().split(/\s+/).filter(Boolean)) {
+          const child = Number(word);
+          if (!Number.isSafeInteger(child) || child <= 0 || String(child) !== word) return 'unverifiable';
+          const stat = readProcStat(child, procRoot);
+          if (stat === null || stat.ppid !== parent) return 'unverifiable';
+          if (stat.state !== 'Z' && stat.state !== 'X') return 'active';
+          queue.push(child);
+        }
+      }
+      // A changing thread set invalidates the observation, rather than
+      // making a just-created or disappearing worker invisible to recovery.
+      if (readdirSync(taskDir).sort().join(',') !== tids.join(',')) return 'unverifiable';
+    } catch { return 'unverifiable'; }
   }
+  if (readProcStat(pid, procRoot)?.startTicks !== startTicks) return 'unverifiable';
   return 'clear';
 }
 

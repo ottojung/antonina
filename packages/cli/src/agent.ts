@@ -68,6 +68,7 @@ import {
   runnerReservationState,
   type AgentMetadata,
 } from '../../agent-runtime/src/metadata.js';
+import { readPromptFile, readPromptStdin } from '../../agent-runtime/src/prompt-file.js';
 import { normalizeAgentId } from '../../agent-runtime/src/process.js';
 import { PERMANENT_EXCLUSION_UNTIL, observedAgentModels } from '../../agent-runtime/src/model-failover.js';
 import { configuredModels } from '../../agent-runtime/src/model-config.js';
@@ -1185,11 +1186,26 @@ async function followAttached(
 }
 
 async function cmdRun(args: string[], context: AgentCommandContext): Promise<number> {
-  const parsed = parse(args, ['--steer', '--detach', '--json', '--wait-for-model']);
+  const parsed = parse(args, ['--steer', '--detach', '--json', '--wait-for-model', '--prompt-stdin']);
   if (parsed.positionals.length !== 0) throw new UsageError('run: unexpected positional arguments');
   const agentId = requireAgentId(parsed.values.get('--id'), 'run');
-  const prompt = parsed.values.get('--prompt');
-  if (!prompt) throw new UsageError('run: --prompt is required');
+  const sources = ['--prompt', '--prompt-file'].filter((name) => parsed.values.has(name));
+  if (parsed.flags.has('--prompt-stdin')) sources.push('--prompt-stdin');
+  if (sources.length !== 1) throw new UsageError('run: pass exactly one of --prompt, --prompt-file or --prompt-stdin');
+  const source = sources[0]!;
+  let prompt: string;
+  try {
+    prompt = source === '--prompt-file'
+      ? readPromptFile(parsed.values.get('--prompt-file')!)
+      : source === '--prompt-stdin' ? readPromptStdin() : parsed.values.get('--prompt')!;
+  } catch (error) {
+    throw new UsageError(`run: ${source}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (prompt.length === 0) throw new UsageError(`run: ${source}: prompt is empty`);
+  const privatePrompt = source !== '--prompt';
+  if (privatePrompt && parsed.flags.has('--steer')) {
+    throw new UsageError('run: --steer cannot use --prompt-file or --prompt-stdin');
+  }
   const observed = requireMeta(agentId, context);
   // Durable execution configuration must be canonical before this prompt can
   // acquire runner or invocation authority.
@@ -1341,6 +1357,8 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
         return;
       }
       meta.pending_prompt = prompt;
+      if (privatePrompt) meta.prompt_transport = 'stdin';
+      else delete meta.prompt_transport;
       meta.state = 'running';
       meta.last_activity_at = Date.now() / 1000;
       decision.action = 'reuse';
@@ -1427,7 +1445,10 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
     // else: a transaction that ends in `busy` records nothing at all, so a
     // rejected prompt cannot leave a cwd behind that no front ever ran in.
     if (runCwd !== null) meta.cwd = runCwd;
-    beginInvocation(meta, prompt, now, promptCount, { logOffset: logSize(agentId, paths(context)) });
+    beginInvocation(meta, prompt, now, promptCount, {
+      logOffset: logSize(agentId, paths(context)),
+      ...(privatePrompt ? { promptTransport: 'stdin' as const } : {}),
+    });
     meta.active_runner = true;
     meta.runner_gen = generation;
     const ownerToken = mintRunnerReservationOwnerToken();

@@ -63,7 +63,11 @@ test('agent prompt is not retained as an alias for run', () => {
   const help = preparePublicCommand('agent', ['--help']);
   assert.equal(help.kind, 'help');
   assert.match(help.text, /\brun\b/);
-  assert.doesNotMatch(help.text, /\bprompt\b/);
+  assert.doesNotMatch(help.text, /^\s*prompt\s/m);
+  const runHelp = preparePublicCommand('agent', ['run', '--help']);
+  assert.equal(runHelp.kind, 'help');
+  assert.match(runHelp.text, /--prompt-file/);
+  assert.match(runHelp.text, /--prompt-stdin/);
 });
 
 test('board create never accepts a caller-supplied issue id', () => {

@@ -25,7 +25,6 @@ const TOP_LEVEL_FIELDS = [
   'state',
   'cwd',
   'title',
-  'variant',
   'native_session_id',
   'pid',
   'pgid',
@@ -117,7 +116,17 @@ export const OPTIONAL_TOP_LEVEL_FIELDS = [
   RUN_LOG_CURSOR_FIELD,
   'model_failover',
   'observed_models',
+  'prompt_transport',
+  // A variant is only present when the launched model was configured with one.
+  // Older records always carry the historical 'low' bookkeeping value and
+  // remain valid; variant-less launches intentionally have no field at all.
+  'variant',
 ] as const;
+
+/** Present only when a prompt was received from a file or stdin. */
+export function persistedPromptTransport(meta: AgentMetadata): 'stdin' | null {
+  return meta.prompt_transport === 'stdin' ? 'stdin' : null;
+}
 
 export class MalformedPendingPromptMetadataError extends Error {
   constructor() {
@@ -326,6 +335,9 @@ export function validateAgentMetadata(meta: AgentMetadata): void {
   if (meta.model_failover !== undefined && meta.model_failover !== null && !validModelFailover(meta.model_failover)) {
     throw new MalformedAgentMetadataError('managed-agent model_failover is malformed');
   }
+  if (meta.prompt_transport !== undefined && meta.prompt_transport !== 'stdin') {
+    throw new MalformedAgentMetadataError('managed-agent prompt_transport is malformed');
+  }
   try { observedAgentModels(meta); } catch {
     throw new MalformedAgentMetadataError('managed-agent observed_models is malformed');
   }
@@ -496,8 +508,13 @@ export function persistedNativeSessionId(meta: AgentMetadata): string | null {
   return value;
 }
 
-export function persistedVariant(meta: AgentMetadata): string {
-  if (!hasOwn(meta, 'variant')) throw new MalformedAgentMetadataError('managed-agent variant is missing');
+/**
+ * The variant the last launch actually used, or `undefined` when that model
+ * was configured without one. Absence is a canonical state, not a malformed
+ * record: variant-less models must never be reported as having run `#low`.
+ */
+export function persistedVariant(meta: AgentMetadata): string | undefined {
+  if (!hasOwn(meta, 'variant')) return undefined;
   const value = meta.variant;
   if (typeof value !== 'string' || value.length === 0) {
     throw new MalformedAgentMetadataError('managed-agent variant is malformed');
@@ -594,7 +611,6 @@ export function idleMeta(agentId: string, cwd: string | null, title: string | nu
     invocation_cwd: null,
     observed_models: [],
     title,
-    variant: DEFAULT_VARIANT,
     native_session_id: null,
     pid: null,
     pgid: null,

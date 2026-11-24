@@ -6,13 +6,12 @@ import { delimiter, isAbsolute, join } from 'node:path';
 import {
   RUNNER_OWNER_TOKEN_ENV,
   persistedNativeSessionId,
-  persistedVariant,
   requiredAgentCwd,
   requiredPersistedAgentId,
   type AgentMetadata,
 } from './metadata.js';
 import type { OomCounters } from './host-capacity.js';
-import { configuredModels } from './model-config.js';
+import { configuredModels, modelReference, type ModelPreference } from './model-config.js';
 import { eligibleAgentModel } from './model-failover.js';
 import { lastProviderErrorEvent, providerRetryAfterSeconds, typedProviderFailure } from './provider-errors.js';
 
@@ -562,6 +561,26 @@ export function selectConfiguredModel(
   return configuredModels(env)[0]!.model;
 }
 
+/**
+ * Per-agent selection skips only this agent's unexpired model cooldowns and
+ * returns the whole configured preference, so the optional variant travels
+ * with the canonical model to the launch site.
+ */
+export function selectConfiguredAgentPreference(
+  meta: AgentMetadata,
+  env: Record<string, string | undefined> = process.env,
+  now: number = Date.now() / 1000,
+  excludedModels: ReadonlySet<string> = new Set(),
+  sharedUnreliable: ReadonlySet<string> = new Set(),
+): ModelPreference {
+  const preferences = configuredModels(env);
+  const chosen = eligibleAgentModel(meta, preferences, now, undefined, excludedModels, sharedUnreliable);
+  if (chosen === null) throw new Error('No eligible configured model: all candidates have an active quota, rate limit, hard exclusion, or were tried this invocation');
+  // Duplicate canonical IDs are refused by configuredModels, so this lookup is
+  // exact and cannot pick a different entry's variant.
+  return preferences.find((preference) => preference.model === chosen)!;
+}
+
 /** Per-agent selection skips only this agent's unexpired model cooldowns. */
 export function selectConfiguredAgentModel(
   meta: AgentMetadata,
@@ -570,9 +589,7 @@ export function selectConfiguredAgentModel(
   excludedModels: ReadonlySet<string> = new Set(),
   sharedUnreliable: ReadonlySet<string> = new Set(),
 ): string {
-  const chosen = eligibleAgentModel(meta, configuredModels(env), now, undefined, excludedModels, sharedUnreliable);
-  if (chosen === null) throw new Error('No eligible configured model: all candidates have an active quota, rate limit, hard exclusion, or were tried this invocation');
-  return chosen;
+  return selectConfiguredAgentPreference(meta, env, now, excludedModels, sharedUnreliable).model;
 }
 
 export function buildAgentCommand(
@@ -583,19 +600,17 @@ export function buildAgentCommand(
   excludedModels: ReadonlySet<string> = new Set(),
   modelEnv: Record<string, string | undefined> = env,
   sharedUnreliable: ReadonlySet<string> = new Set(),
+  viaStdin = false,
 ): string[] | null {
   const agentId = requiredPersistedAgentId(meta);
   const cwd = requiredAgentCwd(meta);
   // OpenCode V2 uses process cwd (set by the runner) instead of --dir.
-  // A model variant is optional and model-specific. Forcing #low (or
-  // any other variant) makes usable free models fail with provider.no-route.
-  // Respect an explicit per-model variant preference, but otherwise
-  // let OpenCode choose that model's supported default.
-  persistedVariant(meta);
+  // A variant is optional and model-specific: only append `#variant` when this
+  // configured model has one. Forcing #low on free models makes them fail with
+  // provider.no-route. Canonical model IDs never carry '#'.
   const executable = resolveOpencode(env);
-  const model = selectConfiguredAgentModel(meta, modelEnv, Date.now() / 1000, excludedModels, sharedUnreliable);
-  const variant = configuredModels(modelEnv).find((entry) => entry.model === model)?.variant;
-  const modelReference = variant === undefined ? model : `${model}#${variant}`;
+  const preference = selectConfiguredAgentPreference(meta, modelEnv, Date.now() / 1000, excludedModels, sharedUnreliable);
+  const modelArgument = modelReference(preference);
   if (isContinue) {
     const recorded = persistedNativeSessionId(meta);
     const sessionId = recorded ?? discoverSessionId(agentId, env, cwd);
@@ -604,18 +619,18 @@ export function buildAgentCommand(
       executable, 'run', '--auto',
       '--format', 'json',
       '--session', sessionId,
-      '--model', modelReference,
+      '--model', modelArgument,
       '--thinking',
-      prompt,
+      ...(viaStdin ? [] : [prompt]),
     ];
   }
   return [
     executable, 'run', '--auto',
     '--format', 'json',
     '--title', `${OPENCODE_TITLE_PREFIX}${agentId}`,
-    '--model', modelReference,
+    '--model', modelArgument,
     '--thinking',
-    prompt,
+    ...(viaStdin ? [] : [prompt]),
   ];
 }
 

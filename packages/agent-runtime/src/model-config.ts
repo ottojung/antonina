@@ -4,10 +4,19 @@ import { join } from 'node:path';
 
 /** Operator-maintained, ordered model preferences. Never supplied by a built-in default. */
 export interface ModelPreference {
+  /** Canonical `provider/model` identifier. Never carries a `#variant` suffix. */
   model: string;
   comment: string;
+  /**
+   * Optional launch-time variant. A single OpenCode variant token such as
+   * `low`, kept separate from the canonical model so failover, cooldowns and
+   * observations stay keyed on `model` alone.
+   */
   variant?: string;
 }
+
+/** Variant tokens are a single suffix of `--model`, never a second model ID. */
+const MODEL_VARIANT = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 
 const HOST_XDG_CONFIG_HOME_ENV = 'ANTONINA_HOST_XDG_CONFIG_HOME';
 const OPENCODE_XDG_CONFIG_HOME_ENV = 'ANTONINA_OPENCODE_XDG_CONFIG_HOME';
@@ -52,12 +61,24 @@ export function configuredModels(env: Record<string, string | undefined> = proce
     if (typeof record.comment !== 'string') {
       throw new Error(`Invalid models[${index}].comment in ${path}: expected free-form text`);
     }
+    const variant = record.variant;
+    if (variant !== undefined && (typeof variant !== 'string' || !MODEL_VARIANT.test(variant))) {
+      throw new Error(`Invalid models[${index}].variant in ${path}: expected a single OpenCode variant token without '#'`);
+    }
     if (seen.has(model)) throw new Error(`Duplicate model ${model} in ${path}`);
     seen.add(model);
-    const variant = record.variant;
-    if (variant !== undefined && (typeof variant !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(variant))) {
-      throw new Error(`Invalid models[${index}].variant in ${path}: expected an OpenCode variant identifier`);
-    }
-    return variant === undefined ? { model, comment: record.comment } : { model, comment: record.comment, variant };
+    return variant === undefined
+      ? { model, comment: record.comment }
+      : { model, comment: record.comment, variant };
   });
+}
+
+/**
+ * The exact `--model` reference for one configured preference. A variant is
+ * appended only when this model was configured with one: forcing `#low` on
+ * models that do not support it makes otherwise healthy models fail with
+ * `provider.no-route`.
+ */
+export function modelReference(preference: ModelPreference): string {
+  return preference.variant === undefined ? preference.model : `${preference.model}#${preference.variant}`;
 }

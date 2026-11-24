@@ -11,7 +11,7 @@ import {
   adoptSharedModelCooldowns, modelAvailability, recordSharedModelCooldown, sharedModelCooldowns,
   withSharedModelCooldowns,
 } from '../dist/packages/agent-runtime/src/model-cooldowns.js';
-import { coolDownAgentModel, PERMANENT_EXCLUSION_UNTIL } from '../dist/packages/agent-runtime/src/model-failover.js';
+import { coolDownAgentModel, MODEL_COOLDOWN_SECONDS, PERMANENT_EXCLUSION_UNTIL } from '../dist/packages/agent-runtime/src/model-failover.js';
 import { procStartTicks, readProcStat } from '../dist/packages/agent-runtime/src/process.js';
 import {
   MAX_PROVIDER_COOLDOWN_SECONDS, lastProviderErrorEvent, providerRetryAfterSeconds, typedProviderFailure,
@@ -150,6 +150,13 @@ test('availability: soft penalties stay eligible, hard exclusions on every model
   assert.equal(modelAvailability(meta, PREFS, shared, now + 501).available, true, 'the shared cooldown expired');
   coolDownAgentModel(meta, LUNA, 'model_unavailable', now);
   coolDownAgentModel(meta, BEAM, 'model_unavailable', now);
+  const unavailable = modelAvailability(meta, PREFS, [], now + 10_000);
+  assert.equal(unavailable.available, false);
+  assert.equal(unavailable.earliestReturn, now + MODEL_COOLDOWN_SECONDS);
+  assert.equal(unavailable.excluded.find((entry) => entry.model === LUNA).until, now + MODEL_COOLDOWN_SECONDS);
+  assert.equal(modelAvailability(meta, PREFS, [], now + MODEL_COOLDOWN_SECONDS + 1).available, true);
+  coolDownAgentModel(meta, LUNA, 'provider_authentication_failed', now);
+  coolDownAgentModel(meta, BEAM, 'provider_billing_required', now);
   const permanent = modelAvailability(meta, PREFS, [], now + 10_000);
   assert.equal(permanent.available, false);
   assert.equal(permanent.earliestReturn, null);

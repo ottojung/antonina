@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { idleMeta, validateAgentMetadata } from '../dist/packages/agent-runtime/src/metadata.js';
 import {
   MODEL_COOLDOWN_SECONDS, TRANSIENT_MODEL_RETRIES, agentModelFailover,
-  coolDownAgentModel, eligibleAgentModel, excludeAgentProvider,
+  clearModelUnavailableCooldowns, coolDownAgentModel, eligibleAgentModel, excludeAgentProvider,
   modelCooldownSeconds, PERMANENT_EXCLUSION_UNTIL, TRANSIENT_UNRELIABLE_SECONDS,
   RATE_LIMIT_BACKOFF_SECONDS, recordAgentModel,
 } from '../dist/packages/agent-runtime/src/model-failover.js';
@@ -160,14 +160,31 @@ test('quota and rate-limit candidates stay outside the transient random pool', (
   assert.equal(eligibleAgentModel(meta,prefs,NOW+1,()=>0),null);
   assert.equal(agentModelFailover(meta).cooldowns[2].until,PERMANENT_EXCLUSION_UNTIL);
   assert.equal(eligibleAgentModel(meta,prefs,NOW+RATE_LIMIT_BACKOFF_SECONDS+1),prefs[1].model);
+  // Once the quota cooldown genuinely expires, the top preference returns;
+  // the model_unavailable exclusion on prefs[2] remains permanent throughout.
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+MODEL_COOLDOWN_SECONDS+1),prefs[0].model);
+  assert.equal(agentModelFailover(meta).cooldowns[2].until,PERMANENT_EXCLUSION_UNTIL);
 });
 
-test('hard model exclusion persists until changed, while adding a new model works', () => {
+test('model_unavailable stays a hard exclusion; only an explicit retry lifts it', () => {
   const meta=testMeta();
   coolDownAgentModel(meta,prefs[0].model,'model_unavailable',NOW);
   assert.equal(eligibleAgentModel(meta,[prefs[0]],NOW+100000000),null);
+  assert.equal(agentModelFailover(meta).cooldowns[0].until,PERMANENT_EXCLUSION_UNTIL);
   assert.equal(eligibleAgentModel(meta,[{model:'openai/replacement',comment:'new'}],NOW+1),'openai/replacement');
   assert.equal(modelCooldownSeconds('provider_authentication_failed'),PERMANENT_EXCLUSION_UNTIL);
+  assert.equal(modelCooldownSeconds('provider_billing_required'),PERMANENT_EXCLUSION_UNTIL);
+});
+
+test('explicit run clears stale model_unavailable but never auth/billing exclusions', () => {
+  const meta=testMeta();
+  coolDownAgentModel(meta,prefs[0].model,'model_unavailable',NOW);
+  coolDownAgentModel(meta,prefs[1].model,'provider_authentication_failed',NOW);
+  coolDownAgentModel(meta,prefs[2].model,'provider_billing_required',NOW);
+  assert.equal(clearModelUnavailableCooldowns(meta, NOW+1), true);
+  const reasons = agentModelFailover(meta).cooldowns.map(x => x.reason).sort();
+  assert.deepEqual(reasons, ['provider_authentication_failed', 'provider_billing_required']);
+  assert.equal(clearModelUnavailableCooldowns(meta, NOW+1), false);
 });
 
 test('provider authentication and billing failures exclude its models, not other providers', () => {

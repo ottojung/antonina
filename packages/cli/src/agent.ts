@@ -69,7 +69,7 @@ import {
   type AgentMetadata,
 } from '../../agent-runtime/src/metadata.js';
 import { normalizeAgentId } from '../../agent-runtime/src/process.js';
-import { PERMANENT_EXCLUSION_UNTIL, observedAgentModels } from '../../agent-runtime/src/model-failover.js';
+import { PERMANENT_EXCLUSION_UNTIL, clearModelUnavailableCooldowns, observedAgentModels } from '../../agent-runtime/src/model-failover.js';
 import { configuredModels } from '../../agent-runtime/src/model-config.js';
 import { modelAvailability, sharedModelCooldowns } from '../../agent-runtime/src/model-cooldowns.js';
 import {
@@ -1190,7 +1190,7 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   const agentId = requireAgentId(parsed.values.get('--id'), 'run');
   const prompt = parsed.values.get('--prompt');
   if (!prompt) throw new UsageError('run: --prompt is required');
-  const observed = requireMeta(agentId, context);
+  let observed = requireMeta(agentId, context);
   // Durable execution configuration must be canonical before this prompt can
   // acquire runner or invocation authority.
   requiredPersistedAgentId(observed);
@@ -1244,6 +1244,16 @@ async function cmdRun(args: string[], context: AgentCommandContext): Promise<num
   // Validate local model configuration without invoking OpenCode.
   // Real inference failures drive the per-agent failover ladder.
   selectConfiguredModel(context.env);
+  // An explicit user run is a deliberate retry: clear stale model_unavailable
+  // exclusions, but never billing/authentication failures that require action.
+  {
+    const now = Date.now() / 1000;
+    const probe = structuredClone(observed);
+    if (clearModelUnavailableCooldowns(probe, now)) {
+      await updateMeta(agentId, (current) => { clearModelUnavailableCooldowns(current, now); }, paths(context));
+      observed = requireMeta(agentId, context);
+    }
+  }
   // Circuit breaker. When every configured model is under a provider-attested
   // quota or rate limit (this agent's own, or one another agent on this host
   // recorded), an accepted prompt could only sit in a `running` front that

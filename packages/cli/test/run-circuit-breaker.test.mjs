@@ -8,7 +8,7 @@ import { runAgentCommand } from '../dist/packages/cli/src/agent.js';
 import { createAgentDirectory, readMeta, writeMeta } from '../dist/packages/agent-runtime/src/store.js';
 import { idleMeta } from '../dist/packages/agent-runtime/src/metadata.js';
 import { recordSharedModelCooldown } from '../dist/packages/agent-runtime/src/model-cooldowns.js';
-import { coolDownAgentModel } from '../dist/packages/agent-runtime/src/model-failover.js';
+import { coolDownAgentModel, PERMANENT_EXCLUSION_UNTIL } from '../dist/packages/agent-runtime/src/model-failover.js';
 
 const MOCK = 'example.test/mock';
 const SPARE = 'example.test/spare';
@@ -74,4 +74,25 @@ test('a soft transient penalty on every model does not trip the breaker', async 
   await runAgentCommand(['run', '--id', '50f7', '--prompt', 'do the work', '--cwd', work, '--detach'],
     { ...context, entryScript: join(work, 'missing-entry.js') }).catch(() => 1);
   assert.doesNotMatch(err.join('\n'), /no model available/);
+});
+
+test('explicit run clears stale model_unavailable without lifting auth or quota exclusions', async (t) => {
+  const { work, state, context } = fixture(t);
+  assert.equal(createAgentDirectory('c1ea', state), true);
+  const meta = idleMeta('c1ea', work, null, 1);
+  coolDownAgentModel(meta, MOCK, 'model_unavailable');
+  coolDownAgentModel(meta, SPARE, 'provider_authentication_failed');
+  writeMeta('c1ea', meta, state);
+  // Missing entry script stops the launch after acceptance; the assertion is
+  // about which exclusions the explicit run cleared before that point.
+  await runAgentCommand(
+    ['run', '--id', 'c1ea', '--prompt', 'do the work', '--cwd', work, '--detach'],
+    { ...context, entryScript: join(work, 'missing-entry.js') },
+  ).catch(() => 1);
+  const after = readMeta('c1ea', state);
+  const reasons = after.model_failover.cooldowns.map((entry) => entry.reason);
+  assert.ok(!reasons.includes('model_unavailable'), 'stale no-route exclusion was retried');
+  assert.ok(reasons.includes('provider_authentication_failed'), 'provider auth exclusion was kept');
+  assert.equal(after.model_failover.cooldowns.find((entry) => entry.model === SPARE).until,
+    PERMANENT_EXCLUSION_UNTIL);
 });

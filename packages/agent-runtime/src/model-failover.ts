@@ -161,6 +161,17 @@ export function coolDownAgentModel(
   };
 }
 
+/** An explicit user run is a signal to retry a model that previously had no
+ * route. Billing and authentication failures require operator action and are
+ * never cleared here. */
+export function clearModelUnavailableCooldowns(meta: AgentMetadata, now: number = Date.now() / 1000): boolean {
+  const previous = agentModelFailover(meta);
+  const cooldowns = previous.cooldowns.filter((entry) => !(entry.reason === 'model_unavailable' && entry.until > now));
+  if (cooldowns.length === previous.cooldowns.length) return false;
+  meta.model_failover = { selected_model: previous.selected_model, cooldowns };
+  return true;
+}
+
 /**
  * Account credentials and billing are scoped to a provider, not to a single
  * model. Only configured models with that exact provider ID are excluded.

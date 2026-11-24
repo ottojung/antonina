@@ -828,6 +828,48 @@ test('delete tombstone blocks later prompt reservation', (t) => {
 });
 
 
+// A provider recovery gap has no live invocation but the accepted prompt
+// remains owned by a real, identity-verified runner. Exercise the public
+// status and launch refusal consumed by external budget controllers.
+test('status preserves runner ownership between provider invocations', async (t) => {
+  if (!existsSync('/proc/self/stat')) return t.skip('requires Linux process identity');
+  const { root, work, env } = fixture(t);
+  const agent = newAgent(env, ['--cwd', work]);
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    env: { ...env, ANTONINA_AGENT_ID: agent }, stdio: 'ignore',
+  });
+  t.after(() => { child.kill('SIGKILL'); });
+  await new Promise((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+  const ticks = procStartTicks(child.pid);
+  assert.notEqual(ticks, null);
+  const path = metaPath(root, agent);
+  const meta = readMetaPath(root, agent);
+  Object.assign(meta, {
+    state: 'running', active_runner: true,
+    runner_pid: child.pid, runner_start_time: ticks,
+    pid: null, pgid: null, start_time: null, invocation_id: null,
+    runner_gen: 1, pending_prompt: 'accepted', prompt_count: 1,
+    started_at: 1, last_activity_at: 1,
+    runner_reservation: {
+      state: 'claimed', gen: 1, mode: 'new', reserved_at: 1,
+      owner_pid: 99999999, owner_start_ticks: 1,
+    },
+  });
+  writeFileSync(path, JSON.stringify(meta));
+  const status = run(['agent', 'status', '--id', agent, '--json'], env);
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(JSON.parse(status.stdout).state, 'running');
+  assert.equal(JSON.parse(status.stdout).alive, false);
+  const before = readFileSync(path, 'utf8');
+  const duplicate = run(['agent', 'run', '--id', agent, '--detach', '--prompt', 'duplicate'], env);
+  assert.equal(duplicate.status, 1);
+  assert.match(duplicate.stderr, /still running/);
+  assert.equal(readFileSync(path, 'utf8'), before);
+});
+
 test('transient backend 5xx recovers without replaying the original prompt', async (t) => {
   const handle = fixture(t);
   const { root, work, env } = handle;

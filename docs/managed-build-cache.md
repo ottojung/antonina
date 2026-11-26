@@ -81,6 +81,35 @@ removed tree.
 `ANTONINA_AGENT_CACHE_RETIREMENT=0` pauses retirement for an operator who needs
 to inspect a cache; it has no effect on launches or on benchmark guards.
 
+## Cache-only periodic sweep
+
+`antonina agent cache-clean [--dry-run] [--days N]` is the explicit cache-only
+retirement sweep. It lists registrations **only** under the dedicated managed
+cache root, takes the same per-agent ownership lock and uses the same terminal /
+unowned ownership predicate as `antonina agent clean`, but it never deletes the
+owner record, its log, or any file outside the registered cache. A terminal
+agent's cache may therefore be reclaimed even when metadata retention is kept
+indefinitely. Unreadable or non-plain registration evidence refuses the whole
+sweep; a missing/unreadable owner record, an ambiguous registration, a live
+reference, or `ANTONINA_AGENT_CACHE_RETIREMENT=0` retains that cache for a later
+retry. `--dry-run` prints the caches that would be retired and changes nothing.
+
+Cadence is an operator maintenance decision, not launch capacity policy: a
+quiet, periodic run (for example every few hours, or at a daily maintenance
+window) is sufficient because each cache is registered and rechecked at
+removal time. This command must never be wired into agent launch, launch
+refusal, model selection or benchmark guards, and it must never shorten record
+retention. The safe automation shape on this host is either (a) an existing
+supervised maintenance invocation that already runs as the agent owner, with
+`ANTONINA_AGENT_CACHE_RETIREMENT=0` available as a global pause, or (b) a
+dedicated one-shot s6 service with `run` executing
+`antonina agent cache-clean` once and then exiting, started only from the
+maintenance schedule rather than as a long-lived dependency of any runner. A
+one-shot service must not be given a `finish` script that retries on failure:
+every refusal is intentional fail-closed state, and the next scheduled run is
+the retry. No service, timer or supervisor configuration is changed by the
+source change that adds this command.
+
 ## Non-goals
 
 - No global or implicit `CARGO_TARGET_DIR` is set for any project.

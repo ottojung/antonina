@@ -58,6 +58,7 @@ import {
 import {
   hasManagedCacheRegistration,
   initializeManagedCache,
+  listManagedCacheClaims,
   managedCachePath,
   managedCacheRoot,
   readManagedCache,
@@ -106,6 +107,7 @@ import {
   removeAgentDirectory,
   stateRoot,
   updateMeta,
+  withAgentLock,
   writeMeta,
   type StatePathsOptions,
   type StoreFs,
@@ -2122,6 +2124,30 @@ function writeSyncedManifestLine(stateRootPath: string, manifestPath: string, li
   }
 }
 
+/**
+ * The single ownership guard for retiring a managed build cache. Both
+ * `agent clean` (which also deletes the owner record) and `agent cache-clean`
+ * (cache only) use this exact predicate. A record whose prompt state cannot be
+ * read is ineligible, never treated as "no pending prompt".
+ */
+function cacheOwnershipAllowsRetirement(meta: AgentMetadata, cutoff: number): boolean {
+  let pending: string | null;
+  try {
+    pending = pendingPrompt(meta);
+  } catch {
+    return false;
+  }
+  const anchor = retentionAnchor(meta);
+  return retentionEligibleState(meta)
+    && anchor !== null
+    && anchor < cutoff
+    && !invocationAlive(meta)
+    && activeRunnerFlag(meta) === false
+    && !reservationInFlight(meta)
+    && pending === null
+    && deletePendingFlag(meta) === false;
+}
+
 async function cmdClean(args: string[], context: AgentCommandContext): Promise<number> {
   const parsed = parse(args, ['--dry-run']);
   if (parsed.positionals.length !== 0) throw new UsageError('clean: unexpected positional arguments');
@@ -2178,23 +2204,7 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
     }
     let removable = false;
     await updateMeta(agentId, (meta) => {
-      let pending: string | null;
-      try {
-        pending = pendingPrompt(meta);
-      } catch {
-        return;
-      }
-      const anchor = retentionAnchor(meta);
-      if (
-        !retentionEligibleState(meta)
-        || anchor === null
-        || anchor >= cutoff
-        || invocationAlive(meta)
-        || activeRunnerFlag(meta) !== false
-        || reservationInFlight(meta)
-        || pending !== null
-        || deletePendingFlag(meta) !== false
-      ) return;
+      if (!cacheOwnershipAllowsRetirement(meta, cutoff)) return;
 
       // The record is terminal and unowned, and this callback runs while the
       // metadata/ownership lock is held. Only a registered cache is touched;
@@ -2241,6 +2251,112 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
   return EXIT_OK;
 }
 
+/**
+ * Cache-only retirement sweep. It enumerates ONLY registrations under the
+ * dedicated managed-cache root, then applies the SAME ownership guard and
+ * per-agent lock as `agent clean`. Owner records, logs and every other file are
+ * left untouched; unreadable evidence, an ambiguous registration, a paused
+ * switch or a live reference retains the cache for a later retry.
+ */
+async function cmdCacheClean(args: string[], context: AgentCommandContext): Promise<number> {
+  const parsed = parse(args, ['--dry-run']);
+  if (parsed.positionals.length !== 0) throw new UsageError('cache-clean: unexpected positional arguments');
+  const configured = parsed.values.get('--days') ?? context.env.ANTONINA_AGENT_RETENTION_DAYS ?? String(DEFAULT_RETENTION_DAYS);
+  const days = nonnegativeInteger(configured, '--days');
+  const cutoff = Date.now() / 1000 - days * 86_400;
+  const stateRootPath = stateRoot(paths(context));
+  const cacheRoot = managedCacheRoot(stateRootPath);
+  const cacheFs = context.managedCacheFs ?? hostManagedCacheFs();
+  const probe = context.liveReferenceProbe ?? hostLiveReferenceProbe;
+  const manifestPath = join(stateRootPath, 'managed-cache-retirements.jsonl');
+  const retentionEnabled = context.env.ANTONINA_AGENT_CACHE_RETIREMENT !== '0';
+  const dryRun = parsed.flags.has('--dry-run');
+
+  const claims = listManagedCacheClaims(cacheRoot, cacheFs);
+  if (!claims.ok) {
+    context.io.stderr(`antonina: cache-clean: retained every managed cache: ${claims.reason ?? 'unreadable evidence'}`);
+    return EXIT_ERROR;
+  }
+
+  const mayRetire = (agentId: string, meta: AgentMetadata): boolean => {
+    if (!cacheOwnershipAllowsRetirement(meta, cutoff)) return false;
+    const registration = hasManagedCacheRegistration(cacheRoot, agentId, cacheFs);
+    if (registration.ambiguous || !registration.registered) {
+      if (registration.ambiguous) {
+        context.io.stdout(`retained managed build cache for ${agentId}: ${registration.reason ?? 'unreadable evidence'}`);
+      }
+      return false;
+    }
+    if (!retentionEnabled) {
+      context.io.stdout(`retained managed build cache for ${agentId}: retirement paused by ANTONINA_AGENT_CACHE_RETIREMENT=0`);
+      return false;
+    }
+    return true;
+  };
+
+  const retire = (agentId: string, meta: AgentMetadata): void => {
+    const result = retireManagedCache({
+      root: cacheRoot,
+      agentId,
+      fs: cacheFs,
+      meta,
+      probeLiveReferences: probe,
+      writeManifestLine: (line) => writeSyncedManifestLine(stateRootPath, manifestPath, line),
+    });
+    if (!result.removed) {
+      context.io.stdout(`retained managed build cache for ${agentId}: ${result.reason ?? 'unknown reason'}`);
+      return;
+    }
+    if (result.record !== undefined) {
+      context.io.stdout(`retired managed build cache ${result.record.path}`);
+    } else {
+      context.io.stdout(`cleaned managed build cache state for ${agentId}: ${result.reason ?? 'already retired'}`);
+    }
+  };
+
+  for (const claim of claims.claims) {
+    const agentId = claim.agentId;
+    if (dryRun) {
+      let meta: AgentMetadata | null;
+      try {
+        meta = readMeta(agentId, paths(context));
+      } catch (error) {
+        context.io.stderr(`antonina: cache-clean: agent ${agentId} was not read and was retained: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
+      if (meta === null) {
+        context.io.stdout(`retained managed build cache for ${agentId}: owner record is missing`);
+      } else if (mayRetire(agentId, meta)) {
+        context.io.stdout(`would retire managed build cache ${claim.path}`);
+      }
+      continue;
+    }
+
+    // Same per-agent lock cmdClean uses; readMeta is strict and no metadata
+    // write happens here, so the owner record and its log stay byte-identical.
+    try {
+      await withAgentLock(agentId, () => {
+        let meta: AgentMetadata | null;
+        try {
+          meta = readMeta(agentId, paths(context));
+        } catch (error) {
+          context.io.stderr(`antonina: cache-clean: agent ${agentId} was not read and was retained: ${error instanceof Error ? error.message : String(error)}`);
+          return;
+        }
+        if (meta === null) {
+          context.io.stdout(`retained managed build cache for ${agentId}: owner record is missing`);
+          return;
+        }
+        if (!mayRetire(agentId, meta)) return;
+        retire(agentId, meta);
+      }, paths(context));
+    } catch (error) {
+      context.io.stderr(`antonina: cache-clean: agent ${agentId} was retained: ownership check failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return EXIT_OK;
+}
+
 export async function runAgentCommand(argv: string[], context: AgentCommandContext): Promise<number> {
   const [command, ...args] = argv;
   try {
@@ -2254,6 +2370,7 @@ export async function runAgentCommand(argv: string[], context: AgentCommandConte
       case 'kill': return await stopLike('kill', args, context);
       case 'delete': return await cmdDelete(args, context);
       case 'cache': return await cmdManagedCache(args, context);
+      case 'cache-clean': return await cmdCacheClean(args, context);
       case 'clean': return await cmdClean(args, context);
       case 'run': return await cmdRun(args, context);
       default:

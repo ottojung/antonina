@@ -328,6 +328,17 @@ const AGENT_SPECS: readonly CommandSpec[] = [
     flags: ['--dry-run'],
     normalize: (p) => ['clean', ...valueArgs(p, ['--days']), ...flagArgs(p, ['--dry-run'])],
   },
+  {
+    path: ['cache-clean'],
+    summary: 'Retire only registered terminal agents\' build caches. Owner records, logs and all other files are left untouched; --dry-run reports candidates without deleting.',
+    values: ['--days'],
+    flags: ['--dry-run'],
+    optionHelp: {
+      '--dry-run': 'Report which registered caches would be retired; change nothing.',
+      '--days': 'Retention age in days for the owner record (default 14).',
+    },
+    normalize: (p) => ['cache-clean', ...valueArgs(p, ['--days']), ...flagArgs(p, ['--dry-run'])],
+  },
 ];
 
 const DAEMON_SPECS: readonly CommandSpec[] = [

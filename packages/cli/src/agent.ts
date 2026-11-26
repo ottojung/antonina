@@ -1,12 +1,22 @@
 import { spawn } from 'node:child_process';
 import {
   type Dirent,
+  closeSync,
   existsSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
+  rmSync,
+  rmdirSync,
   statSync,
+  writeFileSync,
+  writeSync,
 } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { agentStatusTimestamp } from './time-display.js';
 
 import { newEntityId } from '../../core/src/ids.js';
@@ -46,6 +56,16 @@ import {
   forkAgent,
 } from '../../agent-runtime/src/fork.js';
 import {
+  hasManagedCacheRegistration,
+  initializeManagedCache,
+  managedCachePath,
+  managedCacheRoot,
+  readManagedCache,
+  retireManagedCache,
+  type LiveReferenceResult,
+  type ManagedCacheFs,
+} from '../../agent-runtime/src/managed-build-cache.js';
+import {
   LAUNCH_DIRECTORY_MISSING,
   TERMINAL_STATES,
   activeRunnerFlag,
@@ -84,6 +104,7 @@ import {
   readMeta,
   recoverInterruptedInitialMeta,
   removeAgentDirectory,
+  stateRoot,
   updateMeta,
   writeMeta,
   type StatePathsOptions,
@@ -110,6 +131,9 @@ export interface AgentCommandContext {
   home?: string;
   entryScript?: string;
   storeFs?: StoreFs;
+  /** Test seams for the managed-cache helper and retirement step. */
+  managedCacheFs?: ManagedCacheFs;
+  liveReferenceProbe?: () => LiveReferenceResult;
 }
 
 interface Parsed {
@@ -1658,9 +1682,20 @@ async function cmdDelete(args: string[], context: AgentCommandContext): Promise<
     throw new Error(`delete: agent ${agentId} is running; use --force`);
   }
 
+  const cacheRoot = managedCacheRoot(stateRoot(paths(context)));
+  const cacheFs = context.managedCacheFs ?? hostManagedCacheFs();
   const tombstoned = await updateMeta(agentId, (meta) => {
     if (deletePendingFlag(meta) === null) {
       throw new Error('delete: durable deletion authority is malformed');
+    }
+    // Never silently orphan managed cache state: explicit delete must not
+    // remove the owner record while a registered (or ambiguous) cache remains.
+    const registration = hasManagedCacheRegistration(cacheRoot, agentId, cacheFs);
+    if (registration.registered || registration.ambiguous) {
+      throw new Error(
+        `delete: agent ${agentId} has a managed build cache; retire it with "antonina agent clean" first`
+        + (registration.reason ? ` (${registration.reason})` : ''),
+      );
     }
     meta.delete_pending = true;
   }, paths(context));
@@ -1742,6 +1777,214 @@ function retentionAnchor(meta: AgentMetadata): number | null {
   return created === null ? finished : Math.max(finished, created);
 }
 
+function errorCode(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null || !('code' in error)) return null;
+  return typeof error.code === 'string' ? error.code : null;
+}
+
+/** Real host filesystem for the explicitly registered cache root only. */
+function hostManagedCacheFs(): ManagedCacheFs {
+  function allocated(path: string): number {
+    let total = 0;
+    const stack = [path];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      let info;
+      try {
+        info = lstatSync(current);
+      } catch {
+        continue;
+      }
+      total += info.blocks * 512;
+      if (info.isDirectory()) {
+        for (const entry of readdirSync(current, { withFileTypes: true })) {
+          if (!entry.isSymbolicLink()) stack.push(join(current, entry.name));
+        }
+      }
+    }
+    return total;
+  }
+  return {
+    mkdir(path, mode) {
+      mkdirSync(path, { recursive: true, mode });
+    },
+    lstat(path) {
+      let info;
+      try {
+        info = lstatSync(path);
+      } catch (error) {
+        if (errorCode(error) === 'ENOENT') return null;
+        throw error; // EACCES and any other failure is unreadable evidence.
+      }
+      return {
+        dev: Number(info.dev),
+        ino: Number(info.ino),
+        isDirectory: info.isDirectory(),
+        isFile: info.isFile(),
+        isSymbolicLink: info.isSymbolicLink(),
+      };
+    },
+    readFile(path) {
+      return readFileSync(path, 'utf8');
+    },
+    writeFileExclusive(path, data) {
+      writeFileSync(path, data, { flag: 'wx', mode: 0o600 });
+    },
+    readdir(path) {
+      return readdirSync(path);
+    },
+    removeTree(path) {
+      rmSync(path, { recursive: true, force: false });
+    },
+    removeFile(path) {
+      rmSync(path, { force: false });
+    },
+    rmdir(path) {
+      rmdirSync(path);
+    },
+    allocatedBytes: allocated,
+  };
+}
+
+/** Decode the octal escapes used by /proc mount paths (\040, \011, \012, \134). */
+export function decodeProcEscapedPath(value: string): string {
+  let decoded = '';
+  for (let i = 0; i < value.length; i += 1) {
+    if (value[i] !== '\\') {
+      decoded += value[i];
+      continue;
+    }
+    const octal = value.slice(i + 1, i + 4);
+    if (!/^[0-7]{3}$/.test(octal)) throw new Error('invalid /proc path escape');
+    const code = parseInt(octal, 8);
+    if (code < 1 || code > 255) throw new Error('invalid /proc path escape');
+    decoded += String.fromCharCode(code);
+    i += 3;
+  }
+  return decoded;
+}
+
+function markUnknown(unknownProcesses: string[], pid: string, error: unknown): void {
+  const code = errorCode(error);
+  if (code !== 'ENOENT' && code !== 'ESRCH' && !unknownProcesses.includes(pid)) unknownProcesses.push(pid);
+}
+
+/**
+ * Fresh process/mount evidence. Any unreadable /proc data is reported as a
+ * failed probe so the caller fails closed; an unreadable process fd or mountinfo
+ * marks that pid unknown instead of being silently treated as "no reference".
+ * Descendant mounts are included from every process's own mount namespace, not
+ * just the namespace of this CLI process.
+ */
+function hostLiveReferenceProbe(): LiveReferenceResult {
+  const references = new Set<string>();
+  const unknownProcesses: string[] = [];
+  let pids: string[];
+  try {
+    pids = readdirSync('/proc', { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
+      .map((entry) => entry.name);
+  } catch (error) {
+    return { ok: false, reason: '/proc unreadable: ' + (error instanceof Error ? error.message : String(error)), references: [], unknownProcesses: [] };
+  }
+  for (const pid of pids) {
+    try {
+      references.add(readlinkSync(`/proc/${pid}/cwd`));
+      for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+        try {
+          references.add(readlinkSync(`/proc/${pid}/fd/${fd}`));
+        } catch (error) {
+          markUnknown(unknownProcesses, pid, error);
+        }
+      }
+    } catch (error) {
+      markUnknown(unknownProcesses, pid, error);
+    }
+    // Per-process mount namespace: mountinfo records the mount points visible
+    // to this process, including descendant mounts of the managed cache root.
+    try {
+      const mountinfo = readFileSync(`/proc/${pid}/mountinfo`, 'utf8');
+      for (const line of mountinfo.split('\n')) {
+        if (line.trim().length === 0) continue;
+        const fields = line.trim().split(/\s+/);
+        if (fields.length < 6 || fields[5] !== '-') throw new Error('malformed /proc/<pid>/mountinfo line');
+        references.add(decodeProcEscapedPath(fields[4]!));
+        const source = fields[6];
+        if (source !== undefined && source.startsWith('/')) {
+          references.add(decodeProcEscapedPath(source));
+        }
+      }
+    } catch (error) {
+      markUnknown(unknownProcesses, pid, error);
+    }
+  }
+  let mounts: string;
+  try {
+    mounts = readFileSync('/proc/mounts', 'utf8');
+  } catch (error) {
+    return { ok: false, reason: '/proc/mounts unreadable: ' + (error instanceof Error ? error.message : String(error)), references: [], unknownProcesses: [] };
+  }
+  try {
+    for (const line of mounts.split('\n')) {
+      if (line.trim().length === 0) continue;
+      const fields = line.trim().split(/\s+/);
+      if (fields.length >= 2) references.add(decodeProcEscapedPath(fields[1]!));
+    }
+  } catch (error) {
+    return { ok: false, reason: '/proc/mounts path unreadable: ' + (error instanceof Error ? error.message : String(error)), references: [], unknownProcesses: [] };
+  }
+  return { ok: true, references: [...references], unknownProcesses };
+}
+
+/** Opt-in helper: print the dedicated cache path, creating its marker with --init. */
+async function cmdManagedCache(args: string[], context: AgentCommandContext): Promise<number> {
+  const parsed = parse(args, ['--init']);
+  if (parsed.positionals.length !== 0) throw new UsageError('cache: unexpected positional arguments');
+  const agentId = parsed.values.get('--id');
+  if (agentId === undefined) throw new UsageError('cache: --id is required');
+  const root = managedCacheRoot(stateRoot(paths(context)));
+  const fs = context.managedCacheFs ?? hostManagedCacheFs();
+  if (parsed.flags.has('--init')) {
+    let initialized = false;
+    const meta = await updateMeta(agentId, (meta) => {
+      if (deletePendingFlag(meta) !== false) {
+        throw new Error(`cache: agent ${agentId} is being deleted`);
+      }
+      initializeManagedCache(root, agentId, fs);
+      initialized = true;
+    }, paths(context));
+    if (meta === null || !initialized) return EXIT_NOT_FOUND;
+  } else {
+    const meta = readMeta(agentId, paths(context));
+    if (meta === null) return EXIT_NOT_FOUND;
+    readManagedCache(root, agentId, fs);
+  }
+  context.io.stdout(managedCachePath(root, agentId));
+  return EXIT_OK;
+}
+
+/**
+ * Append a manifest line durably: fsync the record, then the directory entry.
+ * A plain appendFileSync can report success while the data is still only in the
+ * page cache, which would lose the pre-removal intent on a crash.
+ */
+function writeSyncedManifestLine(stateRootPath: string, manifestPath: string, line: string): void {
+  mkdirSync(stateRootPath, { recursive: true, mode: 0o700 });
+  const fd = openSync(manifestPath, 'a', 0o600);
+  try {
+    writeSync(fd, line + '\n');
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  const dirFd = openSync(dirname(manifestPath), 'r');
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
+  }
+}
+
 async function cmdClean(args: string[], context: AgentCommandContext): Promise<number> {
   const parsed = parse(args, ['--dry-run']);
   if (parsed.positionals.length !== 0) throw new UsageError('clean: unexpected positional arguments');
@@ -1762,6 +2005,9 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
   // would act on is exactly the set it could not establish, and "no records
   // were eligible" is not something this run observed.
   const unreadable: Array<{ agentId: string; reason: string }> = [];
+  // No root is collected from `persistedAgentCwd` here. Only agents whose
+  // record itself passes retention are candidates; their managed cache is
+  // retired later, under the record's own ownership lock.
   const candidates = agentIds(context, 'clean').filter((agentId) => {
     const read = readMetaForSweep(agentId, context);
     if (!read.readable) {
@@ -1773,9 +2019,24 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
     const anchor = retentionAnchor(meta);
     return anchor !== null && anchor < cutoff;
   });
+  const cacheRoot = managedCacheRoot(stateRoot(paths(context)));
+  const cacheFs = context.managedCacheFs ?? hostManagedCacheFs();
+  const probe = context.liveReferenceProbe ?? hostLiveReferenceProbe;
+  const manifestPath = join(stateRoot(paths(context)), 'managed-cache-retirements.jsonl');
+  const retentionEnabled = context.env.ANTONINA_AGENT_CACHE_RETIREMENT !== '0';
+
   for (const agentId of candidates) {
     if (parsed.flags.has('--dry-run')) {
       context.io.stdout(agentId);
+      if (retentionEnabled) {
+        try {
+          const registration = readManagedCache(cacheRoot, agentId, cacheFs);
+          context.io.stdout(`would retire managed build cache ${registration.path}`);
+        } catch {
+          // No registration, or unreadable evidence: nothing is removed in a
+          // dry run, and the unreadable case is reported by the real sweep.
+        }
+      }
       continue;
     }
     let removable = false;
@@ -1797,6 +2058,41 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
         || pending !== null
         || deletePendingFlag(meta) !== false
       ) return;
+
+      // The record is terminal and unowned, and this callback runs while the
+      // metadata/ownership lock is held. Only a registered cache is touched;
+      // a cwd or a directory named `target` is never evidence of ownership.
+      // Crucially, the owner record is tombstoned ONLY when no registered cache
+      // remains: a refusal or a paused retirement must keep the owner so a
+      // later clean can retry instead of orphaning retryable cache state.
+      const registration = hasManagedCacheRegistration(cacheRoot, agentId, cacheFs);
+      if (registration.ambiguous) {
+        context.io.stdout(`retained managed build cache for ${agentId}: ${registration.reason ?? 'unreadable evidence'}`);
+        return;
+      }
+      if (registration.registered) {
+        if (!retentionEnabled) {
+          context.io.stdout(`retained managed build cache for ${agentId}: retirement paused by ANTONINA_AGENT_CACHE_RETIREMENT=0`);
+          return;
+        }
+        const result = retireManagedCache({
+          root: cacheRoot,
+          agentId,
+          fs: cacheFs,
+          meta,
+          probeLiveReferences: probe,
+          writeManifestLine: (line) => writeSyncedManifestLine(stateRoot(paths(context)), manifestPath, line),
+        });
+        if (!result.removed) {
+          context.io.stdout(`retained managed build cache for ${agentId}: ${result.reason ?? 'unknown reason'}`);
+          return;
+        }
+        if (result.record !== undefined) {
+          context.io.stdout(`retired managed build cache ${result.record.path}`);
+        } else {
+          context.io.stdout(`cleaned managed build cache state for ${agentId}: ${result.reason ?? 'already retired'}`);
+        }
+      }
       meta.delete_pending = true;
       removable = true;
     }, paths(context));
@@ -1820,6 +2116,7 @@ export async function runAgentCommand(argv: string[], context: AgentCommandConte
       case 'stop': return await stopLike('stop', args, context);
       case 'kill': return await stopLike('kill', args, context);
       case 'delete': return await cmdDelete(args, context);
+      case 'cache': return await cmdManagedCache(args, context);
       case 'clean': return await cmdClean(args, context);
       case 'run': return await cmdRun(args, context);
       default:

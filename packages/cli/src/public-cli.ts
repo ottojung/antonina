@@ -311,8 +311,19 @@ const AGENT_SPECS: readonly CommandSpec[] = [
     normalize: (p) => ['delete', '--id', p.values.get('--id')!, ...flagArgs(p, ['--force'])],
   },
   {
+    path: ['cache'],
+    summary: 'Print the dedicated disposable build cache path for an agent; --init registers it.',
+    values: ['--id'],
+    flags: ['--init'],
+    required: ['--id'],
+    optionHelp: {
+      '--init': 'Create and register the cache directory and its identity marker (safe to repeat).',
+    },
+    normalize: (p) => ['cache', '--id', p.values.get('--id')!, ...flagArgs(p, ['--init'])],
+  },
+  {
     path: ['clean'],
-    summary: 'Delete old finished agents: any in a terminal state, plus any idle agent a fork created from an already-finished one.',
+    summary: 'Delete old finished agents: any in a terminal state, plus any idle agent a fork created from an already-finished one. Registered build caches are retired under the same ownership lock.',
     values: ['--days'],
     flags: ['--dry-run'],
     normalize: (p) => ['clean', ...valueArgs(p, ['--days']), ...flagArgs(p, ['--dry-run'])],

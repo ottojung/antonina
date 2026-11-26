@@ -1,12 +1,19 @@
 import { spawn } from 'node:child_process';
 import {
   type Dirent,
+  appendFileSync,
   existsSync,
+  lstatSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
+  rmSync,
+  rmdirSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { agentStatusTimestamp } from './time-display.js';
 
 import { newEntityId } from '../../core/src/ids.js';
@@ -46,6 +53,16 @@ import {
   forkAgent,
 } from '../../agent-runtime/src/fork.js';
 import {
+  initializeManagedCache,
+  managedCacheMarkerPath,
+  managedCachePath,
+  managedCacheRoot,
+  readManagedCache,
+  retireManagedCache,
+  type LiveReferenceResult,
+  type ManagedCacheFs,
+} from '../../agent-runtime/src/managed-build-cache.js';
+import {
   LAUNCH_DIRECTORY_MISSING,
   TERMINAL_STATES,
   activeRunnerFlag,
@@ -84,6 +101,7 @@ import {
   readMeta,
   recoverInterruptedInitialMeta,
   removeAgentDirectory,
+  stateRoot,
   updateMeta,
   writeMeta,
   type StatePathsOptions,
@@ -110,6 +128,9 @@ export interface AgentCommandContext {
   home?: string;
   entryScript?: string;
   storeFs?: StoreFs;
+  /** Test seams for the managed-cache helper and retirement step. */
+  managedCacheFs?: ManagedCacheFs;
+  liveReferenceProbe?: () => LiveReferenceResult;
 }
 
 interface Parsed {
@@ -1742,6 +1763,148 @@ function retentionAnchor(meta: AgentMetadata): number | null {
   return created === null ? finished : Math.max(finished, created);
 }
 
+function errorCode(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null || !('code' in error)) return null;
+  return typeof error.code === 'string' ? error.code : null;
+}
+
+/** Real host filesystem for the explicitly registered cache root only. */
+function hostManagedCacheFs(): ManagedCacheFs {
+  function allocated(path: string): number {
+    let total = 0;
+    const stack = [path];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      let info;
+      try {
+        info = lstatSync(current);
+      } catch {
+        continue;
+      }
+      total += info.blocks * 512;
+      if (info.isDirectory()) {
+        for (const entry of readdirSync(current, { withFileTypes: true })) {
+          if (!entry.isSymbolicLink()) stack.push(join(current, entry.name));
+        }
+      }
+    }
+    return total;
+  }
+  return {
+    mkdir(path, mode) {
+      mkdirSync(path, { recursive: true, mode });
+    },
+    lstat(path) {
+      let info;
+      try {
+        info = lstatSync(path);
+      } catch (error) {
+        if (errorCode(error) === 'ENOENT') return null;
+        throw error; // EACCES and any other failure is unreadable evidence.
+      }
+      return {
+        dev: Number(info.dev),
+        ino: Number(info.ino),
+        isDirectory: info.isDirectory(),
+        isFile: info.isFile(),
+        isSymbolicLink: info.isSymbolicLink(),
+      };
+    },
+    readFile(path) {
+      return readFileSync(path, 'utf8');
+    },
+    writeFileExclusive(path, data) {
+      writeFileSync(path, data, { flag: 'wx', mode: 0o600 });
+    },
+    readdir(path) {
+      return readdirSync(path);
+    },
+    removeTree(path) {
+      rmSync(path, { recursive: true, force: false });
+    },
+    removeFile(path) {
+      rmSync(path, { force: false });
+    },
+    rmdir(path) {
+      rmdirSync(path);
+    },
+    allocatedBytes: allocated,
+  };
+}
+
+/**
+ * Fresh process/mount evidence. Any unreadable /proc data is reported as a
+ * failed probe so the caller fails closed; an unreadable process fd marks that
+ * pid unknown instead of being silently treated as "no reference".
+ */
+function hostLiveReferenceProbe(): LiveReferenceResult {
+  const references: string[] = [];
+  const unknownProcesses: string[] = [];
+  let pids: string[];
+  try {
+    pids = readdirSync('/proc', { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
+      .map((entry) => entry.name);
+  } catch (error) {
+    return { ok: false, reason: '/proc unreadable: ' + (error instanceof Error ? error.message : String(error)), references: [], unknownProcesses: [] };
+  }
+  for (const pid of pids) {
+    try {
+      references.push(readlinkSync(`/proc/${pid}/cwd`));
+      for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+        try {
+          references.push(readlinkSync(`/proc/${pid}/fd/${fd}`));
+        } catch (error) {
+          const code = errorCode(error);
+          if (code !== 'ENOENT' && code !== 'ESRCH') unknownProcesses.push(pid);
+        }
+      }
+    } catch (error) {
+      const code = errorCode(error);
+      if (code !== 'ENOENT' && code !== 'ESRCH') unknownProcesses.push(pid);
+    }
+  }
+  let mounts: string;
+  try {
+    mounts = readFileSync('/proc/mounts', 'utf8');
+  } catch (error) {
+    return { ok: false, reason: '/proc/mounts unreadable: ' + (error instanceof Error ? error.message : String(error)), references: [], unknownProcesses: [] };
+  }
+  for (const line of mounts.split('\n')) {
+    if (line.trim().length === 0) continue;
+    const fields = line.trim().split(/\s+/);
+    if (fields.length >= 2) references.push(fields[1]!);
+  }
+  return { ok: true, references, unknownProcesses };
+}
+
+/** Opt-in helper: print the dedicated cache path, creating its marker with --init. */
+async function cmdManagedCache(args: string[], context: AgentCommandContext): Promise<number> {
+  const parsed = parse(args, ['--init']);
+  if (parsed.positionals.length !== 0) throw new UsageError('cache: unexpected positional arguments');
+  const agentId = parsed.values.get('--id');
+  if (agentId === undefined) throw new UsageError('cache: --id is required');
+  const root = managedCacheRoot(stateRoot(paths(context)));
+  const fs = context.managedCacheFs ?? hostManagedCacheFs();
+  if (parsed.flags.has('--init')) {
+    let initialized = false;
+    const meta = await updateMeta(agentId, (meta) => {
+      if (deletePendingFlag(meta) !== false) {
+        throw new Error(`cache: agent ${agentId} is being deleted`);
+      }
+      initializeManagedCache(root, agentId, fs);
+      initialized = true;
+    }, paths(context));
+    if (meta === null || !initialized) return EXIT_NOT_FOUND;
+  } else {
+    const meta = readMeta(agentId, paths(context));
+    if (meta === null) return EXIT_NOT_FOUND;
+    readManagedCache(root, agentId, fs);
+  }
+  context.io.stdout(managedCachePath(root, agentId));
+  return EXIT_OK;
+}
+
 async function cmdClean(args: string[], context: AgentCommandContext): Promise<number> {
   const parsed = parse(args, ['--dry-run']);
   if (parsed.positionals.length !== 0) throw new UsageError('clean: unexpected positional arguments');
@@ -1762,6 +1925,9 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
   // would act on is exactly the set it could not establish, and "no records
   // were eligible" is not something this run observed.
   const unreadable: Array<{ agentId: string; reason: string }> = [];
+  // No root is collected from `persistedAgentCwd` here. Only agents whose
+  // record itself passes retention are candidates; their managed cache is
+  // retired later, under the record's own ownership lock.
   const candidates = agentIds(context, 'clean').filter((agentId) => {
     const read = readMetaForSweep(agentId, context);
     if (!read.readable) {
@@ -1773,9 +1939,24 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
     const anchor = retentionAnchor(meta);
     return anchor !== null && anchor < cutoff;
   });
+  const cacheRoot = managedCacheRoot(stateRoot(paths(context)));
+  const cacheFs = context.managedCacheFs ?? hostManagedCacheFs();
+  const probe = context.liveReferenceProbe ?? hostLiveReferenceProbe;
+  const manifestPath = join(stateRoot(paths(context)), 'managed-cache-retirements.jsonl');
+  const retentionEnabled = context.env.ANTONINA_AGENT_CACHE_RETIREMENT !== '0';
+
   for (const agentId of candidates) {
     if (parsed.flags.has('--dry-run')) {
       context.io.stdout(agentId);
+      if (retentionEnabled) {
+        try {
+          const registration = readManagedCache(cacheRoot, agentId, cacheFs);
+          context.io.stdout(`would retire managed build cache ${registration.path}`);
+        } catch {
+          // No registration, or unreadable evidence: nothing is removed in a
+          // dry run, and the unreadable case is reported by the real sweep.
+        }
+      }
       continue;
     }
     let removable = false;
@@ -1797,6 +1978,30 @@ async function cmdClean(args: string[], context: AgentCommandContext): Promise<n
         || pending !== null
         || deletePendingFlag(meta) !== false
       ) return;
+
+      // The record is terminal and unowned, and this callback runs while the
+      // metadata/ownership lock is held. Only a registered cache is touched;
+      // a cwd or a directory named `target` is never evidence of ownership.
+      if (retentionEnabled && cacheFs.lstat(managedCacheMarkerPath(cacheRoot, agentId)) !== null) {
+        const result = retireManagedCache({
+          root: cacheRoot,
+          agentId,
+          fs: cacheFs,
+          meta,
+          probeLiveReferences: probe,
+          writeManifestLine(line) {
+            mkdirSync(stateRoot(paths(context)), { recursive: true, mode: 0o700 });
+            appendFileSync(manifestPath, line + '\n', { mode: 0o600 });
+          },
+        });
+        if (result.removed && result.record !== undefined) {
+          context.io.stdout(`retired managed build cache ${result.record.path}`);
+        } else if (result.removed) {
+          context.io.stdout(`cleaned managed build cache state for ${agentId}: ${result.reason ?? 'already retired'}`);
+        } else if (result.reason !== undefined) {
+          context.io.stdout(`retained managed build cache for ${agentId}: ${result.reason}`);
+        }
+      }
       meta.delete_pending = true;
       removable = true;
     }, paths(context));
@@ -1820,6 +2025,7 @@ export async function runAgentCommand(argv: string[], context: AgentCommandConte
       case 'stop': return await stopLike('stop', args, context);
       case 'kill': return await stopLike('kill', args, context);
       case 'delete': return await cmdDelete(args, context);
+      case 'cache': return await cmdManagedCache(args, context);
       case 'clean': return await cmdClean(args, context);
       case 'run': return await cmdRun(args, context);
       default:

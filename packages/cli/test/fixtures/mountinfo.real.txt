@@ -1,0 +1,5 @@
+354 1423 0:208 /user/1001/netns /run/user/1001/netns rw,nosuid,nodev,relatime shared:430 - tmpfs tmpfs rw,mode=700,uid=1001,gid=1001,inode64
+1882 1855 7:9 /workspace /workspace rw,relatime - ext4 /dev/loop9 rw
+1889 1883 252:1 /gnu/store /gnu/store ro,relatime - ext4 /dev/mapper/ubuntu--vg-ubuntu--lv rw
+1857 1855 0:202 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
+1861 1860 0:30 / /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw

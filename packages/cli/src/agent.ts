@@ -1864,9 +1864,150 @@ export function decodeProcEscapedPath(value: string): string {
   return decoded;
 }
 
-function markUnknown(unknownProcesses: string[], pid: string, error: unknown): void {
+/**
+ * Parse one /proc/<pid>/mountinfo line per proc_pid_mountinfo(5):
+ *   id parent major:minor root mount-point mount-options [optional...] - fstype source super-options
+ * The separator is the first bare "-" at or after field 7, never field 6
+ * (field 6 is the mount options). Source is separator+2; root is field 4 (1-based)
+ * and is the underlying path for bind mounts, so it must be considered too.
+ * Anything malformed throws so the caller can fail closed for that pid.
+ */
+export function parseProcMountinfoLine(line: string): { root: string; mountPoint: string; source: string | null } {
+  const fields = line.trim().split(/\s+/);
+  if (fields.length < 10) throw new Error('malformed /proc/<pid>/mountinfo line: too few fields');
+  if (!/^\d+$/.test(fields[0]!)) throw new Error('malformed /proc/<pid>/mountinfo line: mount id');
+  if (!/^\d+$/.test(fields[1]!)) throw new Error('malformed /proc/<pid>/mountinfo line: parent id');
+  if (!/^\d+:\d+$/.test(fields[2]!)) throw new Error('malformed /proc/<pid>/mountinfo line: device');
+  const separator = fields.indexOf('-', 6);
+  if (separator < 6) throw new Error('malformed /proc/<pid>/mountinfo line: missing separator');
+  if (fields.length < separator + 4) throw new Error('malformed /proc/<pid>/mountinfo line: missing filesystem fields');
+  for (let i = 6; i < separator; i += 1) {
+    if (!/^[A-Za-z][A-Za-z0-9_]*(?::\S+)?$/.test(fields[i]!)) throw new Error('malformed /proc/<pid>/mountinfo line: optional field');
+  }
+  const source = decodeProcEscapedPath(fields[separator + 2]!);
+  return {
+    root: decodeProcEscapedPath(fields[3]!),
+    mountPoint: decodeProcEscapedPath(fields[4]!),
+    source: source.startsWith('/') ? source : null,
+  };
+}
+
+/** Decode every usable path in a /proc/<pid>/mountinfo document. */
+export function parseProcMountinfo(text: string): string[] {
+  const references = new Set<string>();
+  for (const line of text.split('\n')) {
+    if (line.trim().length === 0) continue;
+    const parsed = parseProcMountinfoLine(line);
+    references.add(parsed.root);
+    references.add(parsed.mountPoint);
+    if (parsed.source !== null) references.add(parsed.source);
+  }
+  return [...references];
+}
+
+export type ProcReleaseVerdict = 'released' | 'alive' | 'unknown';
+
+export interface ProcStatIdentity {
+  pid: string;
+  state: string;
+  threads: number;
+  startTicks: string;
+}
+
+/**
+ * Parse /proc/<pid>/stat defensively. comm is parenthesised and may contain
+ * spaces and ')' itself, so the closing delimiter is the LAST ')'. State,
+ * field 20 (num_threads) and field 22 (starttime) must all be well formed and
+ * the leading pid must match the pid being probed (no PID reuse shortcuts).
+ */
+export function parseProcStat(stat: string, expectedPid?: string): ProcStatIdentity | null {
+  const open = stat.indexOf(' (');
+  const close = stat.lastIndexOf(')');
+  if (open < 0 || close <= open) return null;
+  const pid = stat.slice(0, open);
+  if (!/^\d+$/.test(pid)) return null;
+  if (expectedPid !== undefined && pid !== expectedPid) return null;
+  const fields = stat.slice(close + 1).trimStart().split(/\s+/);
+  const state = fields[0];
+  const threads = fields[17];
+  const startTicks = fields[19];
+  if (state === undefined || state.length !== 1 || !/^[RSDTIWKPZXx]$/.test(state)) return null;
+  if (threads === undefined || !/^\d+$/.test(threads)) return null;
+  if (startTicks === undefined || !/^\d+$/.test(startTicks)) return null;
+  return { pid, state, threads: Number(threads), startTicks };
+}
+
+export function isTerminalProcState(state: string): boolean {
+  return state === 'Z' || state === 'X' || state === 'x';
+}
+
+/**
+ * Narrow proof that an EINVAL from /proc/<pid>/mountinfo means an exited
+ * thread group, not inaccessible evidence: two independent stat reads must
+ * agree on the same PID, terminal state, one thread and unchanged start ticks,
+ * and /proc/<pid>/task must contain only the leader. A zombie leader with live
+ * sibling threads stays unknown.
+ */
+export function provenTerminalRelease(first: string, second: string, tasks: readonly string[], expectedPid: string): boolean {
+  const a = parseProcStat(first, expectedPid);
+  const b = parseProcStat(second, expectedPid);
+  if (a === null || b === null) return false;
+  if (!isTerminalProcState(a.state) || a.state !== b.state) return false;
+  if (a.threads !== 1 || b.threads !== 1) return false;
+  if (a.startTicks !== b.startTicks) return false;
+  return tasks.length === 1 && tasks[0] === expectedPid;
+}
+
+function provenTerminalReleaseFromProc(pid: string, procRoot: string): boolean {
+  try {
+    const first = readFileSync(`${procRoot}/${pid}/stat`, 'utf8');
+    const identity = parseProcStat(first, pid);
+    if (identity === null || !isTerminalProcState(identity.state) || identity.threads !== 1) return false;
+    let tasks: string[];
+    try {
+      tasks = readdirSync(`${procRoot}/${pid}/task`);
+    } catch {
+      return false;
+    }
+    const second = readFileSync(`${procRoot}/${pid}/stat`, 'utf8');
+    return provenTerminalRelease(first, second, tasks, pid);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Conservative reading of an ENOENT/ESRCH from /proc/<pid>/*. Only a missing
+ * /proc entry or a confirmed terminal state proves the process can no longer
+ * hold descriptors or mounts. A live process whose fd vanished mid-probe is
+ * "alive", and an unreadable or malformed stat is "unknown": both must be
+ * reported as unknown references rather than silently ignored.
+ */
+export function procReleaseVerdict(stat: string | null | undefined, expectedPid?: string): ProcReleaseVerdict {
+  if (stat === null) return 'released';
+  if (stat === undefined) return 'unknown';
+  const identity = parseProcStat(stat, expectedPid);
+  if (identity === null) return 'unknown';
+  return isTerminalProcState(identity.state) ? 'released' : 'alive';
+}
+
+export function markUnknown(unknownProcesses: string[], pid: string, error: unknown, procRoot: string): void {
   const code = errorCode(error);
-  if (code !== 'ENOENT' && code !== 'ESRCH' && !unknownProcesses.includes(pid)) unknownProcesses.push(pid);
+  if (code === 'ENOENT' || code === 'ESRCH') {
+    let stat: string | null | undefined;
+    try {
+      stat = readFileSync(`${procRoot}/${pid}/stat`, 'utf8');
+    } catch (statError) {
+      const statCode = errorCode(statError);
+      stat = statCode === 'ENOENT' || statCode === 'ESRCH' ? null : undefined;
+    }
+    if (procReleaseVerdict(stat, pid) === 'released') return;
+  }
+  // EINVAL is the kernel's response when reading mountinfo of an exited
+  // thread group. Release only on full identity proof; every other error,
+  // including EACCES/EPERM and unreadable identity, stays unknown.
+  if (code === 'EINVAL' && provenTerminalReleaseFromProc(pid, procRoot)) return;
+  if (!unknownProcesses.includes(pid)) unknownProcesses.push(pid);
 }
 
 /**
@@ -1874,53 +2015,49 @@ function markUnknown(unknownProcesses: string[], pid: string, error: unknown): v
  * failed probe so the caller fails closed; an unreadable process fd or mountinfo
  * marks that pid unknown instead of being silently treated as "no reference".
  * Descendant mounts are included from every process's own mount namespace, not
- * just the namespace of this CLI process.
+ * just the namespace of this CLI process. procRoot is injectable only for tests.
  */
-function hostLiveReferenceProbe(): LiveReferenceResult {
+export function hostLiveReferenceProbe(procRoot = '/proc'): LiveReferenceResult {
   const references = new Set<string>();
   const unknownProcesses: string[] = [];
   let pids: string[];
   try {
-    pids = readdirSync('/proc', { withFileTypes: true })
+    pids = readdirSync(procRoot, { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
       .map((entry) => entry.name);
   } catch (error) {
     return { ok: false, reason: '/proc unreadable: ' + (error instanceof Error ? error.message : String(error)), references: [], unknownProcesses: [] };
   }
+  const selfPid = String(process.pid);
   for (const pid of pids) {
     try {
-      references.add(readlinkSync(`/proc/${pid}/cwd`));
-      for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+      references.add(readlinkSync(`${procRoot}/${pid}/cwd`));
+      for (const fd of readdirSync(`${procRoot}/${pid}/fd`)) {
         try {
-          references.add(readlinkSync(`/proc/${pid}/fd/${fd}`));
+          references.add(readlinkSync(`${procRoot}/${pid}/fd/${fd}`));
         } catch (error) {
-          markUnknown(unknownProcesses, pid, error);
+          // readdirSync on our own /proc/<pid>/fd opens a directory fd that is
+          // listed and then closed before readlink: ENOENT for that one entry
+          // is our own enumeration artifact, never a held cache reference.
+          if (errorCode(error) === 'ENOENT' && pid === selfPid) continue;
+          markUnknown(unknownProcesses, pid, error, procRoot);
         }
       }
     } catch (error) {
-      markUnknown(unknownProcesses, pid, error);
+      markUnknown(unknownProcesses, pid, error, procRoot);
     }
     // Per-process mount namespace: mountinfo records the mount points visible
     // to this process, including descendant mounts of the managed cache root.
     try {
-      const mountinfo = readFileSync(`/proc/${pid}/mountinfo`, 'utf8');
-      for (const line of mountinfo.split('\n')) {
-        if (line.trim().length === 0) continue;
-        const fields = line.trim().split(/\s+/);
-        if (fields.length < 6 || fields[5] !== '-') throw new Error('malformed /proc/<pid>/mountinfo line');
-        references.add(decodeProcEscapedPath(fields[4]!));
-        const source = fields[6];
-        if (source !== undefined && source.startsWith('/')) {
-          references.add(decodeProcEscapedPath(source));
-        }
-      }
+      const mountinfo = readFileSync(`${procRoot}/${pid}/mountinfo`, 'utf8');
+      for (const reference of parseProcMountinfo(mountinfo)) references.add(reference);
     } catch (error) {
-      markUnknown(unknownProcesses, pid, error);
+      markUnknown(unknownProcesses, pid, error, procRoot);
     }
   }
   let mounts: string;
   try {
-    mounts = readFileSync('/proc/mounts', 'utf8');
+    mounts = readFileSync(`${procRoot}/mounts`, 'utf8');
   } catch (error) {
     return { ok: false, reason: '/proc/mounts unreadable: ' + (error instanceof Error ? error.message : String(error)), references: [], unknownProcesses: [] };
   }

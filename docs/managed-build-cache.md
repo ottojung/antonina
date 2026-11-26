@@ -57,16 +57,26 @@ hold:
 - no other registration in the dedicated cache root points at the same path or
   inode;
 - a **fresh** process and mount probe at deletion time finds no live reference
-  under the cache path.
+  under the cache path. The probe reads every process's `mountinfo` (including
+  descendant mounts in that process's own namespace), decodes `/proc` octal path
+  escapes and treats any unreadable evidence as unknown.
 
-A durable pre-removal manifest line is written before deletion so evidence is
-preserved and removal failures leave retryable state. On successful removal the
-target, marker and empty agent directory are cleaned up so stale markers cannot
-block later claims. Any refusal or unreadable/malformed/mismatched evidence,
-unreadable `/proc` or `/proc/mounts`, unknown process, changed inode, shared
-claim, or failed removal retains the cache and leaves it retryable.
-Retirements append JSON lines to
-`<state root>/managed-cache-retirements.jsonl`, outside the removed tree.
+The directory's device/inode and live references are re-checked again after the
+allocated-byte scan and immediately before removal. A pre-removal `intent`
+manifest line is fsynced (record and directory) before deletion, with a distinct
+fsynced `retired` completion line afterwards. A crash or removal failure leaves
+the target and marker intact for a retry instead of a false completion.
+
+The owner record is removed **only after** no registered cache remains. A cache
+refusal, paused retirement or ambiguous cache evidence keeps the owner metadata
+so a later `clean` can retry; `antonina agent delete` likewise refuses to
+orphan a registered cache. On successful removal the target, marker and empty
+agent directory are cleaned up so stale markers cannot block later claims. Any
+refusal or unreadable/malformed/mismatched evidence, unreadable `/proc`,
+`/proc/<pid>/mountinfo` or `/proc/mounts`, unknown process, changed inode, shared
+claim, or failed removal retains the cache and leaves it retryable. Retirements
+append JSON lines to `<state root>/managed-cache-retirements.jsonl`, outside the
+removed tree.
 
 `ANTONINA_AGENT_CACHE_RETIREMENT=0` pauses retirement for an operator who needs
 to inspect a cache; it has no effect on launches or on benchmark guards.

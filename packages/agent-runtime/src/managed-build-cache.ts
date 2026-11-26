@@ -18,7 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 
 import {
   activeRunnerFlag,
@@ -106,6 +106,7 @@ export interface RetireManagedCacheResult {
   readonly reason?: string;
   readonly record?: {
     readonly schema: typeof MANAGED_CACHE_SCHEMA;
+    readonly status: 'intent' | 'retired';
     readonly agent_id: string;
     readonly path: string;
     readonly nonce: string;
@@ -126,7 +127,11 @@ export interface RetireManagedCacheOptions {
   readonly probeLiveReferences: () => LiveReferenceResult;
   /** Defaults to a fresh listing of the dedicated managed root. */
   readonly listClaims?: () => ClaimsResult;
-  readonly writeManifestLine?: (line: string) => void;
+  /**
+   * MUST durably fsync the line before returning. Called once with `intent`
+   * before removal, then once with `retired` after successful removal.
+   */
+  readonly writeManifestLine?: (line: string, phase: 'intent' | 'retired') => void;
   readonly now?: () => number;
 }
 
@@ -202,6 +207,22 @@ function assertOwnedDirectory(fs: ManagedCacheFs, path: string): ManagedCacheSta
 }
 
 /**
+ * Verify every ancestor component is a plain directory. `lstat` on the final
+ * path alone is not enough: an intermediate symlink would be followed by any
+ * lookup below it, which could redirect the managed root (or a cleanup) into a
+ * directory Antonina does not own.
+ */
+function assertPlainAncestorChain(fs: ManagedCacheFs, path: string): void {
+  const absolute = resolve(path);
+  const parts = absolute.split(sep).filter((part) => part.length > 0);
+  let current = absolute.startsWith(sep) ? sep : '';
+  for (const part of parts) {
+    current = current === sep ? sep + part : (current.length > 0 ? current + sep + part : part);
+    assertPlainDirectory(fs.lstat(current), current);
+  }
+}
+
+/**
  * Opt-in creation of the dedicated cache directory plus its identity marker.
  * Idempotent for the identical marker; any mismatch is an error rather than an
  * overwrite, so a stale or foreign directory can never be adopted silently.
@@ -218,10 +239,11 @@ export function initializeManagedCache(
   const path = managedCachePath(root, id);
   const markerPath = managedCacheMarkerPath(root, id);
 
-  // The root must be a plain, non-symlink directory owned by this managed area.
-  // mkdir is recursive but we still verify every ancestor we rely on.
+  // Validate ancestors BEFORE mkdir: a recursive mkdir would happily follow a
+  // symlinked ancestor. Then re-validate the whole chain including the new root.
+  assertPlainAncestorChain(fs, dirname(root));
   fs.mkdir(root, 0o700);
-  assertOwnedDirectory(fs, root);
+  assertPlainAncestorChain(fs, root);
 
   // Refuse symlinked agent dir before creating anything inside it.
   const preDir = fs.lstat(dir);
@@ -306,8 +328,7 @@ export function readManagedCache(
   fs: ManagedCacheFs,
 ): { path: string; marker: ManagedCacheMarker; stat: ManagedCacheStat } {
   const id = agentIdRequired(agentId);
-  const rootStat = fs.lstat(root);
-  assertPlainDirectory(rootStat, root);
+  assertPlainAncestorChain(fs, root);
   const dir = managedCacheDir(root, id);
   const dirStat = fs.lstat(dir);
   assertPlainDirectory(dirStat, dir);
@@ -328,6 +349,9 @@ export function readManagedCache(
 
 function staleRetiredMarker(root: string, agentId: string, fs: ManagedCacheFs): ManagedCacheMarker | null {
   const id = agentIdRequired(agentId);
+  // This fallback runs after readManagedCache rejected evidence. It must not
+  // follow a symlinked root/ancestor to "clean up" a foreign directory.
+  assertPlainAncestorChain(fs, root);
   const dir = managedCacheDir(root, id);
   const dirStat = fs.lstat(dir);
   if (dirStat === null) return null;
@@ -366,11 +390,90 @@ function cleanupStaleMarker(root: string, agentId: string, fs: ManagedCacheFs, m
   }
 }
 
+/** Best-effort cleanup of a valid marker left behind after prior retirement. */
+export function cleanupStaleManagedCache(root: string, agentId: string, fs: ManagedCacheFs): boolean {
+  try {
+    const stale = staleRetiredMarker(root, agentId, fs);
+    if (stale === null) return false;
+    cleanupStaleMarker(root, agentId, fs, stale);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface ManagedCacheRegistrationStatus {
+  readonly registered: boolean;
+  /** A valid marker for an already-gone target; cleanup was attempted. */
+  readonly stale?: boolean;
+  /** Present but unreadable evidence: the owner must be preserved, fail closed. */
+  readonly ambiguous?: boolean;
+  readonly reason?: string;
+}
+
+/**
+ * Answer whether an agent still has a registered (or ambiguous) managed cache.
+ * Used before an owner record is deleted so `clean`/`delete` can never orphan
+ * retryable cache state. Any unreadable or non-plain evidence is ambiguous and
+ * keeps the owner record.
+ */
+export function hasManagedCacheRegistration(
+  root: string,
+  agentId: string,
+  fs: ManagedCacheFs,
+): ManagedCacheRegistrationStatus {
+  try {
+    readManagedCache(root, agentId, fs);
+    return { registered: true };
+  } catch {
+    if (cleanupStaleManagedCache(root, agentId, fs)) return { registered: false, stale: true };
+    try {
+      assertPlainAncestorChain(fs, dirname(root));
+      const rootStat = fs.lstat(root);
+      if (rootStat === null) return { registered: false };
+      if (rootStat.isSymbolicLink || !rootStat.isDirectory) {
+        return { registered: false, ambiguous: true, reason: 'managed cache root is not a plain directory' };
+      }
+      const dir = managedCacheDir(root, agentId);
+      const dirStat = fs.lstat(dir);
+      if (dirStat === null) return { registered: false };
+      if (dirStat.isSymbolicLink || !dirStat.isDirectory) {
+        return { registered: false, ambiguous: true, reason: 'managed cache agent directory is not a plain directory' };
+      }
+      const markerPath = managedCacheMarkerPath(root, agentId);
+      const markerStat = fs.lstat(markerPath);
+      if (markerStat !== null) {
+        if (!markerStat.isFile || markerStat.isSymbolicLink) {
+          return { registered: false, ambiguous: true, reason: 'managed cache marker is not a plain file' };
+        }
+        return { registered: false, ambiguous: true, reason: 'managed cache marker is unreadable' };
+      }
+      if (fs.lstat(managedCachePath(root, agentId)) !== null) {
+        return { registered: false, ambiguous: true, reason: 'unmarked managed cache target present' };
+      }
+      return { registered: false };
+    } catch (error) {
+      return {
+        registered: false,
+        ambiguous: true,
+        reason: 'managed cache evidence unreadable: ' + (error instanceof Error ? error.message : String(error)),
+      };
+    }
+  }
+}
+
 /** List registrations under the dedicated root only. No cwd is ever consulted. */
 export function listManagedCacheClaims(root: string, fs: ManagedCacheFs): ClaimsResult {
+  try {
+    assertPlainAncestorChain(fs, dirname(root));
+  } catch (error) {
+    return { ok: false, reason: 'managed cache ancestor unreadable or not a plain directory: ' + (error instanceof Error ? error.message : String(error)), claims: [] };
+  }
   const rootStat = fs.lstat(root);
   if (rootStat === null) return { ok: true, claims: [] };
-  assertPlainDirectory(rootStat, root);
+  if (rootStat.isSymbolicLink || !rootStat.isDirectory) {
+    return { ok: false, reason: 'managed cache root is not a plain directory: ' + root, claims: [] };
+  }
   const claims: CacheClaim[] = [];
   let entries: string[];
   try {
@@ -504,8 +607,16 @@ export function retireManagedCache(options: RetireManagedCacheOptions): RetireMa
   const referenceIssue = liveReferenceReason(registration.path, options.probeLiveReferences());
   if (referenceIssue !== null) return refuse(referenceIssue);
 
-  // Last re-read immediately before removal: marker text, inode and owner all
-  // must still be exactly what was checked above.
+  // Account for the bytes before removal; after removal the path is gone. The
+  // scan walks the tree, so identity and live references are re-checked right
+  // after it, immediately before deletion.
+  let allocatedBytes: number | null;
+  try {
+    allocatedBytes = options.fs.allocatedBytes?.(registration.path) ?? null;
+  } catch (error) {
+    return refuse('allocated scan failed: ' + (error instanceof Error ? error.message : String(error)));
+  }
+
   let beforeRemoval: ReturnType<typeof readManagedCache>;
   try {
     beforeRemoval = readManagedCache(options.root, options.agentId, options.fs);
@@ -515,10 +626,10 @@ export function retireManagedCache(options: RetireManagedCacheOptions): RetireMa
   if (!sameMarker(beforeRemoval.marker, registration.marker)) {
     return refuse('marker changed between verification and deletion');
   }
+  const finalReferenceIssue = liveReferenceReason(registration.path, options.probeLiveReferences());
+  if (finalReferenceIssue !== null) return refuse(finalReferenceIssue + ' (final check)');
 
-  // Account for the bytes before removal; after removal the path is gone.
-  const allocatedBytes = options.fs.allocatedBytes?.(registration.path) ?? null;
-  const record: RetireManagedCacheResult['record'] = {
+  const baseRecord = {
     schema: MANAGED_CACHE_SCHEMA,
     agent_id: options.agentId,
     path: registration.path,
@@ -527,11 +638,12 @@ export function retireManagedCache(options: RetireManagedCacheOptions): RetireMa
     ino: registration.stat.ino,
     allocated_bytes: allocatedBytes,
     utc: new Date((options.now ?? Date.now)()).toISOString(),
-  };
-  // Durable pre-removal manifest: write before deletion so a crash or removal
-  // failure leaves evidence and the still-present target+marker remain retryable.
+  } as const;
+  const intentRecord: RetireManagedCacheResult['record'] = { ...baseRecord, status: 'intent' };
+  // Durable pre-removal manifest: the callback MUST fsync before returning, so
+  // a crash or removal failure leaves evidence and retryable target+marker.
   try {
-    options.writeManifestLine?.(JSON.stringify(record));
+    options.writeManifestLine?.(JSON.stringify(intentRecord), 'intent');
   } catch (error) {
     return refuse('manifest write failed: ' + (error instanceof Error ? error.message : String(error)));
   }
@@ -540,6 +652,16 @@ export function retireManagedCache(options: RetireManagedCacheOptions): RetireMa
     options.fs.removeTree(registration.path);
   } catch (error) {
     return refuse('removal failed: ' + (error instanceof Error ? error.message : String(error)));
+  }
+
+  // Distinct completion record, also fsynced, so an intent line is not mistaken
+  // for a completed retirement after a crash.
+  const completionRecord: RetireManagedCacheResult['record'] = { ...baseRecord, status: 'retired' };
+  let completionError: string | null = null;
+  try {
+    options.writeManifestLine?.(JSON.stringify(completionRecord), 'retired');
+  } catch (error) {
+    completionError = 'completion manifest write failed: ' + (error instanceof Error ? error.message : String(error));
   }
 
   // Clean up marker and empty agent dir so stale markers cannot block later
@@ -556,7 +678,7 @@ export function retireManagedCache(options: RetireManagedCacheOptions): RetireMa
   } catch (error) {
     return {
       removed: true,
-      record,
+      record: completionRecord,
       reason: 'cache removed but marker cleanup failed: ' + (error instanceof Error ? error.message : String(error)),
     };
   }
@@ -567,5 +689,5 @@ export function retireManagedCache(options: RetireManagedCacheOptions): RetireMa
     // Best-effort: empty dir cleanup is not required for correctness.
   }
 
-  return { removed: true, record };
+  return { removed: true, record: completionRecord, ...(completionError === null ? {} : { reason: completionError }) };
 }

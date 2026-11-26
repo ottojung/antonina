@@ -254,7 +254,7 @@ test('the reference probe is invoked freshly for each deletion', () => {
   const second = retireManagedCache({
     root: ROOT, agentId: 'agent-b', fs, meta: terminalMeta('agent-b', '/'), probeLiveReferences: probe,
   });
-  assert.equal(calls, 2);
+  assert.equal(calls, 3); // initial probe for each deletion + a final re-probe before the second removal
   assert.equal(first.removed, false);
   assert.match(first.reason, /live process/);
   assert.equal(second.removed, true);
@@ -275,8 +275,11 @@ test('successful retirement writes a manifest with the pre-removal inode and byt
   assert.equal(result.record.ino, s.created.marker.ino);
   assert.equal(result.record.nonce, s.created.marker.nonce);
   assert.equal(s.fs.nodes.has(s.created.path), false);
-  assert.equal(lines.length, 1);
-  assert.equal(JSON.parse(lines[0]).schema, MANAGED_CACHE_SCHEMA);
+  assert.equal(lines.length, 2);
+  const records = lines.map((line) => JSON.parse(line));
+  assert.deepEqual(records.map((r) => r.status), ['intent', 'retired']);
+  for (const r of records) assert.equal(r.schema, MANAGED_CACHE_SCHEMA);
+  assert.equal(result.record.status, 'retired');
 });
 
 test('the module exports no launch-admission or capacity-guard API', () => {
@@ -346,8 +349,9 @@ test('successful retirement removes stale marker and allows a later claim', () =
   });
   assert.equal(second.removed, true);
   assert.equal(fs.nodes.has(b.path), false);
-  assert.equal(manifest.length, 2);
-  assert.notEqual(JSON.parse(manifest[0]).agent_id, JSON.parse(manifest[1]).agent_id);
+  assert.equal(manifest.length, 4);
+  assert.notEqual(JSON.parse(manifest[0]).agent_id, JSON.parse(manifest[2]).agent_id);
+  assert.deepEqual(manifest.map((line) => JSON.parse(line).status), ['intent', 'retired', 'intent', 'retired']);
 });
 
 test('two sequential retirements on same root do not interfere', () => {
@@ -371,7 +375,7 @@ test('two sequential retirements on same root do not interfere', () => {
   assert.equal(fs.nodes.has(managedCachePath(ROOT, 'agent-seq2')), false);
   assert.equal(fs.nodes.has(managedCacheMarkerPath(ROOT, 'agent-seq1')), false);
   assert.equal(fs.nodes.has(managedCacheMarkerPath(ROOT, 'agent-seq2')), false);
-  assert.equal(lines.length, 2);
+  assert.equal(lines.length, 4);
 });
 
 test('stale marker with missing target is tolerated by claims and cleaned by retirement', () => {
@@ -409,9 +413,10 @@ test('durable pre-removal manifest preserves retryable state on removal failure'
   });
   assert.equal(result.removed, false);
   assert.match(result.reason, /removal failed/);
-  // Manifest was durably written before removal attempt.
+  // The intent record was written before the removal attempt.
   assert.equal(lines.length, 1);
   assert.equal(JSON.parse(lines[0]).path, s.created.path);
+  assert.equal(JSON.parse(lines[0]).status, 'intent');
   // Target and marker remain, so a later retry can succeed.
   assert.equal(s.fs.nodes.has(s.created.path), true);
   assert.equal(s.fs.nodes.has(managedCacheMarkerPath(ROOT, s.id)), true);
@@ -424,6 +429,8 @@ test('durable pre-removal manifest preserves retryable state on removal failure'
   });
   assert.equal(retry.removed, true);
   assert.equal(s.fs.nodes.has(s.created.path), false);
+  assert.equal(lines.length, 3);
+  assert.deepEqual(lines.map((line) => JSON.parse(line).status), ['intent', 'intent', 'retired']);
 });
 
 test('retention refusal preserves retryable state', () => {
@@ -445,5 +452,99 @@ test('retention refusal preserves retryable state', () => {
     writeManifestLine: (line) => lines.push(line),
   });
   assert.equal(retry.removed, true);
-  assert.equal(lines.length, 1);
+  assert.equal(lines.length, 2);
+  assert.deepEqual(lines.map((line) => JSON.parse(line).status), ['intent', 'retired']);
+});
+
+test('identity and live refs are re-checked after the allocated scan, before rm', () => {
+  const s = setup();
+  let probes = 0;
+  const probe = () => {
+    probes += 1;
+    return probes === 1
+      ? { ok: true, references: [], unknownProcesses: [] }
+      : { ok: true, references: [s.created.path + '/debug'], unknownProcesses: [] };
+  };
+  const originalAllocated = s.fs.allocatedBytes;
+  s.fs.allocatedBytes = (path) => {
+    const bytes = originalAllocated(path);
+    s.fs.setInode(path, 424242); // inode swapped by someone else during the scan
+    return bytes;
+  };
+  const result = retireManagedCache({
+    root: ROOT, agentId: s.id, fs: s.fs, meta: s.meta, probeLiveReferences: probe,
+  });
+  assert.equal(result.removed, false);
+  assert.match(result.reason, /cache changed before deletion/);
+  assert.equal(s.fs.nodes.has(s.created.path), true);
+
+  // A second case: identity stable, but a live reference appears during the scan.
+  const t = setup();
+  let tProbes = 0;
+  const tProbe = () => {
+    tProbes += 1;
+    return tProbes === 1
+      ? { ok: true, references: [], unknownProcesses: [] }
+      : { ok: true, references: [t.created.path + '/debug'], unknownProcesses: [] };
+  };
+  const refused = retireManagedCache({
+    root: ROOT, agentId: t.id, fs: t.fs, meta: t.meta, probeLiveReferences: tProbe,
+  });
+  assert.equal(refused.removed, false);
+  assert.match(refused.reason, /final check/);
+  assert.equal(t.fs.nodes.has(t.created.path), true);
+});
+
+test('a symlinked root cannot be followed by the stale-marker fallback or claims listing', () => {
+  const s = setup();
+  s.fs.nodes.set(ROOT, { kind: 'link', dev: 1, ino: 777, content: '/elsewhere', bytes: 0 });
+  const result = retireManagedCache({
+    root: ROOT, agentId: s.id, fs: s.fs, meta: s.meta, probeLiveReferences: OK_PROBE,
+  });
+  assert.equal(result.removed, false);
+  assert.match(result.reason, /not a plain directory|missing/);
+  assert.equal(s.fs.nodes.has(s.created.path), true);
+  const claims = managed.listManagedCacheClaims(ROOT, s.fs);
+  assert.equal(claims.ok, false);
+  assert.match(claims.reason, /not a plain directory/);
+  assert.equal(managed.hasManagedCacheRegistration(ROOT, s.id, s.fs).ambiguous, true);
+});
+
+test('hasManagedCacheRegistration distinguishes registered, absent, stale and ambiguous', () => {
+  const fs = fakeFs();
+  fs.mkdir('/state');
+  fs.mkdir('/state/antonina');
+  assert.equal(managed.hasManagedCacheRegistration(ROOT, 'agent-none', fs).registered, false);
+
+  const a = initializeManagedCache(ROOT, 'agent-reg', fs, () => 1000);
+  assert.equal(managed.hasManagedCacheRegistration(ROOT, 'agent-reg', fs).registered, true);
+
+  fs.removeTree(a.path); // crash after removal, before marker cleanup
+  const stale = managed.hasManagedCacheRegistration(ROOT, 'agent-reg', fs);
+  assert.equal(stale.stale, true);
+  assert.equal(managed.hasManagedCacheRegistration(ROOT, 'agent-reg', fs).registered, false);
+
+  fs.mkdir(ROOT + '/agent-amb');
+  fs.mkdir(ROOT + '/agent-amb/target'); // unmarked target
+  const ambiguous = managed.hasManagedCacheRegistration(ROOT, 'agent-amb', fs);
+  assert.equal(ambiguous.ambiguous, true);
+  assert.match(ambiguous.reason, /unmarked/);
+});
+
+test('manifest emits fsync-able intent before removal and distinct completion after', () => {
+  const s = setup();
+  const events = [];
+  const original = s.fs.removeTree;
+  s.fs.removeTree = (path) => {
+    assert.deepEqual(events.map((event) => event.phase), ['intent'], 'intent must be written before removal');
+    return original(path);
+  };
+  const result = retireManagedCache({
+    root: ROOT, agentId: s.id, fs: s.fs, meta: s.meta, probeLiveReferences: OK_PROBE,
+    writeManifestLine: (line, phase) => events.push({ line: JSON.parse(line), phase }),
+  });
+  assert.equal(result.removed, true);
+  assert.deepEqual(events.map((event) => event.phase), ['intent', 'retired']);
+  assert.deepEqual(events.map((event) => event.line.status), ['intent', 'retired']);
+  assert.equal(events[0].line.nonce, events[1].line.nonce);
 });

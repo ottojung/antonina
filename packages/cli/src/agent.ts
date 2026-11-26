@@ -1907,26 +1907,91 @@ export function parseProcMountinfo(text: string): string[] {
 
 export type ProcReleaseVerdict = 'released' | 'alive' | 'unknown';
 
+export interface ProcStatIdentity {
+  pid: string;
+  state: string;
+  threads: number;
+  startTicks: string;
+}
+
+/**
+ * Parse /proc/<pid>/stat defensively. comm is parenthesised and may contain
+ * spaces and ')' itself, so the closing delimiter is the LAST ')'. State,
+ * field 20 (num_threads) and field 22 (starttime) must all be well formed and
+ * the leading pid must match the pid being probed (no PID reuse shortcuts).
+ */
+export function parseProcStat(stat: string, expectedPid?: string): ProcStatIdentity | null {
+  const open = stat.indexOf(' (');
+  const close = stat.lastIndexOf(')');
+  if (open < 0 || close <= open) return null;
+  const pid = stat.slice(0, open);
+  if (!/^\d+$/.test(pid)) return null;
+  if (expectedPid !== undefined && pid !== expectedPid) return null;
+  const fields = stat.slice(close + 1).trimStart().split(/\s+/);
+  const state = fields[0];
+  const threads = fields[17];
+  const startTicks = fields[19];
+  if (state === undefined || state.length !== 1 || !/^[RSDTIWKPZXx]$/.test(state)) return null;
+  if (threads === undefined || !/^\d+$/.test(threads)) return null;
+  if (startTicks === undefined || !/^\d+$/.test(startTicks)) return null;
+  return { pid, state, threads: Number(threads), startTicks };
+}
+
+export function isTerminalProcState(state: string): boolean {
+  return state === 'Z' || state === 'X' || state === 'x';
+}
+
+/**
+ * Narrow proof that an EINVAL from /proc/<pid>/mountinfo means an exited
+ * thread group, not inaccessible evidence: two independent stat reads must
+ * agree on the same PID, terminal state, one thread and unchanged start ticks,
+ * and /proc/<pid>/task must contain only the leader. A zombie leader with live
+ * sibling threads stays unknown.
+ */
+export function provenTerminalRelease(first: string, second: string, tasks: readonly string[], expectedPid: string): boolean {
+  const a = parseProcStat(first, expectedPid);
+  const b = parseProcStat(second, expectedPid);
+  if (a === null || b === null) return false;
+  if (!isTerminalProcState(a.state) || a.state !== b.state) return false;
+  if (a.threads !== 1 || b.threads !== 1) return false;
+  if (a.startTicks !== b.startTicks) return false;
+  return tasks.length === 1 && tasks[0] === expectedPid;
+}
+
+function provenTerminalReleaseFromProc(pid: string, procRoot: string): boolean {
+  try {
+    const first = readFileSync(`${procRoot}/${pid}/stat`, 'utf8');
+    const identity = parseProcStat(first, pid);
+    if (identity === null || !isTerminalProcState(identity.state) || identity.threads !== 1) return false;
+    let tasks: string[];
+    try {
+      tasks = readdirSync(`${procRoot}/${pid}/task`);
+    } catch {
+      return false;
+    }
+    const second = readFileSync(`${procRoot}/${pid}/stat`, 'utf8');
+    return provenTerminalRelease(first, second, tasks, pid);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Conservative reading of an ENOENT/ESRCH from /proc/<pid>/*. Only a missing
- * /proc entry or a confirmed zombie/dead state proves the process can no longer
+ * /proc entry or a confirmed terminal state proves the process can no longer
  * hold descriptors or mounts. A live process whose fd vanished mid-probe is
  * "alive", and an unreadable or malformed stat is "unknown": both must be
  * reported as unknown references rather than silently ignored.
  */
-export function procReleaseVerdict(stat: string | null | undefined): ProcReleaseVerdict {
+export function procReleaseVerdict(stat: string | null | undefined, expectedPid?: string): ProcReleaseVerdict {
   if (stat === null) return 'released';
   if (stat === undefined) return 'unknown';
-  const close = stat.lastIndexOf(')');
-  if (close < 0) return 'unknown';
-  const state = stat.slice(close + 2).trimStart().split(/\s+/)[0];
-  if (state === undefined || state.length !== 1) return 'unknown';
-  if (state === 'Z' || state === 'X' || state === 'x') return 'released';
-  if (/^[RSDTIWKP]$/.test(state)) return 'alive';
-  return 'unknown';
+  const identity = parseProcStat(stat, expectedPid);
+  if (identity === null) return 'unknown';
+  return isTerminalProcState(identity.state) ? 'released' : 'alive';
 }
 
-function markUnknown(unknownProcesses: string[], pid: string, error: unknown, procRoot: string): void {
+export function markUnknown(unknownProcesses: string[], pid: string, error: unknown, procRoot: string): void {
   const code = errorCode(error);
   if (code === 'ENOENT' || code === 'ESRCH') {
     let stat: string | null | undefined;
@@ -1936,8 +2001,12 @@ function markUnknown(unknownProcesses: string[], pid: string, error: unknown, pr
       const statCode = errorCode(statError);
       stat = statCode === 'ENOENT' || statCode === 'ESRCH' ? null : undefined;
     }
-    if (procReleaseVerdict(stat) === 'released') return;
+    if (procReleaseVerdict(stat, pid) === 'released') return;
   }
+  // EINVAL is the kernel's response when reading mountinfo of an exited
+  // thread group. Release only on full identity proof; every other error,
+  // including EACCES/EPERM and unreadable identity, stays unknown.
+  if (code === 'EINVAL' && provenTerminalReleaseFromProc(pid, procRoot)) return;
   if (!unknownProcesses.includes(pid)) unknownProcesses.push(pid);
 }
 
@@ -1959,6 +2028,7 @@ export function hostLiveReferenceProbe(procRoot = '/proc'): LiveReferenceResult 
   } catch (error) {
     return { ok: false, reason: '/proc unreadable: ' + (error instanceof Error ? error.message : String(error)), references: [], unknownProcesses: [] };
   }
+  const selfPid = String(process.pid);
   for (const pid of pids) {
     try {
       references.add(readlinkSync(`${procRoot}/${pid}/cwd`));
@@ -1966,6 +2036,10 @@ export function hostLiveReferenceProbe(procRoot = '/proc'): LiveReferenceResult 
         try {
           references.add(readlinkSync(`${procRoot}/${pid}/fd/${fd}`));
         } catch (error) {
+          // readdirSync on our own /proc/<pid>/fd opens a directory fd that is
+          // listed and then closed before readlink: ENOENT for that one entry
+          // is our own enumeration artifact, never a held cache reference.
+          if (errorCode(error) === 'ENOENT' && pid === selfPid) continue;
           markUnknown(unknownProcesses, pid, error, procRoot);
         }
       }

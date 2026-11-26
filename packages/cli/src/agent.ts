@@ -1864,9 +1864,81 @@ export function decodeProcEscapedPath(value: string): string {
   return decoded;
 }
 
-function markUnknown(unknownProcesses: string[], pid: string, error: unknown): void {
+/**
+ * Parse one /proc/<pid>/mountinfo line per proc_pid_mountinfo(5):
+ *   id parent major:minor root mount-point mount-options [optional...] - fstype source super-options
+ * The separator is the first bare "-" at or after field 7, never field 6
+ * (field 6 is the mount options). Source is separator+2; root is field 4 (1-based)
+ * and is the underlying path for bind mounts, so it must be considered too.
+ * Anything malformed throws so the caller can fail closed for that pid.
+ */
+export function parseProcMountinfoLine(line: string): { root: string; mountPoint: string; source: string | null } {
+  const fields = line.trim().split(/\s+/);
+  if (fields.length < 10) throw new Error('malformed /proc/<pid>/mountinfo line: too few fields');
+  if (!/^\d+$/.test(fields[0]!)) throw new Error('malformed /proc/<pid>/mountinfo line: mount id');
+  if (!/^\d+$/.test(fields[1]!)) throw new Error('malformed /proc/<pid>/mountinfo line: parent id');
+  if (!/^\d+:\d+$/.test(fields[2]!)) throw new Error('malformed /proc/<pid>/mountinfo line: device');
+  const separator = fields.indexOf('-', 6);
+  if (separator < 6) throw new Error('malformed /proc/<pid>/mountinfo line: missing separator');
+  if (fields.length < separator + 4) throw new Error('malformed /proc/<pid>/mountinfo line: missing filesystem fields');
+  for (let i = 6; i < separator; i += 1) {
+    if (!/^[A-Za-z][A-Za-z0-9_]*(?::\S+)?$/.test(fields[i]!)) throw new Error('malformed /proc/<pid>/mountinfo line: optional field');
+  }
+  const source = decodeProcEscapedPath(fields[separator + 2]!);
+  return {
+    root: decodeProcEscapedPath(fields[3]!),
+    mountPoint: decodeProcEscapedPath(fields[4]!),
+    source: source.startsWith('/') ? source : null,
+  };
+}
+
+/** Decode every usable path in a /proc/<pid>/mountinfo document. */
+export function parseProcMountinfo(text: string): string[] {
+  const references = new Set<string>();
+  for (const line of text.split('\n')) {
+    if (line.trim().length === 0) continue;
+    const parsed = parseProcMountinfoLine(line);
+    references.add(parsed.root);
+    references.add(parsed.mountPoint);
+    if (parsed.source !== null) references.add(parsed.source);
+  }
+  return [...references];
+}
+
+export type ProcReleaseVerdict = 'released' | 'alive' | 'unknown';
+
+/**
+ * Conservative reading of an ENOENT/ESRCH from /proc/<pid>/*. Only a missing
+ * /proc entry or a confirmed zombie/dead state proves the process can no longer
+ * hold descriptors or mounts. A live process whose fd vanished mid-probe is
+ * "alive", and an unreadable or malformed stat is "unknown": both must be
+ * reported as unknown references rather than silently ignored.
+ */
+export function procReleaseVerdict(stat: string | null | undefined): ProcReleaseVerdict {
+  if (stat === null) return 'released';
+  if (stat === undefined) return 'unknown';
+  const close = stat.lastIndexOf(')');
+  if (close < 0) return 'unknown';
+  const state = stat.slice(close + 2).trimStart().split(/\s+/)[0];
+  if (state === undefined || state.length !== 1) return 'unknown';
+  if (state === 'Z' || state === 'X' || state === 'x') return 'released';
+  if (/^[RSDTIWKP]$/.test(state)) return 'alive';
+  return 'unknown';
+}
+
+function markUnknown(unknownProcesses: string[], pid: string, error: unknown, procRoot: string): void {
   const code = errorCode(error);
-  if (code !== 'ENOENT' && code !== 'ESRCH' && !unknownProcesses.includes(pid)) unknownProcesses.push(pid);
+  if (code === 'ENOENT' || code === 'ESRCH') {
+    let stat: string | null | undefined;
+    try {
+      stat = readFileSync(`${procRoot}/${pid}/stat`, 'utf8');
+    } catch (statError) {
+      const statCode = errorCode(statError);
+      stat = statCode === 'ENOENT' || statCode === 'ESRCH' ? null : undefined;
+    }
+    if (procReleaseVerdict(stat) === 'released') return;
+  }
+  if (!unknownProcesses.includes(pid)) unknownProcesses.push(pid);
 }
 
 /**
@@ -1874,14 +1946,14 @@ function markUnknown(unknownProcesses: string[], pid: string, error: unknown): v
  * failed probe so the caller fails closed; an unreadable process fd or mountinfo
  * marks that pid unknown instead of being silently treated as "no reference".
  * Descendant mounts are included from every process's own mount namespace, not
- * just the namespace of this CLI process.
+ * just the namespace of this CLI process. procRoot is injectable only for tests.
  */
-function hostLiveReferenceProbe(): LiveReferenceResult {
+export function hostLiveReferenceProbe(procRoot = '/proc'): LiveReferenceResult {
   const references = new Set<string>();
   const unknownProcesses: string[] = [];
   let pids: string[];
   try {
-    pids = readdirSync('/proc', { withFileTypes: true })
+    pids = readdirSync(procRoot, { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
       .map((entry) => entry.name);
   } catch (error) {
@@ -1889,38 +1961,29 @@ function hostLiveReferenceProbe(): LiveReferenceResult {
   }
   for (const pid of pids) {
     try {
-      references.add(readlinkSync(`/proc/${pid}/cwd`));
-      for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+      references.add(readlinkSync(`${procRoot}/${pid}/cwd`));
+      for (const fd of readdirSync(`${procRoot}/${pid}/fd`)) {
         try {
-          references.add(readlinkSync(`/proc/${pid}/fd/${fd}`));
+          references.add(readlinkSync(`${procRoot}/${pid}/fd/${fd}`));
         } catch (error) {
-          markUnknown(unknownProcesses, pid, error);
+          markUnknown(unknownProcesses, pid, error, procRoot);
         }
       }
     } catch (error) {
-      markUnknown(unknownProcesses, pid, error);
+      markUnknown(unknownProcesses, pid, error, procRoot);
     }
     // Per-process mount namespace: mountinfo records the mount points visible
     // to this process, including descendant mounts of the managed cache root.
     try {
-      const mountinfo = readFileSync(`/proc/${pid}/mountinfo`, 'utf8');
-      for (const line of mountinfo.split('\n')) {
-        if (line.trim().length === 0) continue;
-        const fields = line.trim().split(/\s+/);
-        if (fields.length < 6 || fields[5] !== '-') throw new Error('malformed /proc/<pid>/mountinfo line');
-        references.add(decodeProcEscapedPath(fields[4]!));
-        const source = fields[6];
-        if (source !== undefined && source.startsWith('/')) {
-          references.add(decodeProcEscapedPath(source));
-        }
-      }
+      const mountinfo = readFileSync(`${procRoot}/${pid}/mountinfo`, 'utf8');
+      for (const reference of parseProcMountinfo(mountinfo)) references.add(reference);
     } catch (error) {
-      markUnknown(unknownProcesses, pid, error);
+      markUnknown(unknownProcesses, pid, error, procRoot);
     }
   }
   let mounts: string;
   try {
-    mounts = readFileSync('/proc/mounts', 'utf8');
+    mounts = readFileSync(`${procRoot}/mounts`, 'utf8');
   } catch (error) {
     return { ok: false, reason: '/proc/mounts unreadable: ' + (error instanceof Error ? error.message : String(error)), references: [], unknownProcesses: [] };
   }

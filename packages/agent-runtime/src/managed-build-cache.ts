@@ -502,6 +502,9 @@ export function listManagedCacheClaims(root: string, fs: ManagedCacheFs): Claims
       return { ok: false, reason: 'managed cache marker unreadable: ' + markerPath, claims: [] };
     }
     if (markerStat === null) continue;
+    if (!markerStat.isFile || markerStat.isSymbolicLink) {
+      return { ok: false, reason: 'managed cache marker is not a plain file: ' + markerPath, claims: [] };
+    }
     let marker: ManagedCacheMarker;
     try {
       marker = parseMarker(fs.readFile(markerPath), managedCachePath(root, entry), entry);

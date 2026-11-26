@@ -548,3 +548,27 @@ test('manifest emits fsync-able intent before removal and distinct completion af
   assert.deepEqual(events.map((event) => event.line.status), ['intent', 'retired']);
   assert.equal(events[0].line.nonce, events[1].line.nonce);
 });
+
+test('claims listing rejects non-plain marker before opening it', () => {
+  for (const kind of ['link', 'dir']) {
+    const s = setup();
+    const markerPath = managedCacheMarkerPath(ROOT, s.id);
+    const marker = s.fs.nodes.get(markerPath);
+    marker.kind = kind;
+    // Simulate the OS following a symlink to a perfectly valid marker.
+    const original = s.fs.readFile.bind(s.fs);
+    let attempted = false;
+    s.fs.readFile = (path) => {
+      if (path === markerPath) {
+        attempted = true;
+        return marker.content;
+      }
+      return original(path);
+    };
+    const result = managed.listManagedCacheClaims(ROOT, s.fs);
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /not a plain file/);
+    assert.equal(attempted, false);
+    assert.equal(s.fs.nodes.has(s.created.path), true);
+  }
+});

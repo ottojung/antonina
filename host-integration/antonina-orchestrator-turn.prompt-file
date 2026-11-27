@@ -33,23 +33,29 @@ $snapshot"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/antonina/scheduler-prompts"
 mkdir -p -m 700 "$state_dir" || exit 1
 prompt_file="$(mktemp "$state_dir/turn.XXXXXXXX")" || exit 1
-chmod 600 "$prompt_file" || exit 1
-printf '%s' "$prompt" >"$prompt_file" || exit 1
+chmod 600 "$prompt_file" || { rm -f "$prompt_file"; exit 1; }
+printf '%s' "$prompt" >"$prompt_file" || { rm -f "$prompt_file"; exit 1; }
 
 # Reuse Antonina's V2 managed-agent runtime: same authenticated OpenCode
 # service, model fallback, session isolation and subprocess supervision as workers.
 cli="$HOME/.local/bin/antonina"
 cwd="$HOME/scheduler-src"
-agent_id="$("$cli" agent new --cwd "$cwd" --title "Antonina scheduler turn")" || exit 1
+agent_id=""
 cleanup() {
   # Never leave a private prompt file behind, even on timeout or signal.
   rm -f "$prompt_file"
   # A timed-out coordinator must not outlive its supervised scheduling turn.
-  "$cli" agent stop --id "$agent_id" >/dev/null 2>&1 || true
-  "$cli" agent delete --id "$agent_id" >/dev/null 2>&1 || true
+  if [ -n "$agent_id" ]; then
+    "$cli" agent stop --id "$agent_id" >/dev/null 2>&1 || true
+    "$cli" agent delete --id "$agent_id" >/dev/null 2>&1 || true
+  fi
 }
+# Register cleanup before any fallible step so a failed `agent new` cannot
+# strand the private prompt file.
 trap cleanup 0
 trap 'exit 143' TERM INT HUP
+
+agent_id="$("$cli" agent new --cwd "$cwd" --title "Antonina scheduler turn")" || exit 1
 
 printf 'Antonina V2 scheduler turn: managed agent %s, initial preference %s\n' "$agent_id" "$selected_model"
 if timeout -k 15s 900s "$cli" agent run --id "$agent_id" --cwd "$cwd" --prompt-file "$prompt_file"; then

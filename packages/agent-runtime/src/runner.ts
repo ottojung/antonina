@@ -69,7 +69,7 @@ import { recordUnrecognizedBackendFailure, sharedUnreliableModels } from './mode
 import { SessionCheckpointReader } from './session-checkpoint.js';
 import {
   InvocationActivity, BACKEND_ERROR_GRACE_MS, LIVENESS_POLL_MS,
-  MODEL_STEP_SILENCE_MS, safeAlternativeModel, type LivenessObservation,
+  MODEL_STEP_SILENCE_MS, safeAlternativeModel, healthyAlternativeForEarlyRecovery, type LivenessObservation,
 } from './liveness.js';
 import { procStartTicks, persistedProcessInteger, processTreeActivity, signalMarkedInvocationProcesses } from './process.js';
 import {
@@ -267,6 +267,8 @@ export interface RunnerOptions extends StatePathsOptions {
   selfStartTicks?: (pid: number) => number | null;
   /** Test seam only: production uses the fixed conservative model-step silence window. */
   modelStepSilenceMs?: number;
+  /** Test seam only: production uses a 180s first-step silence threshold. */
+  firstStepSilenceMs?: number;
   /** Test seam only: production samples liveness every five seconds. */
   livenessPollMs?: number;
   /** Test seam only: widen the operator control poll to model external-signal races deterministically. */
@@ -1083,11 +1085,29 @@ async function runInvocation(
     const stallCandidate = (current: AgentMetadata): boolean => {
       if (startTicks === null || current.pid !== pid || current.start_time !== startTicks
         || current.invocation_id !== invocationId || current.state !== 'running') return false;
-      const observation = activity.observe(
-        pid, startTicks, Date.now(),
+      const now = Date.now();
+      let observation = activity.observe(
+        pid, startTicks, now,
         options.modelStepSilenceMs ?? MODEL_STEP_SILENCE_MS,
         options.backendErrorGraceMs ?? BACKEND_ERROR_GRACE_MS,
       );
+      const session = persistedNativeSessionId(current);
+      // The general eight-minute watchdog is unchanged. Only a still
+      // unanswered first step may recover sooner, and only when independent
+      // recent fleet evidence and a healthy eligible alternative agree.
+      if (observation.diagnosis === 'progressing_or_uncertain' && observation.processState === 'S'
+        && session !== null && activity.unansweredFirstStep(session, now, options.firstStepSilenceMs)) {
+        try {
+          const modelEnv = options.env ?? opencodeBackendEnv(current, options);
+          const shared = sharedModelCooldowns(options, now / 1000);
+          if (healthyAlternativeForEarlyRecovery(
+            withSharedModelCooldowns(current, shared, now / 1000), activeModel, modelEnv, now / 1000,
+            failedModelsThisRun, sharedUnreliableModels(options, now / 1000),
+          ) && processTreeActivity(pid, startTicks) === 'clear') {
+            observation = { ...observation, diagnosis: 'model_step_silent' };
+          }
+        } catch { /* Optional fleet evidence must never break ordinary recovery. */ }
+      }
       const verified = observation.diagnosis === 'model_step_silent'
         || observation.diagnosis === 'startup_silent'
         || observation.diagnosis === 'step_finished_silent'
@@ -1335,7 +1355,9 @@ async function runInvocation(
           + '; reconciling uncertain effects, failed attempts=' + (attempt + 1);
         current.last_activity_at = Date.now() / 1000;
       }, options);
-      if (backendError?.classification === 'unrecognized_backend_failure') {
+      const verifiedStall = stalled && livenessState.observation !== null
+        && livenessState.observation.diagnosis !== 'backend_error_silent';
+      if (backendError?.classification === 'unrecognized_backend_failure' || verifiedStall) {
         try {
           recordUnrecognizedBackendFailure(agentId, activeModel, options);
         } catch (error) {

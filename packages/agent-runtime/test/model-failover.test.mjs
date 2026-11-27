@@ -158,16 +158,32 @@ test('quota and rate-limit candidates stay outside the transient random pool', (
   assert.equal(eligibleAgentModel(meta,prefs,NOW+1,()=>0),prefs[2].model);
   coolDownAgentModel(meta,prefs[2].model,'model_unavailable',NOW);
   assert.equal(eligibleAgentModel(meta,prefs,NOW+1,()=>0),null);
-  assert.equal(agentModelFailover(meta).cooldowns[2].until,PERMANENT_EXCLUSION_UNTIL);
+  assert.equal(agentModelFailover(meta).cooldowns[2].until,NOW+MODEL_COOLDOWN_SECONDS);
   assert.equal(eligibleAgentModel(meta,prefs,NOW+RATE_LIMIT_BACKOFF_SECONDS+1),prefs[1].model);
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+MODEL_COOLDOWN_SECONDS+1),prefs[0].model);
 });
 
-test('hard model exclusion persists until changed, while adding a new model works', () => {
+test('model_unavailable is a bounded hard exclusion and can be retried after it becomes stale', () => {
   const meta=testMeta();
   coolDownAgentModel(meta,prefs[0].model,'model_unavailable',NOW);
-  assert.equal(eligibleAgentModel(meta,[prefs[0]],NOW+100000000),null);
+  assert.equal(eligibleAgentModel(meta,[prefs[0]],NOW+1),null);
+  assert.equal(eligibleAgentModel(meta,[prefs[0]],NOW+MODEL_COOLDOWN_SECONDS+1),prefs[0].model);
   assert.equal(eligibleAgentModel(meta,[{model:'openai/replacement',comment:'new'}],NOW+1),'openai/replacement');
   assert.equal(modelCooldownSeconds('provider_authentication_failed'),PERMANENT_EXCLUSION_UNTIL);
+  assert.equal(modelCooldownSeconds('provider_billing_required'),PERMANENT_EXCLUSION_UNTIL);
+});
+
+test('legacy indefinite unavailable exclusions are retryable; new finite ones and credential exclusions are not', () => {
+  const meta=testMeta();
+  coolDownAgentModel(meta,prefs[0].model,'model_unavailable',NOW,PERMANENT_EXCLUSION_UNTIL);
+  coolDownAgentModel(meta,prefs[1].model,'provider_authentication_failed',NOW);
+  coolDownAgentModel(meta,prefs[2].model,'provider_billing_required',NOW);
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+1),prefs[0].model);
+  coolDownAgentModel(meta,prefs[0].model,'model_unavailable',NOW+1);
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+2),null);
+  assert.equal(eligibleAgentModel(meta,prefs,NOW+MODEL_COOLDOWN_SECONDS+2),prefs[0].model);
+  assert.deepEqual(agentModelFailover(meta).cooldowns.map(x => x.reason).sort(),
+    ['model_unavailable','provider_authentication_failed','provider_billing_required']);
 });
 
 test('provider authentication and billing failures exclude its models, not other providers', () => {

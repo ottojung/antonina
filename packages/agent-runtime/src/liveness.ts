@@ -2,7 +2,7 @@ import { closeSync, openSync, readSync, statSync } from 'node:fs';
 
 import { persistedNativeSessionId, type AgentMetadata } from './metadata.js';
 import { configuredModels } from './model-config.js';
-import { eligibleAgentModel } from './model-failover.js';
+import { agentModelFailover, eligibleAgentModel } from './model-failover.js';
 import { readProcStat, type ProcStat } from './process.js';
 import { typedProviderFailure } from './provider-errors.js';
 
@@ -21,6 +21,7 @@ import { typedProviderFailure } from './provider-errors.js';
  * `InvocationActivity.stepStartedAt`.
  */
 export const MODEL_STEP_SILENCE_MS = 8 * 60 * 1000;
+export const FIRST_STEP_UNANSWERED_MS = 180_000;
 export const STARTUP_SILENCE_MS = 90 * 1000;
 export const BACKEND_ERROR_GRACE_MS = 30_000;
 export const LIVENESS_POLL_MS = 5_000;
@@ -128,6 +129,10 @@ export class InvocationActivity {
    */
   private stepStartedAt: number | null = null;
   private stepMessageId: string | null = null;
+  // Early recovery is only a first unanswered request, never an already
+  // answered request, a later step, or an uncertain observation.
+  private firstRequestEligible = true;
+  private firstSession: string | null = null;
   /** The poll time being processed; acceptLine has no clock of its own. */
   private pollNow: number;
 
@@ -151,6 +156,7 @@ export class InvocationActivity {
     const plain = line.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').trim();
     if (/^>\s+(?:build|plan|general)\s+·\s+[A-Za-z0-9_.-]+$/.test(plain)) return;
     if (Buffer.byteLength(line) > MAX_JSONL_ROW_BYTES) {
+      this.firstRequestEligible = false;
       this.phase = 'unknown';
       this.backendFailure = null;
       this.stepStartedAt = null;
@@ -158,12 +164,14 @@ export class InvocationActivity {
     }
     let event: unknown;
     try { event = JSON.parse(line); } catch {
+      this.firstRequestEligible = false;
       this.phase = 'unknown';
       this.backendFailure = null;
       this.stepStartedAt = null;
       return;
     }
     if (typeof event !== 'object' || event === null || Array.isArray(event)) {
+      this.firstRequestEligible = false;
       this.phase = 'unknown';
       this.backendFailure = null;
       this.stepStartedAt = null;
@@ -171,6 +179,7 @@ export class InvocationActivity {
     }
     const record = event as Record<string, unknown>;
     if (typeof record.sessionID !== 'string' || !SESSION_ID.test(record.sessionID)) {
+      this.firstRequestEligible = false;
       this.phase = 'unknown';
       this.backendFailure = null;
       this.stepStartedAt = null;
@@ -186,6 +195,10 @@ export class InvocationActivity {
       // re-issuing one request. Keep the original start time.
       const reissued = this.phase === 'model_step' && this.stepStartedAt !== null
         && (messageId === null || this.stepMessageId === null || messageId === this.stepMessageId);
+      if (typeof part !== 'object' || part === null || Array.isArray(part)
+        || (part as Record<string, unknown>).type !== 'step-start') this.firstRequestEligible = false;
+      if (this.firstSession === null) this.firstSession = record.sessionID;
+      else if (!reissued || record.sessionID !== this.firstSession) this.firstRequestEligible = false;
       if (!reissued) this.stepStartedAt = this.pollNow;
       this.stepMessageId = messageId ?? this.stepMessageId;
       this.phase = 'model_step';
@@ -194,6 +207,7 @@ export class InvocationActivity {
     }
     // Every other well-formed event shows the request was answered (or
     // failed); the step clock no longer applies.
+    this.firstRequestEligible = false;
     this.stepStartedAt = null;
     this.stepMessageId = null;
     if (record.type === 'tool_use') {
@@ -221,11 +235,13 @@ export class InvocationActivity {
     this.pollNow = now;
     const st = statSync(this.file, { throwIfNoEntry: false });
     if (st === undefined || !st.isFile()) {
+      this.firstRequestEligible = false;
       this.phase = 'unknown';
       this.backendFailure = null;
       return;
     }
     if (st.size < this.offset || st.size < this.observedSize) {
+      this.firstRequestEligible = false;
       this.phase = 'unknown';
       this.backendFailure = null;
       this.offset = st.size;
@@ -242,6 +258,7 @@ export class InvocationActivity {
     if (st.size === this.offset) return;
     let fd: number;
     try { fd = openSync(this.file, 'r'); } catch {
+      this.firstRequestEligible = false;
       this.phase = 'unknown';
       this.backendFailure = null;
       return;
@@ -258,6 +275,7 @@ export class InvocationActivity {
         this.partial = lines.pop() ?? '';
         if (Buffer.byteLength(this.partial) > MAX_JSONL_ROW_BYTES) {
           this.partial = '';
+          this.firstRequestEligible = false;
           this.phase = 'unknown';
           this.backendFailure = null;
         }
@@ -265,12 +283,19 @@ export class InvocationActivity {
       }
       if (this.offset < st.size) {
         // A truncated scan cannot establish the final event state.
+        this.firstRequestEligible = false;
         this.phase = 'unknown';
         this.backendFailure = null;
         this.offset = st.size;
         this.partial = '';
       }
     } finally { closeSync(fd); }
+  }
+
+  unansweredFirstStep(session: string, now: number, quietMs = FIRST_STEP_UNANSWERED_MS): boolean {
+    return this.firstRequestEligible && this.firstSession === session
+      && this.phase === 'model_step' && this.partial.length === 0
+      && this.stepStartedAt !== null && now - this.stepStartedAt >= quietMs;
   }
 
   observe(
@@ -281,6 +306,7 @@ export class InvocationActivity {
     errorGraceMs = BACKEND_ERROR_GRACE_MS,
   ): LivenessObservation {
     try { this.pollLog(now); } catch {
+      this.firstRequestEligible = false;
       this.phase = 'unknown';
       this.backendFailure = null;
     }
@@ -345,5 +371,21 @@ export function safeAlternativeModel(
       }
     }
     return eligibleAgentModel(meta, models, now, undefined, excluded) !== null;
+  } catch { return false; }
+}
+
+/** Faster interruption requires a genuinely unpenalized, configured alternative.
+ * No shared observation can authorize a model, remove a hard exclusion, or
+ * escape the same invocation's config scope. */
+export function healthyAlternativeForEarlyRecovery(
+  meta: AgentMetadata, activeModel: string, env: Record<string, string | undefined>,
+  now: number, alreadyTried: ReadonlySet<string>, unreliable: ReadonlySet<string>,
+): boolean {
+  if (persistedNativeSessionId(meta) === null || !unreliable.has(activeModel)) return false;
+  try {
+    const cooldowns = new Set(agentModelFailover(meta).cooldowns
+      .filter(entry => entry.until > now).map(entry => entry.model));
+    return configuredModels(env).some(({model}) => model !== activeModel
+      && !alreadyTried.has(model) && !unreliable.has(model) && !cooldowns.has(model));
   } catch { return false; }
 }

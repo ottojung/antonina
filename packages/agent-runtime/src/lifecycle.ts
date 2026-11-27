@@ -71,6 +71,10 @@ export function deriveState(meta: AgentMetadata | null, now = Date.now() / 1000)
   if (state === null) return 'unknown';
   if (state !== 'running') return state;
   if (invocationAlive(meta)) return 'running';
+  // The accepted prompt remains owned by its identity-verified runner while
+  // it is between provider invocations (including a cooldown/recovery wait).
+  // Reporting unknown here can cause external controllers to kill live work.
+  if (activeRunnerFlag(meta) === true && runnerAlive(meta)) return 'running';
   if (meta.pid === null) {
     const launched = persistedTimestamp(meta.started_at) ?? persistedTimestamp(meta.created_at);
     if (launched !== null && now >= launched && now - launched < PID_START_WINDOW_SECONDS) return 'running';
